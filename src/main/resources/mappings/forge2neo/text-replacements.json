@@ -758,14 +758,6 @@
       "fileGlob": "*.java"
     },
     {
-      "id": "import-BlockPathTypes",
-      "pattern": "import net\\.minecraft\\.world\\.level\\.pathfinder\\.PathType;",
-      "replacement": "import net.minecraft.world.level.pathfinder.PathType;",
-      "description": "Fix pathfinder import (already correct after rename)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "cls-FinishedRecipe-to-RecipeOutput",
       "pattern": "\\bFinishedRecipe\\b",
       "replacement": "RecipeOutput",
@@ -1108,22 +1100,6 @@
       "isRegex": true
     },
     {
-      "id": "dispenser-blocksource-package",
-      "pattern": "import net.minecraft.core.BlockSource;",
-      "replacement": "import net.minecraft.core.dispenser.BlockSource;",
-      "description": "BlockSource moved to net.minecraft.core.dispenser in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": false
-    },
-    {
-      "id": "abstract-projectile-dispense-behavior",
-      "pattern": "AbstractProjectileDispenseBehavior",
-      "replacement": "ProjectileDispenseBehavior",
-      "description": "AbstractProjectileDispenseBehavior renamed to ProjectileDispenseBehavior in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": false
-    },
-    {
       "id": "dispense-to-execute",
       "pattern": "public final ItemStack dispense(BlockSource",
       "replacement": "public ItemStack execute(BlockSource",
@@ -1371,9 +1347,9 @@
     {
       "id": "distexecutor-import",
       "pattern": "import net\\.neoforged\\.fml\\.DistExecutor;\\r?\\n",
-      "replacement": "",
+      "replacement": "// [forge2neo] $0 // DistExecutor removed in NeoForge\n",
       "isRegex": true,
-      "description": "Remove DistExecutor import (removed in NeoForge)",
+      "description": "Comment out DistExecutor import (removed in NeoForge)",
       "fileGlob": "*.java"
     },
     {
@@ -1610,7 +1586,7 @@
     },
     {
       "id": "network-stale-network-null-assign",
-      "pattern": "\\s*network\\s*=\\s*null;[^\n]*\r?\n",
+      "pattern": "\\s*network\\s*=\\s*null;[^\\r\\n]*\\r?\\n",
       "replacement": "// TODO: [forge2neo] SimpleChannel removed\n",
       "description": "Remove stale network = null assignment after SimpleChannel removal",
       "fileGlob": "*.java",
@@ -1882,26 +1858,10 @@
       "isRegex": true
     },
     {
-      "id": "recipe-serializer-constructor-ref",
-      "pattern": "new SimpleCraftingRecipeSerializer<>\\((\\w+)::new\\)",
-      "replacement": "new SimpleCraftingRecipeSerializer<>($1::new)",
-      "description": "SimpleCraftingRecipeSerializer constructor reference (compatible in 1.21)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "creative-tab-accept-deferred",
       "pattern": "event\\.accept\\((\\w+Supplier|\\w+Holder)\\)",
       "replacement": "event.accept($1.get())",
       "description": "BuildCreativeModeTabContentsEvent.accept(DeferredHolder) -> accept(DeferredHolder.get())",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "item-hurtAndBreak-3arg-equipslot",
-      "pattern": "\\.hurtAndBreak\\((\\d+),\\s*(\\w+),\\s*EquipmentSlot\\.(\\w+)\\)",
-      "replacement": ".hurtAndBreak($1, $2, EquipmentSlot.$3)",
-      "description": "hurtAndBreak(int, LivingEntity, EquipmentSlot) - already correct in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -1956,8 +1916,8 @@
     {
       "id": "remove-import-vanishable",
       "pattern": "import net.minecraft.world.item.Vanishable;\\r?\\n",
-      "replacement": "",
-      "description": "Remove Vanishable import (interface removed in 1.21)",
+      "replacement": "// [forge2neo] $0 // Vanishable removed in NeoForge\n",
+      "description": "Comment out Vanishable import (interface removed in 1.21)",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -1979,17 +1939,17 @@
     {
       "id": "tick-event-phase-check-remove",
       "pattern": "if \\(event\\.side\\.isClient\\(\\).*?\\) return;\\r?\\n[ \\t]*",
-      "replacement": "",
+      "replacement": "// [forge2neo] $0 // phase check removed in NeoForge\n",
       "isRegex": true,
-      "description": "Remove event.side/phase checks (handled by Pre/Post split in 1.21)",
+      "description": "Comment out event.side/phase checks (handled by Pre/Post split in 1.21)",
       "fileGlob": "*.java"
     },
     {
       "id": "tick-event-phase-end-check-remove",
       "pattern": "[ \\t]*if \\(event\\.phase != TickEvent\\.Phase\\.END\\) return;\\r?\\n",
-      "replacement": "",
+      "replacement": "// [forge2neo] $0 // phase check removed in NeoForge\n",
       "isRegex": true,
-      "description": "Remove TickEvent.Phase.END check (use .Post event instead in 1.21)",
+      "description": "Comment out TickEvent.Phase.END check (use .Post event instead in 1.21)",
       "fileGlob": "*.java"
     },
     {

@@ -634,7 +634,7 @@ class BuildSystemPass : Pass {
         val rangeReplacements = listOf(
             Regex("""minecraft_version_range\s*=\s*.+""") to "minecraft_version_range=[1.21.1,1.22)",
             Regex("""forge_version_range\s*=\s*.+""") to "neoforge_version_range=[21.1,)",
-            Regex("""neoforge_version_range\s*=\s*\[47[^)]*\)""") to "neoforge_version_range=[21.1,)",
+            Regex("""neoforge_version_range\s*=\s*\[47[^)\r\n]*\)""") to "neoforge_version_range=[21.1,)",
             Regex("""loader_version_range\s*=\s*.+""") to "loader_version_range=[1,)",
         )
         for ((pattern, replacement) in rangeReplacements) {
@@ -1099,7 +1099,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                     // 2. Remove 'implements ExcludedInterface' or ', ExcludedInterface' from class declarations
                     // Handle "implements ExcludedClass" (only interface)
                     modified = modified.replace(
-                        Regex("""(\s+)implements\s+$className\s*(?=\{)"""),
+                        Regex("""([^\S\r\n]+)implements\s+$className\s*(?=\{)"""),
                         "$1"
                     )
                     // Handle "implements Other, ExcludedClass" or "implements ExcludedClass, Other"
@@ -1114,12 +1114,12 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
                     // 3. Comment out standalone method calls: ExcludedClass.method(...)
                     modified = modified.replace(
-                        Regex("""^(\s*)($className\.\w+\([^)]*\)\s*;)""", RegexOption.MULTILINE),
+                        Regex("""^(\s*)($className\.\w+\([^)\r\n]*\)\s*;)""", RegexOption.MULTILINE),
                         "$1// [forge2neo] $2 // excluded"
                     )
                     // Also handle fully-qualified references: com.package.ExcludedClass.method(...)
                     modified = modified.replace(
-                        Regex("""^(\s*)([\w.]+\.$className\.\w+\([^)]*\)\s*;)""", RegexOption.MULTILINE),
+                        Regex("""^(\s*)([\w.]+\.$className\.\w+\([^)\r\n]*\)\s*;)""", RegexOption.MULTILINE),
                         "$1// [forge2neo] $2 // excluded"
                     )
 
@@ -1127,7 +1127,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                     // Comment out ALL body lines in the if-block (cascading deps make partial commenting unsafe).
                     // If the body had a return and there's an else branch, comment the whole if+else structure
                     // and promote the else-body to unconditional code.
-                    val ifBlockPattern = Regex("""^(\s*)if\s*\(.*?\)\s*\{""", RegexOption.MULTILINE)
+                    val ifBlockPattern = Regex("""^(\s*)if\s*\(.*?\)[^\S\r\n]*\{""", RegexOption.MULTILINE)
                     var ifMatch = ifBlockPattern.find(modified)
                     while (ifMatch != null) {
                         val braceStart = modified.indexOf('{', ifMatch.range.first)
@@ -1190,7 +1190,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
                     // 3c. Comment out standalone assignment: Type var = ExcludedClass.method(...)
                     modified = modified.replace(
-                        Regex("""^(\s*)([\w.<>\[\]]+\s+\w+\s*=\s*$className\.[^;]+;)""", RegexOption.MULTILINE),
+                        Regex("""^(\s*)([\w.<>\[\]]+\s+\w+\s*=\s*$className\.[^;\r\n]+;)""", RegexOption.MULTILINE),
                         "$1// [forge2neo] $2 // excluded"
                     )
 
@@ -1207,7 +1207,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                     }
 
                     // 3e. Comment out for-loops with excluded type + their body
-                    val forPattern = Regex("""^(\s*)for\s*\([^)]*\b$className\b[^)]*\)\s*\{""", RegexOption.MULTILINE)
+                    val forPattern = Regex("""^(\s*)for\s*\([^)\r\n]*\b$className\b[^)\r\n]*\)\s*\{""", RegexOption.MULTILINE)
                     var forMatch = forPattern.find(modified)
                     while (forMatch != null) {
                         val braceStart = modified.indexOf('{', forMatch.range.first)
@@ -1235,7 +1235,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                     // 4b. Remove methods that override excluded interface methods
                     // Must run BEFORE the final sweep, which would comment only the signature line
                     val methodPattern = Regex(
-                        """([^\S\r\n]*@Override[^\S\r\n]*\r?\n[^\S\r\n]*public\s+\w+\s+\w+\s*\([^)]*\b${Regex.escape(className)}\b[^)]*\)\s*\{)""",
+                        """([^\S\r\n]*@Override[^\S\r\n]*\r?\n[^\S\r\n]*public\s+\w+\s+\w+\s*\([^)\r\n]*\b${Regex.escape(className)}\b[^)\r\n]*\)\s*\{)""",
                         RegexOption.MULTILINE
                     )
                     val overrideMatch = methodPattern.find(modified)

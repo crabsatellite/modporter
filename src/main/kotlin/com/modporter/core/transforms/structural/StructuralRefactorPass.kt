@@ -196,13 +196,13 @@ class StructuralRefactorPass : Pass {
 
                 // Comment out orphaned chain calls: lines starting with .method(...)
                 modified = modified.replace(
-                    Regex("""^(\s+)(\.[a-zA-Z]+\([^)]*\)[^;\n]*;?)""", RegexOption.MULTILINE),
+                    Regex("""^(\s+)(\.[a-zA-Z]+\([^)]*\)[^;\r\n]*;?)""", RegexOption.MULTILINE),
                     "$1// [forge2neo] $2 // SimpleChannel removed"
                 )
 
                 // Comment out INSTANCE.xxx calls (messageBuilder, send, etc)
                 modified = modified.replace(
-                    Regex("""^(\s+)(INSTANCE\.[^\n]+)""", RegexOption.MULTILINE),
+                    Regex("""^(\s+)(INSTANCE\.[^\r\n]+)""", RegexOption.MULTILINE),
                     "$1// [forge2neo] $2 // SimpleChannel removed"
                 )
 
@@ -332,7 +332,7 @@ class StructuralRefactorPass : Pass {
 
                 // Match Block.use() override signature with 6 params (BlockState, Level, BlockPos, Player, InteractionHand, BlockHitResult)
                 val useMethodPattern = Regex(
-                    """([ \t]*@(?:SuppressWarnings\([^)]*\)\s*\n\s*@)?Override\s*\n)?""" +
+                    """([ \t]*@(?:SuppressWarnings\([^)]*\)\s*\r?\n\s*@)?Override\s*\r?\n)?""" +
                     """([ \t]*)(?:public\s+)(@?\s*\w+(?:<[^>]+>)?\s+)use\s*\(\s*""" +
                     """(\w+)\s+(\w+)\s*,\s*""" +     // BlockState param
                     """(\w+)\s+(\w+)\s*,\s*""" +     // Level/World param
@@ -387,7 +387,7 @@ class StructuralRefactorPass : Pass {
                 if (!modified.contains("InteractionHand") ||
                     modified.lines().none { it.trim().let { t -> !t.startsWith("import") && !t.startsWith("//") && t.contains("InteractionHand") } }) {
                     modified = modified.replace(
-                        Regex("""^import\s+net\.minecraft\.world\.InteractionHand\s*;\s*\n""", RegexOption.MULTILINE),
+                        Regex("""^import\s+net\.minecraft\.world\.InteractionHand\s*;\s*\r?\n""", RegexOption.MULTILINE),
                         ""
                     )
                 }
