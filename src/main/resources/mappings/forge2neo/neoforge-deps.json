@@ -1,0 +1,123 @@
+{
+  "description": "Known NeoForge 1.21.1 dependency mappings for auto-resolution",
+  "targetLoader": "neoforge",
+  "targetGameVersion": "1.21.1",
+  "dependencies": [
+    {
+      "forgePrefix": "mezz.jei",
+      "modrinthSlug": "jei",
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "mezz.jei:jei-1.21.1-neoforge-api:19.21.2.313" },
+        { "config": "runtimeOnly", "coord": "mezz.jei:jei-1.21.1-neoforge:19.21.2.313" }
+      ],
+      "mavenUrl": "https://maven.blamejared.com",
+      "status": "available",
+      "notes": "JEI: split into API (compileOnly) and runtime"
+    },
+    {
+      "forgePrefix": "com.simibubi.create",
+      "modrinthSlug": "create",
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "com.simibubi.create:create-1.21.1:6.0.4-build.42+mc1.21.1:slim", "transitive": false }
+      ],
+      "mavenUrl": "https://maven.createmod.net",
+      "status": "available",
+      "notes": "Create: use slim classifier, non-transitive"
+    },
+    {
+      "forgePrefix": "dev.engine-room.flywheel",
+      "modrinthSlug": "flywheel",
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "dev.engine-room.flywheel:flywheel-neoforge-api-1.21.1:1.0.6" },
+        { "config": "runtimeOnly", "coord": "dev.engine-room.flywheel:flywheel-neoforge-1.21.1:1.0.6" }
+      ],
+      "mavenUrl": "https://maven.createmod.net",
+      "status": "available",
+      "notes": "Flywheel: split into API and runtime"
+    },
+    {
+      "forgePrefix": "net.createmod.ponder",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "net.createmod.ponder:Ponder-NeoForge-1.21.1:2.0.0-beta-3" }
+      ],
+      "mavenUrl": "https://maven.createmod.net",
+      "status": "available",
+      "notes": "Ponder library for Create"
+    },
+    {
+      "forgePrefix": "curse.maven:playeranimator",
+      "modrinthSlug": "playeranimator",
+      "neoforgeCoords": [
+        { "config": "implementation", "coord": "dev.kosmx.player-anim:player-animation-lib-forge:2.0.1+1.21.1" }
+      ],
+      "mavenUrl": "https://maven.kosmx.dev",
+      "status": "available",
+      "notes": "PlayerAnimator: artifact still uses 'forge' in name but works for NeoForge"
+    },
+    {
+      "forgePrefix": "squeek.appleskin",
+      "modrinthSlug": "appleskin",
+      "neoforgeCoords": [],
+      "mavenUrl": null,
+      "status": "check_online",
+      "notes": "AppleSkin: check Modrinth for NeoForge 1.21.1"
+    },
+    {
+      "forgePrefix": "vazkii.botania",
+      "modrinthSlug": "botania",
+      "neoforgeCoords": [],
+      "mavenUrl": null,
+      "status": "unavailable",
+      "notes": "Botania: no NeoForge 1.21.1 build as of 2025"
+    },
+    {
+      "forgePrefix": "org.valkyrienskies",
+      "modrinthSlug": "valkyrien-skies",
+      "neoforgeCoords": [],
+      "mavenUrl": null,
+      "status": "check_online",
+      "notes": "Valkyrien Skies: check Modrinth"
+    },
+    {
+      "forgePrefix": "top.theillusivec4",
+      "modrinthSlug": "curios",
+      "neoforgeCoords": [],
+      "mavenUrl": null,
+      "status": "check_online",
+      "notes": "Curios API: check Modrinth"
+    },
+    {
+      "forgePrefix": "com.blamejared.crafttweaker",
+      "modrinthSlug": "crafttweaker",
+      "neoforgeCoords": [],
+      "mavenUrl": null,
+      "status": "check_online",
+      "notes": "CraftTweaker: check Modrinth"
+    },
+    {
+      "forgePrefix": "curse.maven:geckolib",
+      "modrinthSlug": "geckolib",
+      "neoforgeCoords": [],
+      "mavenUrl": null,
+      "status": "check_online",
+      "notes": "GeckoLib: check Modrinth"
+    },
+    {
+      "forgePrefix": "org.spongepowered:mixin",
+      "modrinthSlug": null,
+      "neoforgeCoords": [],
+      "mavenUrl": null,
+      "status": "unavailable",
+      "notes": "Mixin: bundled in NeoForge, no separate dep needed"
+    },
+    {
+      "forgePrefix": "io.github.llamalad7:mixinextras",
+      "modrinthSlug": null,
+      "neoforgeCoords": [],
+      "mavenUrl": null,
+      "status": "unavailable",
+      "notes": "MixinExtras: bundled in NeoForge, no separate dep needed"
+    }
+  ]
+}

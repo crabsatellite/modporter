@@ -2,6 +2,7 @@ package com.modporter.cli
 
 import com.modporter.core.pipeline.*
 import com.modporter.mapping.MappingDatabase
+import com.modporter.registry.PipelineOptions
 import com.modporter.registry.PipelineRegistry
 import com.modporter.report.ReportGenerator
 import com.github.ajalt.clikt.core.CliktCommand
@@ -62,6 +63,12 @@ class PortCommand : CliktCommand(
     private val verbose by option("--verbose", help = "Show detailed transformation log")
         .flag(default = false)
 
+    private val offline by option("--offline", help = "Skip online dependency resolution (use known mappings only)")
+        .flag(default = false)
+
+    private val resolveDeps by option("--resolve-deps", help = "Auto-resolve NeoForge versions of third-party deps (default: true)")
+        .flag("--no-resolve-deps", default = true)
+
     override fun run() {
         val pipelineDef = resolvePipeline(pipelineId, src)
 
@@ -74,6 +81,7 @@ class PortCommand : CliktCommand(
 
         val targetDir = if (dryRun) src else projectDir
         val confidence = parseConfidence(minConfidence)
+        val options = PipelineOptions(offline = offline, resolveDeps = resolveDeps)
 
         echo("═══════════════════════════════════════════")
         echo("  ModPorter v0.2.0")
@@ -82,12 +90,13 @@ class PortCommand : CliktCommand(
         echo("  Target: $targetDir")
         echo("  Mode: ${if (dryRun) "DRY RUN" else "APPLY"}")
         echo("  Min confidence: $confidence")
+        if (resolveDeps) echo("  Dep resolution: ${if (offline) "offline only" else "online + offline"}")
         echo("═══════════════════════════════════════════")
         echo()
 
         val mappingDb = MappingDatabase.load(pipelineDef.mappingsPrefix)
         val pipeline = Pipeline(
-            passes = pipelineDef.passFactory(mappingDb),
+            passes = pipelineDef.passFactory(mappingDb, options),
             minConfidence = confidence,
             dryRun = dryRun,
             pipelineName = pipelineDef.displayName
@@ -140,7 +149,7 @@ class AnalyzeCommand : CliktCommand(
 
         val mappingDb = MappingDatabase.load(pipelineDef.mappingsPrefix)
         val pipeline = Pipeline(
-            passes = pipelineDef.passFactory(mappingDb),
+            passes = pipelineDef.passFactory(mappingDb, PipelineOptions()),
             dryRun = true,
             pipelineName = pipelineDef.displayName
         )

@@ -18,12 +18,15 @@ object Forge2NeoPipeline {
         sourceFramework = "forge-1.20.1",
         targetFramework = "neoforge-1.21.1",
         mappingsPrefix = "/mappings/forge2neo",
-        passFactory = { mappingDb ->
+        passFactory = { mappingDb, options ->
             listOf(
                 TextReplacementPass(mappingDb),
                 AstTransformPass(mappingDb),
                 StructuralRefactorPass(),
-                BuildSystemPass(),
+                BuildSystemPass(
+                    offlineMode = options.offline || !options.resolveDeps,
+                    mappingsPrefix = "/mappings/forge2neo"
+                ),
                 ResourceMigrationPass(mappingDb)
             )
         },

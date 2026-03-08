@@ -19,7 +19,10 @@ private val logger = KotlinLogging.logger {}
  * - Run configurations
  * - settings.gradle plugin repositories
  */
-class BuildSystemPass : Pass {
+class BuildSystemPass(
+    val offlineMode: Boolean = true,
+    val mappingsPrefix: String = "/mappings/forge2neo"
+) : Pass {
     override val name = "Build System"
     override val order = 4
 
@@ -415,8 +418,19 @@ class BuildSystemPass : Pass {
             fgMatch = Regex("""fg\.deobf\(""").find(content)
         }
 
+        // 10b. Resolve third-party dependencies: check for NeoForge 1.21.1 versions
+        val resolver = DependencyResolver(offlineMode = offlineMode, mappingsPrefix = mappingsPrefix)
+        val resolvedPrefixes = mutableSetOf<String>()
+        val newMavenRepos = mutableSetOf<String>()
+        content = resolveDependencies(content, resolver, resolvedPrefixes, newMavenRepos, changes, file)
+
+        // 10c. Add maven repositories for resolved dependencies
+        if (newMavenRepos.isNotEmpty()) {
+            content = addMavenRepositories(content, newMavenRepos, changes, file)
+        }
+
         // 11. Comment out dependencies referencing old MC version that won't resolve
-        content = commentOutOldDeps(content)
+        content = commentOutOldDeps(content, resolvedPrefixes)
 
         // 12. Exclude integration source packages with unavailable dependencies
         if (!content.contains("sourceSets.main.java {")) {
@@ -808,16 +822,145 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
     }
 
     /**
+     * Resolve third-party dependencies: find NeoForge 1.21.1 versions and rewrite coordinates.
+     * Dependencies that can be resolved are rewritten in-place; unresolvable ones are left for commentOutOldDeps.
+     */
+    private fun resolveDependencies(
+        content: String,
+        resolver: DependencyResolver,
+        resolvedPrefixes: MutableSet<String>,
+        newMavenRepos: MutableSet<String>,
+        changes: MutableList<Change>,
+        file: Path
+    ): String {
+        val depKeywords = listOf("compileOnly", "runtimeOnly", "implementation", "annotationProcessor", "def ")
+        val lines = content.lines().toMutableList()
+        val emittedCoords = mutableSetOf<String>() // Track already-emitted NeoForge coords to avoid duplicates
+        var i = 0
+        while (i < lines.size) {
+            val trimmed = lines[i].trim()
+            if (trimmed.startsWith("//") || depKeywords.none { trimmed.startsWith(it) }) {
+                i++
+                continue
+            }
+            // Accumulate multi-line dependency
+            val blockStart = i
+            var depth = 0
+            var j = i
+            do {
+                for (ch in lines[j]) {
+                    when (ch) { '(', '[' -> depth++; ')', ']' -> depth-- }
+                }
+                j++
+            } while (j < lines.size && depth > 0)
+
+            val blockText = lines.subList(blockStart, j).joinToString("\n")
+
+            // Try to resolve this dependency
+            val resolution = resolver.resolve(blockText)
+            if (resolution is DepResolution.Resolved) {
+                // Skip if already resolved (idempotency: dep already contains a NeoForge coord)
+                val alreadyResolved = resolution.coords.any { blockText.contains(it.coord) }
+                if (alreadyResolved) {
+                    resolvedPrefixes.addAll(resolution.coords.map { it.coord.substringBefore(":") })
+                    emittedCoords.addAll(resolution.coords.map { it.coord })
+                    i = j
+                    continue
+                }
+
+                // Filter out coords already emitted (e.g., multiple JEI deps → single resolved set)
+                val newCoords = resolution.coords.filter { it.coord !in emittedCoords }
+
+                val indent = lines[blockStart].takeWhile { it == ' ' || it == '\t' }
+                if (newCoords.isNotEmpty()) {
+                    // Replace the entire dep block with resolved NeoForge coordinates
+                    val replacementLines = newCoords.map { coord ->
+                        val transitiveSuffix = if (!coord.transitive) " { isTransitive = false }" else ""
+                        "${indent}${coord.config} \"${coord.coord}\"$transitiveSuffix"
+                    }
+                    for (k in (j - 1) downTo blockStart) lines.removeAt(k)
+                    for ((idx, line) in replacementLines.withIndex()) {
+                        lines.add(blockStart + idx, line)
+                    }
+                    changes.add(Change(
+                        file = file, line = blockStart + 1,
+                        description = "Resolved dependency to NeoForge 1.21.1: ${resolution.notes}",
+                        before = blockText.trim(),
+                        after = replacementLines.joinToString("\n").trim(),
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-resolve-dep"
+                    ))
+                    i = blockStart + replacementLines.size
+                } else {
+                    // All coords already emitted — just remove the duplicate Forge dep
+                    for (k in (j - 1) downTo blockStart) lines.removeAt(k)
+                    i = blockStart
+                }
+
+                // Track what was resolved
+                resolvedPrefixes.addAll(resolution.coords.map { it.coord.substringBefore(":") })
+                emittedCoords.addAll(resolution.coords.map { it.coord })
+                resolution.mavenUrl?.let { newMavenRepos.add(it) }
+            } else {
+                i = j
+            }
+        }
+        return lines.joinToString("\n")
+    }
+
+    /**
+     * Add maven repositories for resolved NeoForge dependencies.
+     */
+    private fun addMavenRepositories(
+        content: String,
+        repos: Set<String>,
+        changes: MutableList<Change>,
+        file: Path
+    ): String {
+        var result = content
+        val repoBlock = Regex("""repositories\s*\{""")
+        val repoMatch = repoBlock.find(result)
+        if (repoMatch != null) {
+            val insertPos = repoMatch.range.last + 1
+            val newRepoLines = repos
+                .filter { url -> !result.contains(url) }
+                .joinToString("\n") { url ->
+                    val repoName = when {
+                        url.contains("modrinth") -> "\n    maven {\n        name = \"Modrinth\"\n        url = \"$url\"\n        content { includeGroup \"maven.modrinth\" }\n    }"
+                        else -> "\n    maven { url = \"$url\" }"
+                    }
+                    repoName
+                }
+            if (newRepoLines.isNotBlank()) {
+                result = result.substring(0, insertPos) + newRepoLines + result.substring(insertPos)
+                changes.add(Change(
+                    file = file, line = result.lineNumberAt(insertPos),
+                    description = "Add maven repositories for resolved NeoForge dependencies",
+                    before = "(no additional repos)",
+                    after = repos.joinToString(", "),
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-add-maven-repos"
+                ))
+            }
+        }
+        return result
+    }
+
+    /**
      * Comment out dependency declarations that reference old MC version libraries.
      * Handles both single-line and multi-line (map-style) dependency declarations.
      */
-    private fun commentOutOldDeps(content: String): String {
-        val depPrefixes = listOf("mezz.jei:", "squeek.appleskin:", "com.blamejared.crafttweaker:",
+    private fun commentOutOldDeps(content: String, skipPrefixes: Set<String> = emptySet()): String {
+        val allDepPrefixes = listOf("mezz.jei:", "squeek.appleskin:", "com.blamejared.crafttweaker:",
             "Crafttweaker_Annotation_Processors", "org.spongepowered:mixin:", "vazkii.botania",
             "org.valkyrienskies", "maven.modrinth:", "curse.maven:", "top.theillusivec4:",
             "com.github.", "de.ellpeck.", "mcjty.", "com.tterrag.",
             "com.simibubi.create", "net.createmod.ponder", "dev.engine-room.flywheel",
             "io.github.llamalad7:mixinextras")
+        // Filter out prefixes that were already resolved to NeoForge versions
+        val depPrefixes = allDepPrefixes.filter { prefix ->
+            skipPrefixes.none { skip -> prefix.startsWith(skip) || skip.startsWith(prefix.trimEnd(':')) }
+        }
         val depKeywords = listOf("compileOnly", "runtimeOnly", "implementation", "annotationProcessor", "def ")
 
         val lines = content.lines().toMutableList()

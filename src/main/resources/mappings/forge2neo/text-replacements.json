@@ -2154,22 +2154,6 @@
       "isRegex": true
     },
     {
-      "id": "comment-import-create",
-      "pattern": "(import com\\.simibubi\\.create[^;]*;)",
-      "replacement": "// [forge2neo] $1 // Create mod: re-enable when available for NeoForge 1.21",
-      "description": "Comment out Create mod imports (preserved for re-enablement)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "comment-import-flywheel",
-      "pattern": "(import dev\\.engine_room\\.flywheel[^;]*;)",
-      "replacement": "// [forge2neo] $1 // Flywheel: re-enable when available for NeoForge 1.21",
-      "description": "Comment out Flywheel imports (preserved for re-enablement)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "add-import-vec3-for-aabb",
       "pattern": "(import net\\.minecraft\\.world\\.phys\\.AABB;)\\r?\\n(?!import net\\.minecraft\\.world\\.phys\\.Vec3;)",
       "replacement": "$1\nimport net.minecraft.world.phys.Vec3;\n",
