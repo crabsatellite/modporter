@@ -1,0 +1,22 @@
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev' version '2.0.140'
+}
+
+version = '1.0.0'
+group = 'com.example'
+
+base {
+    archivesName = 'testmod'
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+neoForge {
+    version = project.findProperty('neo_forge_version') ?: '21.1.219'
+
+    parchment {
+        minecraftVersion = '1.21.1'
+        mappingsVersion = '2024.11.17'
+    }
+}

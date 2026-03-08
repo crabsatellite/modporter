@@ -1,0 +1,191 @@
+{
+  "mappings": [
+    {
+      "forgeClass": "ResourceLocation",
+      "forgeMethod": "<init>(String, String)",
+      "neoForgeClass": "ResourceLocation",
+      "neoForgeMethod": "fromNamespaceAndPath",
+      "description": "ResourceLocation constructor -> factory method"
+    },
+    {
+      "forgeClass": "ResourceLocation",
+      "forgeMethod": "<init>(String)",
+      "neoForgeClass": "ResourceLocation",
+      "neoForgeMethod": "parse",
+      "description": "ResourceLocation single-arg constructor -> parse"
+    },
+    {
+      "forgeClass": "VertexConsumer",
+      "forgeMethod": "vertex",
+      "neoForgeClass": "VertexConsumer",
+      "neoForgeMethod": "addVertex",
+      "description": "Vertex rendering rename"
+    },
+    {
+      "forgeClass": "VertexConsumer",
+      "forgeMethod": "color",
+      "neoForgeClass": "VertexConsumer",
+      "neoForgeMethod": "setColor",
+      "description": "Vertex rendering rename"
+    },
+    {
+      "forgeClass": "VertexConsumer",
+      "forgeMethod": "uv",
+      "neoForgeClass": "VertexConsumer",
+      "neoForgeMethod": "setUv",
+      "description": "Vertex rendering rename"
+    },
+    {
+      "forgeClass": "VertexConsumer",
+      "forgeMethod": "overlayCoords",
+      "neoForgeClass": "VertexConsumer",
+      "neoForgeMethod": "setOverlay",
+      "description": "Vertex rendering rename"
+    },
+    {
+      "forgeClass": "VertexConsumer",
+      "forgeMethod": "uv2",
+      "neoForgeClass": "VertexConsumer",
+      "neoForgeMethod": "setLight",
+      "description": "Vertex rendering rename"
+    },
+    {
+      "forgeClass": "VertexConsumer",
+      "forgeMethod": "endVertex",
+      "neoForgeClass": "",
+      "neoForgeMethod": "",
+      "description": "endVertex() removed - auto-flushed"
+    },
+    {
+      "forgeClass": "BufferBuilder",
+      "forgeMethod": "end",
+      "neoForgeClass": "BufferBuilder",
+      "neoForgeMethod": "buildOrThrow",
+      "description": "BufferBuilder.end() -> buildOrThrow() returns MeshData"
+    },
+    {
+      "forgeClass": "NetworkHooks",
+      "forgeMethod": "openScreen",
+      "neoForgeClass": "ServerPlayer",
+      "neoForgeMethod": "openMenu",
+      "description": "NetworkHooks.openScreen -> player.openMenu"
+    },
+    {
+      "forgeClass": "BlockEntity",
+      "forgeMethod": "load",
+      "neoForgeClass": "BlockEntity",
+      "neoForgeMethod": "loadAdditional",
+      "neoForgeSignature": "(CompoundTag, HolderLookup.Provider)",
+      "description": "BlockEntity.load -> loadAdditional with HolderLookup.Provider"
+    },
+    {
+      "forgeClass": "ItemStack",
+      "forgeMethod": "hasTag",
+      "neoForgeClass": "",
+      "neoForgeMethod": "",
+      "description": "REMOVED - Use DataComponents instead"
+    },
+    {
+      "forgeClass": "ItemStack",
+      "forgeMethod": "getTag",
+      "neoForgeClass": "",
+      "neoForgeMethod": "",
+      "description": "REMOVED - Use stack.get(DataComponents.XXX) instead"
+    },
+    {
+      "forgeClass": "ItemStack",
+      "forgeMethod": "getOrCreateTag",
+      "neoForgeClass": "",
+      "neoForgeMethod": "",
+      "description": "REMOVED - Use DataComponents instead"
+    },
+    {
+      "forgeClass": "ItemStack",
+      "forgeMethod": "setTag",
+      "neoForgeClass": "",
+      "neoForgeMethod": "",
+      "description": "REMOVED - Use stack.set(DataComponents.XXX, value) instead"
+    },
+    {
+      "forgeClass": "ItemStack",
+      "forgeMethod": "isSameItemSameTags",
+      "neoForgeClass": "ItemStack",
+      "neoForgeMethod": "isSameItemSameComponents",
+      "description": "Tags renamed to Components"
+    },
+    {
+      "forgeClass": "Entity",
+      "forgeMethod": "changeDimension",
+      "forgeSignature": "(ServerLevel)",
+      "neoForgeClass": "Entity",
+      "neoForgeMethod": "changeDimension",
+      "neoForgeSignature": "(DimensionTransition)",
+      "description": "Dimension transition rework"
+    },
+    {
+      "forgeClass": "ItemHandlerHelper",
+      "forgeMethod": "copyStackWithSize",
+      "neoForgeClass": "ItemStack",
+      "neoForgeMethod": "copyWithCount",
+      "description": "Method moved to ItemStack"
+    },
+    {
+      "forgeClass": "ItemHandlerHelper",
+      "forgeMethod": "canItemStacksStack",
+      "neoForgeClass": "ItemStack",
+      "neoForgeMethod": "isSameItemSameComponents",
+      "description": "Method moved to ItemStack"
+    },
+    {
+      "forgeClass": "VertexConsumer",
+      "forgeMethod": "normal",
+      "neoForgeClass": "VertexConsumer",
+      "neoForgeMethod": "setNormal",
+      "description": "Vertex rendering rename"
+    },
+    {
+      "forgeClass": "LivingEntity",
+      "forgeMethod": "broadcastBreakEvent",
+      "neoForgeClass": "LivingEntity",
+      "neoForgeMethod": "onEquippedItemBroken",
+      "description": "Equipment break event rename"
+    },
+    {
+      "forgeClass": "LivingEntity",
+      "forgeMethod": "getExperienceReward",
+      "neoForgeClass": "LivingEntity",
+      "neoForgeMethod": "getBaseExperienceReward",
+      "description": "Experience method rename"
+    },
+    {
+      "forgeClass": "DamageSource",
+      "forgeMethod": "isIndirect",
+      "neoForgeClass": "DamageSource",
+      "neoForgeMethod": "isDirect",
+      "description": "Logic INVERTED: isIndirect -> isDirect (check usage)"
+    },
+    {
+      "forgeClass": "ResourceLocation",
+      "forgeMethod": "of",
+      "neoForgeClass": "ResourceLocation",
+      "neoForgeMethod": "bySeparator",
+      "description": "ResourceLocation.of -> bySeparator"
+    },
+    {
+      "forgeClass": "BlockEntity",
+      "forgeMethod": "saveAdditional",
+      "forgeSignature": "(CompoundTag)",
+      "neoForgeClass": "BlockEntity",
+      "neoForgeMethod": "saveAdditional",
+      "neoForgeSignature": "(CompoundTag, HolderLookup.Provider)",
+      "description": "BlockEntity.saveAdditional gains HolderLookup.Provider parameter"
+    },
+    {
+      "forgeClass": "CreativeModeTab.Builder",
+      "forgeMethod": "withTabsBefore",
+      "neoForgeClass": "CreativeModeTab.Builder",
+      "neoForgeMethod": "withTabsBefore",
+      "description": "CreativeModeTab.Builder: parameters changed from ResourceLocation to ResourceKey<CreativeModeTab>"
+    }
+  ]
+}

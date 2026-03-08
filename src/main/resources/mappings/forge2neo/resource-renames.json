@@ -1,0 +1,26 @@
+{
+  "renames": [
+    {"from": "tags/blocks", "to": "tags/block", "description": "Data folder depluralisation"},
+    {"from": "tags/items", "to": "tags/item", "description": "Data folder depluralisation"},
+    {"from": "tags/entity_types", "to": "tags/entity_type", "description": "Data folder depluralisation"},
+    {"from": "tags/fluids", "to": "tags/fluid", "description": "Data folder depluralisation"},
+    {"from": "tags/game_events", "to": "tags/game_event", "description": "Data folder depluralisation"},
+    {"from": "tags/damage_types", "to": "tags/damage_type", "description": "Data folder depluralisation"},
+    {"from": "tags/worldgen/biomes", "to": "tags/worldgen/biome", "description": "Data folder depluralisation"},
+    {"from": "tags/worldgen/flat_level_generator_presets", "to": "tags/worldgen/flat_level_generator_preset", "description": "Data folder depluralisation"},
+    {"from": "tags/worldgen/structures", "to": "tags/worldgen/structure", "description": "Data folder depluralisation"},
+    {"from": "tags/worldgen/world_presets", "to": "tags/worldgen/world_preset", "description": "Data folder depluralisation"},
+    {"from": "tags/painting_variants", "to": "tags/painting_variant", "description": "Data folder depluralisation"},
+    {"from": "tags/banner_patterns", "to": "tags/banner_pattern", "description": "Data folder depluralisation"},
+    {"from": "tags/cat_variants", "to": "tags/cat_variant", "description": "Data folder depluralisation"},
+    {"from": "tags/functions", "to": "tags/function", "description": "Data folder depluralisation"},
+    {"from": "advancements", "to": "advancement", "description": "Data folder depluralisation"},
+    {"from": "recipes", "to": "recipe", "description": "Data folder depluralisation"},
+    {"from": "structures", "to": "structure", "description": "Data folder depluralisation"},
+    {"from": "loot_tables", "to": "loot_table", "description": "Data folder depluralisation"},
+    {"from": "predicates", "to": "predicate", "description": "Data folder depluralisation"},
+    {"from": "item_modifiers", "to": "item_modifier", "description": "Data folder depluralisation"},
+    {"from": "functions", "to": "function", "description": "Data folder depluralisation"},
+    {"from": "META-INF/mods.toml", "to": "META-INF/neoforge.mods.toml", "description": "Mod metadata file rename"}
+  ]
+}

@@ -1,0 +1,19 @@
+# Build
+build/
+bin/
+.gradle/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test outputs
+src/test/resources/fixtures/*-ported/

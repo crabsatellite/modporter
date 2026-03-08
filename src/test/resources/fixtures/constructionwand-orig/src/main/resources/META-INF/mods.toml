@@ -1,0 +1,31 @@
+modLoader = "javafml"
+loaderVersion = "[46,)"
+license = "MIT License"
+[[mods]]
+modId="constructionwand"
+version="${file.jarVersion}"
+displayName="Construction Wand"
+displayURL="https://github.com/Theta-Dev/ConstructionWand"
+logoFile="logo.png"
+authors="ThetaDev"
+description='''
+Construction Wands make building easier!
+
+With a Construction Wand you can place multiple blocks (up to 1024) at once, extending your build on the side you're
+facing. If that's not enough: you can upgrade your wand with additional cores, allowing you to place a block
+behind the block you are facing, conjure blocks in mid air or destroy lots of blocks very fast.
+
+This is my first minecraft mod. May the odds be ever in your favor.
+'''
+[[dependencies.constructionwand]]
+    modId="forge"
+mandatory = true
+versionRange = "[46,)"
+ordering = "NONE"
+    side="BOTH"
+[[dependencies.constructionwand]]
+    modId="minecraft"
+mandatory = true
+versionRange = "[1.20, 1.21)"
+ordering = "NONE"
+    side="BOTH"
