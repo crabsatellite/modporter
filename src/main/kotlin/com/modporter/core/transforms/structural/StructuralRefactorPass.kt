@@ -160,6 +160,14 @@ class StructuralRefactorPass : Pass {
             errors.add("Client event extraction error: ${e.message}")
         }
 
+        // Remove empty @EventBusSubscriber inner classes left over after extraction/cleanup
+        try {
+            val emptyClassChanges = removeEmptySubscriberClasses(projectDir, dryRun)
+            changes.addAll(emptyClassChanges)
+        } catch (e: Exception) {
+            errors.add("Empty subscriber class removal error: ${e.message}")
+        }
+
         return PassResult(name, changes, errors, skipped)
     }
 
@@ -1035,7 +1043,7 @@ $registrations
                         val busVarName = busAssignMatch.groupValues[1]
                         // Remove the redundant assignment and replace usages
                         text = text.replace(busAssignMatch.value, "")
-                        text = text.replace(busVarName, "modEventBus")
+                        text = Regex("\\b${Regex.escape(busVarName)}\\b").replace(text, "modEventBus")
                     }
 
                     // Remove FMLJavaModLoadingContext import
@@ -1554,6 +1562,120 @@ $registrations
 
                 if (!dryRun) {
                     file.writeText(lines.joinToString(separator))
+                }
+            }
+
+        return changes
+    }
+
+    /**
+     * Remove empty @EventBusSubscriber-annotated inner classes.
+     * An inner class is "empty" if it has zero non-empty methods.
+     * A method is "empty" if its body is just {} or contains only whitespace/comments.
+     */
+    private fun removeEmptySubscriberClasses(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+
+        // Pattern to find @EventBusSubscriber annotated inner classes and their full body
+        val innerClassPattern = Regex(
+            """([ \t]*@EventBusSubscriber\b[^\r\n]*\r?\n)([ \t]*public\s+static\s+class\s+(\w+)\s*\{)""",
+            RegexOption.MULTILINE
+        )
+
+        Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+            .forEach { file ->
+                var text = file.readText()
+                val original = text
+                var removed = false
+
+                // Find inner classes with @EventBusSubscriber repeatedly (text changes after each removal)
+                var match = innerClassPattern.find(text)
+                while (match != null) {
+                    val annotationLine = match.groupValues[1]
+                    val classOpenLine = match.groupValues[2]
+                    val className = match.groupValues[3]
+                    val classBodyStart = match.range.last + 1
+
+                    // Find the matching closing brace by counting braces
+                    var braceCount = 1
+                    var pos = classBodyStart
+                    while (pos < text.length && braceCount > 0) {
+                        when (text[pos]) {
+                            '{' -> braceCount++
+                            '}' -> braceCount--
+                        }
+                        pos++
+                    }
+
+                    if (braceCount != 0) {
+                        // Couldn't match braces, skip
+                        match = innerClassPattern.find(text, match.range.last + 1)
+                        continue
+                    }
+
+                    // Extract the class body (between opening { and closing })
+                    val classBody = text.substring(classBodyStart, pos - 1)
+
+                    // Check if the class has any non-empty methods
+                    // A method signature: access modifiers + return type + name + params + body
+                    val methodPattern = Regex(
+                        """(public|protected|private|static|\s)+\s+\w[\w<>,\s\[\]]*\s+\w+\s*\([^)]*\)\s*\{([^}]*)\}"""
+                    )
+                    val methods = methodPattern.findAll(classBody).toList()
+                    val hasNonEmptyMethod = methods.any { m ->
+                        val body = m.groupValues[2]
+                        // Non-empty if body has something other than whitespace and comments
+                        val stripped = body
+                            .replace(Regex("""//[^\r\n]*"""), "")      // remove line comments
+                            .replace(Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL), "") // remove block comments
+                            .trim()
+                        stripped.isNotEmpty()
+                    }
+
+                    if (!hasNonEmptyMethod) {
+                        // Remove the entire inner class block including annotation and trailing newline
+                        val startIdx = match.range.first
+                        var endIdx = pos
+                        // Consume trailing whitespace/newline
+                        while (endIdx < text.length && (text[endIdx] == '\r' || text[endIdx] == '\n')) {
+                            endIdx++
+                        }
+                        // Also remove a blank line before the annotation if present
+                        var adjStart = startIdx
+                        if (adjStart > 0 && text[adjStart - 1] == '\n') {
+                            adjStart--
+                            if (adjStart > 0 && text[adjStart - 1] == '\r') {
+                                adjStart--
+                            }
+                        }
+
+                        text = text.removeRange(adjStart, endIdx)
+                        removed = true
+                        logger.info { "Removing empty @EventBusSubscriber inner class: $className in ${file.fileName}" }
+
+                        changes.add(Change(
+                            file = file,
+                            line = 0,
+                            description = "Remove empty @EventBusSubscriber inner class '$className'",
+                            before = "@EventBusSubscriber ... class $className { /* empty */ }",
+                            after = "(removed)",
+                            confidence = Confidence.HIGH,
+                            ruleId = "struct-remove-empty-subscriber-class"
+                        ))
+
+                        // Restart search from the beginning since indices shifted
+                        match = innerClassPattern.find(text)
+                    } else {
+                        match = innerClassPattern.find(text, match.range.last + 1)
+                    }
+                }
+
+                if (removed && !dryRun) {
+                    file.writeText(text)
                 }
             }
 
