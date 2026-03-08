@@ -3,6 +3,7 @@ plugins {
     kotlin("plugin.serialization") version "1.9.22"
     application
     jacoco
+    id("com.github.johnrengelman.shadow") version "8.1.1"
 }
 
 group = "com.modporter"
@@ -59,6 +60,11 @@ tasks.jar {
     manifest {
         attributes["Main-Class"] = "com.modporter.cli.MainKt"
     }
+}
+
+tasks.shadowJar {
+    archiveClassifier.set("all")
+    mergeServiceFiles()
 }
 
 tasks.test {

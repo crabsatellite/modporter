@@ -581,7 +581,7 @@ class BuildSystemPass : Pass {
         }
         // Ensure neo_forge_version exists even if no forge version property was found
         if (!foundForgeVersion && !content.contains("neo_forge_version")) {
-            content += "\n# Added by forge2neo\nneo_forge_version=21.1.219\n"
+            content += "\n# Added by modporter\nneo_forge_version=21.1.219\n"
             changes.add(Change(
                 file = file, line = content.lines().size,
                 description = "Add neo_forge_version property (required by neoForge block)",
@@ -685,7 +685,7 @@ class BuildSystemPass : Pass {
             val modIdFromProps = Regex("""^modid\s*=\s*(\S+)""", RegexOption.MULTILINE).find(content)?.groupValues?.get(1)
             val modId = modIdFromProps ?: detectModId(file.parent)
             if (modId != null) {
-                content += "\n# Added by forge2neo\nmod_id=$modId\n"
+                content += "\n# Added by modporter\nmod_id=$modId\n"
                 changes.add(Change(
                     file = file, line = content.lines().size,
                     description = "Add mod_id property for NeoForge configuration",
