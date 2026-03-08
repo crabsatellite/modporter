@@ -1252,12 +1252,17 @@ $registrations
     }
 
     /**
-     * Remove methods that were removed in 1.21:
-     * - onAddedToWorld() / onRemovedFromWorld() (Entity lifecycle methods removed)
+     * Rename entity lifecycle methods that were renamed in 1.21:
+     * - onAddedToWorld() → onAddedToLevel()
+     * - onRemovedFromWorld() → onRemovedFromLevel()
+     * Preserves all original logic — only the method name changes.
      */
     private fun removeObsoleteMethods(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
-        val obsoleteMethods = listOf("onAddedToWorld", "onRemovedFromWorld")
+        val methodRenames = mapOf(
+            "onAddedToWorld" to "onAddedToLevel",
+            "onRemovedFromWorld" to "onRemovedFromLevel"
+        )
 
         val javaFiles = Files.walk(projectDir)
             .filter { it.extension == "java" }
@@ -1267,70 +1272,39 @@ $registrations
             .toList()
 
         for (file in javaFiles) {
-            val content = file.readText()
-            if (obsoleteMethods.none { content.contains(it) }) continue
+            var content = file.readText()
+            if (methodRenames.keys.none { content.contains(it) }) continue
 
-            val lines = content.lines().toMutableList()
             var modified = false
-            var i = 0
+            for ((oldName, newName) in methodRenames) {
+                if (!content.contains(oldName)) continue
 
-            while (i < lines.size) {
-                val trimmed = lines[i].trim()
-
-                for (methodName in obsoleteMethods) {
-                    // Match @Override followed by method declaration
-                    val isOverride = trimmed == "@Override" && i + 1 < lines.size &&
-                        lines[i + 1].trim().let { next ->
-                            next.contains("void $methodName(") || next.contains("void $methodName (")
-                        }
-                    val isDirectMethod = trimmed.contains("void $methodName(") || trimmed.contains("void $methodName (")
-
-                    if (isOverride || isDirectMethod) {
-                        val methodStart = i
-                        // Find the opening brace
-                        var j = if (isOverride) i + 1 else i
-                        while (j < lines.size && !lines[j].contains("{")) j++
-                        if (j >= lines.size) break
-
-                        // Find matching closing brace
-                        var depth = 0
-                        var k = j
-                        while (k < lines.size) {
-                            for (ch in lines[k]) {
-                                if (ch == '{') depth++
-                                if (ch == '}') depth--
-                            }
-                            if (depth <= 0) break
-                            k++
-                        }
-
-                        if (k < lines.size) {
-                            // Comment out the entire method
-                            for (idx in methodStart..k) {
-                                lines[idx] = "// [forge2neo] ${lines[idx].trimStart()}"
-                            }
-                            lines.add(methodStart, "    // [forge2neo] Removed $methodName() - removed in NeoForge 1.21")
-                            modified = true
-                            changes.add(Change(
-                                file = file,
-                                line = methodStart + 1,
-                                description = "Remove obsolete $methodName() override (removed in 1.21)",
-                                before = "@Override void $methodName()",
-                                after = "// Removed",
-                                confidence = Confidence.HIGH,
-                                ruleId = "struct-remove-obsolete-method"
-                            ))
-                            i = k + 2 // skip past the commented method + comment line
-                            break
-                        }
+                // Replace method declarations: void onAddedToWorld( → void onAddedToLevel(
+                val declPattern = Regex("""(void\s+)${Regex.escape(oldName)}(\s*\()""")
+                if (declPattern.containsMatchIn(content)) {
+                    content = declPattern.replace(content) { match ->
+                        "${match.groupValues[1]}$newName${match.groupValues[2]}"
                     }
+                    // Also replace super.onAddedToWorld() → super.onAddedToLevel()
+                    content = content.replace("super.$oldName(", "super.$newName(")
+                    // Replace any this.onAddedToWorld() calls
+                    content = content.replace("this.$oldName(", "this.$newName(")
+
+                    modified = true
+                    changes.add(Change(
+                        file = file,
+                        line = 0,
+                        description = "Rename $oldName() → $newName() (renamed in 1.21)",
+                        before = "void $oldName()",
+                        after = "void $newName()",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-rename-lifecycle-method"
+                    ))
                 }
-                i++
             }
 
             if (modified && !dryRun) {
-                val separator = if (content.contains("\r\n")) "\r\n" else "\n"
-                file.writeText(lines.joinToString(separator))
+                file.writeText(content)
             }
         }
 

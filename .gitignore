@@ -1,6 +1,6 @@
-# Build
-build/
-bin/
+# Build outputs (only at root level, not source packages named 'build')
+/build/
+/bin/
 .gradle/
 
 # IDE

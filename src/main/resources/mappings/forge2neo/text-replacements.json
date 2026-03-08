@@ -2194,18 +2194,18 @@
       "isRegex": true
     },
     {
-      "id": "remove-import-create",
-      "pattern": "import com\\.simibubi\\.create[^;]*;\\r?\\n",
-      "replacement": "",
-      "description": "Remove Create mod imports (unavailable in NeoForge 1.21)",
+      "id": "comment-import-create",
+      "pattern": "(import com\\.simibubi\\.create[^;]*;)",
+      "replacement": "// [forge2neo] $1 // Create mod: re-enable when available for NeoForge 1.21",
+      "description": "Comment out Create mod imports (preserved for re-enablement)",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
-      "id": "remove-import-flywheel",
-      "pattern": "import dev\\.engine_room\\.flywheel[^;]*;\\r?\\n",
-      "replacement": "",
-      "description": "Remove Flywheel imports (unavailable in NeoForge 1.21)",
+      "id": "comment-import-flywheel",
+      "pattern": "(import dev\\.engine_room\\.flywheel[^;]*;)",
+      "replacement": "// [forge2neo] $1 // Flywheel: re-enable when available for NeoForge 1.21",
+      "description": "Comment out Flywheel imports (preserved for re-enablement)",
       "fileGlob": "*.java",
       "isRegex": true
     },
