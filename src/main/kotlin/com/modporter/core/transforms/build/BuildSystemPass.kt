@@ -434,7 +434,8 @@ class BuildSystemPass(
 
         // 12. Exclude integration source packages with unavailable dependencies
         if (!content.contains("sourceSets.main.java {")) {
-            val integrationExclusions = detectUnavailableIntegrations(file.parent, content)
+            val detectionResult = detectUnavailableIntegrations(file.parent, content)
+            val integrationExclusions = detectionResult.exclusions
             if (integrationExclusions.isNotEmpty()) {
                 val exclusionBlock = buildString {
                     append("\n// Exclude optional integration modules whose dependencies are not yet available for NeoForge 1.21\n")
@@ -456,6 +457,11 @@ class BuildSystemPass(
                         ruleId = "build-exclude-integrations"
                     ))
                 }
+            }
+
+            // 12b. Clean up unavailable dep references in files too large to exclude
+            if (detectionResult.cleanupTargets.isNotEmpty()) {
+                cleanupUnavailableDepRefs(detectionResult.cleanupTargets, changes, file)
             }
         }
 
@@ -875,8 +881,11 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                 if (newCoords.isNotEmpty()) {
                     // Replace the entire dep block with resolved NeoForge coordinates
                     val replacementLines = newCoords.map { coord ->
-                        val transitiveSuffix = if (!coord.transitive) " { isTransitive = false }" else ""
-                        "${indent}${coord.config} \"${coord.coord}\"$transitiveSuffix"
+                        if (!coord.transitive) {
+                            "${indent}${coord.config}(\"${coord.coord}\") { transitive = false }"
+                        } else {
+                            "${indent}${coord.config} \"${coord.coord}\""
+                        }
                     }
                     for (k in (j - 1) downTo blockStart) lines.removeAt(k)
                     for ((idx, line) in replacementLines.withIndex()) {
@@ -1007,13 +1016,23 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
     }
 
     /**
+     * Result of detecting unavailable integrations.
+     * @param exclusions files/dirs to exclude from sourceSets
+     * @param cleanupTargets map of file path to set of import prefixes to comment out (for large files that shouldn't be excluded entirely)
+     */
+    data class IntegrationDetectionResult(
+        val exclusions: List<String>,
+        val cleanupTargets: Map<Path, Set<String>> = emptyMap()
+    )
+
+    /**
      * Detect integration source packages that depend on unavailable external libraries.
      * Scans src/main/java for "integration" subdirectories whose dependencies were commented out.
-     * Returns package paths suitable for sourceSets exclude (e.g., "com/example/integration/jei").
+     * Returns exclusions and cleanup targets.
      */
-    private fun detectUnavailableIntegrations(projectDir: Path, buildContent: String = ""): List<String> {
+    private fun detectUnavailableIntegrations(projectDir: Path, buildContent: String = ""): IntegrationDetectionResult {
         val srcDir = projectDir.resolve("src/main/java")
-        if (!srcDir.exists()) return emptyList()
+        if (!srcDir.exists()) return IntegrationDetectionResult(emptyList())
 
         // Map of dependency group prefixes to their expected integration package names
         val depToIntegration = mapOf(
@@ -1061,9 +1080,11 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                 trimmed.startsWith("//") && trimmed.contains(dep)
             }
         }
+        if (commentedDeps.isEmpty()) return IntegrationDetectionResult(emptyList())
 
         // Find actual integration directories in the source tree
         val exclusions = mutableListOf<String>()
+        val cleanupTargets = mutableMapOf<Path, MutableSet<String>>()
         try {
             // Check both "integration", "integrations", and "compat" directory names
             if (commentedDeps.isNotEmpty()) java.nio.file.Files.walk(srcDir)
@@ -1082,28 +1103,28 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
             // Also find individual files that import commented-out dependency packages
             // (for cases like HandlerBotania.java not in an integration directory)
-            if (commentedDeps.isNotEmpty()) {
-                for (dep in commentedDeps) {
-                    val importPrefix = depImportPrefixes[dep] ?: continue
-                    java.nio.file.Files.walk(srcDir)
-                        .filter { it.toString().endsWith(".java") }
-                        .forEach { javaFile ->
-                            val text = javaFile.toFile().readText()
-                            // Check for both raw and commented-out imports (text-replacement may have commented them)
-                            if (text.contains("import $importPrefix") ||
-                                text.contains("// [forge2neo] import $importPrefix")) {
-                                val relativePath = srcDir.relativize(javaFile).toString().replace('\\', '/')
-                                if (exclusions.any { relativePath == it || relativePath.startsWith(it.removeSuffix("/**") + "/") }) return@forEach
-                                // Only exclude small files (< 30 lines) that are clearly integration-only
-                                // Larger files get their references cleaned up instead of being excluded
-                                val lineCount = text.lines().size
-                                val depRefCount = Regex("""\b${Regex.escape(importPrefix.substringAfterLast('.'))}\b""").findAll(text).count()
-                                if (lineCount < 50 || depRefCount >= 4) {
-                                    exclusions.add(relativePath)
-                                }
+            for (dep in commentedDeps) {
+                val importPrefix = depImportPrefixes[dep] ?: continue
+                java.nio.file.Files.walk(srcDir)
+                    .filter { it.toString().endsWith(".java") }
+                    .forEach { javaFile ->
+                        val text = javaFile.toFile().readText()
+                        if (text.contains("import $importPrefix") ||
+                            text.contains("// [forge2neo] import $importPrefix")) {
+                            val relativePath = srcDir.relativize(javaFile).toString().replace('\\', '/')
+                            if (exclusions.any { relativePath == it || relativePath.startsWith(it.removeSuffix("/**") + "/") }) return@forEach
+                            val lineCount = text.lines().size
+                            val depRefCount = Regex("""\b${Regex.escape(importPrefix.substringAfterLast('.'))}\b""").findAll(text).count()
+                            val fullPrefixRefs = text.lines().count { l -> l.contains(importPrefix) }
+                            if (lineCount < 50 || depRefCount >= 4 || fullPrefixRefs >= 1) {
+                                logger.info { "Excluding $relativePath (dep=$dep, lines=$lineCount)" }
+                                exclusions.add(relativePath)
+                            } else {
+                                // File is too large/important to exclude — mark for cleanup instead
+                                cleanupTargets.getOrPut(javaFile) { mutableSetOf() }.add(importPrefix)
                             }
                         }
-                }
+                    }
             }
 
             // Exclude files that use removed/rewritten APIs that can't be fixed by text replacement
@@ -1164,8 +1185,9 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                                 val lineCount = text.lines().size
                                 // Count references to determine coupling strength
                                 val refCount = Regex("""\b${Regex.escape(className)}\b""").findAll(text).count()
-                                // Exclude thin wrappers (< 20 lines) or heavily coupled files (5+ refs)
-                                if (lineCount < 20 || refCount >= 5) {
+                                // Exclude thin files (< 30 lines) or heavily coupled files (5+ refs or >20% ref density)
+                                val refDensity = refCount.toDouble() / lineCount.coerceAtLeast(1)
+                                if (lineCount < 30 || refCount >= 5 || refDensity > 0.1) {
                                     exclusions.add(relativePath)
                                     changed = true
                                     break
@@ -1174,9 +1196,11 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                         }
                     }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            logger.warn { "Error detecting unavailable integrations: ${e.message}" }
+        }
 
-        return exclusions
+        return IntegrationDetectionResult(exclusions, cleanupTargets)
     }
 
     /**
@@ -1187,6 +1211,54 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
      * - Commenting out method calls to excluded classes (e.g., ExcludedClass.method())
      * - Removing @Override methods that implement excluded interfaces
      */
+
+    /**
+     * Clean up references to unavailable deps in files too large to exclude entirely.
+     * Comments out imports and wraps usage blocks in compile-guard comments.
+     */
+    private fun cleanupUnavailableDepRefs(
+        cleanupTargets: Map<Path, Set<String>>,
+        changes: MutableList<Change>,
+        buildFile: Path
+    ) {
+        for ((javaFile, importPrefixes) in cleanupTargets) {
+            var text = javaFile.readText()
+            val original = text
+            for (prefix in importPrefixes) {
+                // Comment out import lines matching this prefix
+                text = text.replace(Regex("""^(import\s+${Regex.escape(prefix)}\..+;)$""", RegexOption.MULTILINE)) {
+                    "// [modporter] unavailable dep: ${it.groupValues[1]}"
+                }
+                // Find simple class names imported from this prefix and comment out their usages
+                val importedClasses = Regex("""import\s+${Regex.escape(prefix)}\.[\w.]*\.(\w+);""")
+                    .findAll(original)
+                    .map { it.groupValues[1] }
+                    .toSet()
+                for (className in importedClasses) {
+                    // Comment out lines that reference this class (but not the import we already handled)
+                    text = text.replace(Regex("""^(\s*(?!.*//\s*\[modporter\]).+\b${Regex.escape(className)}\b.*)$""", RegexOption.MULTILINE)) {
+                        val line = it.groupValues[1]
+                        if (line.trimStart().startsWith("//")) line // already commented
+                        else "${line.substringBefore(line.trimStart())}// [modporter] unavailable dep: ${line.trimStart()}"
+                    }
+                }
+            }
+            if (text != original) {
+                javaFile.writeText(text)
+                logger.info { "Cleaned up unavailable dep refs in ${javaFile.fileName}" }
+                changes.add(Change(
+                    file = javaFile,
+                    line = 1,
+                    description = "Comment out unavailable dep references (${importPrefixes.joinToString(", ")})",
+                    before = "(references to unavailable deps)",
+                    after = "(commented out)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-cleanup-unavailable-deps"
+                ))
+            }
+        }
+    }
+
     private fun cleanupExcludedReferences(projectDir: Path, dryRun: Boolean): Pair<List<Change>, List<String>> {
         val changes = mutableListOf<Change>()
         val errors = mutableListOf<String>()
@@ -1246,13 +1318,14 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                         "$1"
                     )
                     // Handle "implements Other, ExcludedClass" or "implements ExcludedClass, Other"
+                    // Only in implements/extends clauses (line must contain implements or extends keyword)
                     modified = modified.replace(
-                        Regex(""",\s*$className"""),
-                        ""
+                        Regex("""^(.*(?:implements|extends)\s+.+),\s*\b$className\b(.*)$""", RegexOption.MULTILINE),
+                        "$1$2"
                     )
                     modified = modified.replace(
-                        Regex("""$className\s*,\s*"""),
-                        ""
+                        Regex("""^(.*(?:implements|extends)\s+)\b$className\b\s*,\s*(.*)$""", RegexOption.MULTILINE),
+                        "$1$2"
                     )
 
                     // 3. Comment out standalone method calls: ExcludedClass.method(...)
@@ -1494,6 +1567,51 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                     }
                     if (changed) {
                         modified = lines.joinToString("\n")
+                    }
+
+                    // Post-processing: find commented-out variable declarations and comment their usages
+                    val varLines = modified.lines().toMutableList()
+                    var varChanged = false
+                    for (vi in varLines.indices) {
+                        val vLine = varLines[vi]
+                        if (!vLine.trimStart().startsWith("// [forge2neo]")) continue
+                        // Extract variable name from commented declaration like: // [forge2neo] Type varName = ...
+                        val varMatch = Regex("""// \[forge2neo\]\s+(?:\w+(?:<[^>]*>)?)\s+(\w+)\s*=""").find(vLine) ?: continue
+                        val varName = varMatch.groupValues[1]
+                        // Comment subsequent lines in the same block that use this variable
+                        var braceDepth = 0
+                        for (vj in (vi + 1) until varLines.size) {
+                            val nextLine = varLines[vj].trimStart()
+                            if (nextLine == "}") {
+                                if (braceDepth == 0) break
+                                braceDepth--
+                            }
+                            if (nextLine.endsWith("{")) braceDepth++
+                            if (!nextLine.startsWith("//") && nextLine.isNotEmpty() &&
+                                Regex("""\b${Regex.escape(varName)}\b""").containsMatchIn(nextLine)) {
+                                val indent = varLines[vj].substringBefore(nextLine)
+                                varLines[vj] = "$indent// [forge2neo] $nextLine // excluded: variable '$varName' unavailable"
+                                varChanged = true
+                            }
+                        }
+                    }
+                    if (varChanged) {
+                        modified = varLines.joinToString("\n")
+                    }
+                }
+
+                // Second pass: find field names from commented-out declarations and comment their usages
+                // Match: // [forge2neo] ... DeferredHolder<...> FIELD_NAME = ...
+                val commentedFieldPattern = Regex("""// \[forge2neo\].*(?:DeferredHolder|RegistryObject|Supplier)[^=]*>\s+(\w+)\s*=""")
+                val commentedFields = commentedFieldPattern.findAll(modified).map { it.groupValues[1] }.toSet()
+                for (fieldName in commentedFields) {
+                    modified = modified.replace(
+                        Regex("""^(\s*)(?!//)(.+\b${Regex.escape(fieldName)}\b.*)$""", RegexOption.MULTILINE)
+                    ) { match ->
+                        val indent = match.groupValues[1]
+                        val code = match.groupValues[2]
+                        if (code.trimStart().startsWith("//")) match.value
+                        else "$indent// [forge2neo] $code // excluded: $fieldName unavailable (field commented out)"
                     }
                 }
 

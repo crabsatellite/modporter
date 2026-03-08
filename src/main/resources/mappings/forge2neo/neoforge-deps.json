@@ -21,8 +21,8 @@
         { "config": "compileOnly", "coord": "com.simibubi.create:create-1.21.1:6.0.4-build.42+mc1.21.1:slim", "transitive": false }
       ],
       "mavenUrl": "https://maven.createmod.net",
-      "status": "available",
-      "notes": "Create: use slim classifier, non-transitive"
+      "status": "unavailable",
+      "notes": "Create: NeoForge 1.21.1 exists but API changed significantly, needs manual migration"
     },
     {
       "forgePrefix": "dev.engine-room.flywheel",
@@ -32,18 +32,16 @@
         { "config": "runtimeOnly", "coord": "dev.engine-room.flywheel:flywheel-neoforge-1.21.1:1.0.6" }
       ],
       "mavenUrl": "https://maven.createmod.net",
-      "status": "available",
-      "notes": "Flywheel: split into API and runtime"
+      "status": "unavailable",
+      "notes": "Flywheel: NeoForge 1.21.1 exists but typically bundled with Create, exclude for now"
     },
     {
       "forgePrefix": "net.createmod.ponder",
       "modrinthSlug": null,
-      "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "net.createmod.ponder:Ponder-NeoForge-1.21.1:2.0.0-beta-3" }
-      ],
-      "mavenUrl": "https://maven.createmod.net",
-      "status": "available",
-      "notes": "Ponder library for Create"
+      "neoforgeCoords": [],
+      "mavenUrl": null,
+      "status": "unavailable",
+      "notes": "Ponder: part of Create ecosystem, exclude when Create is excluded"
     },
     {
       "forgePrefix": "curse.maven:playeranimator",
@@ -52,8 +50,8 @@
         { "config": "implementation", "coord": "dev.kosmx.player-anim:player-animation-lib-forge:2.0.1+1.21.1" }
       ],
       "mavenUrl": "https://maven.kosmx.dev",
-      "status": "available",
-      "notes": "PlayerAnimator: artifact still uses 'forge' in name but works for NeoForge"
+      "status": "unavailable",
+      "notes": "PlayerAnimator 2.0: API breaking changes (IPlayable vs KeyframeAnimation), needs manual migration"
     },
     {
       "forgePrefix": "squeek.appleskin",

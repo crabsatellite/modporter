@@ -2009,6 +2009,53 @@
       "fileGlob": "*.java"
     },
     {
+      "id": "import-render-frame-event",
+      "pattern": "(import net\\.neoforged\\.neoforge\\.client\\.event\\.ClientTickEvent;)\\r?\\n(?!import net\\.neoforged\\.neoforge\\.client\\.event\\.RenderFrameEvent;)",
+      "replacement": "$1\nimport net.neoforged.neoforge.client.event.RenderFrameEvent;\n",
+      "description": "Add RenderFrameEvent import alongside ClientTickEvent",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tick-event-phase-end-return",
+      "pattern": "if \\(event\\.phase == TickEvent\\.Phase\\.END\\) \\{\\r?\\n[^\\S\\r\\n]*return;\\r?\\n[^\\S\\r\\n]*\\}",
+      "replacement": "// Phase check removed: NeoForge uses .Pre/.Post subevents",
+      "description": "Remove TickEvent.Phase.END guard (NeoForge uses Pre/Post subevents)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tick-event-phase-start-return",
+      "pattern": "if \\(event\\.phase == TickEvent\\.Phase\\.START\\) \\{\\r?\\n[^\\S\\r\\n]*return;\\r?\\n[^\\S\\r\\n]*\\}",
+      "replacement": "// Phase check removed: NeoForge uses .Pre/.Post subevents",
+      "description": "Remove TickEvent.Phase.START guard (NeoForge uses Pre/Post subevents)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tick-event-phase-check-neq",
+      "pattern": "if \\(event\\.phase != TickEvent\\.Phase\\.(START|END)\\)[^{]*\\{\\r?\\n[^\\S\\r\\n]*return;\\r?\\n[^\\S\\r\\n]*\\}",
+      "replacement": "// Phase check removed: NeoForge uses .Pre/.Post subevents",
+      "description": "Remove TickEvent.Phase != check (NeoForge uses Pre/Post subevents)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "render-tick-time-field",
+      "pattern": "event\\.renderTickTime",
+      "replacement": "Minecraft.getInstance().getTimer().getRealtimeDeltaTicks()",
+      "description": "event.renderTickTime -> Minecraft.getInstance().getTimer().getRealtimeDeltaTicks() (1.21)",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "get-delta-frame-time",
+      "pattern": "Minecraft\\.getInstance\\(\\)\\.getDeltaFrameTime\\(\\)",
+      "replacement": "Minecraft.getInstance().getTimer().getRealtimeDeltaTicks()",
+      "description": "getDeltaFrameTime() -> getTimer().getRealtimeDeltaTicks() (1.21)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "import-tick-event-replace",
       "pattern": "import net.neoforged.neoforge.event.TickEvent;",
       "replacement": "import net.neoforged.neoforge.client.event.ClientTickEvent;\nimport net.neoforged.neoforge.event.tick.ServerTickEvent;\nimport net.neoforged.neoforge.event.tick.LevelTickEvent;\nimport net.neoforged.neoforge.event.tick.PlayerTickEvent;",
