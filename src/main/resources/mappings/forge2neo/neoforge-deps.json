@@ -4,6 +4,46 @@
   "targetGameVersion": "1.21.1",
   "dependencies": [
     {
+      "forgePrefix": "com.aetherteam.nitrogen:nitrogen_internals",
+      "modrinthSlug": null,
+      "packagePrefixes": [
+        "com.aetherteam.nitrogen."
+      ],
+      "neoforgeCoords": [
+        { "config": "implementation", "coord": "com.aetherteam.nitrogen:nitrogen_internals:1.21.1-1.1.25-neoforge" }
+      ],
+      "versionProperties": [
+        {
+          "name": "nitrogen_version",
+          "value": "1.21.1-1.1.25-neoforge",
+          "notes": "Public NeoForge 1.21.1 Nitrogen build"
+        }
+      ],
+      "mavenUrl": "https://packages.aether-mod.net/Nitrogen",
+      "status": "available",
+      "notes": "Nitrogen Internals: public NeoForge 1.21.1 library build"
+    },
+    {
+      "forgePrefix": "com.aetherteam.cumulus:cumulus_menus",
+      "modrinthSlug": null,
+      "packagePrefixes": [
+        "com.aetherteam.cumulus."
+      ],
+      "neoforgeCoords": [
+        { "config": "implementation", "coord": "com.aetherteam.cumulus:cumulus_menus:1.21.1-2.0.8-neoforge" }
+      ],
+      "versionProperties": [
+        {
+          "name": "cumulus_version",
+          "value": "1.21.1-2.0.8-neoforge",
+          "notes": "Public NeoForge 1.21.1 Cumulus build"
+        }
+      ],
+      "mavenUrl": "https://packages.aether-mod.net/Cumulus",
+      "status": "available",
+      "notes": "Cumulus Menus: public NeoForge 1.21.1 library build"
+    },
+    {
       "forgePrefix": "mezz.jei",
       "modrinthSlug": "jei",
       "neoforgeCoords": [

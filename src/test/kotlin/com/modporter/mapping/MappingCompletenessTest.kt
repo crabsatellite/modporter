@@ -113,6 +113,21 @@ class MappingCompletenessTest {
                 if (status == "remove" && notes.isBlank()) {
                     add("$prefix is remove without evidence notes")
                 }
+                val versionProperties = dep["versionProperties"]?.jsonArray.orEmpty()
+                versionProperties.forEach { versionElement ->
+                    val versionProperty = versionElement.jsonObject
+                    val name = versionProperty["name"]?.jsonPrimitive?.content.orEmpty()
+                    val value = versionProperty["value"]?.jsonPrimitive?.content.orEmpty()
+                    if (!Regex("""[A-Za-z_][A-Za-z0-9_.-]*""").matches(name)) {
+                        add("$prefix has invalid version property name $name")
+                    }
+                    if (value.isBlank()) {
+                        add("$prefix has blank target version property $name")
+                    }
+                    if (Regex("""\b1\.20(?:\.1)?\b""").containsMatchIn(value)) {
+                        add("$prefix leaves target version property $name on old Minecraft line: $value")
+                    }
+                }
             }
         }
 

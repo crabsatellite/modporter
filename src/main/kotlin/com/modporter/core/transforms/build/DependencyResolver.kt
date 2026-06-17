@@ -83,6 +83,9 @@ class DependencyResolver(
         return resolve(known.forgePrefix)
     }
 
+    fun targetVersionProperties(): List<KnownDepVersionProperty> =
+        knownDeps.flatMap { it.versionProperties }
+
     private fun resolveOnline(known: KnownDep): DepResolution {
         val slug = known.modrinthSlug ?: return DepResolution.Unavailable("No Modrinth slug for ${known.forgePrefix}")
 
@@ -220,8 +223,16 @@ data class KnownDep(
     val modrinthSlug: String? = null,
     val packagePrefixes: List<String> = emptyList(),
     val neoforgeCoords: List<NeoForgeCoord> = emptyList(),
+    val versionProperties: List<KnownDepVersionProperty> = emptyList(),
     val mavenUrl: String? = null,
     val status: String = "unavailable",
+    val notes: String = ""
+)
+
+@Serializable
+data class KnownDepVersionProperty(
+    val name: String,
+    val value: String,
     val notes: String = ""
 )
 

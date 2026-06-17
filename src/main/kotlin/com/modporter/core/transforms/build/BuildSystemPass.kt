@@ -3644,6 +3644,27 @@ $body
             ))
         }
 
+        val dependencyVersionProperties = DependencyResolver(
+            offlineMode = true,
+            mappingsPrefix = mappingsPrefix
+        ).targetVersionProperties()
+        for (versionProperty in dependencyVersionProperties) {
+            val pattern = Regex("""(?m)^${Regex.escape(versionProperty.name)}\s*=\s*.+$""")
+            val match = pattern.find(content) ?: continue
+            val replacement = "${versionProperty.name}=${versionProperty.value}"
+            if (match.value.trim() == replacement) continue
+            changes.add(Change(
+                file = file,
+                line = content.lineNumberAt(match.range.first),
+                description = "Update dependency version property ${versionProperty.name} for NeoForge 1.21.1",
+                before = match.value,
+                after = replacement,
+                confidence = Confidence.HIGH,
+                ruleId = "build-props-dependency-version"
+            ))
+            content = content.replaceRange(match.range, replacement)
+        }
+
         val baseMcVersion = Regex("""(?m)^base_minecraft_version\s*=\s*1\.20(?:\.\d+)?\s*$""").find(content)
         if (baseMcVersion != null) {
             changes.add(Change(

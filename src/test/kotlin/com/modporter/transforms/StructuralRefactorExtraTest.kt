@@ -1685,6 +1685,140 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `custom capability migration derives entity providers and level attachments from attach events`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val capabilityDir = srcDir.resolve("capability")
+        capabilityDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "examplemod";
+
+                public ExampleMod(IEventBus modEventBus) {
+                }
+            }
+        """.trimIndent())
+        capabilityDir.resolve("PlayerData.java").writeText("""
+            package com.example.capability;
+
+            import com.modporter.generated.examplemod.compat.LazyOptional;
+            import net.minecraft.world.entity.player.Player;
+
+            public interface PlayerData {
+                static LazyOptional<PlayerData> get(Player player) {
+                    return LazyOptional.ofNullable(player.getCapability(ExampleCapabilities.PLAYER_DATA));
+                }
+            }
+        """.trimIndent())
+        capabilityDir.resolve("LevelData.java").writeText("""
+            package com.example.capability;
+
+            import com.modporter.generated.examplemod.compat.LazyOptional;
+            import net.minecraft.world.level.Level;
+
+            public interface LevelData {
+                static LazyOptional<LevelData> get(Level level) {
+                    return LazyOptional.ofNullable(level.getCapability(ExampleCapabilities.LEVEL_DATA, null));
+                }
+            }
+        """.trimIndent())
+        capabilityDir.resolve("PlayerDataCapability.java").writeText("""
+            package com.example.capability;
+
+            import net.minecraft.world.entity.player.Player;
+
+            public class PlayerDataCapability implements PlayerData {
+                public PlayerDataCapability(Player player) {
+                }
+            }
+        """.trimIndent())
+        capabilityDir.resolve("LevelDataCapability.java").writeText("""
+            package com.example.capability;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.Level;
+
+            public class LevelDataCapability implements LevelData, net.neoforged.neoforge.common.util.INBTSerializable<CompoundTag> {
+                public LevelDataCapability(Level level) {
+                }
+
+                public CompoundTag serializeNBT(HolderLookup.Provider provider) {
+                    return new CompoundTag();
+                }
+
+                public void deserializeNBT(HolderLookup.Provider provider, CompoundTag tag) {
+                }
+            }
+        """.trimIndent())
+        capabilityDir.resolve("ExampleCapabilities.java").writeText("""
+            package com.example.capability;
+
+            import com.example.ExampleMod;
+            import com.example.compat.Capability;
+            import com.example.compat.CapabilityManager;
+            import com.example.compat.CapabilityToken;
+            import com.example.compat.CapabilityProvider;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.Level;
+            import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
+            import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
+
+            public class ExampleCapabilities {
+                public static final Capability<PlayerData> PLAYER_DATA = CapabilityManager.get(new CapabilityToken<>() {});
+                public static final Capability<LevelData> LEVEL_DATA = CapabilityManager.get(new CapabilityToken<>() {});
+
+                public static void register(RegisterCapabilitiesEvent event) {
+                    event.register(PlayerData.class);
+                    event.register(LevelData.class);
+                }
+
+                public static void attachEntityCapabilities(AttachCapabilitiesEvent<Entity> event) {
+                    if (event.getObject() instanceof LivingEntity livingEntity) {
+                        if (livingEntity instanceof Player player) {
+                            event.addCapability(ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, "player_data"), new CapabilityProvider(ExampleCapabilities.PLAYER_DATA, new PlayerDataCapability(player)));
+                        }
+                    }
+                }
+
+                public static void attachLevelCapabilities(AttachCapabilitiesEvent<Level> event) {
+                    event.addCapability(ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, "level_data"), new CapabilityProvider(ExampleCapabilities.LEVEL_DATA, new LevelDataCapability(event.getObject())));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val capabilities = capabilityDir.resolve("ExampleCapabilities.java").readText()
+        val playerData = capabilityDir.resolve("PlayerData.java").readText()
+        val levelData = capabilityDir.resolve("LevelData.java").readText()
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-custom-entity-capabilities" })
+        assertTrue(result.changes.any { it.ruleId == "struct-level-capability-attachment-main-register" })
+        assertTrue(capabilities.contains("EntityCapability<PlayerData, Direction> PLAYER_DATA"), capabilities)
+        assertTrue(capabilities.contains("Supplier<AttachmentType<LevelData>> LEVEL_DATA"), capabilities)
+        assertTrue(capabilities.contains("DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES"), capabilities)
+        assertTrue(capabilities.contains("AttachmentType.serializable(holder -> new LevelDataCapability((Level) holder)).build()"), capabilities)
+        assertTrue(capabilities.contains("new PlayerDataCapability(player)"), capabilities)
+        assertTrue(capabilities.contains("if (!(entity instanceof Player player)) return null;"), capabilities)
+        assertFalse(capabilities.contains("AttachCapabilitiesEvent"))
+        assertFalse(capabilities.contains("CapabilityProvider"))
+        assertFalse(capabilities.contains("event.register(PlayerData.class)"))
+        assertTrue(playerData.contains("player.getCapability(ExampleCapabilities.PLAYER_DATA, null)"), playerData)
+        assertTrue(levelData.contains("level.getData(ExampleCapabilities.LEVEL_DATA.get())"), levelData)
+        assertTrue(mod.contains("ExampleCapabilities.registerAttachments(modEventBus);"), mod)
+    }
+
+    @Test
     fun `migrates legacy advancement triggers to codec DeferredRegister API`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val advancementDir = srcDir.resolve("advancements")

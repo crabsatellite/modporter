@@ -3543,7 +3543,17 @@ $itemArguments
         val apiType: String,
         val implementationType: String?,
         val entityKind: String,
-        val setsEntity: Boolean
+        val setsEntity: Boolean,
+        val constructorArgFromEntity: Boolean = false,
+        val entityVariableName: String = entityKind.replaceFirstChar { it.lowercase() }
+    )
+
+    private data class LegacyLevelCapability(
+        val fieldName: String,
+        val apiType: String,
+        val implementationType: String,
+        val idPath: String,
+        val modIdExpression: String
     )
 
     private fun migrateCustomEntityCapabilities(projectDir: Path, dryRun: Boolean): List<Change> {
@@ -3564,30 +3574,44 @@ $itemArguments
 
         val implementationByInterface = findCapabilityImplementations(javaFiles)
         val entityKindByInterface = findCapabilityEntityKinds(javaFiles)
+        val levelCapabilityNames = capabilityFiles
+            .flatMap { extractAttachLevelCapabilitySpecs(it.readText(), implementationByInterface).map { spec -> spec.fieldName } }
+            .toSet()
 
         for (capabilityFile in capabilityFiles) {
             val original = capabilityFile.readText()
+            val attachEntitySpecs = extractAttachEntityCapabilitySpecs(original)
+            val levelCapabilitySpecs = extractAttachLevelCapabilitySpecs(original, implementationByInterface)
+                .associateBy { it.fieldName }
             val declarations = Regex(
                 """public\s+static\s+final\s+Capability<\s*([A-Za-z_$][\w$]*)\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*CapabilityManager\.get\s*\(\s*new\s+CapabilityToken<>\s*\(\s*\)\s*\{\s*}\s*\)\s*;"""
             ).findAll(original).map { match ->
                 val apiType = match.groupValues[1]
                 val fieldName = match.groupValues[2]
+                val attachSpec = attachEntitySpecs[fieldName]
                 LegacyEntityCapability(
                     fieldName = fieldName,
                     apiType = apiType,
-                    implementationType = implementationByInterface[apiType],
-                    entityKind = entityKindByInterface[apiType] ?: "LivingEntity",
-                    setsEntity = entityKindByInterface.containsKey(apiType)
+                    implementationType = attachSpec?.implementationType ?: implementationByInterface[apiType],
+                    entityKind = attachSpec?.entityKind ?: entityKindByInterface[apiType] ?: "LivingEntity",
+                    setsEntity = attachSpec == null && entityKindByInterface.containsKey(apiType),
+                    constructorArgFromEntity = attachSpec != null,
+                    entityVariableName = attachSpec?.entityVariableName
+                        ?: (entityKindByInterface[apiType] ?: "LivingEntity").replaceFirstChar { it.lowercase() }
                 )
             }.toList()
 
-            val entityCapabilities = declarations.filter { it.implementationType != null }
-            if (entityCapabilities.isEmpty()) continue
+            val entityCapabilities = declarations.filter {
+                it.implementationType != null && !levelCapabilitySpecs.containsKey(it.fieldName)
+            }
+            val levelCapabilities = levelCapabilitySpecs.values.toList()
+            if (entityCapabilities.isEmpty() && levelCapabilities.isEmpty()) continue
 
             var modified = original
             for (capability in declarations) {
-                val replacement = if (capability.implementationType != null) {
-                    "public static final EntityCapability<${capability.apiType}, Direction> ${capability.fieldName} = EntityCapability.createSided(${capability.apiType}.ID, ${capability.apiType}.class);"
+                val levelCapability = levelCapabilitySpecs[capability.fieldName]
+                val replacement = if (levelCapability != null) {
+                    "public static final Supplier<AttachmentType<${levelCapability.apiType}>> ${levelCapability.fieldName} = ATTACHMENT_TYPES.register(\"${levelCapability.idPath}\", () -> AttachmentType.serializable(holder -> new ${levelCapability.implementationType}((Level) holder)).build());"
                 } else {
                     "public static final EntityCapability<${capability.apiType}, Direction> ${capability.fieldName} = EntityCapability.createSided(${capability.apiType}.ID, ${capability.apiType}.class);"
                 }
@@ -3595,10 +3619,29 @@ $itemArguments
                     """public\s+static\s+final\s+Capability<\s*${Regex.escape(capability.apiType)}\s*>\s+${Regex.escape(capability.fieldName)}\s*=\s*CapabilityManager\.get\s*\(\s*new\s+CapabilityToken<>\s*\(\s*\)\s*\{\s*}\s*\)\s*;"""
                 ).replace(modified, replacement)
             }
+            if (levelCapabilities.isNotEmpty() && !modified.contains("DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES")) {
+                val firstField = Regex("""(?m)^[ \t]*public\s+static\s+final\s+(?:Supplier<AttachmentType<[^>]+>>|EntityCapability<[^;]+>)\s+[A-Za-z_$][\w$]*\s*=""")
+                    .find(modified)
+                val modRef = levelCapabilities.first().modIdExpression
+                val registerField = """
+	public static final DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES = DeferredRegister.create(NeoForgeRegistries.ATTACHMENT_TYPES, $modRef);
 
-            modified = removeMethodByName(modified, "attachLevelCapability")
-            modified = removeMethodByName(modified, "attachEntityCapability")
+""".trimStart()
+                if (firstField != null) {
+                    modified = modified.substring(0, firstField.range.first) + registerField + modified.substring(firstField.range.first)
+                }
+            }
+
+            modified = removeAttachCapabilitiesEventMethods(modified)
             modified = replaceRegisterCapabilitiesMethod(modified, entityCapabilities)
+            if (levelCapabilities.isNotEmpty() && !modified.contains("registerAttachments(IEventBus")) {
+                modified = insertBeforeLastClassBrace(modified, """
+
+	public static void registerAttachments(IEventBus modEventBus) {
+		ATTACHMENT_TYPES.register(modEventBus);
+	}
+""".trimEnd())
+            }
 
             listOf(
                 "net.neoforged.neoforge.event.AttachCapabilitiesEvent",
@@ -3613,18 +3656,38 @@ $itemArguments
                 "org.jetbrains.annotations.NotNull",
                 "org.jetbrains.annotations.Nullable"
             ).forEach { modified = removeImport(modified, it) }
+            val withoutCapabilityProviderImports = Regex("""(?m)^[ \t]*import\s+[\w.]+\.CapabilityProvider;\s*\r?\n""")
+                .replace(modified, "")
+            if (!Regex("""\bCapabilityProvider\b""").containsMatchIn(withoutCapabilityProviderImports)) {
+                modified = withoutCapabilityProviderImports
+            }
             modified = modified.replace(
                 Regex("""(?m)^[ \t]*import\s+net\.neoforged\.neoforge\.capabilities\.\*;\s*\r?\n"""),
                 ""
             )
-            modified = addImportIfMissing(modified, "java.util.Collections")
-            modified = addImportIfMissing(modified, "java.util.Map")
-            modified = addImportIfMissing(modified, "java.util.WeakHashMap")
-            modified = addImportIfMissing(modified, "net.minecraft.core.Direction")
-            modified = addImportIfMissing(modified, "net.minecraft.core.registries.BuiltInRegistries")
-            modified = addImportIfMissing(modified, "net.minecraft.world.entity.EntityType")
-            modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.EntityCapability")
-            modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
+            if (entityCapabilities.isNotEmpty()) {
+                modified = addImportIfMissing(modified, "java.util.Collections")
+                modified = addImportIfMissing(modified, "java.util.Map")
+                modified = addImportIfMissing(modified, "java.util.WeakHashMap")
+                modified = addImportIfMissing(modified, "net.minecraft.core.Direction")
+                modified = addImportIfMissing(modified, "net.minecraft.core.registries.BuiltInRegistries")
+                modified = addImportIfMissing(modified, "net.minecraft.world.entity.EntityType")
+                modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.EntityCapability")
+                for (entityKind in entityCapabilities.map { it.entityKind }.toSet()) {
+                    entityKindImport(entityKind)?.let { modified = addImportIfMissing(modified, it) }
+                }
+            }
+            if (levelCapabilities.isNotEmpty()) {
+                modified = addImportIfMissing(modified, "java.util.function.Supplier")
+                modified = addImportIfMissing(modified, "net.minecraft.world.level.Level")
+                modified = addImportIfMissing(modified, "net.neoforged.bus.api.IEventBus")
+                modified = addImportIfMissing(modified, "net.neoforged.neoforge.attachment.AttachmentType")
+                modified = addImportIfMissing(modified, "net.neoforged.neoforge.registries.DeferredRegister")
+                modified = addImportIfMissing(modified, "net.neoforged.neoforge.registries.NeoForgeRegistries")
+            }
+            if (entityCapabilities.isNotEmpty()) {
+                modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
+            }
 
             if (modified != original) {
                 if (!dryRun) capabilityFile.writeText(modified)
@@ -3647,6 +3710,9 @@ $itemArguments
             if (capabilityListNames.any { text.contains("$it.") } && text.contains(".getCapability(")) {
                 text = rewriteLegacyEntityCapabilityQueries(text, capabilityListNames, compatPackage)
             }
+            if (levelCapabilityNames.isNotEmpty() && capabilityListNames.any { text.contains("$it.") }) {
+                text = rewriteLegacyLevelCapabilityQueries(text, capabilityListNames, levelCapabilityNames, compatPackage)
+            }
             if (capabilityListNames.any { text.contains("::attach") }) {
                 text = text.lines()
                     .filterNot { line -> capabilityListNames.any { name -> line.contains("$name::attach") } }
@@ -3662,6 +3728,44 @@ $itemArguments
                     after = "LazyOptional.ofNullable(entity.getCapability(CapabilityList.CAP, null))",
                     confidence = Confidence.HIGH,
                     ruleId = "struct-custom-entity-capability-lookups"
+                ))
+            }
+        }
+
+        val mainClass = detectModMainClass(projectDir)
+        val mainText = mainClass?.readText().orEmpty()
+        val attachmentOwnerFiles = capabilityFiles.filter { file ->
+            file.readText().contains("registerAttachments(IEventBus")
+        }
+        for (attachmentOwner in attachmentOwnerFiles) {
+            if (mainClass == null || mainText.isBlank()) continue
+            val ownerText = attachmentOwner.readText()
+            val ownerPackage = packageNameOf(ownerText)
+            val ownerClass = attachmentOwner.fileName.toString().removeSuffix(".java")
+            val call = "$ownerClass.registerAttachments("
+            if (mainClass.readText().contains(call)) continue
+            var migratedMain = mainClass.readText()
+            val busName = detectModBusVariable(migratedMain) ?: "modEventBus"
+            val mainPackage = packageNameOf(migratedMain)
+            if (ownerPackage != mainPackage) {
+                migratedMain = addImportIfMissing(migratedMain, "$ownerPackage.$ownerClass")
+            }
+            migratedMain = insertModBusListener(
+                migratedMain,
+                busName,
+                "        $ownerClass.registerAttachments($busName);",
+                "$ownerClass.attachments"
+            )
+            if (migratedMain != mainClass.readText()) {
+                if (!dryRun) mainClass.writeText(migratedMain)
+                changes.add(Change(
+                    file = mainClass,
+                    line = 1,
+                    description = "Register migrated level capability attachments on the mod event bus",
+                    before = "AttachCapabilitiesEvent<Level>",
+                    after = "$ownerClass.registerAttachments($busName)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-level-capability-attachment-main-register"
                 ))
             }
         }
@@ -3695,10 +3799,108 @@ $itemArguments
         return result
     }
 
+    private data class AttachEntityCapabilitySpec(
+        val fieldName: String,
+        val implementationType: String,
+        val entityKind: String,
+        val entityVariableName: String
+    )
+
+    private fun extractAttachEntityCapabilitySpecs(source: String): Map<String, AttachEntityCapabilitySpec> {
+        if (!source.contains("AttachCapabilitiesEvent<Entity>") || !source.contains("event.addCapability(")) {
+            return emptyMap()
+        }
+        val specs = linkedMapOf<String, AttachEntityCapabilitySpec>()
+        val instancePattern = Regex("""(?:event\.getObject\(\)|[A-Za-z_$][\w$]*)\s+instanceof\s+([A-Za-z_$][\w$]*)\s+([A-Za-z_$][\w$]*)""")
+        var cursor = 0
+        while (true) {
+            val match = instancePattern.find(source, cursor) ?: break
+            val entityKind = match.groupValues[1]
+            val entityVariable = match.groupValues[2]
+            val closeParen = source.indexOf(')', match.range.last)
+            val openBrace = if (closeParen >= 0) source.indexOf('{', closeParen) else -1
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = source.substring(openBrace + 1, closeBrace)
+            val providerPattern = Regex(
+                """event\.addCapability\s*\([^;]*?new\s+CapabilityProvider\s*\(\s*(?:[A-Za-z_$][\w$]*\.)?([A-Z_$][A-Z0-9_$]*)\s*,\s*new\s+([A-Za-z_$][\w$]*)\s*\(\s*${Regex.escape(entityVariable)}\s*\)\s*\)""",
+                RegexOption.DOT_MATCHES_ALL
+            )
+            providerPattern.findAll(body).forEach { provider ->
+                val fieldName = provider.groupValues[1]
+                specs[fieldName] = AttachEntityCapabilitySpec(
+                    fieldName = fieldName,
+                    implementationType = provider.groupValues[2],
+                    entityKind = entityKind,
+                    entityVariableName = entityVariable
+                )
+            }
+            cursor = match.range.last + 1
+        }
+        return specs
+    }
+
+    private fun extractAttachLevelCapabilitySpecs(
+        source: String,
+        implementationByInterface: Map<String, String>
+    ): List<LegacyLevelCapability> {
+        if (!source.contains("AttachCapabilitiesEvent<Level>") || !source.contains("event.addCapability(")) {
+            return emptyList()
+        }
+        val apiTypeByField = Regex(
+            """public\s+static\s+final\s+Capability<\s*([A-Za-z_$][\w$]*)\s*>\s+([A-Z_$][A-Z0-9_$]*)\s*="""
+        ).findAll(source).associate { it.groupValues[2] to it.groupValues[1] }
+        val specs = mutableListOf<LegacyLevelCapability>()
+        val pattern = Regex(
+            """event\.addCapability\s*\(\s*ResourceLocation\.fromNamespaceAndPath\s*\(\s*([^,]+?)\s*,\s*"([^"]+)"\s*\)\s*,\s*new\s+CapabilityProvider\s*\(\s*(?:[A-Za-z_$][\w$]*\.)?([A-Z_$][A-Z0-9_$]*)\s*,\s*new\s+([A-Za-z_$][\w$]*)\s*\(\s*event\.getObject\(\)\s*\)\s*\)\s*\)""",
+            RegexOption.DOT_MATCHES_ALL
+        )
+        pattern.findAll(source).forEach { match ->
+            val fieldName = match.groupValues[3]
+            val apiType = apiTypeByField[fieldName] ?: return@forEach
+            val implementationType = match.groupValues[4].ifBlank { implementationByInterface[apiType] ?: return@forEach }
+            specs.add(LegacyLevelCapability(
+                fieldName = fieldName,
+                apiType = apiType,
+                implementationType = implementationType,
+                idPath = match.groupValues[2],
+                modIdExpression = match.groupValues[1].trim()
+            ))
+        }
+        return specs
+    }
+
+    private fun removeAttachCapabilitiesEventMethods(source: String): String {
+        var result = source
+        val methodNames = Regex("""\b([A-Za-z_$][\w$]*)\s*\(\s*AttachCapabilitiesEvent<[^>]+>\s+[A-Za-z_$][\w$]*\s*\)""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        for (methodName in methodNames) {
+            result = removeMethodByName(result, methodName)
+        }
+        return result
+    }
+
+    private fun entityKindImport(entityKind: String): String? = when (entityKind) {
+        "Entity" -> "net.minecraft.world.entity.Entity"
+        "LivingEntity" -> "net.minecraft.world.entity.LivingEntity"
+        "Mob" -> "net.minecraft.world.entity.Mob"
+        "Player" -> "net.minecraft.world.entity.player.Player"
+        "ItemEntity" -> "net.minecraft.world.entity.item.ItemEntity"
+        "LightningBolt" -> "net.minecraft.world.entity.LightningBolt"
+        "AbstractArrow" -> "net.minecraft.world.entity.projectile.AbstractArrow"
+        else -> null
+    }
+
     private fun replaceRegisterCapabilitiesMethod(source: String, capabilities: List<LegacyEntityCapability>): String {
-        val methodName = "registerCapabilities"
-        val nameIndex = source.indexOf(methodName)
-        if (nameIndex < 0) return source
+        val methodMatch = Regex(
+            """(?:public|protected|private)\s+static\s+void\s+[A-Za-z_$][\w$]*\s*\(\s*RegisterCapabilitiesEvent\s+[A-Za-z_$][\w$]*\s*\)"""
+        ).find(source) ?: return source
+        val nameIndex = methodMatch.range.first
         val openBrace = source.indexOf('{', nameIndex)
         if (openBrace < 0) return source
         val closeBrace = findMatchingBrace(source, openBrace)
@@ -3719,22 +3921,35 @@ $itemArguments
         }
         val helpers = capabilities.joinToString(System.lineSeparator() + System.lineSeparator()) { capability ->
             val implementation = capability.implementationType ?: capability.apiType
+            val entityVariable = capability.entityVariableName
             val guard = when (capability.entityKind) {
-                "Player" -> "if (!(entity instanceof Player player)) return null;"
-                "LivingEntity" -> "if (!(entity instanceof LivingEntity living)) return null;"
-                else -> ""
+                "Entity" -> ""
+                else -> "if (!(entity instanceof ${capability.entityKind} $entityVariable)) return null;"
             }
-            val entityArg = when (capability.entityKind) {
-                "Player" -> "player"
-                "LivingEntity" -> "living"
-                else -> "entity"
+            val constructor = if (capability.constructorArgFromEntity) {
+                "new $implementation($entityVariable)"
+            } else {
+                "new $implementation()"
             }
-            val setEntity = if (capability.setsEntity) "            capability.setEntity($entityArg);${System.lineSeparator()}" else ""
+            val setEntityArg = when {
+                capability.constructorArgFromEntity -> null
+                capability.entityKind == "Entity" -> "entity"
+                else -> entityVariable
+            }
+            val setEntity = if (capability.setsEntity && setEntityArg != null) {
+                "            capability.setEntity($setEntityArg);${System.lineSeparator()}"
+            } else {
+                ""
+            }
+            val guardLine = if (guard.isBlank()) {
+                ""
+            } else {
+                "        $guard${System.lineSeparator()}"
+            }
             """
     private static ${capability.apiType} getOrCreate${capability.fieldName}(Entity entity) {
-        $guard
-        return ${capability.fieldName}_CACHE.computeIfAbsent(entity, key -> {
-            $implementation capability = new $implementation();
+$guardLine        return ${capability.fieldName}_CACHE.computeIfAbsent(entity, key -> {
+            $implementation capability = $constructor;
 $setEntity            return capability;
         });
     }
@@ -3754,6 +3969,31 @@ $helpers
 """.trimEnd()
     }
 
+    private fun rewriteLegacyLevelCapabilityQueries(
+        source: String,
+        capabilityListNames: Set<String>,
+        levelCapabilityNames: Set<String>,
+        compatPackage: String
+    ): String {
+        var result = source
+        val ownerAlternation = capabilityListNames.joinToString("|") { Regex.escape(it) }
+        val fieldAlternation = levelCapabilityNames.joinToString("|") { Regex.escape(it) }
+        if (ownerAlternation.isBlank() || fieldAlternation.isBlank()) return source
+        val alreadyWrappedPattern = Regex(
+            """((?:[A-Za-z_$][\w$]*\.)*LazyOptional\.ofNullable\(\s*)((?<![A-Za-z0-9_$])[A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($ownerAlternation)\.($fieldAlternation))\s*,\s*null\s*\)(\s*\))"""
+        )
+        result = alreadyWrappedPattern.replace(result) { match ->
+            "${match.groupValues[1]}${match.groupValues[2]}.getData(${match.groupValues[3]}.get())${match.groupValues[6]}"
+        }
+        val directPattern = Regex(
+            """(?<![A-Za-z0-9_$])([A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($ownerAlternation)\.($fieldAlternation))\s*,\s*null\s*\)"""
+        )
+        result = directPattern.replace(result) { match ->
+            "${match.groupValues[1]}.getData(${match.groupValues[2]}.get())"
+        }
+        return result
+    }
+
     private fun rewriteLegacyEntityCapabilityQueries(
         source: String,
         capabilityListNames: Set<String>,
@@ -3761,8 +4001,14 @@ $helpers
     ): String {
         var result = source
         val listAlternation = capabilityListNames.joinToString("|") { Regex.escape(it) }
+        val wrappedPattern = Regex(
+            """((?:[A-Za-z_$][\w$]*\.)*LazyOptional\.ofNullable\(\s*)([A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($listAlternation)\.[A-Za-z_$][\w$]*)\s*\)(\s*\))"""
+        )
+        result = wrappedPattern.replace(result) { match ->
+            "${match.groupValues[1]}${match.groupValues[2]}.getCapability(${match.groupValues[3]}, null)${match.groupValues[5]}"
+        }
         val queryPattern = Regex(
-            """(?<!ofNullable\()([A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($listAlternation)\.[A-Za-z_$][\w$]*)\s*\)"""
+            """(?<!ofNullable\()(?<![A-Za-z0-9_$])([A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($listAlternation)\.[A-Za-z_$][\w$]*)\s*\)"""
         )
         result = queryPattern.replace(result) { match ->
             val receiver = match.groupValues[1]
@@ -4291,6 +4537,7 @@ public class DelegatingPackResources extends AbstractPackResources {
     }
 }
 """.trimStart()
+
 
     private fun rewriteUnusedLegacyEnchantmentSubclasses(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")

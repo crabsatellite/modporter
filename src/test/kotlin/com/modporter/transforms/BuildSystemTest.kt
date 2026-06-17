@@ -191,6 +191,26 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `updates known dependency version properties from mapping database`() {
+        val projectDir = tempDir.resolve("known-dependency-version-props")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("""
+            minecraft_version=1.20.1
+            nitrogen_version=1.20.1-1.0.12-neoforge
+            cumulus_version=1.20.1-1.0.1-neoforge
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("gradle.properties").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-props-dependency-version" })
+        assertTrue(content.contains("nitrogen_version=1.21.1-1.1.25-neoforge"), content)
+        assertTrue(content.contains("cumulus_version=1.21.1-2.0.8-neoforge"), content)
+        assertFalse(content.contains("1.20.1-1.0.12-neoforge"), content)
+        assertFalse(content.contains("1.20.1-1.0.1-neoforge"), content)
+    }
+
+    @Test
     fun `migrates coremod ASMAPI scripts to NeoForge package`() {
         val projectDir = tempDir.resolve("coremod-asmapi")
         val asmDir = projectDir.resolve("src/main/resources/META-INF/asm")
@@ -2761,6 +2781,41 @@ class BuildSystemTest {
         assertTrue(content.contains("""compileOnly "curse.maven:create-328085:7408951""""))
         assertFalse(content.contains("7178761"))
         assertFalse(content.contains("net.minecraftforge.fluids"))
+    }
+
+    @Test
+    fun `resolves versioned public library dependencies to target NeoForge coordinates`() {
+        val projectDir = tempDir.resolve("p19-versioned-public-libraries")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                implementation fg.deobf("com.aetherteam.nitrogen:nitrogen_internals:${'$'}{project.nitrogen_version}")
+                implementation fg.deobf("com.aetherteam.cumulus:cumulus_menus:${'$'}{project.cumulus_version}")
+            }
+        """.trimIndent())
+        projectDir.resolve("gradle.properties").writeText("""
+            minecraft_version=1.20.1
+            nitrogen_version=1.20.1-1.0.12-neoforge
+            cumulus_version=1.20.1-1.0.1-neoforge
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val build = projectDir.resolve("build.gradle").readText()
+        val props = projectDir.resolve("gradle.properties").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(build.contains("""implementation "com.aetherteam.nitrogen:nitrogen_internals:1.21.1-1.1.25-neoforge""""))
+        assertTrue(build.contains("""implementation "com.aetherteam.cumulus:cumulus_menus:1.21.1-2.0.8-neoforge""""))
+        assertTrue(build.contains("https://packages.aether-mod.net/Nitrogen"))
+        assertTrue(build.contains("https://packages.aether-mod.net/Cumulus"))
+        assertTrue(props.contains("nitrogen_version=1.21.1-1.1.25-neoforge"), props)
+        assertTrue(props.contains("cumulus_version=1.21.1-2.0.8-neoforge"), props)
+        assertFalse(build.contains("fg.deobf"), build)
+        assertFalse(props.contains("1.20.1-1.0"), props)
     }
 
     @Test
