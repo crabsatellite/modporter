@@ -1317,21 +1317,23 @@ private boolean $methodName(Iterable<net.minecraft.core.Holder<Enchantment>> enc
 
     private fun migrateLootConditionSerializerCodec(source: String): String {
         if (!source.contains("implements LootItemCondition") ||
-            !source.contains("ConditionSerializer") ||
             !source.contains("Serializer<")) {
             return source
         }
 
         val className = javaTopLevelTypeName(source) ?: return source
-        if (!Regex("""class\s+ConditionSerializer\s+implements\s+Serializer<\s*${Regex.escape(className)}\s*>""")
-                .containsMatchIn(source)) {
-            return source
+        val serializerName = when {
+            Regex("""class\s+ConditionSerializer\s+implements\s+(?:net\.minecraft\.world\.level\.storage\.loot\.)?Serializer<\s*${Regex.escape(className)}\s*>""")
+                .containsMatchIn(source) -> "ConditionSerializer"
+            Regex("""class\s+Serializer\s+implements\s+(?:net\.minecraft\.world\.level\.storage\.loot\.)?Serializer<\s*${Regex.escape(className)}\s*>""")
+                .containsMatchIn(source) -> "Serializer"
+            else -> return source
         }
-        val serializer = innerClassText(source, "ConditionSerializer") ?: return source
+        val serializer = innerClassText(source, serializerName) ?: return source
         val codecField = inferLootConditionCodecField(source, serializer, className) ?: return source
 
         var result = insertStaticFieldAfterTypeOpen(source, className, codecField)
-        result = removeInnerClassByName(result, "ConditionSerializer")
+        result = removeInnerClassByName(result, serializerName)
         return result
     }
 
@@ -1348,6 +1350,8 @@ private boolean $methodName(Iterable<net.minecraft.core.Holder<Enchantment>> enc
 	public static final MapCodec<$className> CODEC = MapCodec.unit($value);
             """.trimIndent()
         }
+
+        inferWrappedStringLootConditionCodecField(serializer, className, constructorArgs)?.let { return it }
 
         val serializedMembers = serializedLootMembersByKey(serializer)
         val fields = constructorArgs.mapNotNull { lootConditionCodecField(it, serializedMembers) }
@@ -1371,11 +1375,37 @@ $fieldLines
             members[match.groupValues[1]] = match.groupValues[2]
         }
         Regex(
+            """\b(?:json|object)\.addProperty\s*\(\s*"([^"]+)"\s*,\s*[A-Za-z_$][\w$.]*\.serialize\s*\(\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\s*\)\s*\)"""
+        ).findAll(serializer).forEach { match ->
+            members[match.groupValues[1]] = match.groupValues[2]
+        }
+        Regex(
             """\b(?:json|object)\.add\s*\(\s*"([^"]+)"\s*,\s*[A-Za-z_$][\w$]*\.serialize\s*\(\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\s*\)\s*\)"""
         ).findAll(serializer).forEach { match ->
             members[match.groupValues[1]] = match.groupValues[2]
         }
         return members
+    }
+
+    private fun inferWrappedStringLootConditionCodecField(
+        serializer: String,
+        className: String,
+        constructorArgs: List<String>
+    ): String? {
+        if (constructorArgs.size != 1) return null
+        val deserialize = Regex(
+            """([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.deserialize\s*\(\s*GsonHelper\.getAsString\s*\(\s*[^,]+,\s*"([^"]+)"\s*\)\s*\)"""
+        ).find(constructorArgs.single()) ?: return null
+        val converter = deserialize.groupValues[1]
+        val key = deserialize.groupValues[2]
+        val member = Regex(
+            """\b(?:json|object)\.addProperty\s*\(\s*"${Regex.escape(key)}"\s*,\s*${Regex.escape(converter)}\.serialize\s*\(\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\s*\)\s*\)"""
+        ).find(serializer)?.groupValues?.get(1) ?: jsonKeyToJavaMember(key)
+        return """
+	public static final MapCodec<$className> CODEC = com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec(instance -> instance.group(
+		com.mojang.serialization.Codec.STRING.fieldOf("$key").forGetter(o -> $converter.serialize(o.$member))
+	).apply(instance, value -> new $className($converter.deserialize(value))));
+        """.trimIndent()
     }
 
     private fun lootConditionCodecField(argument: String, serializedMembers: Map<String, String>): LootCodecField? {
@@ -1423,12 +1453,18 @@ $fieldLines
         result = Regex("""(protected|public|private)\s+${Regex.escape(className)}\s*\(\s*LootItemCondition\[\]\s+([A-Za-z_$][\w$]*)""")
             .replace(result, "$1 $className(java.util.List<LootItemCondition> $2")
         result = Regex("""public\s+LootItemFunctionType\s+getType\s*\(\s*\)""")
-            .replace(result, "public LootItemFunctionType<? extends LootItemConditionalFunction> getType()")
+            .replace(result, "public LootItemFunctionType<$className> getType()")
         result = removeInnerClassByName(result, "Serializer")
         return result
     }
 
     private fun inferLootConditionalFunctionCodecField(serializer: String, className: String): String? {
+        if (Regex("""return\s+new\s+${Regex.escape(className)}\s*\(\s*conditions\s*\)\s*;""").containsMatchIn(serializer)) {
+            return """
+	public static final MapCodec<$className> CODEC = com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec(instance -> commonFields(instance).apply(instance, $className::new));
+            """.trimIndent()
+        }
+
         if (!serializer.contains("GsonHelper.getAsItem") ||
             !serializer.contains("\"default\"") ||
             !serializer.contains("success")) {
@@ -1456,7 +1492,7 @@ $fieldLines
     private fun migrateLootTypeRegistryCodecConstructors(source: String): String {
         if (!source.contains("LootItemConditionType") && !source.contains("LootItemFunctionType")) return source
         var result = source
-        result = Regex("""new\s+LootItemConditionType\s*\(\s*new\s+([A-Za-z_$][\w$]*)\.ConditionSerializer\s*\(\s*\)\s*\)""")
+        result = Regex("""new\s+LootItemConditionType\s*\(\s*new\s+([A-Za-z_$][\w$]*)\.(?:ConditionSerializer|Serializer)\s*\(\s*\)\s*\)""")
             .replace(result, "new LootItemConditionType($1.CODEC)")
         result = Regex("""new\s+LootItemFunctionType\s*\(\s*new\s+([A-Za-z_$][\w$]*)\.Serializer\s*\(\s*\)\s*\)""")
             .replace(result, "new LootItemFunctionType<>($1.CODEC)")

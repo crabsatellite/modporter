@@ -2580,6 +2580,43 @@ class TextReplacementTest {
                 }
             }
         """.trimIndent())
+        srcDir.resolve("ConfigEnabled.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+
+            public class ConfigEnabled implements LootItemCondition {
+                private final ConfigValue config;
+
+                public ConfigEnabled(ConfigValue config) {
+                    this.config = config;
+                }
+
+                public LootItemConditionType getType() {
+                    return TestLoot.CONFIG_ENABLED.get();
+                }
+
+                public boolean test(LootContext context) {
+                    return true;
+                }
+
+                public static class Serializer implements net.minecraft.world.level.storage.loot.Serializer<ConfigEnabled> {
+                    public void serialize(JsonObject json, ConfigEnabled instance, JsonSerializationContext context) {
+                        json.addProperty("config", ConfigSerializationUtil.serialize(instance.config));
+                    }
+
+                    public ConfigEnabled deserialize(JsonObject json, JsonDeserializationContext context) {
+                        return new ConfigEnabled(ConfigSerializationUtil.deserialize(GsonHelper.getAsString(json, "config")));
+                    }
+                }
+            }
+        """.trimIndent())
         srcDir.resolve("ModItemSwap.java").writeText("""
             package com.example;
 
@@ -2654,6 +2691,42 @@ class TextReplacementTest {
                 }
             }
         """.trimIndent())
+        srcDir.resolve("NoExtraLootFunction.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.functions.LootItemConditionalFunction;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+
+            public class NoExtraLootFunction extends LootItemConditionalFunction {
+                protected NoExtraLootFunction(LootItemCondition[] conditions) {
+                    super(conditions);
+                }
+
+                public LootItemFunctionType getType() {
+                    return TestLoot.NO_EXTRA.get();
+                }
+
+                public ItemStack run(ItemStack stack, LootContext context) {
+                    return stack;
+                }
+
+                public static class Serializer extends LootItemConditionalFunction.Serializer<NoExtraLootFunction> {
+                    public void serialize(JsonObject json, NoExtraLootFunction instance, JsonSerializationContext context) {
+                        super.serialize(json, instance, context);
+                    }
+
+                    public NoExtraLootFunction deserialize(JsonObject json, JsonDeserializationContext context, LootItemCondition[] conditions) {
+                        return new NoExtraLootFunction(conditions);
+                    }
+                }
+            }
+        """.trimIndent())
         srcDir.resolve("TestLoot.java").writeText("""
             package com.example;
 
@@ -2669,8 +2742,12 @@ class TextReplacementTest {
 
                 public static final DeferredHolder<LootItemFunctionType, LootItemFunctionType> ITEM_OR_DEFAULT =
                         FUNCTIONS.register("item_or_default", () -> new LootItemFunctionType(new ModItemSwap.Serializer()));
+                public static final DeferredHolder<LootItemFunctionType, LootItemFunctionType> NO_EXTRA =
+                        FUNCTIONS.register("no_extra", () -> new LootItemFunctionType(new NoExtraLootFunction.Serializer()));
                 public static final DeferredHolder<LootItemConditionType, LootItemConditionType> MOD_EXISTS =
                         CONDITIONS.register("mod_exists", () -> new LootItemConditionType(new ModExistsCondition.ConditionSerializer()));
+                public static final DeferredHolder<LootItemConditionType, LootItemConditionType> CONFIG_ENABLED =
+                        CONDITIONS.register("config_enabled", () -> new LootItemConditionType(new ConfigEnabled.Serializer()));
                 public static final DeferredHolder<LootItemConditionType, LootItemConditionType> ENTITY_TARGET =
                         CONDITIONS.register("entity_target", () -> new LootItemConditionType(new EntityTargetCondition.ConditionSerializer()));
                 public static final DeferredHolder<LootItemConditionType, LootItemConditionType> IS_MINION =
@@ -2688,7 +2765,9 @@ class TextReplacementTest {
         val entityTarget = srcDir.resolve("EntityTargetCondition.java").readText()
         val isMinion = srcDir.resolve("IsMinionCondition.java").readText()
         val uncrafting = srcDir.resolve("UncraftingTableEnabledCondition.java").readText()
+        val configEnabled = srcDir.resolve("ConfigEnabled.java").readText()
         val modItemSwap = srcDir.resolve("ModItemSwap.java").readText()
+        val noExtraLootFunction = srcDir.resolve("NoExtraLootFunction.java").readText()
         val registry = srcDir.resolve("TestLoot.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "loot-serializer-mapcodec" })
@@ -2697,18 +2776,28 @@ class TextReplacementTest {
         assertTrue(entityTarget.contains("LootContext.EntityTarget.CODEC.fieldOf(\"entity\").forGetter(o -> o.entityTarget)"))
         assertTrue(isMinion.contains("com.mojang.serialization.Codec.BOOL.optionalFieldOf(\"inverse\", false).forGetter(o -> o.inverse)"))
         assertTrue(uncrafting.contains("public static final MapCodec<UncraftingTableEnabledCondition> CODEC = MapCodec.unit(new UncraftingTableEnabledCondition());"))
+        assertTrue(configEnabled.contains("com.mojang.serialization.Codec.STRING.fieldOf(\"config\").forGetter(o -> ConfigSerializationUtil.serialize(o.config))"))
+        assertTrue(configEnabled.contains("value -> new ConfigEnabled(ConfigSerializationUtil.deserialize(value))"))
         assertTrue(modItemSwap.contains("public static final MapCodec<ModItemSwap> CODEC = com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec"))
         assertTrue(modItemSwap.contains("protected ModItemSwap(java.util.List<LootItemCondition> conditions, Item item, Item old, boolean success)"))
-        assertTrue(modItemSwap.contains("public LootItemFunctionType<? extends LootItemConditionalFunction> getType()"))
+        assertTrue(modItemSwap.contains("public LootItemFunctionType<ModItemSwap> getType()"))
+        assertTrue(noExtraLootFunction.contains("public static final MapCodec<NoExtraLootFunction> CODEC = com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec(instance -> commonFields(instance).apply(instance, NoExtraLootFunction::new));"))
+        assertTrue(noExtraLootFunction.contains("protected NoExtraLootFunction(java.util.List<LootItemCondition> conditions)"))
+        assertTrue(noExtraLootFunction.contains("public LootItemFunctionType<NoExtraLootFunction> getType()"))
         assertTrue(registry.contains("DeferredRegister<LootItemFunctionType<?>> FUNCTIONS"))
         assertTrue(registry.contains("DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<ModItemSwap>> ITEM_OR_DEFAULT"))
+        assertTrue(registry.contains("DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<NoExtraLootFunction>> NO_EXTRA"))
         assertTrue(registry.contains("new LootItemFunctionType<>(ModItemSwap.CODEC)"))
+        assertTrue(registry.contains("new LootItemFunctionType<>(NoExtraLootFunction.CODEC)"))
         assertTrue(registry.contains("new LootItemConditionType(ModExistsCondition.CODEC)"))
+        assertTrue(registry.contains("new LootItemConditionType(ConfigEnabled.CODEC)"))
         assertTrue(registry.contains("new LootItemConditionType(EntityTargetCondition.CODEC)"))
         assertTrue(registry.contains("new LootItemConditionType(IsMinionCondition.CODEC)"))
         assertTrue(registry.contains("new LootItemConditionType(UncraftingTableEnabledCondition.CODEC)"))
         assertFalse(modExists.contains("ConditionSerializer"))
+        assertFalse(configEnabled.contains("net.minecraft.world.level.storage.loot.Serializer"))
         assertFalse(modItemSwap.contains("LootItemConditionalFunction.Serializer"))
+        assertFalse(noExtraLootFunction.contains("LootItemConditionalFunction.Serializer"))
         assertFalse(modItemSwap.contains("JsonSyntaxException"))
         assertFalse(modExists.contains("net.minecraft.world.level.storage.loot.Serializer"))
     }
