@@ -10043,6 +10043,7 @@ ${entries.joinToString(",\n")}
         result = migrateRecipeHolderAccess(result)
         result = migrateRecipeManagerByKeyHolderAccessSource(result)
         result = migrateRecipeHolderIdAndLocalMmlibApi(result)
+        result = migrateRecipeBookCategoryFinderRecipeHolders(result)
         result = migrateLegacyCraftingRecipeBoundaries(result)
         result = migrateMerchantOfferItemCosts(result)
         result = migrateItemUseDurationCalls(result)
@@ -21682,6 +21683,43 @@ public class $className<T extends $recipeBase> extends BlockStateRecipeSerialize
                 val recipeVar = match.groupValues[1]
                 match.value.replace("$recipeVar.get()", "$recipeVar.value()")
             }
+    }
+
+    private fun migrateRecipeBookCategoryFinderRecipeHolders(source: String): String {
+        if (!source.contains("registerRecipeCategoryFinder(") || !source.contains(" instanceof ")) return source
+        val id = """[A-Za-z_$][\w$]*"""
+        var changed = false
+        val result = rewriteJavaCall(source, "registerRecipeCategoryFinder") { receiver, args ->
+            if (args.size < 2) return@rewriteJavaCall null
+            val lambda = args[1]
+            val lambdaMatch = Regex(
+                """(?s)^\s*(?:\(\s*(?:[\w$.\s?<>]+\s+)?($id)\s*\)|($id))\s*->\s*\{(.*)}\s*$"""
+            ).find(lambda) ?: return@rewriteJavaCall null
+            val recipeParam = (lambdaMatch.groupValues[1].ifBlank { lambdaMatch.groupValues[2] }).trim()
+            val body = lambdaMatch.groupValues[3]
+            val instanceOfPattern = Regex("""\b${Regex.escape(recipeParam)}\s+instanceof\b""")
+            if (!instanceOfPattern.containsMatchIn(body)) return@rewriteJavaCall null
+            val valueVarBase = "${recipeParam}Value"
+            var valueVar = valueVarBase
+            var suffix = 2
+            while (Regex("""\b${Regex.escape(valueVar)}\b""").containsMatchIn(body)) {
+                valueVar = "$valueVarBase$suffix"
+                suffix++
+            }
+            val bodyIndent = Regex("""\r?\n([ \t]*)\S""")
+                .find(body)
+                ?.groupValues
+                ?.get(1)
+                ?: "    "
+            val migratedBody = instanceOfPattern.replace(body) { "$valueVar instanceof" }
+            val normalizedBody = if (migratedBody.startsWith("\n")) migratedBody else "\n$bodyIndent$migratedBody"
+            changed = true
+            val migratedLambda = "$recipeParam -> {\n${bodyIndent}var $valueVar = $recipeParam.value();$normalizedBody}"
+            val migratedArgs = args.toMutableList()
+            migratedArgs[1] = migratedLambda
+            "$receiver.registerRecipeCategoryFinder(${migratedArgs.joinToString(", ") { it.trim() }})"
+        }
+        return if (changed) result else source
     }
 
     private fun migrateLegacyCraftingRecipeBoundaries(source: String): String {

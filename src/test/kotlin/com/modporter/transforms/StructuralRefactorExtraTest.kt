@@ -10693,6 +10693,46 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `unwraps recipe book category finder holders before instanceof checks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RecipeCategorySurface.java").writeText("""
+            package com.example;
+
+            public class RecipeCategorySurface {
+                public static void register(RegisterRecipeBookCategoriesEvent event) {
+                    event.registerRecipeCategoryFinder(ExampleRecipeTypes.ENCHANTING.get(), recipe -> {
+                        if (recipe instanceof AltarRepairRecipe || (recipe instanceof AbstractCookingRecipe cooking && cooking.category() == Category.REPAIR)) {
+                            return ExampleCategories.REPAIR.get();
+                        } else if (recipe instanceof AbstractCookingRecipe cooking) {
+                            return ExampleCategories.FOOD.get();
+                        }
+                        return ExampleCategories.MISC.get();
+                    });
+                    event.registerRecipeCategoryFinder(ExampleRecipeTypes.FREEZING.get(), (RecipeHolder<?> holder) -> {
+                        if (holder instanceof AbstractCookingRecipe cooking) {
+                            return ExampleCategories.FREEZING.get();
+                        }
+                        return ExampleCategories.MISC.get();
+                    });
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val surface = srcDir.resolve("RecipeCategorySurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(surface.contains("var recipeValue = recipe.value();"), surface)
+        assertTrue(surface.contains("recipeValue instanceof AltarRepairRecipe"), surface)
+        assertTrue(surface.contains("recipeValue instanceof AbstractCookingRecipe cooking"), surface)
+        assertTrue(surface.contains("var holderValue = holder.value();"), surface)
+        assertTrue(surface.contains("holderValue instanceof AbstractCookingRecipe cooking"), surface)
+        assertFalse(surface.contains("recipe instanceof AltarRepairRecipe"), surface)
+        assertFalse(surface.contains("holder instanceof AbstractCookingRecipe"), surface)
+    }
+
+    @Test
     fun `does not synthesize legacy ITeleporter default portal position without source evidence`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
