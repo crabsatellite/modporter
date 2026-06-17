@@ -381,35 +381,50 @@ class WidgetRenderRenameTransformer(
         /** Known AbstractWidget subclasses where render() became renderWidget() */
         private val WIDGET_PARENT_TYPES = setOf(
             "AbstractWidget", "EditBox", "Button", "AbstractButton",
-            "AbstractSliderButton", "ObjectSelectionList", "AbstractSelectionList"
+            "AbstractSliderButton", "ImageButton", "StateSwitchingButton",
+            "ObjectSelectionList", "AbstractSelectionList"
         )
     }
 
     override fun visit(n: ClassOrInterfaceDeclaration, arg: Void?): Visitable {
         // Check if this class extends a known widget type
-        val extendsWidget = n.extendedTypes.any { ext ->
-            val typeName = ext.nameAsString
-            WIDGET_PARENT_TYPES.any { typeName == it || typeName.endsWith(".$it") }
-        }
+        val extendsWidget = n.extendedTypes.any { ext -> isWidgetType(ext.nameAsString) }
 
         if (extendsWidget) {
             // Find render methods with the GuiGraphics signature and rename to renderWidget
             for (method in n.methods) {
-                if (method.nameAsString == "render" && hasGuiGraphicsSignature(method)) {
-                    val line = method.begin.map { it.line }.orElse(0)
-                    changes.add(Change(
-                        file = file, line = line,
-                        description = "Widget render() -> renderWidget() (AbstractWidget.render is final in 1.21)",
-                        before = "public void render(GuiGraphics ...)",
-                        after = "public void renderWidget(GuiGraphics ...)",
-                        confidence = Confidence.HIGH,
-                        ruleId = "ast-widget-render-rename"
-                    ))
-                    method.setName("renderWidget")
-                }
+                renameWidgetRenderMethod(method)
             }
         }
         return super.visit(n, arg)
+    }
+
+    override fun visit(n: ObjectCreationExpr, arg: Void?): Visitable {
+        if (isWidgetType(n.type.nameAsString)) {
+            n.anonymousClassBody.ifPresent { body ->
+                body.filterIsInstance<MethodDeclaration>()
+                    .forEach { renameWidgetRenderMethod(it) }
+            }
+        }
+        return super.visit(n, arg)
+    }
+
+    private fun isWidgetType(typeName: String): Boolean =
+        WIDGET_PARENT_TYPES.any { typeName == it || typeName.endsWith(".$it") }
+
+    private fun renameWidgetRenderMethod(method: MethodDeclaration) {
+        if (method.nameAsString == "render" && hasGuiGraphicsSignature(method)) {
+            val line = method.begin.map { it.line }.orElse(0)
+            changes.add(Change(
+                file = file, line = line,
+                description = "Widget render() -> renderWidget() (AbstractWidget.render is final in 1.21)",
+                before = "public void render(GuiGraphics ...)",
+                after = "public void renderWidget(GuiGraphics ...)",
+                confidence = Confidence.HIGH,
+                ruleId = "ast-widget-render-rename"
+            ))
+            method.setName("renderWidget")
+        }
     }
 
     private fun hasGuiGraphicsSignature(method: MethodDeclaration): Boolean {

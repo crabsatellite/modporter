@@ -270,6 +270,20 @@ class StructuralRefactorPass : Pass {
             errors.add("Recipe book category enum extension migration error: ${e.message}")
         }
 
+        try {
+            val imageButtonChanges = migrateLegacyImageButtonConstructors(projectDir, dryRun)
+            changes.addAll(imageButtonChanges)
+        } catch (e: Exception) {
+            errors.add("Legacy ImageButton constructor migration error: ${e.message}")
+        }
+
+        try {
+            val curiosClientChanges = migrateCuriosClientApi(projectDir, dryRun)
+            changes.addAll(curiosClientChanges)
+        } catch (e: Exception) {
+            errors.add("Curios client API migration error: ${e.message}")
+        }
+
         // Convert stale Class::register mod-bus listeners to direct
         // DeferredRegister.register(bus) calls when the target class already
         // declares a DeferredRegister field.
@@ -8742,6 +8756,268 @@ $methods
         "method": "${extension.methodName}"
       }
     }"""
+    }
+
+    private fun migrateLegacyImageButtonConstructors(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+        val helperPackages = mutableSetOf<String>()
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .filter { it.fileName.toString() != "LegacyImageButton.java" }
+            .toList()
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("ImageButton")) return@forEach
+                val packageName = packageNameOf(original)
+                var migrated = rewriteLegacyImageButtonObjectCreations(original)
+                migrated = rewriteLegacyImageButtonSuperclasses(migrated)
+                if (migrated != original) {
+                    helperPackages += packageName
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate legacy ImageButton UV constructors to generated compatibility widget",
+                        before = "ImageButton(x, y, width, height, xTexStart, yTexStart, yDiffTex, texture, ...)",
+                        after = "LegacyImageButton(old UV constructor shape)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-legacy-imagebutton-constructors"
+                    ))
+                    if (!dryRun) javaFile.writeText(migrated)
+                }
+            }
+
+        helperPackages.forEach { packageName ->
+            val helperFile = srcDir.resolve(packageName.replace('.', '/')).resolve("LegacyImageButton.java")
+            changes.add(Change(
+                file = helperFile,
+                line = 0,
+                description = "Generate compatibility ImageButton preserving legacy UV spritesheet rendering",
+                before = "(missing LegacyImageButton)",
+                after = "LegacyImageButton.java",
+                confidence = Confidence.HIGH,
+                ruleId = "struct-legacy-imagebutton-helper"
+            ))
+            if (!dryRun && !helperFile.exists()) {
+                helperFile.parent.createDirectories()
+                helperFile.writeText(legacyImageButtonSource(packageName))
+            }
+        }
+        return changes
+    }
+
+    private fun rewriteLegacyImageButtonObjectCreations(source: String): String {
+        var result = source
+        var cursor = 0
+        val replacements = mutableListOf<Pair<String, String>>()
+        while (true) {
+            val match = Regex("""new\s+ImageButton\s*\(""").find(source, cursor) ?: break
+            val openParen = source.indexOf('(', match.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(source, openParen) else -1
+            if (closeParen < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (isLegacyImageButtonConstructorArgs(args)) {
+                val call = source.substring(match.range.first, closeParen + 1)
+                replacements += call to call.replaceFirst(Regex("""new\s+ImageButton"""), "new LegacyImageButton")
+            }
+            cursor = closeParen + 1
+        }
+        replacements.forEach { (before, after) ->
+            result = result.replace(before, after)
+        }
+        return result
+    }
+
+    private fun rewriteLegacyImageButtonSuperclasses(source: String): String {
+        if (!Regex("""extends\s+ImageButton\b""").containsMatchIn(source)) return source
+        var hasLegacySuperCall = false
+        var cursor = 0
+        while (true) {
+            val match = Regex("""\bsuper\s*\(""").find(source, cursor) ?: break
+            val openParen = source.indexOf('(', match.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(source, openParen) else -1
+            if (closeParen < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (isLegacyImageButtonConstructorArgs(args)) {
+                hasLegacySuperCall = true
+                break
+            }
+            cursor = closeParen + 1
+        }
+        return if (hasLegacySuperCall) {
+            source.replace(Regex("""extends\s+ImageButton\b"""), "extends LegacyImageButton")
+        } else {
+            source
+        }
+    }
+
+    private fun isLegacyImageButtonConstructorArgs(args: List<String>): Boolean {
+        if (args.size !in setOf(9, 11, 12)) return false
+        val textureArgIndex = 7
+        val textureArg = args.getOrNull(textureArgIndex)?.trim().orEmpty()
+        if (textureArg.isBlank()) return false
+        if (args[4].contains("WidgetSprites")) return false
+        return true
+    }
+
+    private fun legacyImageButtonSource(packageName: String): String {
+        val packageLine = if (packageName.isBlank()) "" else "package $packageName;\n\n"
+        return """${packageLine}import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.ImageButton;
+import net.minecraft.client.gui.components.WidgetSprites;
+import net.minecraft.network.chat.CommonComponents;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
+
+public class LegacyImageButton extends ImageButton {
+	protected final int xTexStart;
+	protected final int yTexStart;
+	protected final int yDiffTex;
+	protected final ResourceLocation resourceLocation;
+	protected final int textureWidth;
+	protected final int textureHeight;
+
+	public LegacyImageButton(int x, int y, int width, int height, int xTexStart, int yTexStart, int yDiffTex, ResourceLocation texture, OnPress onPress) {
+		this(x, y, width, height, xTexStart, yTexStart, yDiffTex, texture, 256, 256, onPress, CommonComponents.EMPTY);
+	}
+
+	public LegacyImageButton(int x, int y, int width, int height, int xTexStart, int yTexStart, int yDiffTex, ResourceLocation texture, int textureWidth, int textureHeight, OnPress onPress) {
+		this(x, y, width, height, xTexStart, yTexStart, yDiffTex, texture, textureWidth, textureHeight, onPress, CommonComponents.EMPTY);
+	}
+
+	public LegacyImageButton(int x, int y, int width, int height, int xTexStart, int yTexStart, int yDiffTex, ResourceLocation texture, int textureWidth, int textureHeight, OnPress onPress, Component message) {
+		super(x, y, width, height, new WidgetSprites(texture, texture), onPress, message);
+		this.xTexStart = xTexStart;
+		this.yTexStart = yTexStart;
+		this.yDiffTex = yDiffTex;
+		this.resourceLocation = texture;
+		this.textureWidth = textureWidth;
+		this.textureHeight = textureHeight;
+	}
+
+	@Override
+	public void renderWidget(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTicks) {
+		int v = this.yTexStart;
+		if (this.isHoveredOrFocused()) {
+			v += this.yDiffTex;
+		}
+		guiGraphics.blit(this.resourceLocation, this.getX(), this.getY(), (float) this.xTexStart, (float) v, this.width, this.height, this.textureWidth, this.textureHeight);
+	}
+}
+"""
+    }
+
+    private fun migrateCuriosClientApi(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .toList()
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("Curios") && !original.contains("RenderButton")) return@forEach
+                var migrated = original
+                if (migrated.contains("Curios.MODID")) {
+                    migrated = migrated.replace("Curios.MODID", "CuriosApi.MODID")
+                    migrated = addImportIfMissing(migrated, "top.theillusivec4.curios.api.CuriosApi")
+                }
+                if (migrated.contains("import top.theillusivec4.curios.client.gui.RenderButton;")) {
+                    migrated = rewriteCuriosRenderButtonConstructors(migrated)
+                    migrated = rewriteCuriosRenderButtonAnonymousRenderMethods(migrated)
+                }
+                if (migrated != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate Curios client API constants and RenderButton constructor shape",
+                        before = "Curios.MODID / RenderButton(..., yDiffTex, texture, onPress)",
+                        after = "CuriosApi.MODID / RenderButton(..., texture, onPress)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-curios-client-api"
+                    ))
+                    if (!dryRun) javaFile.writeText(migrated)
+                }
+            }
+        return changes
+    }
+
+    private fun rewriteCuriosRenderButtonConstructors(source: String): String {
+        var result = source
+        var cursor = 0
+        val replacements = mutableListOf<Pair<String, String>>()
+        while (true) {
+            val match = Regex("""new\s+RenderButton\s*\(""").find(source, cursor) ?: break
+            val openParen = source.indexOf('(', match.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(source, openParen) else -1
+            if (closeParen < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (args.size == 10) {
+                val migratedArgs = args.filterIndexed { index, _ -> index != 7 }
+                val call = source.substring(match.range.first, closeParen + 1)
+                replacements += call to "new RenderButton(${migratedArgs.joinToString(", ")})"
+            }
+            cursor = closeParen + 1
+        }
+        replacements.forEach { (before, after) ->
+            result = result.replace(before, after)
+        }
+        return result
+    }
+
+    private fun rewriteCuriosRenderButtonAnonymousRenderMethods(source: String): String {
+        val replacements = mutableListOf<Triple<Int, Int, String>>()
+        var cursor = 0
+        while (true) {
+            val match = Regex("""new\s+RenderButton\s*\(""").find(source, cursor) ?: break
+            val openParen = source.indexOf('(', match.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(source, openParen) else -1
+            if (closeParen < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val openBrace = firstNonWhitespaceIndex(source, closeParen + 1)
+            if (openBrace < 0 || source[openBrace] != '{') {
+                cursor = closeParen + 1
+                continue
+            }
+            val closeBrace = findMatchingBrace(source, openBrace)
+            if (closeBrace < 0) {
+                cursor = closeParen + 1
+                continue
+            }
+            val body = source.substring(openBrace, closeBrace + 1)
+            val migratedBody = Regex("""(\bpublic\s+void\s+)render(\s*\(\s*GuiGraphics\b)""")
+                .replace(body, "$1renderWidget$2")
+            if (migratedBody != body) {
+                replacements += Triple(openBrace, closeBrace + 1, migratedBody)
+            }
+            cursor = closeBrace + 1
+        }
+        if (replacements.isEmpty()) return source
+        var result = source
+        replacements.sortedByDescending { it.first }.forEach { (start, end, replacement) ->
+            result = result.substring(0, start) + replacement + result.substring(end)
+        }
+        return result
+    }
+
+    private fun firstNonWhitespaceIndex(source: String, start: Int): Int {
+        var index = start
+        while (index < source.length && source[index].isWhitespace()) {
+            index++
+        }
+        return if (index < source.length) index else -1
     }
 
     private fun migrateLegacyGrassColorModifierEnumExtensions(projectDir: Path, dryRun: Boolean): List<Change> {

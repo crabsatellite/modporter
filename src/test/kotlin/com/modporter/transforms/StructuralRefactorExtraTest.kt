@@ -2345,6 +2345,118 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy image button UV constructors migrate to compatibility widget`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/client")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleButtons.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.components.ImageButton;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleButtons {
+                public ImageButton simple(ResourceLocation texture) {
+                    return new ImageButton(0, 0, 20, 18, 0, 0, 19, texture, button -> {});
+                }
+
+                public ImageButton messaged(ResourceLocation texture) {
+                    return new ImageButton(0, 0, 20, 20, 0, 0, 20, texture, 20, 40, button -> {}, Component.literal("Open")) {
+                        @Override
+                        public void renderWidget(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTicks) {
+                            super.renderWidget(guiGraphics, mouseX, mouseY, partialTicks);
+                        }
+                    };
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("InactiveButton.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.components.ImageButton;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class InactiveButton extends ImageButton {
+                public InactiveButton(int x, int y, int width, int height, int xTexStart, int yTexStart, int yDiffTex, ResourceLocation texture, int textureWidth, int textureHeight, OnPress onPress, Component message) {
+                    super(x, y, width, height, xTexStart, yTexStart, yDiffTex, texture, textureWidth, textureHeight, onPress, message);
+                }
+
+                @Override
+                public void renderWidget(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTicks) {
+                    int v = this.yTexStart;
+                    guiGraphics.blit(this.resourceLocation, this.getX(), this.getY(), (float) this.xTexStart, (float) v, this.width, this.height, this.textureWidth, this.textureHeight);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        val buttons = srcDir.resolve("ExampleButtons.java").readText()
+        val inactive = srcDir.resolve("InactiveButton.java").readText()
+        val helper = srcDir.resolve("LegacyImageButton.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-imagebutton-constructors" })
+        assertTrue(buttons.contains("new LegacyImageButton(0, 0, 20, 18, 0, 0, 19, texture, button -> {})"), buttons)
+        assertTrue(buttons.contains("new LegacyImageButton(0, 0, 20, 20, 0, 0, 20, texture, 20, 40, button -> {}, Component.literal(\"Open\"))"), buttons)
+        assertFalse(buttons.contains("new ImageButton(0, 0, 20, 18, 0, 0, 19"), buttons)
+        assertTrue(inactive.contains("public class InactiveButton extends LegacyImageButton"), inactive)
+        assertTrue(inactive.contains("this.yTexStart"), inactive)
+        assertTrue(inactive.contains("this.resourceLocation"), inactive)
+        assertTrue(helper.contains("public class LegacyImageButton extends ImageButton"), helper)
+        assertTrue(helper.contains("new WidgetSprites(texture, texture)"), helper)
+        assertTrue(helper.contains("protected final int xTexStart;"), helper)
+        assertTrue(helper.contains("protected final ResourceLocation resourceLocation;"), helper)
+        assertTrue(helper.contains("guiGraphics.blit(this.resourceLocation"), helper)
+    }
+
+    @Test
+    fun `curios client RenderButton constructor and mod id migrate by dependency API`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/client")
+        srcDir.createDirectories()
+        srcDir.resolve("CuriosScreenSurface.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.resources.ResourceLocation;
+            import top.theillusivec4.curios.Curios;
+            import top.theillusivec4.curios.client.gui.RenderButton;
+            import top.theillusivec4.curios.common.inventory.CurioSlot;
+
+            public class CuriosScreenSurface {
+                private static final ResourceLocation CURIO_INVENTORY = ResourceLocation.fromNamespaceAndPath(Curios.MODID, "textures/gui/inventory.png");
+
+                public Object make(CurioSlot slot) {
+                    return new RenderButton(slot, 1, 2, 3, 4, 5, 6, 7, CURIO_INVENTORY, button -> {}) {
+                        @Override
+                        public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
+                            this.setX(1);
+                        }
+                    };
+                }
+
+                public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick) {
+                    this.make(null);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        val migrated = srcDir.resolve("CuriosScreenSurface.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-curios-client-api" })
+        assertTrue(migrated.contains("import top.theillusivec4.curios.api.CuriosApi;"), migrated)
+        assertTrue(migrated.contains("ResourceLocation.fromNamespaceAndPath(CuriosApi.MODID, \"textures/gui/inventory.png\")"), migrated)
+        assertTrue(migrated.contains("new RenderButton(slot, 1, 2, 3, 4, 5, 6, CURIO_INVENTORY, button -> {})"), migrated)
+        assertFalse(migrated.contains("new RenderButton(slot, 1, 2, 3, 4, 5, 6, 7, CURIO_INVENTORY"), migrated)
+        assertTrue(migrated.contains("public void renderWidget(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick)"), migrated)
+        assertTrue(migrated.contains("public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTick)"), migrated)
+    }
+
+    @Test
     fun `attachment registration helper is not treated as subscribe event`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val capabilityDir = srcDir.resolve("capability")

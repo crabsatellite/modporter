@@ -229,6 +229,66 @@ class AstTransformTest {
     }
 
     @Test
+    fun `Widget render renamed for ImageButton subclass`() {
+        val projectDir = createTestFile("ImageButtonChild.java", """
+            package com.example;
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.components.ImageButton;
+            import net.minecraft.client.gui.components.WidgetSprites;
+            import net.minecraft.resources.ResourceLocation;
+            public class ImageButtonChild extends ImageButton {
+                public ImageButtonChild(WidgetSprites sprites) {
+                    super(0, 0, 20, 20, sprites, button -> {});
+                }
+                @Override
+                public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTicks) {
+                    super.render(guiGraphics, mouseX, mouseY, partialTicks);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = AstTransformPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/ImageButtonChild.java").readText()
+
+        assertTrue(transformed.contains("void renderWidget("))
+        assertFalse(transformed.contains("void render("))
+        assertTrue(result.changes.any { it.ruleId == "ast-widget-render-rename" })
+    }
+
+    @Test
+    fun `Widget render renamed for anonymous ImageButton subclass`() {
+        val projectDir = createTestFile("ImageButtonFactory.java", """
+            package com.example;
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.components.ImageButton;
+            import net.minecraft.client.gui.components.WidgetSprites;
+            public class ImageButtonFactory {
+                public ImageButton make(WidgetSprites sprites) {
+                    return new ImageButton(0, 0, 20, 20, sprites, button -> {}) {
+                        @Override
+                        public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTicks) {
+                            super.render(guiGraphics, mouseX, mouseY, partialTicks);
+                        }
+                    };
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = AstTransformPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/ImageButtonFactory.java").readText()
+
+        assertTrue(transformed.contains("void renderWidget("))
+        assertFalse(transformed.contains("void render("))
+        assertTrue(result.changes.any { it.ruleId == "ast-widget-render-rename" })
+    }
+
+    @Test
     fun `SelectionList super constructor 6-param transformed to 5-param`() {
         val projectDir = createTestFile("TestSelectionList.java", """
             package com.example;
