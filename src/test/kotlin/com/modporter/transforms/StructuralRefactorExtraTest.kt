@@ -11174,6 +11174,40 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy game event constructors only inside matching deferred registers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("GameEventRegistrySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.gameevent.GameEvent;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class GameEventRegistrySurface {
+                public static final DeferredRegister<GameEvent> GAME_EVENTS = DeferredRegister.create(Registries.GAME_EVENT, ExampleMod.ID);
+                public static final DeferredHolder<GameEvent, GameEvent> MATCHING =
+                    GAME_EVENTS.register("matching", () -> new GameEvent("matching", 4));
+                public static final DeferredHolder<GameEvent, GameEvent> MISMATCH =
+                    GAME_EVENTS.register("registered_id", () -> new GameEvent("legacy_id", 6));
+
+                public Object unrelated() {
+                    return OtherFactory.register("matching", () -> new GameEvent("matching", 8));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("GameEventRegistrySurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(transformed.contains("GAME_EVENTS.register(\"matching\", () -> new GameEvent(4))"), transformed)
+        assertTrue(transformed.contains("GAME_EVENTS.register(\"registered_id\", () -> new GameEvent(\"legacy_id\", 6))"), transformed)
+        assertTrue(transformed.contains("OtherFactory.register(\"matching\", () -> new GameEvent(\"matching\", 8))"), transformed)
+    }
+
+    @Test
     fun `migrates legacy structure start custom loads without dropping nbt logic`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

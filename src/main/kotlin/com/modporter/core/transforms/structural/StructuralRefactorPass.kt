@@ -9409,6 +9409,7 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyAnimalFoodPredicateOverrides(result)
         result = migrateLegacyMushroomBlockConstructorOrder(result)
         result = migrateLegacyVanillaBlockConstructors121(result)
+        result = migrateLegacyGameEventConstructors(result)
         result = migrateDefaultLootTableResourceKeys(result)
         result = migrateContainerEntityLootTableResourceKeys(result)
         result = migrateLegacyLootTableKeyFields(result)
@@ -14912,6 +14913,36 @@ ${indent}if ($handlerVar != null) $statement"""
         val trimmed = expression.trim()
         return Regex("""\b(?:ParticleTypes|[A-Za-z_$][\w$]*ParticleTypes)\.[A-Z][A-Z0-9_]*(?:\.get\(\))?\b""").containsMatchIn(trimmed) ||
             Regex("""\b(?:ParticleOptions|SimpleParticleType|ParticleType\s*<[^>]+>)\s+[A-Za-z_$][\w$]*\b""").containsMatchIn(trimmed)
+    }
+
+    private fun migrateLegacyGameEventConstructors(source: String): String {
+        if (!source.contains("new GameEvent(") || !source.contains("DeferredRegister")) return source
+        val gameEventRegisters = Regex("""\bDeferredRegister\s*<\s*GameEvent\s*>\s+([A-Za-z_$][\w$]*)\s*=""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (gameEventRegisters.isEmpty()) return source
+
+        val stringLiteral = Regex(""""(?:\\.|[^"\\])*"""")
+        fun migrateSupplier(registerId: String, supplier: String): String {
+            return rewriteJavaNew(supplier, "GameEvent") { args ->
+                if (args.size != 2) return@rewriteJavaNew null
+                val legacyId = args[0].trim()
+                if (!stringLiteral.matches(registerId) || legacyId != registerId) return@rewriteJavaNew null
+                "new GameEvent(${args[1].trim()})"
+            }
+        }
+
+        return rewriteJavaCall(source, "register") { receiver, args ->
+            if (args.size < 2) return@rewriteJavaCall null
+            val registerName = receiver.trim().substringAfterLast(".")
+            if (registerName !in gameEventRegisters) return@rewriteJavaCall null
+            val migratedSupplier = migrateSupplier(args[0].trim(), args[1])
+            if (migratedSupplier == args[1]) return@rewriteJavaCall null
+            val migratedArgs = args.toMutableList()
+            migratedArgs[1] = migratedSupplier
+            "$receiver.register(${migratedArgs.joinToString(", ") { it.trim() }})"
+        }
     }
 
     private fun migrateLegacyBannerPatternConstructors(source: String): String {
