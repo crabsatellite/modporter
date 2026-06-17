@@ -4183,12 +4183,29 @@ class StructuralRefactorExtraTest {
                 }
             }
         """.trimIndent())
+        projectDir.resolve("src/main/java/com/example/NitrogenTooltipOverrides.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.client.event.listeners.TooltipListeners;
+
+            public class NitrogenTooltipOverrides {
+                void register() {
+                    TooltipListeners.PREDICATES.put(ModItems.FIRST, (player, stack, components, component) -> component);
+                    TooltipListeners.PREDICATES.put(ModItems.SECOND, (player, stack, components, context) -> {
+                        String context1 = "outer";
+                        return context;
+                    });
+                    TooltipListeners.OTHER.put(ModItems.THIRD, (player, stack, components, component) -> component);
+                }
+            }
+        """.trimIndent())
         val pass = StructuralRefactorPass()
         val result = pass.apply(projectDir)
         val alexsCaves = tempDir.resolve("src/main/java/com/example/AlexsCavesEventHandler.java").readText()
         val farmers = tempDir.resolve("src/main/java/com/example/FarmersDelightEventHandler.java").readText()
         val epicFight = tempDir.resolve("src/main/java/com/example/EpicFightClientHelper.java").readText()
         val hotBath = tempDir.resolve("src/main/java/com/example/HotBath.java").readText()
+        val nitrogenTooltip = tempDir.resolve("src/main/java/com/example/NitrogenTooltipOverrides.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-verified-compat-121-api" })
         assertTrue(alexsCaves.contains("living.getEffect(ACEffectRegistry.IRRADIATED)"))
@@ -4220,6 +4237,11 @@ class StructuralRefactorExtraTest {
         assertTrue(hotBath.contains("yesman.epicfight.api.client.event.EpicFightClientEventHooks"))
         assertTrue(!hotBath.contains("yesman.epicfight.api.client.forgeevent.PatchedRenderersEvent${'$'}Modify"))
         assertTrue(!hotBath.contains("yesman.epicfight.client.ClientEngine"))
+
+        assertTrue(nitrogenTooltip.contains("TooltipListeners.PREDICATES.put(ModItems.FIRST, (player, stack, components, context, component) -> component);"))
+        assertTrue(nitrogenTooltip.contains("TooltipListeners.PREDICATES.put(ModItems.SECOND, (player, stack, components, context2, context) ->"))
+        assertTrue(nitrogenTooltip.contains("TooltipListeners.OTHER.put(ModItems.THIRD, (player, stack, components, component) -> component);"))
+        assertTrue(!nitrogenTooltip.contains("PREDICATES.put(ModItems.FIRST, (player, stack, components, component)"))
 
     }
 

@@ -23492,6 +23492,8 @@ $encodeLines
             )
         }
 
+        result = migrateNitrogenTooltipPredicateLambdas(result)
+
         if (needsHolder || result.contains("Holder<MobEffect>")) {
             result = addImportIfMissing(result, "net.minecraft.core.Holder")
         }
@@ -23499,6 +23501,57 @@ $encodeLines
             result = removeImport(result, "yesman.epicfight.api.client.event.types.registry.RegisterPatchedRenderersEvent")
         }
         return result
+    }
+
+    private fun migrateNitrogenTooltipPredicateLambdas(source: String): String {
+        val token = "TooltipListeners.PREDICATES.put"
+        if (!source.contains(token)) return source
+        val migrated = StringBuilder()
+        var cursor = 0
+        var changed = false
+        while (cursor < source.length) {
+            val tokenIndex = source.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + token.length
+            if (openParen >= source.length || source[openParen] != '(') {
+                migrated.append(source, cursor, openParen)
+                cursor = openParen
+                continue
+            }
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen < 0) break
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (args.size != 2) {
+                migrated.append(source, cursor, closeParen + 1)
+                cursor = closeParen + 1
+                continue
+            }
+            val lambda = migrateNitrogenTooltipPredicateLambda(args[1])
+            if (lambda == args[1]) {
+                migrated.append(source, cursor, closeParen + 1)
+            } else {
+                migrated.append(source, cursor, openParen + 1)
+                migrated.append(args[0].trim())
+                migrated.append(", ")
+                migrated.append(lambda)
+                migrated.append(")")
+                changed = true
+            }
+            cursor = closeParen + 1
+        }
+        if (!changed) return source
+        migrated.append(source, cursor, source.length)
+        return migrated.toString()
+    }
+
+    private fun migrateNitrogenTooltipPredicateLambda(lambdaArg: String): String {
+        val lambda = lambdaArg.trim()
+        val header = Regex("""^\(\s*([^)]*?)\s*\)\s*->""").find(lambda) ?: return lambdaArg
+        val params = splitTopLevelJavaArgs(header.groupValues[1])
+        if (params.size != 4) return lambdaArg
+        val contextName = uniqueLocalName(lambda, "context")
+        return "(${params[0]}, ${params[1]}, ${params[2]}, $contextName, ${params[3]}) ->" +
+            lambda.substring(header.range.last + 1)
     }
 
     private fun migrateCustomRecipeSerializer121Source(source: String): String {
