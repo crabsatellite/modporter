@@ -151,6 +151,46 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `normalizes neoforge properties without double prefixing`() {
+        val projectDir = tempDir.resolve("neoforge-props")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("""
+            minecraft_version=1.20.1
+            neoforge_version=47.1.0
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("gradle.properties").readText()
+
+        assertTrue(content.contains("neo_forge_version=21.1.219"), content)
+        assertFalse(content.contains("neoneo_forge_version"), content)
+    }
+
+    @Test
+    fun `normalizes old minecraft version property references in build script`() {
+        val projectDir = tempDir.resolve("mc-version-build-props")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            version = "${'$'}{mc_version}-${'$'}{mod_version}-neoforge"
+            dependencies {
+                implementation "example:dep:${'$'}{project.mc_version}"
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(content.contains("""version = "${'$'}{minecraft_version}-${'$'}{mod_version}-neoforge""""), content)
+        assertTrue(content.contains("""implementation "example:dep:${'$'}{project.minecraft_version}""""), content)
+        assertFalse(content.contains("mc_version"), content)
+    }
+
+    @Test
     fun `migrates coremod ASMAPI scripts to NeoForge package`() {
         val projectDir = tempDir.resolve("coremod-asmapi")
         val asmDir = projectDir.resolve("src/main/resources/META-INF/asm")
@@ -1032,6 +1072,188 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `rewrites class-for-name loader presence probes to class resource probes`() {
+        val projectDir = tempDir.resolve("class-for-name-loader-presence")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMixinPlugin.java").writeText("""
+            package com.example;
+
+            public class ExampleMixinPlugin {
+                private boolean optionalA = false;
+                private boolean optionalB = false;
+
+                public void onLoad(String mixinPackage) {
+                    try {
+                        Class.forName("net.optional.First", false, getClass().getClassLoader());
+                        optionalA = true;
+                    } catch (ClassNotFoundException e) {
+                    }
+                    try {
+                        Class.forName("net.optional.Second", false, Thread.currentThread().getContextClassLoader());
+                        optionalB = true;
+                    } catch (ClassNotFoundException e) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ExampleMixinPlugin.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertFalse(content.contains("Class.forName"), content)
+        assertFalse(content.contains("ClassNotFoundException"), content)
+        assertTrue(content.contains("""optionalA = modporterClassResourcePresent("net.optional.First");"""), content)
+        assertTrue(content.contains("""optionalB = modporterClassResourcePresent("net.optional.Second");"""), content)
+        assertTrue(content.contains("private static boolean modporterClassResourcePresent(String binaryClassName)"), content)
+    }
+
+    @Test
+    fun `removes ForgeGradle JarJar import and task type after ModDev migration`() {
+        val projectDir = tempDir.resolve("forgegradle-jarjar-import")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            import net.minecraftforge.gradle.userdev.tasks.JarJar
+
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            tasks.named('jarJar', JarJar).configure {
+                archiveClassifier = ''
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-remove-forgegradle-import" })
+        assertTrue(result.changes.any { it.ruleId == "build-remove-forgegradle-jarjar-type" })
+        assertTrue(result.changes.any { it.ruleId == "build-remove-jarjar-archive-classifier" })
+        assertFalse(content.contains("net.minecraftforge.gradle.userdev.tasks.JarJar"), content)
+        assertFalse(content.contains(", JarJar"), content)
+        assertFalse(content.contains("archiveClassifier = ''"), content)
+    }
+
+    @Test
+    fun `removes ModdingX ForgeGradle companion plugins and recreates sourceJar task`() {
+        val projectDir = tempDir.resolve("moddingx-forgegradle-companion")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'java-library'
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+                id 'org.moddingx.modgradle.mapping' version '[4,5)'
+                id 'org.moddingx.modgradle.sourcejar' version '[4,5)' apply false
+            }
+
+            apply plugin: 'org.moddingx.modgradle.sourcejar'
+
+            publishing {
+                publications {
+                    mavenJava(MavenPublication) {
+                        artifact sourceJar
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-remove-forgegradle-companion-plugin" })
+        assertTrue(result.changes.any { it.ruleId == "build-remove-forgegradle-companion-apply" })
+        assertTrue(result.changes.any { it.ruleId == "build-sourcejar-task" })
+        assertFalse(content.contains("org.moddingx.modgradle.mapping"), content)
+        assertFalse(content.contains("org.moddingx.modgradle.sourcejar"), content)
+        assertTrue(content.contains("tasks.register('sourceJar', Jar)"), content)
+        assertTrue(content.contains("from sourceSets.main.allSource"), content)
+        assertTrue(content.contains("artifact sourceJar"), content)
+    }
+
+    @Test
+    fun `removes bundled jarJar mixin dependencies and normalizes range pin dsl`() {
+        val projectDir = tempDir.resolve("jarjar-range-pin")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            dependencies {
+                jarJar("io.github.llamalad7:mixinextras-forge:${'$'}{project.mixinextras_version}") {
+                    jarJar.ranged(it, "[${'$'}{project.mixinextras_version},)")
+                    jarJar.pin(it, "${'$'}{project.mixinextras_version}")
+                }
+
+                jarJar "com.example:library:${'$'}{project.library_version}" {
+                    jarJar.ranged(it, "[${'$'}{project.library_version},)")
+                    jarJar.pin(it, "${'$'}{project.library_version}")
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-remove-bundled-mixin-dependency" })
+        assertTrue(result.changes.any { it.ruleId == "build-normalize-jarjar-range-pin" })
+        assertFalse(content.contains("mixinextras"), content)
+        assertFalse(content.contains("jarJar.ranged"), content)
+        assertFalse(content.contains("jarJar.pin"), content)
+        assertTrue(content.contains("""jarJar "com.example:library:${'$'}{project.library_version}""""), content)
+    }
+
+    @Test
+    fun `publishing uses archive jar instead of ModDev jarJar task`() {
+        val projectDir = tempDir.resolve("jarjar-publication")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            publishing {
+                publications {
+                    mavenJava(MavenPublication) {
+                        artifact project.tasks.jarJar
+                    }
+                }
+            }
+
+            curseforge {
+                project {
+                    mainArtifact(tasks.jarJar)
+                }
+            }
+
+            modrinth {
+                uploadFile = tasks.jarJar
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-jarjar-publication-archive" })
+        assertTrue(content.contains("artifact tasks.named('jar')"), content)
+        assertTrue(content.contains("mainArtifact(tasks.jar)"), content)
+        assertTrue(content.contains("uploadFile = tasks.jar"), content)
+        assertFalse(content.contains("tasks.jarJar"), content)
+    }
+
+    @Test
     fun `rewrites add-layers renderer reflection to public renderer lookup API`() {
         val projectDir = tempDir.resolve("addlayers-renderers-at")
         val srcDir = projectDir.resolve("src/main/java/com/example/client")
@@ -1439,6 +1661,112 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `drops access transformers for removed 121 inner classes`() {
+        val projectDir = tempDir.resolve("removed-inner-class-at")
+        val atDir = projectDir.resolve("src/main/resources/META-INF")
+        atDir.createDirectories()
+        atDir.resolve("accesstransformer.cfg").writeText("""
+            public net.minecraft.client.gui.Gui${'$'}HeartType
+            public net.minecraft.world.item.crafting.SimpleCookingSerializer${'$'}CookieBaker
+            public net.minecraft.client.gui.screens.TitleScreen${'$'}WarningLabel
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = atDir.resolve("accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.client.gui.Gui${'$'}HeartType"))
+        assertFalse(at.contains("SimpleCookingSerializer${'$'}CookieBaker"))
+        assertFalse(at.contains("TitleScreen${'$'}WarningLabel"))
+    }
+
+    @Test
+    fun `removes TitleScreen accessors for fields and inner classes removed in 121`() {
+        val projectDir = tempDir.resolve("removed-title-screen-accessors")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TitleScreenAccessor.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.components.SplashRenderer;
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.minecraft.client.renderer.PanoramaRenderer;
+            import net.neoforged.neoforge.client.gui.TitleScreenModUpdateIndicator;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.Mutable;
+            import org.spongepowered.asm.mixin.gen.Accessor;
+
+            @Mixin(TitleScreen.class)
+            public interface TitleScreenAccessor {
+                @Accessor("splash")
+                SplashRenderer example${'$'}getSplash();
+
+                @Mutable
+                @Accessor("panorama")
+                void example${'$'}setPanorama(PanoramaRenderer panorama);
+
+                @Accessor(value = "modUpdateNotification", remap = false)
+                TitleScreenModUpdateIndicator example${'$'}getModUpdateNotification();
+
+                @Accessor(value = "modUpdateNotification", remap = false)
+                void example${'$'}setModUpdateNotification(TitleScreenModUpdateIndicator widget);
+
+                @Accessor
+                TitleScreen.WarningLabel example${'$'}getWarningLabel();
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleTitleScreen.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.minecraft.client.renderer.PanoramaRenderer;
+
+            public class ExampleTitleScreen extends TitleScreen {
+                public ExampleTitleScreen() {
+                    TitleScreenAccessor accessor = (TitleScreenAccessor) this;
+                    accessor.example${'$'}setPanorama(new PanoramaRenderer(CUBE_MAP));
+                    accessor.example${'$'}setModUpdateNotification(new ExampleModUpdateIndicator(this));
+                    accessor.example${'$'}getModUpdateNotification().init();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleModUpdateIndicator.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.neoforged.neoforge.client.gui.TitleScreenModUpdateIndicator;
+
+            public class ExampleModUpdateIndicator extends TitleScreenModUpdateIndicator {
+                public ExampleModUpdateIndicator(TitleScreen screen) {
+                    super(screen);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val accessor = srcDir.resolve("TitleScreenAccessor.java").readText()
+        val screen = srcDir.resolve("ExampleTitleScreen.java").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-title-screen-removed-accessors" })
+        assertTrue(result.changes.any { it.ruleId == "build-title-screen-removed-accessor-calls" })
+        assertTrue(
+            result.changes.any { it.ruleId == "build-title-screen-update-indicator-class" },
+            result.changes.joinToString("\n") { "${it.ruleId}: ${it.file.fileName}" } + "\n\n" + screen
+        )
+        assertTrue(accessor.contains("SplashRenderer example${'$'}getSplash()"))
+        assertFalse(accessor.contains("PanoramaRenderer"))
+        assertFalse(accessor.contains("TitleScreenModUpdateIndicator"))
+        assertFalse(accessor.contains("WarningLabel"))
+        assertFalse(screen.contains("example${'$'}setPanorama"))
+        assertFalse(screen.contains("example${'$'}setModUpdateNotification"))
+        assertFalse(screen.contains("example${'$'}getModUpdateNotification"))
+        assertFalse(screen.contains("PanoramaRenderer"))
+        assertFalse(srcDir.resolve("ExampleModUpdateIndicator.java").exists())
+    }
+
+    @Test
     fun `migrates removed noParticlesOnBreak block property to AT backed helper`() {
         val projectDir = tempDir.resolve("no-particles-block-properties")
         projectDir.createDirectories()
@@ -1527,6 +1855,29 @@ class BuildSystemTest {
         assertFalse(source.contains("TickEvent.Phase"))
         assertFalse(source.contains("event.phase"))
         assertFalse(source.contains("import net.neoforged.neoforge.event.TickEvent;"), source)
+    }
+
+    @Test
+    fun `split tick cleanup does not rewrite unrelated java files`() {
+        val projectDir = tempDir.resolve("split-tick-noop")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val javaFile = srcDir.resolve("Plain.java")
+        javaFile.writeText("""
+            package com.example;
+
+            public class Plain {
+                public void run() {
+                    System.out.println("ok");
+                }
+            }
+        """.trimIndent())
+
+        val before = javaFile.readText()
+        val result = pass.apply(projectDir)
+
+        assertFalse(result.changes.any { it.ruleId == "build-cleanup-split-tick-phase" })
+        assertEquals(before, javaFile.readText())
     }
 
     @Test

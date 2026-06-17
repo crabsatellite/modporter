@@ -1594,6 +1594,276 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `inventory recipe holder interface migrates to recipe crafting holder`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.inventory.RecipeHolder;
+
+            public class MenuBackedBlockEntity implements RecipeHolder {
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.world.inventory.RecipeCraftingHolder;"))
+        assertFalse(transformed.contains("import net.minecraft.world.item.crafting.RecipeHolder;"))
+        assertTrue(transformed.contains("implements RecipeCraftingHolder"))
+    }
+
+    @Test
+    fun `block path type rename does not rewrite project class names`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.level.pathfinder.BlockPathTypes;
+
+            public class AetherBlockPathTypes {
+                public static final BlockPathTypes BOSS_DOORWAY = BlockPathTypes.create("BOSS_DOORWAY", -1.0F);
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("public class AetherBlockPathTypes"))
+        assertTrue(transformed.contains("import net.minecraft.world.level.pathfinder.PathType;"))
+        assertTrue(transformed.contains("public static final PathType BOSS_DOORWAY = PathType.create"))
+        assertFalse(transformed.contains("public class AetherPathType"))
+    }
+
+    @Test
+    fun `glass block rename does not rewrite project class names`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.level.block.GlassBlock;
+
+            public class QuicksoilGlassBlock extends GlassBlock {
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("public class QuicksoilGlassBlock extends TransparentBlock"))
+        assertTrue(transformed.contains("import net.minecraft.world.level.block.TransparentBlock;"))
+        assertFalse(transformed.contains("public class QuicksoilTransparentBlock"))
+        assertFalse(transformed.contains("import net.minecraft.world.level.block.GlassBlock;"))
+    }
+
+    @Test
+    fun `removed item marker interfaces are deleted from multi-interface implements clauses`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.item.DyeableLeatherItem;
+            import net.minecraft.world.item.Vanishable;
+
+            class AccessoryItem extends Item implements ICurioItem, Vanishable {
+            }
+
+            class LeatherGlovesItem extends GlovesItem implements DyeableLeatherItem {
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("class AccessoryItem extends Item implements ICurioItem"))
+        assertTrue(transformed.contains("class LeatherGlovesItem extends GlovesItem {"))
+        assertFalse(transformed.contains("Vanishable"))
+        assertFalse(transformed.contains("DyeableLeatherItem"))
+    }
+
+    @Test
+    fun `simple container import is preserved when the class extends simple container`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.SimpleContainer;
+
+            public class LoreInventory extends SimpleContainer {
+                public LoreInventory() {
+                    super(1);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.world.SimpleContainer;"))
+        assertTrue(transformed.contains("extends SimpleContainer"))
+        assertFalse(transformed.contains("import net.minecraft.world.item.crafting.SingleRecipeInput;"))
+    }
+
+    @Test
+    fun `generic dirt message screen renames to generic message screen`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.GenericDirtMessageScreen;
+
+            public class ScreenUse {
+                void open(Component title) {
+                    new GenericDirtMessageScreen(title);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.client.gui.screens.GenericMessageScreen;"))
+        assertTrue(transformed.contains("new GenericMessageScreen(title);"))
+        assertFalse(transformed.contains("GenericDirtMessageScreen"))
+    }
+
+    @Test
+    fun `command function cacheable function migrates to split cacheable type`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.commands.CommandFunction;
+
+            public class FunctionUse {
+                CacheableTarget target(CommandFunction.CacheableFunction function) {
+                    return new CacheableTarget(function, CommandFunction.CacheableFunction.NONE);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.commands.CacheableFunction;"))
+        assertTrue(transformed.contains("import net.minecraft.commands.functions.CommandFunction;"))
+        assertTrue(transformed.contains("CacheableTarget target(CacheableFunction function)"))
+        assertTrue(transformed.contains("new CacheableTarget(function, java.util.Optional.empty())"))
+        assertFalse(transformed.contains("CommandFunction.CacheableFunction"))
+        assertFalse(transformed.contains("import net.minecraft.commands.CommandFunction;"))
+    }
+
+    @Test
+    fun `removed tag manager item access migrates to registry holders`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.tags.ITagManager;
+
+            public class TagAccess {
+                public static void add(TagKey<Item> itemTag, int burnTime) {
+                    ITagManager<Item> tags = BuiltInRegistries.ITEM.tags();
+                    if (tags != null) {
+                        tags.getTag(itemTag).stream().forEach((item) -> getMap().put(item, burnTime));
+                    }
+                }
+
+                public static boolean empty(TagKey<Item> itemTag) {
+                    boolean flag = true;
+                    ITagManager<Item> itemTags = BuiltInRegistries.ITEM.tags();
+                    if (itemTags != null) {
+                        if (itemTags.getTag(itemTag).isEmpty()) {
+                            flag = false;
+                        }
+                    }
+                    return flag;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertFalse(transformed.contains("ITagManager"))
+        assertFalse(transformed.contains("net.neoforged.neoforge.registries.tags"))
+        assertTrue(transformed.contains("BuiltInRegistries.ITEM.getTagOrEmpty(itemTag).forEach((holder) -> { Item item = holder.value(); getMap().put(item, burnTime); });"), transformed)
+        assertTrue(transformed.contains("if (!BuiltInRegistries.ITEM.getTagOrEmpty(itemTag).iterator().hasNext()) {"), transformed)
+    }
+
+    @Test
+    fun `network hooks open screen handles nested simple menu provider lambda`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraftforge.network.NetworkHooks;
+
+            public class TestMod {
+                public void open(ServerPlayer serverPlayer) {
+                    NetworkHooks.openScreen(serverPlayer, new SimpleMenuProvider((id, inventory, playerEntity) -> new LoreBookMenu(id, inventory), Component.translatable("menu.example.book")));
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(transformed.contains("(serverPlayer).openMenu(new SimpleMenuProvider((id, inventory, playerEntity) -> new LoreBookMenu(id, inventory), Component.translatable(\"menu.example.book\")));"), transformed)
+        assertFalse(transformed.contains("buf.writeBlockPos(inventory, playerEntity)"), transformed)
+        assertFalse(transformed.contains("NetworkHooks.openScreen"), transformed)
+        assertFalse(transformed.contains("import net.minecraftforge.network.NetworkHooks;"), transformed)
+    }
+
+    @Test
+    fun `network hooks open screen rejects untyped third argument instead of guessing`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraftforge.network.NetworkHooks;
+
+            public class TestMod {
+                public void open(ServerPlayer player, MenuProvider menu, Object payload) {
+                    NetworkHooks.openScreen(player, menu, payload);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.errors.any { it.contains("Cannot safely migrate NetworkHooks.openScreen") }, result.errors.joinToString("\n"))
+        assertTrue(transformed.contains("NetworkHooks.openScreen(player, menu, payload);"), transformed)
+        assertTrue(transformed.contains("import net.neoforged.neoforge.network.NetworkHooks;") ||
+            transformed.contains("import net.minecraftforge.network.NetworkHooks;"), transformed)
+    }
+
+    @Test
     fun `sakura gui tags bucket event and vertex APIs migrate to 1_21 surfaces`() {
         val projectDir = createTestFile("""
             package com.example;

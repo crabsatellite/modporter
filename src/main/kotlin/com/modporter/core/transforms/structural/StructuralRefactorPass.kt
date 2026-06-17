@@ -39,7 +39,7 @@ class StructuralRefactorPass : Pass {
         val changes = mutableListOf<Change>()
         val errors = mutableListOf<String>()
         val skipped = mutableListOf<String>()
-        val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17))
+        val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE))
 
         val javaFiles = Files.walk(projectDir)
             .filter { it.extension == "java" }
@@ -284,6 +284,16 @@ class StructuralRefactorPass : Pass {
             changes.addAll(missingMappingChanges)
         } catch (e: Exception) {
             errors.add("MissingMappings alias migration error: ${e.message}")
+        }
+
+        // Forge/early-NeoForge built-in pack helpers were removed in 1.21.
+        // Preserve their source semantics through explicit PackLocationInfo,
+        // PackSelectionConfig, and generated PackResources adapters.
+        try {
+            val packResourceChanges = migrateLegacyPackResourceApis(projectDir, dryRun)
+            changes.addAll(packResourceChanges)
+        } catch (e: Exception) {
+            errors.add("Legacy pack resource API migration error: ${e.message}")
         }
 
         try {
@@ -965,9 +975,52 @@ ${indent}}
             replacement
         }
 
+        val runForDistClientBlockPattern = Regex(
+            """(?m)^([ \t]*)DistExecutor\.(unsafeRunForDist|safeRunForDist)\(\s*\(\s*\)\s*->\s*\(\s*\)\s*->\s*\{\s*\r?\n([\s\S]*?)\r?\n\1\}\s*,\s*\(\s*\)\s*->\s*\(\s*\)\s*->\s*(?:false|true|null)\s*\)\s*;"""
+        )
+        val beforeRunForDistMigration = result
+        result = runForDistClientBlockPattern.replace(beforeRunForDistMigration) { match ->
+            val indent = match.groupValues[1]
+            val methodName = match.groupValues[2]
+            val body = removeTrailingSupplierReturn(match.groupValues[3]).trimEnd()
+            val replacement = if (body.isBlank()) {
+                """
+${indent}if (FMLLoader.getDist() == Dist.CLIENT) {
+${indent}}
+""".trimEnd()
+            } else {
+                """
+${indent}if (FMLLoader.getDist() == Dist.CLIENT) {
+$body
+${indent}}
+""".trimEnd()
+            }
+            migrated = true
+            changes.add(distExecutorMigrationChange(
+                file = file,
+                line = lineNumberAt(beforeRunForDistMigration, match.range.first),
+                methodName = methodName,
+                dist = "CLIENT",
+                before = match.value.trim(),
+                after = replacement.trim()
+            ))
+            replacement
+        }
+
         if (!migrated) return result
         result = removeDistExecutorImports(result)
+        result = addImportIfMissing(result, "net.neoforged.api.distmarker.Dist")
         return addImportIfMissing(result, "net.neoforged.fml.loading.FMLLoader")
+    }
+
+    private fun removeTrailingSupplierReturn(body: String): String {
+        val lines = body.lines().toMutableList()
+        var index = lines.lastIndex
+        while (index >= 0 && lines[index].isBlank()) index--
+        if (index >= 0 && Regex("""^\s*return\s+[^;]+;\s*$""").matches(lines[index])) {
+            lines.removeAt(index)
+        }
+        return lines.joinToString("\n")
     }
 
     private fun distExecutorMigrationChange(
@@ -3567,6 +3620,7 @@ $itemArguments
             modified = addImportIfMissing(modified, "java.util.Collections")
             modified = addImportIfMissing(modified, "java.util.Map")
             modified = addImportIfMissing(modified, "java.util.WeakHashMap")
+            modified = addImportIfMissing(modified, "net.minecraft.core.Direction")
             modified = addImportIfMissing(modified, "net.minecraft.core.registries.BuiltInRegistries")
             modified = addImportIfMissing(modified, "net.minecraft.world.entity.EntityType")
             modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.EntityCapability")
@@ -3727,6 +3781,516 @@ $helpers
             .let { if (it.first().isDigit()) "m$it" else it }
         return "com.modporter.generated.$sanitized.compat"
     }
+
+    private fun migrateLegacyPackResourceApis(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val compatPackage = detectGeneratedCompatPackage(projectDir)
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .filter { !it.toString().replace('\\', '/').contains("/src/main/java/${compatPackage.replace('.', '/')}/") }
+            .toList()
+        val changes = mutableListOf<Change>()
+        var needsPathPackResources = false
+        var needsDelegatingPackResources = false
+        var needsLegacyResourcesSupplier = false
+
+        for (javaFile in javaFiles) {
+            val original = javaFile.readText()
+            var modified = original
+            val hadPathPackResources =
+                modified.contains("net.neoforged.neoforge.resource.PathPackResources") ||
+                    modified.contains("net.minecraftforge.resource.PathPackResources")
+            val hadDelegatingPackResources =
+                modified.contains("net.neoforged.neoforge.resource.DelegatingPackResources") ||
+                    modified.contains("net.minecraftforge.resource.DelegatingPackResources")
+
+            if (hadPathPackResources) {
+                modified = modified
+                    .replace("import net.neoforged.neoforge.resource.PathPackResources;", "import $compatPackage.PathPackResources;")
+                    .replace("import net.minecraftforge.resource.PathPackResources;", "import $compatPackage.PathPackResources;")
+                    .replace("net.neoforged.neoforge.resource.PathPackResources", "$compatPackage.PathPackResources")
+                    .replace("net.minecraftforge.resource.PathPackResources", "$compatPackage.PathPackResources")
+                needsPathPackResources = true
+            }
+            if (hadDelegatingPackResources) {
+                modified = modified
+                    .replace("import net.neoforged.neoforge.resource.DelegatingPackResources;", "import $compatPackage.DelegatingPackResources;")
+                    .replace("import net.minecraftforge.resource.DelegatingPackResources;", "import $compatPackage.DelegatingPackResources;")
+                    .replace("net.neoforged.neoforge.resource.DelegatingPackResources", "$compatPackage.DelegatingPackResources")
+                    .replace("net.minecraftforge.resource.DelegatingPackResources", "$compatPackage.DelegatingPackResources")
+                needsDelegatingPackResources = true
+            }
+
+            val accessorMigrated = migratePackMetadataSectionAccessors(modified)
+            modified = accessorMigrated
+
+            val createRewrite = rewriteLegacyPackCreateCalls(modified, compatPackage)
+            modified = createRewrite.first
+            needsLegacyResourcesSupplier = needsLegacyResourcesSupplier || createRewrite.second
+
+            val supplierRewrite = rewriteLegacyPackResourcesSupplierAssignments(modified, compatPackage)
+            modified = supplierRewrite.first
+            needsLegacyResourcesSupplier = needsLegacyResourcesSupplier || supplierRewrite.second
+
+            val readInfoRewrite = rewriteLegacyPackReadInfoCalls(modified)
+            modified = readInfoRewrite
+
+            if (modified.contains("Pack.Info")) {
+                modified = Regex("""\bPack\.Info\b(?!\s*\()""").replace(modified, "Pack.Metadata")
+            }
+
+            modified = addLegacyPackApiImports(modified)
+
+            if (modified != original) {
+                if (!dryRun) javaFile.writeText(modified)
+                changes.add(Change(
+                    file = javaFile,
+                    line = 1,
+                    description = "Migrate legacy built-in pack resource APIs to Minecraft 1.21 PackLocationInfo/ResourcesSupplier contracts",
+                    before = "PathPackResources/DelegatingPackResources/Pack.create/Pack.Info legacy shape",
+                    after = "PackLocationInfo + PackSelectionConfig + generated PackResources adapters",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-legacy-pack-resources"
+                ))
+            }
+        }
+
+        if (needsPathPackResources) {
+            changes.addAll(ensureGeneratedPackResourceCompat(
+                srcDir,
+                compatPackage,
+                "PathPackResources.java",
+                generatedPathPackResourcesSource(compatPackage),
+                "Generate source-compatible PathPackResources adapter",
+                "struct-generate-path-pack-resources",
+                dryRun
+            ))
+        }
+        if (needsDelegatingPackResources) {
+            changes.addAll(ensureGeneratedPackResourceCompat(
+                srcDir,
+                compatPackage,
+                "DelegatingPackResources.java",
+                generatedDelegatingPackResourcesSource(compatPackage),
+                "Generate source-compatible DelegatingPackResources adapter",
+                "struct-generate-delegating-pack-resources",
+                dryRun
+            ))
+        }
+        if (needsLegacyResourcesSupplier) {
+            changes.addAll(ensureGeneratedPackResourceCompat(
+                srcDir,
+                compatPackage,
+                "LegacyPackResourcesSupplier.java",
+                generatedLegacyPackResourcesSupplierSource(compatPackage),
+                "Generate adapter for legacy single-method Pack.ResourcesSupplier lambdas",
+                "struct-generate-legacy-pack-resources-supplier",
+                dryRun
+            ))
+        }
+
+        return changes
+    }
+
+    private fun addLegacyPackApiImports(source: String): String {
+        var result = source
+        if (result.contains("new PackLocationInfo(") || result.contains("Pack.readPackMetadata(")) {
+            result = addImportIfMissing(result, "net.minecraft.server.packs.PackLocationInfo")
+        }
+        if (result.contains("new PackSelectionConfig(")) {
+            result = addImportIfMissing(result, "net.minecraft.server.packs.PackSelectionConfig")
+        }
+        if (result.contains("PackCompatibility.forVersion(")) {
+            result = addImportIfMissing(result, "net.minecraft.server.packs.repository.PackCompatibility")
+            result = addImportIfMissing(result, "net.minecraft.util.InclusiveRange")
+            result = addImportIfMissing(result, "net.minecraft.SharedConstants")
+        }
+        if (result.contains("Pack.readPackMetadata(")) {
+            result = addImportIfMissing(result, "net.minecraft.SharedConstants")
+            result = addImportIfMissing(result, "net.minecraft.network.chat.Component")
+            result = addImportIfMissing(result, "net.minecraft.server.packs.PackType")
+            result = addImportIfMissing(result, "net.minecraft.server.packs.repository.PackSource")
+        }
+        return result
+    }
+
+    private fun migratePackMetadataSectionAccessors(source: String): String {
+        if (!source.contains("PackMetadataSection")) return source
+        val metadataNames = Regex("""\bPackMetadataSection\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (metadataNames.isEmpty()) return source
+        var result = source
+        for (name in metadataNames) {
+            result = result.replace("$name.getDescription()", "$name.description()")
+            result = Regex("""\b${Regex.escape(name)}\.getPackFormat\s*\(\s*PackType\.[A-Z_]+\s*\)""")
+                .replace(result, "$name.packFormat()")
+        }
+        return result
+    }
+
+    private fun rewriteLegacyPackResourcesSupplierAssignments(source: String, compatPackage: String): Pair<String, Boolean> {
+        var usedAdapter = false
+        val pattern = Regex(
+            """(Pack\.ResourcesSupplier\s+[A-Za-z_$][\w$]*\s*=\s*)((?:\([^;\n{}]*\)|[A-Za-z_$][\w$]*)\s*->\s*[^;]+);"""
+        )
+        val rewritten = pattern.replace(source) { match ->
+            val rhs = match.groupValues[2].trim()
+            if (rhs.contains("LegacyPackResourcesSupplier")) return@replace match.value
+            usedAdapter = true
+            "${match.groupValues[1]}new $compatPackage.LegacyPackResourcesSupplier($rhs);"
+        }
+        return rewritten to usedAdapter
+    }
+
+    private fun rewriteLegacyPackReadInfoCalls(source: String): String {
+        var result = source
+        var cursor = 0
+        val token = "Pack.readPackInfo("
+        while (true) {
+            val tokenIndex = result.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + token.length - 1
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            if (args.size != 2) {
+                cursor = closeParen + 1
+                continue
+            }
+            val id = args[0].trim()
+            val resources = args[1].trim()
+            val replacement =
+                "Pack.readPackMetadata(new PackLocationInfo($id, Component.literal(String.valueOf($id)), PackSource.BUILT_IN, java.util.Optional.empty()), $resources, SharedConstants.getCurrentVersion().getPackVersion(PackType.CLIENT_RESOURCES))"
+            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
+            cursor = tokenIndex + replacement.length
+        }
+        return result
+    }
+
+    private fun rewriteLegacyPackCreateCalls(source: String, compatPackage: String): Pair<String, Boolean> {
+        var result = source
+        var usedSupplierAdapter = false
+        var cursor = 0
+        val token = "Pack.create("
+        while (true) {
+            val tokenIndex = result.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + token.length - 1
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            if (args.size != 9) {
+                cursor = closeParen + 1
+                continue
+            }
+            val supplier = wrapLegacyPackResourcesSupplier(args[3], compatPackage)
+            usedSupplierAdapter = usedSupplierAdapter || supplier != args[3].trim()
+            val metadata = rewriteLegacyPackInfoExpression(args[4], args[5])
+            val location = "new PackLocationInfo(${args[0]}, ${args[1]}, ${args[8]}, java.util.Optional.empty())"
+            val selection = "new PackSelectionConfig(${args[2]}, ${args[6]}, ${args[7]})"
+            val replacement = "new Pack($location, $supplier, $metadata, $selection)"
+            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
+            cursor = tokenIndex + replacement.length
+        }
+        return result to usedSupplierAdapter
+    }
+
+    private fun wrapLegacyPackResourcesSupplier(expression: String, compatPackage: String): String {
+        val trimmed = expression.trim()
+        if (!trimmed.contains("->") || trimmed.contains("LegacyPackResourcesSupplier")) return trimmed
+        return "new $compatPackage.LegacyPackResourcesSupplier($trimmed)"
+    }
+
+    private fun rewriteLegacyPackInfoExpression(expression: String, packTypeExpression: String): String {
+        val trimmed = expression.trim()
+        val args = parseNewPackInfoArgs(trimmed) ?: return trimmed
+        if (args.size < 5) return trimmed
+        val packType = packTypeExpression.trim()
+        val selectedFormat = "($packType == PackType.SERVER_DATA ? ${args[1]} : ${args[2]})"
+        val compatibility =
+            "PackCompatibility.forVersion(new InclusiveRange<>($selectedFormat), SharedConstants.getCurrentVersion().getPackVersion($packType))"
+        return "new Pack.Metadata(${args[0]}, $compatibility, ${args[3]}, java.util.List.of(), ${args[4]})"
+    }
+
+    private fun parseNewPackInfoArgs(expression: String): List<String>? {
+        val prefixes = listOf("new Pack.Info(", "new Pack.Metadata(")
+        val prefix = prefixes.firstOrNull { expression.startsWith(it) } ?: return null
+        val openParen = prefix.length - 1
+        val closeParen = findMatchingParen(expression, openParen)
+        if (closeParen != expression.length - 1) return null
+        return splitTopLevelJavaArgs(expression.substring(openParen + 1, closeParen))
+    }
+
+    private fun ensureGeneratedPackResourceCompat(
+        srcDir: Path,
+        compatPackage: String,
+        fileName: String,
+        source: String,
+        description: String,
+        ruleId: String,
+        dryRun: Boolean
+    ): List<Change> {
+        val compatFile = srcDir.resolve(compatPackage.replace('.', '/')).resolve(fileName)
+        if (compatFile.exists() && compatFile.readText() == source) return emptyList()
+        if (!dryRun) {
+            compatFile.parent.createDirectories()
+            compatFile.writeText(source)
+        }
+        return listOf(Change(
+            file = compatFile,
+            line = 1,
+            description = description,
+            before = "(missing generated pack resource adapter)",
+            after = compatPackage,
+            confidence = Confidence.HIGH,
+            ruleId = ruleId
+        ))
+    }
+
+    private fun generatedPathPackResourcesSource(packageName: String): String = """
+package $packageName;
+
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import net.minecraft.network.chat.Component;
+import net.minecraft.server.packs.CompositePackResources;
+import net.minecraft.server.packs.PackLocationInfo;
+import net.minecraft.server.packs.PackResources;
+import net.minecraft.server.packs.PackType;
+import net.minecraft.server.packs.repository.Pack;
+import net.minecraft.server.packs.repository.PackSource;
+
+/**
+ * Source-compatible adapter generated by modporter for the removed legacy
+ * PathPackResources constructors.
+ */
+public class PathPackResources extends net.minecraft.server.packs.PathPackResources {
+    private final boolean hidden;
+    private final Path root;
+
+    public PathPackResources(String id, boolean hidden, Path root) {
+        this(new PackLocationInfo(id, Component.literal(id), PackSource.BUILT_IN, Optional.empty()), hidden, root);
+    }
+
+    public PathPackResources(PackLocationInfo location, Path root) {
+        this(location, false, root);
+    }
+
+    public PathPackResources(PackLocationInfo location, boolean hidden, Path root) {
+        super(location, root);
+        this.hidden = hidden;
+        this.root = root;
+    }
+
+    @Override
+    public boolean isHidden() {
+        return this.hidden;
+    }
+
+    public Path root() {
+        return this.root;
+    }
+
+    public static class PathResourcesSupplier implements Pack.ResourcesSupplier {
+        private final Path content;
+        private final boolean hidden;
+
+        public PathResourcesSupplier(Path content) {
+            this(content, false);
+        }
+
+        public PathResourcesSupplier(Path content, boolean hidden) {
+            this.content = content;
+            this.hidden = hidden;
+        }
+
+        @Override
+        public PackResources openPrimary(PackLocationInfo location) {
+            return new PathPackResources(location, this.hidden, this.content);
+        }
+
+        @Override
+        public PackResources openFull(PackLocationInfo location, Pack.Metadata metadata) {
+            PackResources primary = this.openPrimary(location);
+            List<String> overlays = metadata.overlays();
+            if (overlays.isEmpty()) {
+                return primary;
+            }
+            List<PackResources> overlayPacks = new ArrayList<>(overlays.size());
+            for (String overlay : overlays) {
+                overlayPacks.add(new PathPackResources(location, this.hidden, this.content.resolve(overlay)));
+            }
+            return new CompositePackResources(primary, overlayPacks);
+        }
+    }
+}
+""".trimStart()
+
+    private fun generatedLegacyPackResourcesSupplierSource(packageName: String): String = """
+package $packageName;
+
+import java.util.Objects;
+import java.util.function.Function;
+import net.minecraft.server.packs.PackLocationInfo;
+import net.minecraft.server.packs.PackResources;
+import net.minecraft.server.packs.repository.Pack;
+
+/**
+ * Adapter generated by modporter for old single-method Pack.ResourcesSupplier
+ * lambdas. It preserves the old supplier contract and exposes it through the
+ * Minecraft 1.21 openPrimary/openFull interface.
+ */
+public record LegacyPackResourcesSupplier(Function<String, ? extends PackResources> factory) implements Pack.ResourcesSupplier {
+    public LegacyPackResourcesSupplier {
+        Objects.requireNonNull(factory, "factory");
+    }
+
+    @Override
+    public PackResources openPrimary(PackLocationInfo location) {
+        return this.factory.apply(location.id());
+    }
+
+    @Override
+    public PackResources openFull(PackLocationInfo location, Pack.Metadata metadata) {
+        return this.openPrimary(location);
+    }
+}
+""".trimStart()
+
+    private fun generatedDelegatingPackResourcesSource(packageName: String): String = """
+package $packageName;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import javax.annotation.Nullable;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.packs.AbstractPackResources;
+import net.minecraft.server.packs.PackLocationInfo;
+import net.minecraft.server.packs.PackResources;
+import net.minecraft.server.packs.PackType;
+import net.minecraft.server.packs.metadata.MetadataSectionSerializer;
+import net.minecraft.server.packs.metadata.pack.PackMetadataSection;
+import net.minecraft.server.packs.repository.PackSource;
+import net.minecraft.server.packs.resources.IoSupplier;
+
+/**
+ * Source-compatible implementation of the removed DelegatingPackResources base.
+ * It preserves the legacy constructor contract by merging namespace lookups
+ * across the supplied child packs.
+ */
+public class DelegatingPackResources extends AbstractPackResources {
+    private final boolean hidden;
+    private final PackMetadataSection packInfo;
+    private final List<PackResources> packs;
+    private final Map<String, List<PackResources>> assets;
+    private final Map<String, List<PackResources>> data;
+
+    public DelegatingPackResources(String id, boolean hidden, PackMetadataSection packInfo, List<? extends PackResources> packs) {
+        super(new PackLocationInfo(id, Component.literal(id), PackSource.BUILT_IN, Optional.empty()));
+        this.hidden = hidden;
+        this.packInfo = packInfo;
+        this.packs = List.copyOf(packs);
+        this.assets = this.buildNamespaceMap(PackType.CLIENT_RESOURCES, packs);
+        this.data = this.buildNamespaceMap(PackType.SERVER_DATA, packs);
+    }
+
+    private Map<String, List<PackResources>> buildNamespaceMap(PackType type, List<? extends PackResources> packList) {
+        Map<String, List<PackResources>> map = new LinkedHashMap<>();
+        for (PackResources pack : packList) {
+            for (String namespace : pack.getNamespaces(type)) {
+                map.computeIfAbsent(namespace, key -> new ArrayList<>()).add(pack);
+            }
+        }
+        map.replaceAll((key, value) -> List.copyOf(value));
+        return Map.copyOf(map);
+    }
+
+    @Override
+    public boolean isHidden() {
+        return this.hidden;
+    }
+
+    @Nullable
+    @Override
+    public IoSupplier<InputStream> getRootResource(String... paths) {
+        for (PackResources pack : this.packs) {
+            IoSupplier<InputStream> resource = pack.getRootResource(paths);
+            if (resource != null) {
+                return resource;
+            }
+        }
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    @Nullable
+    @Override
+    public <T> T getMetadataSection(MetadataSectionSerializer<T> deserializer) throws IOException {
+        return deserializer.getMetadataSectionName().equals("pack") ? (T) this.packInfo : null;
+    }
+
+    @Nullable
+    @Override
+    public IoSupplier<InputStream> getResource(PackType type, ResourceLocation location) {
+        for (PackResources pack : this.getCandidatePacks(type, location)) {
+            IoSupplier<InputStream> resource = pack.getResource(type, location);
+            if (resource != null) {
+                return resource;
+            }
+        }
+        return null;
+    }
+
+    @Override
+    public void listResources(PackType type, String namespace, String path, ResourceOutput output) {
+        for (PackResources pack : this.packs) {
+            pack.listResources(type, namespace, path, output);
+        }
+    }
+
+    @Override
+    public Set<String> getNamespaces(PackType type) {
+        return type == PackType.CLIENT_RESOURCES ? this.assets.keySet() : this.data.keySet();
+    }
+
+    @Override
+    public void close() {
+        for (PackResources pack : this.packs) {
+            pack.close();
+        }
+    }
+
+    @Nullable
+    public List<PackResources> getChildren() {
+        return this.packs;
+    }
+
+    private List<PackResources> getCandidatePacks(PackType type, ResourceLocation location) {
+        Map<String, List<PackResources>> map = type == PackType.CLIENT_RESOURCES ? this.assets : this.data;
+        return map.getOrDefault(location.getNamespace(), Collections.emptyList());
+    }
+}
+""".trimStart()
 
     private fun rewriteUnusedLegacyEnchantmentSubclasses(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
@@ -4692,17 +5256,20 @@ public final class DirtinessAttachment {
         val registrationPattern = Regex(
             """(?m)^([ \t]*)public\s+static\s+final\s+[\w.$<>?]+\s+(\w+)\s*=\s*CriteriaTriggers\.register\s*\(\s*new\s+(\w+)\s*\(\s*\)\s*\)\s*;\s*$"""
         )
+        val singletonRegistrationPattern = Regex(
+            """(?m)^([ \t]*)CriteriaTriggers\.register\s*\(\s*(\w+)\.INSTANCE\s*\)\s*;\s*$"""
+        )
         val triggerSources = javaFiles.associateBy { it.fileName.toString().removeSuffix(".java") }
         val registrations = javaFiles.flatMap { javaFile ->
             val text = javaFile.readText()
-            if (!text.contains("CriteriaTriggers.register(new ")) return@flatMap emptyList()
+            if (!text.contains("CriteriaTriggers.register(")) return@flatMap emptyList()
             val registryPackage = packageNameOf(text)
             val registryClassName = Regex("""\bclass\s+(\w+)\b""")
                 .find(text)
                 ?.groupValues
                 ?.get(1)
                 ?: return@flatMap emptyList()
-            registrationPattern.findAll(text).map { match ->
+            val fieldRegistrations = registrationPattern.findAll(text).map { match ->
                 val triggerClassName = match.groupValues[3]
                 LegacyCriterionRegistration(
                     registryFile = javaFile,
@@ -4715,7 +5282,23 @@ public final class DirtinessAttachment {
                         ?.let(::extractCriterionTriggerPath)
                         ?: criterionFieldToPath(match.groupValues[2])
                 )
-            }.toList()
+            }
+            val singletonRegistrations = singletonRegistrationPattern.findAll(text).map { match ->
+                val triggerClassName = match.groupValues[2]
+                val triggerPath = triggerSources[triggerClassName]
+                    ?.readText()
+                    ?.let(::extractCriterionTriggerPath)
+                    ?: criterionFieldToPath(triggerClassName.removeSuffix("Trigger"))
+                LegacyCriterionRegistration(
+                    registryFile = javaFile,
+                    registryPackage = registryPackage,
+                    registryClassName = registryClassName,
+                    fieldName = criterionPathToField(triggerPath),
+                    triggerClassName = triggerClassName,
+                    triggerPath = triggerPath
+                )
+            }
+            (fieldRegistrations + singletonRegistrations).toList().distinctBy { it.triggerClassName }
         }
         if (registrations.isEmpty()) return changes
 
@@ -4766,6 +5349,8 @@ public final class DirtinessAttachment {
                 val fieldAlternation = refs.joinToString("|") { Regex.escape(it.fieldName) }
                 text = Regex("""\b${Regex.escape(registryClassName)}\.($fieldAlternation)\.trigger\s*\(""")
                     .replace(text) { match -> "${registryClassName}.${match.groupValues[1]}.get().trigger(" }
+                text = Regex("""(?m)^[ \t]*${Regex.escape(registryClassName)}\.init\s*\(\s*\)\s*;\s*\r?\n?""")
+                    .replace(text, "")
             }
             if (text != original) {
                 if (!dryRun) javaFile.writeText(text)
@@ -4818,7 +5403,23 @@ public final class DirtinessAttachment {
                 val indent = match.groupValues[1]
                 "${indent}public static final DeferredHolder<CriterionTrigger<?>, ${registration.triggerClassName}> ${registration.fieldName} = TRIGGERS.register(\"${registration.triggerPath}\", ${registration.triggerClassName}::new);"
             }
+            if (!Regex("""\b${Regex.escape(registration.fieldName)}\b\s*=""").containsMatchIn(text)) {
+                val triggerRegister = Regex(
+                    """(?m)^([ \t]*)public\s+static\s+final\s+DeferredRegister<CriterionTrigger<\?>>\s+TRIGGERS\s*=\s*[^;\r\n]+;\s*$"""
+                ).find(text)
+                if (triggerRegister != null) {
+                    val indent = triggerRegister.groupValues[1]
+                    val insertPos = triggerRegister.range.last + 1
+                    val fieldLine = "\n${indent}public static final DeferredHolder<CriterionTrigger<?>, ${registration.triggerClassName}> ${registration.fieldName} = TRIGGERS.register(\"${registration.triggerPath}\", ${registration.triggerClassName}::new);"
+                    text = text.substring(0, insertPos) + fieldLine + text.substring(insertPos)
+                }
+            }
+            text = Regex(
+                """(?m)^[ \t]*CriteriaTriggers\.register\s*\(\s*${Regex.escape(registration.triggerClassName)}\.INSTANCE\s*\)\s*;\s*\r?\n?"""
+            ).replace(text, "")
         }
+        text = Regex("""(?s)\n[ \t]*public\s+static\s+void\s+init\s*\(\s*\)\s*\{\s*}\s*""")
+            .replace(text, "\n")
         return text
     }
 
@@ -5112,7 +5713,7 @@ public final class DirtinessAttachment {
             source.contains("deserializeBug") || (source.contains("\"bug\"") && source.contains("BlockState")) ->
                 blockCriterionTriggerSource(packageName, registryImport, className, instanceName, registration)
             source.contains("ItemPredicate.fromJson") ->
-                itemCriterionTriggerSource(packageName, registryImport, className, instanceName, registration)
+                itemCriterionTriggerSource(packageName, registryImport, className, instanceName, registration, source)
             source.contains("MinMaxBounds.Ints.fromJson") && source.contains("Potion") ->
                 potionCriterionTriggerSource(packageName, registryImport, className, instanceName, registration)
             source.contains("\"structure\"") && source.contains("structureName") ->
@@ -5277,8 +5878,11 @@ public class $className extends SimpleCriterionTrigger<$className.$instanceName>
         registryImport: String,
         className: String,
         instanceName: String,
-        registration: LegacyCriterionRegistration
-    ): String = """package $packageName;
+        registration: LegacyCriterionRegistration,
+        source: String
+    ): String {
+        val factories = itemCriterionFactoryMethods(source, className, instanceName, registration)
+        return """package $packageName;
 
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
@@ -5309,24 +5913,66 @@ public class $className extends SimpleCriterionTrigger<$className.$instanceName>
                 ItemPredicate.CODEC.optionalFieldOf("item").forGetter($className.$instanceName::item))
             .apply(instance, $className.$instanceName::new));
 
-        public static Criterion<$className.$instanceName> uncraftedItem() {
-            return ${registration.registryClassName}.${registration.fieldName}.get().createCriterion(new $instanceName(Optional.empty(), Optional.empty()));
-        }
-
-        public static Criterion<$className.$instanceName> uncraftedItem(ItemPredicate predicate) {
-            return ${registration.registryClassName}.${registration.fieldName}.get().createCriterion(new $instanceName(Optional.empty(), Optional.of(predicate)));
-        }
-
-        public static Criterion<$className.$instanceName> uncraftedItem(ItemLike item) {
-            return uncraftedItem(ItemPredicate.Builder.item().of(item).build());
-        }
+$factories
 
         public boolean matches(ItemStack stack) {
-            return this.item.isEmpty() || this.item.get().matches(stack);
+            return this.item.isEmpty() || this.item.get().test(stack);
         }
     }
 }
 """
+    }
+
+    private fun itemCriterionFactoryMethods(
+        source: String,
+        className: String,
+        instanceName: String,
+        registration: LegacyCriterionRegistration
+    ): String {
+        val methods = mutableListOf<String>()
+        val instanceType = """(?:${Regex.escape(className)}\.)?${Regex.escape(instanceName)}"""
+        Regex("""public\s+static\s+$instanceType\s+(\w+)\s*\(\s*ItemPredicate\s+([A-Za-z_$][\w$]*)\s*\)""")
+            .findAll(source)
+            .map { it.groupValues[1] to it.groupValues[2] }
+            .distinctBy { it.first }
+            .forEach { (methodName, paramName) ->
+                methods.add("""
+        public static Criterion<$className.$instanceName> $methodName(ItemPredicate $paramName) {
+            return ${registration.registryClassName}.${registration.fieldName}.get().createCriterion(new $instanceName(Optional.empty(), Optional.of($paramName)));
+        }
+""".trimEnd())
+            }
+        Regex("""public\s+static\s+$instanceType\s+(\w+)\s*\(\s*ItemLike\s+([A-Za-z_$][\w$]*)\s*\)""")
+            .findAll(source)
+            .map { it.groupValues[1] to it.groupValues[2] }
+            .distinctBy { it.first }
+            .forEach { (methodName, paramName) ->
+                methods.add("""
+        public static Criterion<$className.$instanceName> $methodName(ItemLike $paramName) {
+            return $methodName(ItemPredicate.Builder.item().of($paramName).build());
+        }
+""".trimEnd())
+            }
+        Regex("""public\s+static\s+$instanceType\s+(\w+)\s*\(\s*\)""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .distinct()
+            .forEach { methodName ->
+                methods.add("""
+        public static Criterion<$className.$instanceName> $methodName() {
+            return ${registration.registryClassName}.${registration.fieldName}.get().createCriterion(new $instanceName(Optional.empty(), Optional.empty()));
+        }
+""".trimEnd())
+            }
+        if (methods.isEmpty()) {
+            methods.add("""
+        public static Criterion<$className.$instanceName> createCriterion(ItemPredicate predicate) {
+            return ${registration.registryClassName}.${registration.fieldName}.get().createCriterion(new $instanceName(Optional.empty(), Optional.of(predicate)));
+        }
+""".trimEnd())
+        }
+        return methods.joinToString("\n\n")
+    }
 
     private fun potionCriterionTriggerSource(
         packageName: String,
@@ -5434,6 +6080,11 @@ public class $className extends SimpleCriterionTrigger<$className.$instanceName>
 
     private fun criterionFieldToPath(fieldName: String): String =
         fieldName.lowercase().removeSuffix("_trigger")
+
+    private fun criterionPathToField(triggerPath: String): String =
+        triggerPath.replace(Regex("""[^A-Za-z0-9]+"""), "_")
+            .trim('_')
+            .uppercase()
 
     private fun migrateTransparentBlockBeaconSource(source: String): String {
         var result = source
@@ -12747,30 +13398,50 @@ ${indent}if ($handlerVar != null) $statement"""
         }
 
         var result = source
-        val defaultPortalInfoPosition = if (source.contains("ITeleporter.super.getPortalInfo(entity, dest, defaultPortalInfo)")) {
-            javaMethodText(source, "getPortalInfo")
+        val getPortalInfoMethod = javaMethodText(source, "getPortalInfo")
+        val defaultSuperCall = getPortalInfoMethod?.let {
+            Regex("""ITeleporter\.super\.getPortalInfo\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\)""")
+                .find(it)
+        }
+        val defaultPortalInfoPosition = if (defaultSuperCall != null) {
+            getPortalInfoMethod
                 ?.let(::inferLegacyTeleporterDefaultPortalPosition)
                 ?: return source
         } else {
             null
         }
+        val legacySignature = legacyGetPortalInfoSignature(result)
         if (result.contains("implements ITeleporter")) {
             result = result.replace(" implements ITeleporter", "")
             result = removeImport(result, "net.neoforged.neoforge.common.util.ITeleporter")
             result = removeImport(result, "net.minecraftforge.common.util.ITeleporter")
+        }
+        val beforeNullChangeDimensionOverride = result
+        result = Regex(
+            """(?m)^([ \t]*)(@Nullable\s*\r?\n)?\1@Override\s*\r?\n\1public\s+Entity\s+changeDimension\(\s*ServerLevel\s+[A-Za-z_$][\w$]*\s*,\s*ITeleporter\s+[A-Za-z_$][\w$]*\s*\)\s*\{\s*\r?\n\1[ \t]*return\s+null\s*;\s*\r?\n\1}"""
+        ).replace(result) { match ->
+            val indent = match.groupValues[1]
+            val nullable = match.groupValues[2]
+            "${indent}${nullable}${indent}@Override\n${indent}public Entity changeDimension(DimensionTransition transition) {\n${indent}    return null;\n${indent}}"
+        }
+        if (result != beforeNullChangeDimensionOverride) {
+            result = removeImport(result, "net.neoforged.neoforge.common.util.ITeleporter")
+            result = removeImport(result, "net.minecraftforge.common.util.ITeleporter")
+            result = addImportIfMissing(result, "net.minecraft.world.level.portal.DimensionTransition")
         }
         if (result.contains("PortalInfo")) {
             result = result.replace("import net.minecraft.world.level.portal.PortalInfo;", "import net.minecraft.world.level.portal.DimensionTransition;")
             if (!result.contains("import net.minecraft.world.level.portal.DimensionTransition;")) {
                 result = addImportIfMissing(result, "net.minecraft.world.level.portal.DimensionTransition")
             }
-            result = result.replace("Function<ServerLevel, PortalInfo> defaultPortalInfo", "")
-            result = Regex("""\(\s*Entity\s+entity\s*,\s*ServerLevel\s+dest\s*,\s*\)""")
-                .replace(result, "(Entity entity, ServerLevel dest)")
-            result = Regex("""(?m)^([ \t]*)@Override\s*\r?\n\1public\s+PortalInfo\s+getPortalInfo\(\s*Entity\s+entity\s*,\s*ServerLevel\s+dest\s*\)""")
-                .replace(result) { match -> "${match.groupValues[1]}public DimensionTransition getPortalInfo(Entity entity, ServerLevel dest)" }
-            result = Regex("""(?m)^([ \t]*)public\s+PortalInfo\s+getPortalInfo\(\s*Entity\s+entity\s*,\s*ServerLevel\s+dest\s*\)""")
-                .replace(result) { match -> "${match.groupValues[1]}public DimensionTransition getPortalInfo(Entity entity, ServerLevel dest)" }
+            result = Regex("""\(\s*Entity\s+([A-Za-z_$][\w$]*)\s*,\s*ServerLevel\s+([A-Za-z_$][\w$]*)\s*,\s*(?:java\.util\.function\.)?Function\s*<\s*ServerLevel\s*,\s*PortalInfo\s*>\s*[A-Za-z_$][\w$]*\s*\)""")
+                .replace(result) { match -> "(Entity ${match.groupValues[1]}, ServerLevel ${match.groupValues[2]})" }
+            result = Regex("""(?m)^([ \t]*)@Override\s*\r?\n\1public\s+PortalInfo\s+getPortalInfo\(\s*Entity\s+([A-Za-z_$][\w$]*)\s*,\s*ServerLevel\s+([A-Za-z_$][\w$]*)\s*\)""")
+                .replace(result) { match -> "${match.groupValues[1]}public DimensionTransition getPortalInfo(Entity ${match.groupValues[2]}, ServerLevel ${match.groupValues[3]})" }
+            result = Regex("""(?m)^([ \t]*)public\s+PortalInfo\s+getPortalInfo\(\s*Entity\s+([A-Za-z_$][\w$]*)\s*,\s*ServerLevel\s+([A-Za-z_$][\w$]*)\s*\)""")
+                .replace(result) { match -> "${match.groupValues[1]}public DimensionTransition getPortalInfo(Entity ${match.groupValues[2]}, ServerLevel ${match.groupValues[3]})" }
+            result = Regex("""(?m)^([ \t]*)@Override\s*\r?\n\1public\s+boolean\s+playTeleportSound\(""")
+                .replace(result) { match -> "${match.groupValues[1]}public boolean playTeleportSound(" }
             result = result.replace("PortalInfo pos;", "DimensionTransition pos;")
             result = Regex("""\bPortalInfo\s+([A-Za-z_$][\w$]*)\s*=""")
                 .replace(result) { match -> "DimensionTransition ${match.groupValues[1]} =" }
@@ -12781,9 +13452,11 @@ ${indent}if ($handlerVar != null) $statement"""
             result = result.replace("pos.pos;", "pos.pos();")
             result = result.replace("BlockPos.containing(pos.pos)", "BlockPos.containing(pos.pos())")
             if (defaultPortalInfoPosition != null) {
+                val entityParam = defaultSuperCall?.groupValues?.get(1) ?: legacySignature?.entityParam ?: "entity"
+                val levelParam = defaultSuperCall?.groupValues?.get(2) ?: legacySignature?.levelParam ?: "dest"
                 result = result.replace(
-                    "ITeleporter.super.getPortalInfo(entity, dest, defaultPortalInfo)",
-                    "makePortalInfo(dest, entity, Vec3.atCenterOf($defaultPortalInfoPosition))"
+                    defaultSuperCall!!.value,
+                    "makePortalInfo($levelParam, $entityParam, Vec3.atCenterOf($defaultPortalInfoPosition))"
                 )
             }
             result = result.replace("return makePortalInfo(entity, portalX, portalY, portalZ);", "return makePortalInfo(destDim, entity, portalX, portalY, portalZ);")
@@ -12796,10 +13469,16 @@ ${indent}if ($handlerVar != null) $statement"""
                 .replace(result, "private static DimensionTransition makePortalInfo(ServerLevel level, Entity entity, Vec3 pos)")
             result = Regex("""new\s+PortalInfo\(\s*pos\s*,\s*Vec3\.ZERO\s*,\s*entity\.getYRot\(\)\s*,\s*entity\.getXRot\(\)\s*\)""")
                 .replace(result, "new DimensionTransition(level, pos, Vec3.ZERO, entity.getYRot(), entity.getXRot(), DimensionTransition.PLACE_PORTAL_TICKET)")
+            legacySignature?.let {
+                result = migratePortalInfoConstructorsInMethod(result, "getPortalInfo", it.levelParam)
+                result = migratePortalShapeCreatePortalInfoInMethod(result, "getPortalInfo")
+            }
+            result = migratePortalInfoConstructorsInMethod(result, "makePortalInfo", "level")
             result = removeMethodByName(result, "placeEntity")
             result = removeImport(result, "java.util.function.Function")
             javaMethodText(result, "getPortalInfo")?.let { method ->
-                val migratedMethod = method.replace("makePortalInfo(entity,", "makePortalInfo(dest, entity,")
+                val targetLevelParam = legacySignature?.levelParam ?: "dest"
+                val migratedMethod = method.replace("makePortalInfo(entity,", "makePortalInfo($targetLevelParam, entity,")
                 result = result.replace(method, migratedMethod)
             }
         }
@@ -12828,6 +13507,124 @@ ${indent}if ($handlerVar != null) $statement"""
         return result
     }
 
+    private data class LegacyPortalInfoSignature(
+        val entityParam: String,
+        val levelParam: String,
+        val defaultPortalInfoParam: String
+    )
+
+    private fun legacyGetPortalInfoSignature(source: String): LegacyPortalInfoSignature? =
+        Regex("""public\s+PortalInfo\s+getPortalInfo\(\s*Entity\s+([A-Za-z_$][\w$]*)\s*,\s*ServerLevel\s+([A-Za-z_$][\w$]*)\s*,\s*(?:java\.util\.function\.)?Function\s*<\s*ServerLevel\s*,\s*PortalInfo\s*>\s*([A-Za-z_$][\w$]*)\s*\)""")
+            .find(source)
+            ?.let { match ->
+                LegacyPortalInfoSignature(
+                    entityParam = match.groupValues[1],
+                    levelParam = match.groupValues[2],
+                    defaultPortalInfoParam = match.groupValues[3]
+                )
+            }
+
+    private fun migratePortalInfoConstructorsInMethod(source: String, methodName: String, levelExpression: String): String {
+        val method = javaMethodText(source, methodName) ?: return source
+        val migrated = migratePortalInfoConstructors(method, levelExpression)
+        return if (migrated == method) source else source.replace(method, migrated)
+    }
+
+    private fun migratePortalInfoConstructors(source: String, levelExpression: String): String {
+        val result = StringBuilder()
+        var cursor = 0
+        while (cursor < source.length) {
+            val constructorIndex = source.indexOf("new PortalInfo", cursor)
+            if (constructorIndex < 0) break
+            val openParen = source.indexOf('(', constructorIndex)
+            if (openParen < 0) break
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen < 0) break
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen)).map { it.trim() }
+            if (args.size != 4) {
+                cursor = closeParen + 1
+                continue
+            }
+            result.append(source, cursor, constructorIndex)
+            result.append("new DimensionTransition(")
+            result.append(levelExpression)
+            result.append(", ")
+            result.append(args[0])
+            result.append(", ")
+            result.append(args[1])
+            result.append(", ")
+            result.append(args[2])
+            result.append(", ")
+            result.append(args[3])
+            result.append(", DimensionTransition.PLACE_PORTAL_TICKET)")
+            cursor = closeParen + 1
+        }
+        if (cursor == 0) return source
+        result.append(source, cursor, source.length)
+        return result.toString()
+    }
+
+    private fun migratePortalShapeCreatePortalInfoInMethod(source: String, methodName: String): String {
+        val method = javaMethodText(source, methodName) ?: return source
+        val migrated = migratePortalShapeCreatePortalInfo(method)
+        return if (migrated == method) source else source.replace(method, migrated)
+    }
+
+    private fun migratePortalShapeCreatePortalInfo(source: String): String {
+        val result = StringBuilder()
+        var cursor = 0
+        while (cursor < source.length) {
+            val callIndex = source.indexOf("PortalShape.createPortalInfo", cursor)
+            if (callIndex < 0) break
+            val openParen = source.indexOf('(', callIndex)
+            if (openParen < 0) break
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen < 0) break
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen)).map { it.trim() }
+            if (args.size != 8) {
+                cursor = closeParen + 1
+                continue
+            }
+            val level = args[0]
+            val rectangle = args[1]
+            val axis = args[2]
+            val relativePosition = args[3]
+            val entity = args[4]
+            val speed = args[5]
+            val yRot = args[6]
+            val xRot = args[7]
+            val dimensions = "$entity.getDimensions($entity.getPose())"
+            result.append(source, cursor, callIndex)
+            result.append("new DimensionTransition(")
+            result.append(level)
+            result.append(", PortalShape.findCollisionFreePosition(PortalShape.getRelativePosition(")
+            result.append(rectangle)
+            result.append(", ")
+            result.append(axis)
+            result.append(", ")
+            result.append(relativePosition)
+            result.append(", ")
+            result.append(dimensions)
+            result.append("), ")
+            result.append(level)
+            result.append(", ")
+            result.append(entity)
+            result.append(", ")
+            result.append(dimensions)
+            result.append("), ")
+            result.append(speed)
+            result.append(", ")
+            result.append(yRot)
+            result.append(", ")
+            result.append(xRot)
+            result.append(", DimensionTransition.PLACE_PORTAL_TICKET)")
+            cursor = closeParen + 1
+        }
+        if (cursor == 0) return source
+        result.append(source, cursor, source.length)
+        return result.toString()
+    }
+
     private fun inferLegacyTeleporterDefaultPortalPosition(getPortalInfoMethod: String): String? {
         val id = """[A-Za-z_$][\w$]*"""
         return Regex("""\bBlockPos\s+($id)\s*=""")
@@ -12835,8 +13632,8 @@ ${indent}if ($handlerVar != null) $statement"""
             .map { it.groupValues[1] }
             .firstOrNull { variable ->
                 val escaped = Regex.escape(variable)
-                Regex("""\bplaceInExistingPortal\(\s*dest\s*,\s*entity\s*,\s*$escaped\s*\)""").containsMatchIn(getPortalInfoMethod) ||
-                    Regex("""\bmoveToSafeCoords\(\s*dest\s*,\s*entity\s*,\s*$escaped\s*\)""").containsMatchIn(getPortalInfoMethod)
+                Regex("""\b(?:placeInExistingPortal|moveToSafeCoords)\(\s*[A-Za-z_$][\w$]*\s*,\s*[A-Za-z_$][\w$]*\s*,\s*$escaped\s*\)""")
+                    .containsMatchIn(getPortalInfoMethod)
             }
     }
 
@@ -17922,11 +18719,17 @@ List<$recipeType> $listName = $recipeCall.stream()
             .replace(result) { match ->
                 val recipeType = match.groupValues[1]
                 val recipeVar = match.groupValues[2]
-                if (recipeType == "RecipeHolder") {
-                    match.value
-                } else {
-                    needsRecipeHolder = true
-                    "for (RecipeHolder<$recipeType> ${recipeVar}Holder : ${match.groupValues[3]}) {\n\t\t\t\t$recipeType $recipeVar = ${recipeVar}Holder.value();"
+                val recipeCall = match.groupValues[3]
+                when (recipeType) {
+                    "RecipeHolder" -> match.value
+                    "var" -> {
+                        needsRecipeHolder = true
+                        "for (Object ${recipeVar}Holder : $recipeCall) {\n\t\t\t\tvar $recipeVar = ((RecipeHolder<?>) ${recipeVar}Holder).value();"
+                    }
+                    else -> {
+                        needsRecipeHolder = true
+                        "for (RecipeHolder<$recipeType> ${recipeVar}Holder : $recipeCall) {\n\t\t\t\t$recipeType $recipeVar = ${recipeVar}Holder.value();"
+                    }
                 }
             }
         result = Regex("""\b([A-Za-z_$][\w$]*)\.getId\(\)""")

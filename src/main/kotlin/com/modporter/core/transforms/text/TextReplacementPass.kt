@@ -47,7 +47,7 @@ class TextReplacementPass(
 
         for (file in javaFiles) {
             try {
-                val result = processFile(projectDir, file, rules, dryRun)
+                val result = processFile(projectDir, file, rules, dryRun, errors)
                 changes.addAll(result)
             } catch (e: Exception) {
                 errors.add("Error processing ${file}: ${e.message}")
@@ -58,11 +58,38 @@ class TextReplacementPass(
         return PassResult(name, changes, errors)
     }
 
-    private fun processFile(projectDir: Path, file: Path, rules: List<TextReplacement>, dryRun: Boolean): List<Change> {
+    private fun processFile(
+        projectDir: Path,
+        file: Path,
+        rules: List<TextReplacement>,
+        dryRun: Boolean,
+        errors: MutableList<String>
+    ): List<Change> {
         val originalContent = file.readText()
         var content = originalContent
         val changes = mutableListOf<Change>()
         val tierIncorrectTagResources = mutableListOf<TierIncorrectTagResource>()
+
+        val networkHooksOpenScreen = migrateNetworkHooksOpenScreen(content, file)
+        content = networkHooksOpenScreen.content
+        changes.addAll(networkHooksOpenScreen.changes)
+        errors.addAll(networkHooksOpenScreen.errors)
+
+        val beforeInventoryRecipeHolder = content
+        content = migrateInventoryRecipeHolderInterface(content)
+        if (content != beforeInventoryRecipeHolder) {
+            changes.add(
+                Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate container RecipeHolder interface to RecipeCraftingHolder",
+                    before = "net.minecraft.world.inventory.RecipeHolder implements RecipeHolder",
+                    after = "net.minecraft.world.inventory.RecipeCraftingHolder implements RecipeCraftingHolder",
+                    confidence = Confidence.HIGH,
+                    ruleId = "inventory-recipeholder-recipecraftingholder"
+                )
+            )
+        }
 
         for (rule in rules) {
             val pattern = if (rule.isRegex) Regex(rule.pattern) else null
@@ -104,6 +131,22 @@ class TextReplacementPass(
             } else {
                 content.replace(rule.pattern, rule.replacement)
             }
+        }
+
+        val beforeTagManager = content
+        content = migrateRemovedTagManagerAccess(content)
+        if (content != beforeTagManager) {
+            changes.add(
+                Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate removed ITagManager item tag access to Registry.getTagOrEmpty",
+                    before = "ITagManager<Item> tags = BuiltInRegistries.ITEM.tags(); tags.getTag(tag)",
+                    after = "BuiltInRegistries.ITEM.getTagOrEmpty(tag)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "itagmanager-item-gettagorempty"
+                )
+            )
         }
 
         val beforeCustomEnchantments = content
@@ -328,8 +371,6 @@ class TextReplacementPass(
             "import net.neoforged.neoforge.network.NetworkRegistry;",
             "import net.neoforged.neoforge.network.NetworkDirection;",
             "import net.neoforged.neoforge.network.NetworkEvent;",
-            "import net.neoforged.neoforge.network.NetworkHooks;",
-            "import net.minecraftforge.network.NetworkHooks;",
             "import net.neoforged.fml.common.Mod.EventBusSubscriber;",
             "import net.minecraft.world.level.storage.loot.functions.CopyNbtFunction;",
         )
@@ -337,6 +378,10 @@ class TextReplacementPass(
             if (result.contains(stale)) {
                 result = removeImportLine(result, stale.removePrefix("import ").removeSuffix(";"))
             }
+        }
+        if (!result.contains("NetworkHooks.")) {
+            result = removeImportLine(result, "net.neoforged.neoforge.network.NetworkHooks")
+            result = removeImportLine(result, "net.minecraftforge.network.NetworkHooks")
         }
 
         if (!result.contains("ContextNbtProvider.")) {
@@ -514,6 +559,9 @@ class TextReplacementPass(
         }
         if (Regex("\\bSingleRecipeInput\\b").containsMatchIn(result) && !result.contains("import net.minecraft.world.item.crafting.SingleRecipeInput;")) {
             missingImports.add("import net.minecraft.world.item.crafting.SingleRecipeInput;")
+        }
+        if (Regex("\\bCacheableFunction\\b").containsMatchIn(result) && !result.contains("import net.minecraft.commands.CacheableFunction;")) {
+            missingImports.add("import net.minecraft.commands.CacheableFunction;")
         }
         if (Regex("\\bCraftingInput\\b").containsMatchIn(result) && !result.contains("import net.minecraft.world.item.crafting.CraftingInput;")) {
             missingImports.add("import net.minecraft.world.item.crafting.CraftingInput;")
@@ -2561,6 +2609,177 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         return result
     }
 
+    private data class NetworkHooksOpenScreenMigration(
+        val content: String,
+        val changes: List<Change>,
+        val errors: List<String>
+    )
+
+    private fun migrateNetworkHooksOpenScreen(source: String, file: Path): NetworkHooksOpenScreenMigration {
+        if (!source.contains("NetworkHooks.openScreen")) {
+            return NetworkHooksOpenScreenMigration(source, emptyList(), emptyList())
+        }
+
+        val changes = mutableListOf<Change>()
+        val errors = mutableListOf<String>()
+        val out = StringBuilder(source.length)
+        var cursor = 0
+        var searchFrom = 0
+        val callName = "NetworkHooks.openScreen"
+
+        while (true) {
+            val callStart = source.indexOf(callName, searchFrom)
+            if (callStart < 0) break
+            val openParen = source.indexOf('(', callStart + callName.length)
+            if (openParen < 0) {
+                errors.add("Cannot safely migrate NetworkHooks.openScreen in ${file}:${source.lineNumberAt(callStart)}: missing argument list")
+                break
+            }
+            val closeParen = findMatchingDelimiter(source, openParen, '(', ')')
+            if (closeParen < 0) {
+                errors.add("Cannot safely migrate NetworkHooks.openScreen in ${file}:${source.lineNumberAt(callStart)}: unbalanced argument list")
+                break
+            }
+
+            val args = splitTopLevelArguments(source.substring(openParen + 1, closeParen))
+            val replacement = when (args.size) {
+                2 -> "(${args[0]}).openMenu(${args[1]})"
+                3 -> {
+                    val extraData = args[2]
+                    when {
+                        isNetworkHooksExtraDataWriter(extraData, source) ->
+                            "(${args[0]}).openMenu(${args[1]}, $extraData)"
+                        isNetworkHooksBlockPosExtra(extraData, source) ->
+                            "(${args[0]}).openMenu(${args[1]}, buf -> buf.writeBlockPos($extraData))"
+                        else -> null
+                    }
+                }
+                else -> null
+            }
+
+            if (replacement == null) {
+                errors.add(
+                    "Cannot safely migrate NetworkHooks.openScreen in ${file}:${source.lineNumberAt(callStart)}: " +
+                        "expected 2 args or a statically identifiable Consumer/FriendlyByteBuf writer or BlockPos third arg"
+                )
+                out.append(source, cursor, closeParen + 1)
+            } else {
+                out.append(source, cursor, callStart)
+                out.append(replacement)
+                changes.add(Change(
+                    file = file,
+                    line = source.lineNumberAt(callStart),
+                    description = "Migrate NetworkHooks.openScreen with balanced argument parsing",
+                    before = source.substring(callStart, closeParen + 1),
+                    after = replacement,
+                    confidence = Confidence.HIGH,
+                    ruleId = "networkhooks-openscreen-balanced"
+                ))
+            }
+
+            cursor = closeParen + 1
+            searchFrom = closeParen + 1
+        }
+
+        out.append(source, cursor, source.length)
+        return NetworkHooksOpenScreenMigration(out.toString(), changes, errors)
+    }
+
+    private fun migrateInventoryRecipeHolderInterface(source: String): String {
+        val oldImport = "import net.minecraft.world.inventory.RecipeHolder;"
+        if (!source.contains(oldImport)) return source
+        return source
+            .replace(oldImport, "import net.minecraft.world.inventory.RecipeCraftingHolder;")
+            .let { result ->
+                Regex("""(implements\s+[^{;\r\n]*?)\bRecipeHolder\b""")
+                    .replace(result) { match -> "${match.groupValues[1]}RecipeCraftingHolder" }
+            }
+    }
+
+    private fun migrateRemovedTagManagerAccess(source: String): String {
+        if (!source.contains("ITagManager<")) return source
+        val lines = removeImportLine(source, "net.neoforged.neoforge.registries.tags.ITagManager").lines()
+        val out = mutableListOf<String>()
+        var i = 0
+        val id = """[A-Za-z_$][\w$]*"""
+        val declaration = Regex("""^(\s*)ITagManager<\s*Item\s*>\s+($id)\s*=\s*BuiltInRegistries\.ITEM\.tags\(\)\s*;\s*$""")
+        while (i < lines.size) {
+            val decl = declaration.find(lines[i])
+            if (decl != null && i + 2 < lines.size) {
+                val varName = decl.groupValues[2]
+                val nullGuard = Regex("""^\s*if\s*\(\s*${Regex.escape(varName)}\s*!=\s*null\s*\)\s*\{\s*$""")
+                if (nullGuard.matches(lines[i + 1])) {
+                    val loop = Regex("""^(\s*)${Regex.escape(varName)}\.getTag\((.*)\)\.stream\(\)\.forEach\(\s*\(\s*($id)\s*\)\s*->\s*(.*)\);\s*$""")
+                        .find(lines[i + 2])
+                    if (loop != null && i + 3 < lines.size && lines[i + 3].trim() == "}") {
+                        val indent = loop.groupValues[1]
+                        val tagExpression = loop.groupValues[2].trim()
+                        val itemVariable = loop.groupValues[3]
+                        val body = loop.groupValues[4].trim()
+                        out.add("${indent}BuiltInRegistries.ITEM.getTagOrEmpty($tagExpression).forEach((holder) -> { Item $itemVariable = holder.value(); $body; });")
+                        i += 4
+                        continue
+                    }
+
+                    val emptyCheck = Regex("""^(\s*)if\s*\(\s*${Regex.escape(varName)}\.getTag\((.*)\)\.isEmpty\(\)\s*\)\s*\{\s*$""")
+                        .find(lines[i + 2])
+                    if (emptyCheck != null) {
+                        val indent = emptyCheck.groupValues[1]
+                        val tagExpression = emptyCheck.groupValues[2].trim()
+                        out.add("${indent}if (!BuiltInRegistries.ITEM.getTagOrEmpty($tagExpression).iterator().hasNext()) {")
+                        i += 3
+                        while (i < lines.size) {
+                            out.add(lines[i])
+                            val copiedInnerClose = lines[i].trim() == "}"
+                            i++
+                            if (copiedInnerClose) break
+                        }
+                        if (i < lines.size && lines[i].trim() == "}") {
+                            i++
+                        }
+                        continue
+                    }
+                }
+            }
+            out.add(lines[i])
+            i++
+        }
+        return out.joinToString("\n")
+    }
+
+    private fun isNetworkHooksExtraDataWriter(expression: String, source: String): Boolean {
+        val trimmed = stripOuterParentheses(expression.trim())
+        if (trimmed.contains("->") || trimmed.contains("::")) return true
+        if (trimmed.startsWith("new Consumer") || trimmed.startsWith("new java.util.function.Consumer")) return true
+        val identifier = Regex("""^[A-Za-z_$][\w$]*$""").matchEntire(trimmed)?.value ?: return false
+        return Regex("""\b(?:java\.util\.function\.)?Consumer\s*<[^;=]+>\s+${Regex.escape(identifier)}\b""")
+            .containsMatchIn(source)
+    }
+
+    private fun isNetworkHooksBlockPosExtra(expression: String, source: String): Boolean {
+        val trimmed = stripOuterParentheses(expression.trim())
+        if (trimmed.startsWith("new BlockPos(") ||
+            trimmed.startsWith("new net.minecraft.core.BlockPos(") ||
+            trimmed.startsWith("BlockPos.") ||
+            trimmed.startsWith("net.minecraft.core.BlockPos.") ||
+            trimmed.endsWith(".getBlockPos()")) {
+            return true
+        }
+        val identifier = Regex("""^[A-Za-z_$][\w$]*$""").matchEntire(trimmed)?.value ?: return false
+        return Regex("""\b(?:net\.minecraft\.core\.)?BlockPos\s+${Regex.escape(identifier)}\b""")
+            .containsMatchIn(source)
+    }
+
+    private fun stripOuterParentheses(expression: String): String {
+        var result = expression
+        while (result.startsWith("(") && result.endsWith(")")) {
+            val closeParen = findMatchingDelimiter(result, 0, '(', ')')
+            if (closeParen != result.lastIndex) break
+            result = result.substring(1, result.lastIndex).trim()
+        }
+        return result
+    }
+
     private fun removeImportLine(source: String, importName: String): String =
         Regex("""(?m)^[ \t]*import\s+${Regex.escape(importName)};\s*\r?\n?""").replace(source, "")
 
@@ -2801,6 +3020,9 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
             }
             .joinToString("\n")
     }
+
+    private fun String.lineNumberAt(offset: Int): Int =
+        take(offset.coerceIn(0, length)).count { it == '\n' } + 1
 
     /**
      * Build the complete rule list by combining explicit text-replacements.json rules

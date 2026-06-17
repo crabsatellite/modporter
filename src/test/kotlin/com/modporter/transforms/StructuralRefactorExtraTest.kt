@@ -49,6 +49,90 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy pack resource APIs to resources supplier adapters`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("PackSetup.java").writeText("""
+            package com.example;
+
+            import java.nio.file.Path;
+            import net.minecraft.SharedConstants;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.server.packs.PackType;
+            import net.minecraft.server.packs.metadata.pack.PackMetadataSection;
+            import net.minecraft.server.packs.repository.Pack;
+            import net.minecraft.server.packs.repository.PackSource;
+            import net.minecraft.world.flag.FeatureFlagSet;
+            import net.neoforged.neoforge.event.AddPackFindersEvent;
+            import net.neoforged.neoforge.resource.PathPackResources;
+
+            public class PackSetup {
+                public void add(AddPackFindersEvent event, Path sourcePath) {
+                    PathPackResources pack = new PathPackResources("example:" + sourcePath, true, sourcePath);
+                    Pack.ResourcesSupplier resourcesSupplier = (string) -> pack;
+                    Pack.Info info = Pack.readPackInfo("builtin/example", resourcesSupplier);
+                    if (info != null) {
+                        event.addRepositorySource((source) -> source.accept(Pack.create("builtin/example", Component.literal("Example"), true, resourcesSupplier, info, PackType.CLIENT_RESOURCES, Pack.Position.TOP, false, PackSource.BUILT_IN)));
+                    }
+                    PackMetadataSection metadata = new PackMetadataSection(Component.literal("Desc"), SharedConstants.getCurrentVersion().getPackVersion(PackType.CLIENT_RESOURCES));
+                    event.addRepositorySource((source) -> source.accept(Pack.create("builtin/example_inline", Component.literal("Inline"), false, (string) -> pack, new Pack.Info(metadata.getDescription(), metadata.getPackFormat(PackType.SERVER_DATA), metadata.getPackFormat(PackType.CLIENT_RESOURCES), FeatureFlagSet.of(), pack.isHidden()), PackType.CLIENT_RESOURCES, Pack.Position.TOP, false, PackSource.BUILT_IN)));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CombinedPackResources.java").writeText("""
+            package com.example;
+
+            import java.nio.file.Path;
+            import java.util.List;
+            import net.minecraft.server.packs.PackResources;
+            import net.minecraft.server.packs.metadata.pack.PackMetadataSection;
+            import net.neoforged.neoforge.resource.DelegatingPackResources;
+
+            public class CombinedPackResources extends DelegatingPackResources {
+                public CombinedPackResources(String id, PackMetadataSection packInfo, List<? extends PackResources> packs, Path sourcePack) {
+                    super(id, true, packInfo, packs);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val setup = srcDir.resolve("PackSetup.java").readText()
+        val combined = srcDir.resolve("CombinedPackResources.java").readText()
+        val compatDir = tempDir.resolve("src/main/java/com/modporter/generated/examplemod/compat")
+
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-pack-resources" })
+        assertTrue(result.changes.any { it.ruleId == "struct-generate-path-pack-resources" })
+        assertTrue(result.changes.any { it.ruleId == "struct-generate-delegating-pack-resources" })
+        assertTrue(result.changes.any { it.ruleId == "struct-generate-legacy-pack-resources-supplier" })
+        assertTrue(setup.contains("import com.modporter.generated.examplemod.compat.PathPackResources;"))
+        assertTrue(setup.contains("new com.modporter.generated.examplemod.compat.LegacyPackResourcesSupplier((string) -> pack)"))
+        assertTrue(setup.contains("Pack.Metadata info = Pack.readPackMetadata("))
+        assertTrue(setup.contains("new Pack(new PackLocationInfo("))
+        assertTrue(setup.contains("new PackSelectionConfig("))
+        assertTrue(setup.contains("PackCompatibility.forVersion(new InclusiveRange<>("))
+        assertTrue(setup.contains("metadata.description()"))
+        assertTrue(setup.contains("metadata.packFormat()"))
+        assertFalse(setup.contains("Pack.create("))
+        assertFalse(setup.contains("Pack.Info"))
+        assertFalse(setup.contains("readPackInfo"))
+        assertFalse(setup.contains("getDescription()"))
+        assertFalse(setup.contains("getPackFormat("))
+        assertTrue(combined.contains("import com.modporter.generated.examplemod.compat.DelegatingPackResources;"))
+        assertTrue(compatDir.resolve("PathPackResources.java").exists())
+        assertTrue(compatDir.resolve("DelegatingPackResources.java").readText().contains("extends AbstractPackResources"))
+        assertTrue(compatDir.resolve("LegacyPackResourcesSupplier.java").readText().contains("openPrimary(PackLocationInfo location)"))
+    }
+
+    @Test
     fun `migrates cross class DeferredHolder presence checks without touching optionals`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -1544,6 +1628,63 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `custom entity capability migration imports Direction for sided EntityCapability`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val capabilityDir = srcDir.resolve("capability")
+        capabilityDir.createDirectories()
+
+        capabilityDir.resolve("PlayerData.java").writeText("""
+            package com.example.capability;
+
+            import net.minecraft.world.entity.player.Player;
+
+            public interface PlayerData {
+                void setEntity(Player player);
+            }
+        """.trimIndent())
+
+        capabilityDir.resolve("PlayerDataCapability.java").writeText("""
+            package com.example.capability;
+
+            public class PlayerDataCapability implements PlayerData {
+                public void setEntity(net.minecraft.world.entity.player.Player player) {
+                }
+            }
+        """.trimIndent())
+
+        capabilityDir.resolve("ExampleCapabilities.java").writeText("""
+            package com.example.capability;
+
+            import com.modporter.compat.Capability;
+            import com.modporter.compat.CapabilityManager;
+            import com.modporter.compat.CapabilityToken;
+            import net.minecraft.world.entity.Entity;
+            import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
+            import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
+
+            public class ExampleCapabilities {
+                public static final Capability<PlayerData> PLAYER_DATA = CapabilityManager.get(new CapabilityToken<>() {});
+
+                public static void registerCapabilities(RegisterCapabilitiesEvent event) {
+                    event.register(PlayerData.class);
+                }
+
+                public static void attachCapabilities(AttachCapabilitiesEvent<Entity> event) {
+                    event.addCapability(null, new PlayerDataCapability());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val capabilities = capabilityDir.resolve("ExampleCapabilities.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-custom-entity-capabilities" })
+        assertTrue(capabilities.contains("import net.minecraft.core.Direction;"), capabilities)
+        assertTrue(capabilities.contains("EntityCapability<PlayerData, Direction> PLAYER_DATA"), capabilities)
+        assertTrue(capabilities.contains("event.registerEntity(PLAYER_DATA"), capabilities)
+    }
+
+    @Test
     fun `migrates legacy advancement triggers to codec DeferredRegister API`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val advancementDir = srcDir.resolve("advancements")
@@ -1760,6 +1901,119 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates singleton registered item SimpleCriterionTrigger without hardcoded factory names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val advancementDir = srcDir.resolve("advancement")
+        advancementDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.advancement.ExampleAdvancementTriggers;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                }
+
+                public void commonSetup() {
+                    ExampleAdvancementTriggers.init();
+                }
+            }
+        """.trimIndent())
+
+        advancementDir.resolve("ExampleAdvancementTriggers.java").writeText("""
+            package com.example.advancement;
+
+            import net.minecraft.advancements.CriteriaTriggers;
+
+            public class ExampleAdvancementTriggers {
+                public static void init() {
+                    CriteriaTriggers.register(IncubationTrigger.INSTANCE);
+                }
+            }
+        """.trimIndent())
+
+        advancementDir.resolve("IncubationTrigger.java").writeText("""
+            package com.example.advancement;
+
+            import com.example.ExampleMod;
+            import com.google.gson.JsonObject;
+            import net.minecraft.advancements.critereon.*;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.item.ItemStack;
+
+            public class IncubationTrigger extends SimpleCriterionTrigger<IncubationTrigger.Instance> {
+                private static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, "incubation_trigger");
+                public static final IncubationTrigger INSTANCE = new IncubationTrigger();
+
+                @Override
+                public ResourceLocation getId() {
+                    return ID;
+                }
+
+                @Override
+                public IncubationTrigger.Instance createInstance(JsonObject json, ContextAwarePredicate predicate, DeserializationContext context) {
+                    ItemPredicate itemPredicate = ItemPredicate.fromJson(json.get("item"));
+                    return new IncubationTrigger.Instance(predicate, itemPredicate);
+                }
+
+                public void trigger(ServerPlayer player, ItemStack stack) {
+                    this.trigger(player, instance -> instance.test(stack));
+                }
+
+                public static class Instance extends SimpleCriterionTrigger.SimpleInstance {
+                    private final ItemPredicate item;
+
+                    public Instance(ContextAwarePredicate predicate, ItemPredicate item) {
+                        super(IncubationTrigger.ID, predicate);
+                        this.item = item;
+                    }
+
+                    public static IncubationTrigger.Instance forItem(ItemPredicate item) {
+                        return new IncubationTrigger.Instance(ContextAwarePredicate.ANY, item);
+                    }
+
+                    public static IncubationTrigger.Instance forAny() {
+                        return forItem(ItemPredicate.ANY);
+                    }
+
+                    public boolean test(ItemStack stack) {
+                        return this.item.test(stack);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val registry = advancementDir.resolve("ExampleAdvancementTriggers.java").readText()
+        val trigger = advancementDir.resolve("IncubationTrigger.java").readText()
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-criterion-trigger-deferred-register" })
+        assertTrue(result.changes.any { it.ruleId == "struct-simple-criterion-trigger-codec" })
+        assertTrue(registry.contains("DeferredRegister<CriterionTrigger<?>> TRIGGERS"), registry)
+        assertTrue(registry.contains("DeferredHolder<CriterionTrigger<?>, IncubationTrigger> INCUBATION_TRIGGER"), registry)
+        assertTrue(registry.contains("TRIGGERS.register(\"incubation_trigger\", IncubationTrigger::new)"), registry)
+        assertTrue(!registry.contains("CriteriaTriggers"), registry)
+        assertTrue(!registry.contains("public static void init"), registry)
+        assertTrue(trigger.contains("public static Criterion<IncubationTrigger.Instance> forItem(ItemPredicate item)"), trigger)
+        assertTrue(trigger.contains("public static Criterion<IncubationTrigger.Instance> forAny()"), trigger)
+        assertTrue(trigger.contains("this.item.get().test(stack)"), trigger)
+        assertTrue(!trigger.contains("uncraftedItem"), trigger)
+        assertTrue(!trigger.contains("ItemPredicate.fromJson"), trigger)
+        assertTrue(mod.contains("ExampleAdvancementTriggers.TRIGGERS.register(modEventBus);"), mod)
+        assertTrue(!mod.contains("ExampleAdvancementTriggers.init();"), mod)
+    }
+
+    @Test
     fun `migrates transparent block beacon color and legacy plant APIs`() {
         val blockDir = tempDir.resolve("src/main/java/com/example/block")
         blockDir.createDirectories()
@@ -1911,6 +2165,40 @@ class StructuralRefactorExtraTest {
         assertTrue(!migrated.contains("DistExecutor"))
         assertTrue(!migrated.contains("DistExecutor removed in NeoForge"))
         assertTrue(result.changes.none { it.ruleId == "struct-dist-executor" })
+    }
+
+    @Test
+    fun `migrates DistExecutor runForDist client block statement to dist guard`() {
+        val projectDir = createFile("ClientRegistration.java", """
+            package com.example;
+
+            import net.neoforged.fml.DistExecutor;
+
+            public class ClientRegistration {
+                public ClientRegistration(EventBus bus) {
+                    DistExecutor.unsafeRunForDist(() -> () -> {
+                        ClientMenus.register(bus);
+                        ClientTabs.register(bus);
+                        return true;
+                    }, () -> () -> false);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/ClientRegistration.java")
+            .readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-dist-executor-dist-guard" })
+        assertTrue(migrated.contains("import net.neoforged.api.distmarker.Dist;"))
+        assertTrue(migrated.contains("import net.neoforged.fml.loading.FMLLoader;"))
+        assertTrue(migrated.contains("if (FMLLoader.getDist() == Dist.CLIENT) {"))
+        assertTrue(migrated.contains("ClientMenus.register(bus);"))
+        assertTrue(migrated.contains("ClientTabs.register(bus);"))
+        assertTrue(!migrated.contains("DistExecutor"))
+        assertTrue(!migrated.contains("return true;"))
     }
 
     @Test
@@ -8240,6 +8528,89 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates ITeleporter portal info with project specific parameter names by source shape`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("NamedTeleporter.java").writeText("""
+            package com.example;
+
+            import net.minecraft.BlockUtil;
+            import net.minecraft.core.Direction;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.level.portal.PortalInfo;
+            import net.minecraft.world.level.portal.PortalShape;
+            import net.minecraft.world.phys.Vec3;
+            import net.neoforged.neoforge.common.util.ITeleporter;
+            import java.util.Optional;
+            import java.util.function.Function;
+
+            public class NamedTeleporter implements ITeleporter {
+                @Override
+                public boolean playTeleportSound(ServerPlayer player, ServerLevel sourceLevel, ServerLevel destinationLevel) {
+                    return false;
+                }
+
+                @Override
+                public PortalInfo getPortalInfo(Entity entity, ServerLevel destinationLevel, Function<ServerLevel, PortalInfo> defaultPortalInfo) {
+                    if (entity.isShiftKeyDown()) {
+                        return new PortalInfo(new Vec3(entity.getX(), destinationLevel.getMaxBuildHeight(), entity.getZ()), Vec3.ZERO, entity.getYRot(), entity.getXRot());
+                    }
+                    Direction.Axis axis = Direction.Axis.X;
+                    Vec3 vec3 = new Vec3(0.5, 0.0, 0.0);
+                    Optional<BlockUtil.FoundRectangle> rectangle = Optional.empty();
+                    return rectangle.map(found -> PortalShape.createPortalInfo(destinationLevel, found, axis, vec3, entity, entity.getDeltaMovement(), entity.getYRot(), entity.getXRot())).orElse(null);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val teleporter = srcDir.resolve("NamedTeleporter.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(!teleporter.contains("ITeleporter"), teleporter)
+        assertTrue(!teleporter.contains("import net.minecraft.world.level.portal.PortalInfo"), teleporter)
+        assertTrue(!teleporter.contains("new PortalInfo"), teleporter)
+        assertTrue(!teleporter.contains("Function<ServerLevel, PortalInfo>"), teleporter)
+        assertTrue(!teleporter.contains("destinationLevel, )"), teleporter)
+        assertTrue(teleporter.contains("public boolean playTeleportSound(ServerPlayer player, ServerLevel sourceLevel, ServerLevel destinationLevel)"))
+        assertTrue(teleporter.contains("public DimensionTransition getPortalInfo(Entity entity, ServerLevel destinationLevel)"))
+        assertTrue(teleporter.contains("new DimensionTransition(destinationLevel, new Vec3(entity.getX(), destinationLevel.getMaxBuildHeight(), entity.getZ()), Vec3.ZERO, entity.getYRot(), entity.getXRot(), DimensionTransition.PLACE_PORTAL_TICKET)"), teleporter)
+        assertTrue(teleporter.contains("PortalShape.findCollisionFreePosition(PortalShape.getRelativePosition(found, axis, vec3, entity.getDimensions(entity.getPose())), destinationLevel, entity, entity.getDimensions(entity.getPose()))"), teleporter)
+    }
+
+    @Test
+    fun `migrates var getAllRecipesFor loops without invalid holder generic`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RecipeDisplaySurface.java").writeText("""
+            package com.example;
+
+            import java.util.List;
+
+            public class RecipeDisplaySurface {
+                public void registerDisplays(DisplayRegistry registry) {
+                    for (var recipe : (List<?>) registry.getRecipeManager().getAllRecipesFor(ExampleRecipeTypes.ENCHANTING.get())) {
+                        if (recipe instanceof EnchantingRecipe enchanting) {
+                            use(enchanting);
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val surface = srcDir.resolve("RecipeDisplaySurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(surface.contains("import net.minecraft.world.item.crafting.RecipeHolder;"), surface)
+        assertFalse(surface.contains("RecipeHolder<var>"), surface)
+        assertTrue(surface.contains("for (Object recipeHolder : (List<?>) registry.getRecipeManager().getAllRecipesFor(ExampleRecipeTypes.ENCHANTING.get()))"), surface)
+        assertTrue(surface.contains("var recipe = ((RecipeHolder<?>) recipeHolder).value();"), surface)
+    }
+
+    @Test
     fun `does not synthesize legacy ITeleporter default portal position without source evidence`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -8273,6 +8644,37 @@ class StructuralRefactorExtraTest {
         assertTrue(teleporter.contains("ITeleporter.super.getPortalInfo(entity, dest, defaultPortalInfo)"))
         assertTrue(!teleporter.contains("DimensionTransition"))
         assertTrue(!teleporter.contains("Vec3.atCenterOf(entity.blockPosition())) : pos"))
+    }
+
+    @Test
+    fun `migrates null legacy changeDimension ITeleporter override to dimension transition override`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("FloatingBlock.java").writeText("""
+            package com.example;
+
+            import javax.annotation.Nullable;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.entity.Entity;
+            import net.neoforged.neoforge.common.util.ITeleporter;
+
+            public class FloatingBlock extends Entity {
+                @Nullable
+                @Override
+                public Entity changeDimension(ServerLevel destination, ITeleporter teleporter) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val floatingBlock = srcDir.resolve("FloatingBlock.java").readText()
+
+        assertTrue(floatingBlock.contains("import net.minecraft.world.level.portal.DimensionTransition;"), floatingBlock)
+        assertTrue(floatingBlock.contains("public Entity changeDimension(DimensionTransition transition)"), floatingBlock)
+        assertTrue(floatingBlock.contains("return null;"), floatingBlock)
+        assertTrue(!floatingBlock.contains("ITeleporter"), floatingBlock)
+        assertTrue(!floatingBlock.contains("changeDimension(ServerLevel destination"), floatingBlock)
     }
 
     @Test

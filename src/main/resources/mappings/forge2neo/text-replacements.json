@@ -928,32 +928,17 @@
     },
     {
       "id": "cls-BlockPathTypes",
-      "pattern": "BlockPathTypes",
+      "pattern": "\\bBlockPathTypes\\b",
       "replacement": "PathType",
       "description": "BlockPathTypes -> PathType (renamed in 1.21)",
-      "fileGlob": "*.java"
+      "fileGlob": "*.java",
+      "isRegex": true
     },
     {
       "id": "cls-FinishedRecipe-to-RecipeOutput",
       "pattern": "\\bFinishedRecipe\\b",
       "replacement": "RecipeOutput",
       "description": "FinishedRecipe -> RecipeOutput (renamed in 1.21)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "networkhooks-openscreen-pos",
-      "pattern": "NetworkHooks\\.openScreen\\(\\s*([^,;\\r\\n]+?)\\s*,\\s*([^,;\\r\\n]+?)\\s*,\\s*([^\\)]+?)\\s*\\)",
-      "replacement": "($1).openMenu($2, buf -> buf.writeBlockPos($3))",
-      "description": "NetworkHooks.openScreen(player, menu, pos) -> ServerPlayer.openMenu(menu, extra data writer)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "networkhooks-openscreen",
-      "pattern": "NetworkHooks\\.openScreen\\(\\s*([^,;\\r\\n]+?)\\s*,\\s*([^\\)]+?)\\s*\\)",
-      "replacement": "($1).openMenu($2)",
-      "description": "NetworkHooks.openScreen(player, menu) -> ServerPlayer.openMenu(menu)",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -974,6 +959,38 @@
       "isRegex": true
     },
     {
+      "id": "cls-GenericDirtMessageScreen",
+      "pattern": "\\bGenericDirtMessageScreen\\b",
+      "replacement": "GenericMessageScreen",
+      "description": "GenericDirtMessageScreen -> GenericMessageScreen (1.21)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "import-commandfunction-functions-package",
+      "pattern": "import net.minecraft.commands.CommandFunction;\\r?\\n",
+      "replacement": "import net.minecraft.commands.functions.CommandFunction;\n",
+      "description": "CommandFunction moved to net.minecraft.commands.functions in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "commandfunction-cacheable-none",
+      "pattern": "CommandFunction\\.CacheableFunction\\.NONE",
+      "replacement": "java.util.Optional.empty()",
+      "description": "CommandFunction.CacheableFunction.NONE became Optional.empty() for advancement rewards",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "commandfunction-cacheable-class",
+      "pattern": "\\bCommandFunction\\.CacheableFunction\\b",
+      "replacement": "CacheableFunction",
+      "description": "CommandFunction.CacheableFunction split into CacheableFunction in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "import-advancementrequirements-strategy-outer",
       "pattern": "import net.minecraft.advancements.AdvancementRequirements.Strategy;\\r?\\n",
       "replacement": "import net.minecraft.advancements.AdvancementRequirements;\n",
@@ -986,6 +1003,14 @@
       "pattern": "\\bAbstractGlassBlock\\b",
       "replacement": "TransparentBlock",
       "description": "AbstractGlassBlock -> TransparentBlock (1.21)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "cls-GlassBlock",
+      "pattern": "\\bGlassBlock\\b",
+      "replacement": "TransparentBlock",
+      "description": "GlassBlock -> TransparentBlock (1.21)",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -1497,14 +1522,6 @@
       "isRegex": false
     },
     {
-      "id": "networkhooks-import-remove",
-      "pattern": "import net.neoforged.neoforge.network.NetworkHooks;\\r?\\n",
-      "replacement": "",
-      "description": "NetworkHooks removed in NeoForge 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "planttype-import-remove",
       "pattern": "import net.neoforged.neoforge.common.PlantType;\\r?\\n",
       "replacement": "",
@@ -1567,14 +1584,6 @@
       "description": "Keep LazyOptional import for generated compatibility shim",
       "fileGlob": "*.java",
       "isRegex": true
-    },
-    {
-      "id": "recipe-holder-import",
-      "pattern": "import net.minecraft.world.inventory.RecipeHolder;",
-      "replacement": "import net.minecraft.world.item.crafting.RecipeHolder;",
-      "description": "RecipeHolder moved from world.inventory to world.item.crafting (1.21)",
-      "fileGlob": "*.java",
-      "isRegex": false
     },
     {
       "id": "recipe-holder-getall-optional-var",
@@ -1647,14 +1656,6 @@
       "description": "Recipe<T> is bound to RecipeInput in 1.21, not Container",
       "fileGlob": "*.java",
       "isRegex": true
-    },
-    {
-      "id": "smelting-single-recipe-input-import",
-      "pattern": "import net.minecraft.world.SimpleContainer;",
-      "replacement": "import net.minecraft.world.item.crafting.SingleRecipeInput;",
-      "description": "RecipeManager smelting lookups use SingleRecipeInput in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": false
     },
     {
       "id": "smelting-single-recipe-input-local",
@@ -3064,11 +3065,27 @@
     },
     {
       "id": "remove-implements-vanishable",
-      "pattern": " implements Vanishable",
+      "pattern": "\\s+implements\\s+Vanishable\\b",
       "replacement": "",
       "description": "Remove Vanishable interface (removed in 1.21)",
       "fileGlob": "*.java",
-      "isRegex": false
+      "isRegex": true
+    },
+    {
+      "id": "remove-trailing-implements-vanishable",
+      "pattern": ",\\s*Vanishable\\b",
+      "replacement": "",
+      "description": "Remove Vanishable from multi-interface implements clauses (removed in 1.21)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "remove-leading-implements-vanishable",
+      "pattern": "implements\\s+Vanishable\\s*,\\s*",
+      "replacement": "implements ",
+      "description": "Remove leading Vanishable from multi-interface implements clauses (removed in 1.21)",
+      "fileGlob": "*.java",
+      "isRegex": true
     },
     {
       "id": "remove-import-vanishable",
@@ -3261,6 +3278,38 @@
       "pattern": "(?m)^(\\s*)(\\w+)\\.begin\\(([^;]+)\\);",
       "replacement": "$1$2 = Tesselator.getInstance().begin($3);",
       "description": "BufferBuilder.begin(...) -> Tesselator.getInstance().begin(...) in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "remove-implements-dyeableleatheritem",
+      "pattern": "\\s+implements\\s+DyeableLeatherItem\\b",
+      "replacement": "",
+      "description": "Remove DyeableLeatherItem interface (removed in 1.21)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "remove-trailing-implements-dyeableleatheritem",
+      "pattern": ",\\s*DyeableLeatherItem\\b",
+      "replacement": "",
+      "description": "Remove DyeableLeatherItem from multi-interface implements clauses (removed in 1.21)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "remove-leading-implements-dyeableleatheritem",
+      "pattern": "implements\\s+DyeableLeatherItem\\s*,\\s*",
+      "replacement": "implements ",
+      "description": "Remove leading DyeableLeatherItem from multi-interface implements clauses (removed in 1.21)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "remove-import-dyeableleatheritem",
+      "pattern": "import net.minecraft.world.item.DyeableLeatherItem;\\r?\\n",
+      "replacement": "",
+      "description": "Remove DyeableLeatherItem import (interface removed in 1.21)",
       "fileGlob": "*.java",
       "isRegex": true
     },

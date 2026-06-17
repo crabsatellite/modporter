@@ -270,6 +270,12 @@ class BuildSystemPass(
         }
 
         try {
+            changes.addAll(migrateRemovedTitleScreenAccessors(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate removed TitleScreen accessor surfaces: ${e.message}")
+        }
+
+        try {
             changes.addAll(migrateAccessTransformers(projectDir, dryRun))
             changes.addAll(configureAccessTransformers(projectDir, dryRun))
         } catch (e: Exception) {
@@ -313,6 +319,40 @@ class BuildSystemPass(
         val errors = mutableListOf<String>()
         var content = file.readText()
         val original = content
+
+        val forgeGradleImportPattern = Regex("""(?m)^[ \t]*import\s+net\.minecraftforge\.gradle\.[^\r\n]+(?:\r?\n)?""")
+        val forgeGradleImport = forgeGradleImportPattern.find(content)
+        if (forgeGradleImport != null) {
+            changes.add(Change(
+                file = file,
+                line = content.lineNumberAt(forgeGradleImport.range.first),
+                description = "Remove ForgeGradle task import after ModDev migration",
+                before = forgeGradleImport.value.trim(),
+                after = "(removed)",
+                confidence = Confidence.HIGH,
+                ruleId = "build-remove-forgegradle-import"
+            ))
+            content = forgeGradleImportPattern.replace(content, "")
+        }
+
+        val jarJarTaskTypePattern = Regex("""tasks\.named\((\s*['"]jarJar['"]\s*),\s*JarJar\s*\)\.configure""")
+        val jarJarTaskType = jarJarTaskTypePattern.find(content)
+        if (jarJarTaskType != null) {
+            changes.add(Change(
+                file = file,
+                line = content.lineNumberAt(jarJarTaskType.range.first),
+                description = "Remove ForgeGradle JarJar task type reference",
+                before = jarJarTaskType.value,
+                after = "tasks.named(${jarJarTaskType.groupValues[1]}).configure",
+                confidence = Confidence.HIGH,
+                ruleId = "build-remove-forgegradle-jarjar-type"
+            ))
+            content = jarJarTaskTypePattern.replace(content) { match ->
+                "tasks.named(${match.groupValues[1]}).configure"
+            }
+        }
+        content = removeUnsupportedJarJarTaskClassifier(content, changes, file)
+        content = normalizeJarJarPublicationReferences(content, changes, file)
 
         // 1. Handle buildscript { } + apply plugin pattern (old-style ForgeGradle)
         val hasBuildscript = content.contains("buildscript")
@@ -371,6 +411,41 @@ class BuildSystemPass(
                     content = content.replace(match.value, "")
                 }
             }
+
+            val moddingXForgeGradlePlugins = listOf(
+                Regex("""(?m)^[ \t]*id\s*(?:\(\s*)?['"]org\.moddingx\.modgradle\.mapping['"]\s*(?:\))?\s*version\s*['"][^'"]+['"](?:\s*apply\s+false)?\s*$"""),
+                Regex("""(?m)^[ \t]*id\s*(?:\(\s*)?['"]org\.moddingx\.modgradle\.sourcejar['"]\s*(?:\))?\s*version\s*['"][^'"]+['"](?:\s*apply\s+false)?\s*$"""),
+            )
+            for (pluginPattern in moddingXForgeGradlePlugins) {
+                val matches = pluginPattern.findAll(content).toList()
+                for (match in matches) {
+                    changes.add(Change(
+                        file = file,
+                        line = content.lineNumberAt(match.range.first),
+                        description = "Remove ForgeGradle companion plugin: ${match.value.trim()}",
+                        before = match.value.trim(),
+                        after = "(removed; handled by ModDev or local Gradle task)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-remove-forgegradle-companion-plugin"
+                    ))
+                }
+                content = pluginPattern.replace(content, "")
+            }
+
+            val moddingXApplyPlugin = Regex("""(?m)^[ \t]*apply\s+plugin:\s*['"]org\.moddingx\.modgradle\.(?:mapping|sourcejar)['"]\s*(?:\r?\n)?""")
+            val applyPluginMatches = moddingXApplyPlugin.findAll(content).toList()
+            for (match in applyPluginMatches) {
+                changes.add(Change(
+                    file = file,
+                    line = content.lineNumberAt(match.range.first),
+                    description = "Remove ForgeGradle companion apply plugin line",
+                    before = match.value.trim(),
+                    after = "(removed; sourceJar task is generated when needed)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-remove-forgegradle-companion-apply"
+                ))
+            }
+            content = moddingXApplyPlugin.replace(content, "")
         }
 
         // 2. Replace Forge dependency with neoForge block
@@ -527,6 +602,7 @@ class BuildSystemPass(
         content = content.replace("forge_version_range", "neoforge_version_range")
         // Then forge_version -> neo_forge_version (avoid matching neo_forge_version again)
         content = content.replace(Regex("""(?<!neo_)\bforge_version\b"""), "neo_forge_version")
+        content = content.replace(Regex("""\bneoforge_version\b"""), "neo_forge_version")
         content = content.replace(Regex("""\bforgeVersion\b"""), "neoForgeVersion")
         // Also replace property key neoforge_version -> neo_forge_version in maps/references
         content = content.replace("neoforge_version            : neoforge_version", "neo_forge_version            : neo_forge_version")
@@ -632,6 +708,7 @@ class BuildSystemPass(
 
         // 10d. NeoForge bundles Mixin/MixinExtras; old standalone processors can break Mojmap remapping.
         content = removeBundledMixinDependencies(content, changes, file)
+        content = normalizeJarJarRangePinDsl(content, changes, file)
 
         // 11. Keep unresolved dependencies active while removing ForgeGradle-only wrappers.
         content = normalizeOldDependencyWrappers(content, resolvedPrefixes)
@@ -657,6 +734,8 @@ class BuildSystemPass(
         content = content.replace(Regex("""^.*[Rr]eobf.*\n?""", RegexOption.MULTILINE), "")
 
         // 14. Replace old property references in build.gradle body
+        content = content.replace(Regex("""\bproject\.mc_version\b"""), "project.minecraft_version")
+        content = content.replace(Regex("""\bmc_version\b"""), "minecraft_version")
         content = content.replace(Regex("""\bmcversion\b"""), "minecraft_version")
         content = content.replace(Regex("""\bmcVersion\b"""), "minecraft_version")
         content = content.replace(Regex("""(?<!neo_)\bforgeversion\b"""), "neo_forge_version")
@@ -689,6 +768,7 @@ class BuildSystemPass(
         }
 
         // 18. Clean up excessive blank lines
+        content = ensureSourceJarTask(content, changes, file)
         content = content.replace(Regex("""\n{3,}"""), "\n\n")
 
         if (content != original && !dryRun) {
@@ -696,6 +776,119 @@ class BuildSystemPass(
         }
 
         return changes to errors
+    }
+
+    private fun removeUnsupportedJarJarTaskClassifier(
+        content: String,
+        changes: MutableList<Change>,
+        file: Path
+    ): String {
+        var result = content
+        val wholeBlockPattern = Regex(
+            """(?ms)^[ \t]*tasks\.named\(\s*['"]jarJar['"]\s*\)\.configure\s*\{\s*archiveClassifier\s*=\s*['"][^'"]*['"]\s*\}\s*"""
+        )
+        val wholeBlockMatches = wholeBlockPattern.findAll(result).toList()
+        for (match in wholeBlockMatches) {
+            changes.add(Change(
+                file = file,
+                line = result.lineNumberAt(match.range.first),
+                description = "Remove ForgeGradle JarJar archiveClassifier task configuration",
+                before = match.value.trim(),
+                after = "(removed; ModDev jarJar is not a Jar task)",
+                confidence = Confidence.HIGH,
+                ruleId = "build-remove-jarjar-archive-classifier"
+            ))
+        }
+        result = wholeBlockPattern.replace(result, "")
+
+        val linePattern = Regex("""(?m)^[ \t]*archiveClassifier\s*=\s*['"][^'"]*['"]\s*\r?\n?""")
+        var searchFrom = 0
+        while (true) {
+            val blockMatch = Regex("""tasks\.named\(\s*['"]jarJar['"]\s*\)\.configure\s*\{""").find(result, searchFrom)
+                ?: break
+            val openBrace = result.indexOf('{', blockMatch.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (closeBrace <= openBrace) break
+            val body = result.substring(openBrace + 1, closeBrace)
+            val lineMatches = linePattern.findAll(body).toList()
+            if (lineMatches.isNotEmpty()) {
+                val before = result.substring(blockMatch.range.first, closeBrace + 1)
+                val cleanedBody = linePattern.replace(body, "")
+                result = result.substring(0, openBrace + 1) + cleanedBody + result.substring(closeBrace)
+                changes.add(Change(
+                    file = file,
+                    line = result.lineNumberAt(blockMatch.range.first),
+                    description = "Remove ForgeGradle JarJar archiveClassifier task configuration",
+                    before = before.trim(),
+                    after = result.substring(blockMatch.range.first, result.indexOf('}', openBrace) + 1).trim(),
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-remove-jarjar-archive-classifier"
+                ))
+                searchFrom = openBrace + cleanedBody.length + 1
+            } else {
+                searchFrom = closeBrace + 1
+            }
+        }
+        return result
+    }
+
+    private fun normalizeJarJarPublicationReferences(
+        content: String,
+        changes: MutableList<Change>,
+        file: Path
+    ): String {
+        var result = content
+        val replacements = listOf(
+            Regex("""\bartifact\s+project\.tasks\.jarJar\b""") to "artifact tasks.named('jar')",
+            Regex("""\bartifact\s+tasks\.jarJar\b""") to "artifact tasks.named('jar')",
+            Regex("""\bmainArtifact\(\s*tasks\.jarJar\s*\)""") to "mainArtifact(tasks.jar)",
+            Regex("""\buploadFile\s*=\s*tasks\.jarJar\b""") to "uploadFile = tasks.jar"
+        )
+        for ((pattern, replacement) in replacements) {
+            val matches = pattern.findAll(result).toList()
+            for (match in matches) {
+                changes.add(Change(
+                    file = file,
+                    line = result.lineNumberAt(match.range.first),
+                    description = "Publish ModDev archive jar instead of non-archive jarJar task",
+                    before = match.value,
+                    after = replacement,
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-jarjar-publication-archive"
+                ))
+            }
+            result = pattern.replace(result, replacement)
+        }
+        return result
+    }
+
+    private fun ensureSourceJarTask(content: String, changes: MutableList<Change>, file: Path): String {
+        if (!Regex("""\bsourceJar\b""").containsMatchIn(content)) return content
+        if (Regex("""\b(?:tasks\.(?:register|create)\(\s*['"]sourceJar['"]|task\s+sourceJar\b)""")
+                .containsMatchIn(content)) {
+            return content
+        }
+
+        val task = """
+tasks.register('sourceJar', Jar) {
+    archiveClassifier = 'sources'
+    from sourceSets.main.allSource
+}
+
+""".trimIndent() + System.lineSeparator()
+        val insertAt = Regex("""(?m)^publishing\s*\{""").find(content)?.range?.first
+            ?: Regex("""(?m)^curseforge\s*\{""").find(content)?.range?.first
+            ?: content.length
+        changes.add(Change(
+            file = file,
+            line = content.lineNumberAt(insertAt.coerceAtMost(content.length)),
+            description = "Create sourceJar task after removing ForgeGradle sourcejar plugin",
+            before = "org.moddingx.modgradle.sourcejar plugin",
+            after = "tasks.register('sourceJar', Jar) from sourceSets.main.allSource",
+            confidence = Confidence.HIGH,
+            ruleId = "build-sourcejar-task"
+        ))
+        return content.substring(0, insertAt) + task + content.substring(insertAt)
     }
 
     private fun transformSettingsGradle(
@@ -1966,7 +2159,8 @@ public static SoundEvent getDeathSound(LivingEntity $param) {
 
     private fun rewriteClassForNamePresenceChecksWithoutReflection(source: String): String {
         val pattern = Regex(
-            """(?s)try\s*\{\s*Class\.forName\(\s*"([^"]+)"\s*\)\s*;\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*=\s*true\s*;\s*\}\s*catch\s*\(\s*ClassNotFoundException\s+[A-Za-z_$][\w$]*\s*\)\s*\{\s*\2\s*=\s*false\s*;\s*\}"""
+            """try\s*\{\s*Class\.forName\(\s*"([^"]+)"(?:\s*,\s*false\s*,\s*.*?)?\s*\)\s*;\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*=\s*true\s*;\s*\}\s*catch\s*\(\s*ClassNotFoundException\s+[A-Za-z_$][\w$]*\s*\)\s*\{\s*(?:\2\s*=\s*false\s*;)?\s*\}""",
+            RegexOption.DOT_MATCHES_ALL
         )
         val rewritten = pattern.replace(source) { match ->
             """${match.groupValues[2]} = modporterClassResourcePresent("${match.groupValues[1]}");"""
@@ -2537,7 +2731,9 @@ config="$configName"
                 modified = Regex("""event\.phase\s*==\s*TickEvent\.Phase\.START\s*&&\s*""").replace(modified, "")
                 modified = Regex("""\s*&&\s*event\.phase\s*==\s*TickEvent\.Phase\.START""").replace(modified, "")
 
-                if (!Regex("""\bTickEvent\.Phase\b""").containsMatchIn(modified)) {
+                if (!Regex("""\bTickEvent\.Phase\b""").containsMatchIn(modified) &&
+                    Regex("""\bTickEvent\b|import\s+net\.(?:minecraftforge|neoforged\.neoforge)\.event(?:\.tick)?\.TickEvent;""")
+                        .containsMatchIn(modified)) {
                     modified = removeJavaImport(modified, "net.minecraftforge.event.TickEvent")
                     modified = removeJavaImport(modified, "net.neoforged.neoforge.event.TickEvent")
                     modified = removeJavaImport(modified, "net.neoforged.neoforge.event.tick.TickEvent")
@@ -2567,6 +2763,157 @@ config="$configName"
             }
 
         return changes
+    }
+
+    private fun migrateRemovedTitleScreenAccessors(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val javaFiles = java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .toList()
+        val changes = mutableListOf<Change>()
+        val removedMethods = linkedSetOf<String>()
+
+        for (javaFile in javaFiles) {
+            val original = javaFile.readText()
+            if (!original.contains("@Mixin(TitleScreen.class)") || !original.contains("@Accessor")) continue
+
+            val (withoutAccessors, methods) = removeRemovedTitleScreenAccessorMethods(original)
+            if (withoutAccessors == original) continue
+
+            val modified = cleanupTitleScreenRemovedAccessorImports(withoutAccessors)
+            if (modified != original) {
+                removedMethods.addAll(methods)
+                changes.add(Change(
+                    file = javaFile,
+                    line = 1,
+                    description = "Remove Mixin accessors for TitleScreen fields and inner classes removed in 1.21",
+                    before = methods.joinToString(", "),
+                    after = "removed accessors for non-existent TitleScreen targets",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-title-screen-removed-accessors"
+                ))
+                if (!dryRun) javaFile.writeText(modified)
+            }
+        }
+
+        if (removedMethods.isNotEmpty()) {
+            for (javaFile in javaFiles) {
+                val original = javaFile.readText()
+                val modified = cleanupTitleScreenRemovedAccessorImports(
+                    removeRemovedTitleScreenAccessorCallStatements(original, removedMethods)
+                )
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Remove direct calls that only target removed TitleScreen accessor methods",
+                        before = removedMethods.joinToString(", "),
+                        after = "removed direct obsolete accessor call statements",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-title-screen-removed-accessor-calls"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                }
+            }
+        }
+
+        changes.addAll(removeUnusedTitleScreenUpdateIndicatorClasses(javaFiles, removedMethods, dryRun))
+        return changes
+    }
+
+    private fun removeRemovedTitleScreenAccessorMethods(source: String): Pair<String, Set<String>> {
+        val removed = linkedSetOf<String>()
+        val methodPattern = Regex(
+            """(?ms)^([ \t]*(?:@[^\r\n]+(?:\r?\n|[ \t]+))*[ \t]*(?:[\w.$<>\[\], ?]+\s+)+([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*;\s*)"""
+        )
+        var modified = methodPattern.replace(source) { match ->
+            val block = match.groupValues[1]
+            val methodName = match.groupValues[2]
+            val isRemovedTitleScreenAccessor = block.contains("@Accessor") && (
+                block.contains("TitleScreen.WarningLabel") ||
+                    block.contains("TitleScreenModUpdateIndicator") ||
+                    Regex("""@Accessor\s*\(\s*(?:value\s*=\s*)?"panorama"""").containsMatchIn(block)
+                )
+            if (isRemovedTitleScreenAccessor) {
+                removed.add(methodName)
+                ""
+            } else {
+                match.value
+            }
+        }
+        val removedTypeAccessorPatterns = listOf(
+            Regex("""(?ms)^[ \t]*(?:@[^\r\n]+\r?\n)+[ \t]*TitleScreenModUpdateIndicator\s+([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*;\s*"""),
+            Regex("""(?ms)^[ \t]*(?:@[^\r\n]+\r?\n)+[ \t]*void\s+([A-Za-z_$][\w$]*)\s*\([^;{}]*TitleScreenModUpdateIndicator[^;{}]*\)\s*;\s*"""),
+            Regex("""(?ms)^[ \t]*(?:@[^\r\n]+\r?\n)+[ \t]*TitleScreen\.WarningLabel\s+([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*;\s*""")
+        )
+        for (pattern in removedTypeAccessorPatterns) {
+            modified = pattern.replace(modified) { match ->
+                removed.add(match.groupValues[1])
+                ""
+            }
+        }
+        return modified to removed
+    }
+
+    private fun removeRemovedTitleScreenAccessorCallStatements(source: String, removedMethods: Set<String>): String {
+        var result = source
+        for (method in removedMethods) {
+            val callStatement = Regex(
+                """(?m)^[ \t]*[^\r\n]*\.${Regex.escape(method)}\s*\([^\r\n]*\)[^\r\n]*;\s*(?:\r?\n)?"""
+            )
+            result = callStatement.replace(result, "")
+        }
+        return result
+    }
+
+    private fun removeUnusedTitleScreenUpdateIndicatorClasses(
+        javaFiles: List<Path>,
+        removedMethods: Set<String>,
+        dryRun: Boolean
+    ): List<Change> {
+        val changes = mutableListOf<Change>()
+        val currentFiles = javaFiles.filter { it.exists() }
+        val sources = currentFiles.associateWith {
+            removeRemovedTitleScreenAccessorCallStatements(it.readText(), removedMethods)
+        }
+        val updateIndicatorClasses = sources.mapNotNull { (file, source) ->
+            if (!source.contains("extends TitleScreenModUpdateIndicator")) return@mapNotNull null
+            val className = Regex("""\bclass\s+([A-Za-z_$][\w$]*)\b[\s\S]*?\bextends\s+TitleScreenModUpdateIndicator\b""")
+                .find(source)
+                ?.groupValues
+                ?.get(1)
+                ?: file.fileName.toString().removeSuffix(".java")
+            file to className
+        }
+
+        for ((file, className) in updateIndicatorClasses) {
+            val hasExternalReference = sources.any { (otherFile, source) ->
+                otherFile != file && Regex("""\b${Regex.escape(className)}\b""").containsMatchIn(source)
+            }
+            if (hasExternalReference) continue
+
+            changes.add(Change(
+                file = file,
+                line = 1,
+                description = "Remove unused TitleScreenModUpdateIndicator subclass after the NeoForge title-screen update widget was removed",
+                before = className,
+                after = "(deleted unused removed-API subclass)",
+                confidence = Confidence.HIGH,
+                ruleId = "build-title-screen-update-indicator-class"
+            ))
+            if (!dryRun) file.deleteIfExists()
+        }
+
+        return changes
+    }
+
+    private fun cleanupTitleScreenRemovedAccessorImports(source: String): String {
+        var result = source
+        result = removeJavaImportIfSimpleNameUnused(result, "net.neoforged.neoforge.client.gui.TitleScreenModUpdateIndicator")
+        result = removeJavaImportIfSimpleNameUnused(result, "net.minecraft.client.renderer.PanoramaRenderer")
+        return result
     }
 
     private fun migrateAccessTransformers(projectDir: Path, dryRun: Boolean): List<Change> {
@@ -2700,6 +3047,8 @@ config="$configName"
             entry.contains("net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator defaultBlock") ||
             entry.contains("net.minecraft.world.level.chunk.ChunkGenerator getPlacementsForStructure(") ||
             entry.contains("net.minecraft.client.resources.model.ModelBakery UNREFERENCED_TEXTURES") ||
+            entry.contains("net.minecraft.world.item.crafting.SimpleCookingSerializer\$CookieBaker") ||
+            entry.contains("net.minecraft.client.gui.screens.TitleScreen\$WarningLabel") ||
             entry.contains("net.minecraft.world.entity.LivingEntity getDeathSound()") ||
             entry.contains("net.minecraft.world.entity.decoration.HangingEntity setDirection(") ||
             entry.contains("net.neoforged.neoforge.client.event.EntityRenderersEvent\$AddLayers renderers") ||
@@ -3222,11 +3571,12 @@ $body
         // Replace forge version property (various naming conventions)
         var foundForgeVersion = false
         for (pattern in listOf(
-            Regex("""forge_version\s*=\s*.+"""),
-            Regex("""neo_forge_version\s*=\s*.+"""),
-            Regex("""neoforge_version\s*=\s*.+"""),
-            Regex("""forgeversion\s*=\s*.+"""),
-            Regex("""forgeVersion\s*=\s*.+"""),
+            Regex("""(?m)^forge_version\s*=\s*.+$"""),
+            Regex("""(?m)^neo_forge_version\s*=\s*.+$"""),
+            Regex("""(?m)^neoforge_version\s*=\s*.+$"""),
+            Regex("""(?m)^neoneo_forge_version\s*=\s*.+$"""),
+            Regex("""(?m)^forgeversion\s*=\s*.+$"""),
+            Regex("""(?m)^forgeVersion\s*=\s*.+$"""),
         )) {
             if (pattern.containsMatchIn(content)) {
                 val match = pattern.find(content)!!
@@ -3244,7 +3594,7 @@ $body
             }
         }
         // Ensure neo_forge_version exists even if no forge version property was found
-        if (!foundForgeVersion && !content.contains("neo_forge_version")) {
+        if (!foundForgeVersion && !Regex("""(?m)^neo_forge_version\s*=""").containsMatchIn(content)) {
             content += "\n# Added by modporter\nneo_forge_version=21.1.219\n"
             changes.add(Change(
                 file = file, line = content.lines().size,
@@ -3259,10 +3609,10 @@ $body
         // Replace Minecraft version (handles various naming conventions)
         var foundMcVersion = false
         for (mcProp in listOf(
-            Regex("""minecraft_version\s*=\s*1\.20\.\d+"""),
-            Regex("""mc_version\s*=\s*1\.20\.\d+"""),
-            Regex("""mcversion\s*=\s*1\.20\.\d+"""),
-            Regex("""mcVersion\s*=\s*1\.20\.\d+"""),
+            Regex("""(?m)^minecraft_version\s*=\s*1\.20\.\d+\s*$"""),
+            Regex("""(?m)^mc_version\s*=\s*1\.20\.\d+\s*$"""),
+            Regex("""(?m)^mcversion\s*=\s*1\.20\.\d+\s*$"""),
+            Regex("""(?m)^mcVersion\s*=\s*1\.20\.\d+\s*$"""),
         )) {
             if (mcProp.containsMatchIn(content)) {
                 val match = mcProp.find(content)!!
@@ -3282,7 +3632,7 @@ $body
             }
         }
         // Ensure minecraft_version exists
-        if (!foundMcVersion && !content.contains("minecraft_version")) {
+        if (!foundMcVersion && !Regex("""(?m)^minecraft_version\s*=""").containsMatchIn(content)) {
             content += "minecraft_version=1.21.1\n"
             changes.add(Change(
                 file = file, line = content.lines().size,
@@ -3471,6 +3821,18 @@ $body
 
     private fun removeJavaImport(source: String, importName: String): String =
         source.replace(Regex("""(?m)^[ \t]*import\s+${Regex.escape(importName)};\s*\r?\n"""), "")
+
+    private fun removeJavaImportIfSimpleNameUnused(source: String, importName: String): String {
+        val withoutImport = removeJavaImport(source, importName)
+        if (withoutImport == source) return source
+        val simpleName = importName.substringAfterLast('.')
+        return if (usesJavaSimpleNameOutsideImports(withoutImport, simpleName)) source else withoutImport
+    }
+
+    private fun usesJavaSimpleNameOutsideImports(source: String, simpleName: String): Boolean {
+        val withoutImports = Regex("""(?m)^[ \t]*import\s+[^;]+;\s*\r?\n""").replace(source, "")
+        return Regex("""\b${Regex.escape(simpleName)}\b""").containsMatchIn(withoutImports)
+    }
 
     private fun detectWorldCarverModIdExpression(source: String, projectDir: Path): String? {
         Regex("""@(?:Mod\.)?EventBusSubscriber\s*\([^)]*\bmodid\s*=\s*([^,)]+)""")
@@ -3781,7 +4143,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         changes: MutableList<Change>,
         file: Path
     ): String {
-        val depKeywords = listOf("compileOnly", "runtimeOnly", "implementation", "annotationProcessor", "testAnnotationProcessor", "testImplementation")
+        val depKeywords = listOf("compileOnly", "runtimeOnly", "implementation", "annotationProcessor", "testAnnotationProcessor", "testImplementation", "jarJar")
         val bundledPrefixes = listOf("org.spongepowered:mixin", "io.github.llamalad7:mixinextras")
         val lines = content.lines().toMutableList()
         var i = 0
@@ -3796,12 +4158,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
             var depth = 0
             var j = i
             do {
-                for (ch in lines[j]) {
-                    when (ch) {
-                        '(', '[' -> depth++
-                        ')', ']' -> depth--
-                    }
-                }
+                depth += delimiterDepthDeltaOutsideStrings(lines[j])
                 j++
             } while (j < lines.size && depth > 0)
 
@@ -3825,6 +4182,134 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
             }
         }
         return lines.joinToString("\n")
+    }
+
+    private fun normalizeJarJarRangePinDsl(
+        content: String,
+        changes: MutableList<Change>,
+        file: Path
+    ): String {
+        val lines = content.lines().toMutableList()
+        var i = 0
+        while (i < lines.size) {
+            val trimmed = lines[i].trim()
+            if (trimmed.startsWith("//") || !trimmed.startsWith("jarJar") || !trimmed.contains("{")) {
+                i++
+                continue
+            }
+
+            val blockStart = i
+            var depth = 0
+            var j = i
+            do {
+                depth += braceDepthDeltaOutsideStrings(lines[j])
+                j++
+            } while (j < lines.size && depth > 0)
+
+            val blockText = lines.subList(blockStart, j).joinToString("\n")
+            if (!blockText.contains("jarJar.ranged(") && !blockText.contains("jarJar.pin(")) {
+                i = j
+                continue
+            }
+
+            val bodyLines = lines.subList(blockStart + 1, (j - 1).coerceAtLeast(blockStart + 1))
+            val unsupportedOnly = bodyLines.all { bodyLine ->
+                val bodyTrimmed = bodyLine.trim()
+                bodyTrimmed.isEmpty() ||
+                    bodyTrimmed.startsWith("jarJar.ranged(") ||
+                    bodyTrimmed.startsWith("jarJar.pin(")
+            }
+            val replacementLines = if (unsupportedOnly) {
+                val closureStart = indexOfOutsideStrings(lines[blockStart], '{')
+                listOf(if (closureStart >= 0) lines[blockStart].substring(0, closureStart).trimEnd() else lines[blockStart])
+            } else {
+                lines.subList(blockStart, j).filterNot { bodyLine ->
+                    val bodyTrimmed = bodyLine.trim()
+                    bodyTrimmed.startsWith("jarJar.ranged(") || bodyTrimmed.startsWith("jarJar.pin(")
+                }
+            }
+
+            for (k in (j - 1) downTo blockStart) lines.removeAt(k)
+            for ((offset, replacementLine) in replacementLines.withIndex()) {
+                lines.add(blockStart + offset, replacementLine)
+            }
+            changes.add(Change(
+                file = file,
+                line = blockStart + 1,
+                description = "Remove ForgeGradle JarJar range/pin DSL unsupported by ModDev",
+                before = blockText.trim(),
+                after = replacementLines.joinToString("\n").trim(),
+                confidence = Confidence.HIGH,
+                ruleId = "build-normalize-jarjar-range-pin"
+            ))
+            i = blockStart + replacementLines.size
+        }
+        return lines.joinToString("\n")
+    }
+
+    private fun delimiterDepthDeltaOutsideStrings(line: String): Int {
+        var depth = 0
+        scanOutsideGradleStrings(line) { ch ->
+            when (ch) {
+                '(', '[', '{' -> depth++
+                ')', ']', '}' -> depth--
+            }
+        }
+        return depth
+    }
+
+    private fun braceDepthDeltaOutsideStrings(line: String): Int {
+        var depth = 0
+        scanOutsideGradleStrings(line) { ch ->
+            when (ch) {
+                '{' -> depth++
+                '}' -> depth--
+            }
+        }
+        return depth
+    }
+
+    private fun indexOfOutsideStrings(line: String, target: Char): Int {
+        var found = -1
+        scanOutsideGradleStrings(line) { ch, index ->
+            if (found < 0 && ch == target) found = index
+        }
+        return found
+    }
+
+    private fun scanOutsideGradleStrings(line: String, visit: (Char) -> Unit) {
+        scanOutsideGradleStrings(line) { ch, _ -> visit(ch) }
+    }
+
+    private fun scanOutsideGradleStrings(line: String, visit: (Char, Int) -> Unit) {
+        var inSingle = false
+        var inDouble = false
+        var escaped = false
+        var i = 0
+        while (i < line.length) {
+            val ch = line[i]
+            val next = line.getOrNull(i + 1)
+            if (!inSingle && !inDouble && ch == '/' && next == '/') break
+            if (inSingle || inDouble) {
+                if (escaped) {
+                    escaped = false
+                } else if (ch == '\\') {
+                    escaped = true
+                } else if (inSingle && ch == '\'') {
+                    inSingle = false
+                } else if (inDouble && ch == '"') {
+                    inDouble = false
+                }
+                i++
+                continue
+            }
+            when (ch) {
+                '\'' -> inSingle = true
+                '"' -> inDouble = true
+                else -> visit(ch, i)
+            }
+            i++
+        }
     }
 
     /**

@@ -420,6 +420,72 @@ class RealModBenchmarkTest {
     }
 
     @Test
+    fun `converted project validation rejects invalid recipe holder var generic`(@TempDir tempDir: Path) {
+        tempDir.resolve("src/main/resources/META-INF").createDirectories()
+        tempDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").writeText("modLoader=\"javafml\"\n")
+        tempDir.resolve("build.gradle").writeText(
+            """
+            plugins {
+                id 'net.neoforged.moddev'
+            }
+            """.trimIndent()
+        )
+        val sourceFile = tempDir.resolve("src/main/java/com/example/Ported.java")
+        sourceFile.parent.createDirectories()
+        sourceFile.writeText(
+            """
+            package com.example;
+
+            import net.minecraft.world.item.crafting.RecipeHolder;
+
+            public class Ported {
+                void recipes(Iterable<?> recipes) {
+                    for (RecipeHolder<var> recipeHolder : recipes) {
+                    }
+                }
+            }
+            """.trimIndent()
+        )
+
+        val issues = validateConvertedProject(tempDir, PipelineResult(emptyList(), dryRun = false))
+
+        assertTrue(
+            issues.any { it.contains("Converted source contains invalid migration artifacts") },
+            "Expected invalid RecipeHolder<var> to fail converted-project validation; got: $issues"
+        )
+    }
+
+    @Test
+    fun `converted project validation rejects public top level type filename mismatch`(@TempDir tempDir: Path) {
+        tempDir.resolve("src/main/resources/META-INF").createDirectories()
+        tempDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").writeText("modLoader=\"javafml\"\n")
+        tempDir.resolve("build.gradle").writeText(
+            """
+            plugins {
+                id 'net.neoforged.moddev'
+            }
+            """.trimIndent()
+        )
+        val sourceFile = tempDir.resolve("src/main/java/com/example/AetherBlockPathTypes.java")
+        sourceFile.parent.createDirectories()
+        sourceFile.writeText(
+            """
+            package com.example;
+
+            public class AetherPathType {
+            }
+            """.trimIndent()
+        )
+
+        val issues = validateConvertedProject(tempDir, PipelineResult(emptyList(), dryRun = false))
+
+        assertTrue(
+            issues.any { it.contains("Converted source contains invalid migration artifacts") && it.contains("public type AetherPathType") },
+            "Expected public type/file mismatch to fail converted-project validation; got: $issues"
+        )
+    }
+
+    @Test
     fun `converted project validation rejects build migration placeholders`(@TempDir tempDir: Path) {
         tempDir.resolve("src/main/resources/META-INF").createDirectories()
         tempDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").writeText("modLoader=\"javafml\"\n")
@@ -814,6 +880,13 @@ class RealModBenchmarkTest {
                         bypassMarkers.take(8).joinToString(", ")
                 )
             }
+            val invalidMigrationArtifacts = findInvalidSourceMigrationArtifacts(projectDir.resolve("src/main/java"))
+            if (invalidMigrationArtifacts.isNotEmpty()) {
+                issues.add(
+                    "Converted source contains invalid migration artifacts (${invalidMigrationArtifacts.size}): " +
+                        invalidMigrationArtifacts.take(8).joinToString(", ")
+                )
+            }
         }
 
         val buildFiles = listOf(projectDir.resolve("build.gradle"), projectDir.resolve("build.gradle.kts"))
@@ -923,6 +996,42 @@ class RealModBenchmarkTest {
                     text.lines().forEachIndexed { index, line ->
                         if (markerPatterns.any { it.containsMatchIn(line) }) {
                             hits.add("${srcDir.relativize(file)}:${index + 1}")
+                        }
+                    }
+                }
+        } finally {
+            stream.close()
+        }
+        return hits
+    }
+
+    private fun findInvalidSourceMigrationArtifacts(srcDir: Path): List<String> {
+        if (!srcDir.exists()) return emptyList()
+        val markerPatterns = listOf(
+            "RecipeHolder<var>" to Regex("""\bRecipeHolder\s*<\s*var\s*>""")
+        )
+        val hits = mutableListOf<String>()
+        val stream = Files.walk(srcDir)
+        try {
+            stream
+                .filter { Files.isRegularFile(it) && it.toString().endsWith(".java") }
+                .filter { !srcDir.relativize(it).toString().replace('\\', '/').startsWith("references/") }
+                .forEach { file ->
+                    val active = activeCode(file.readText())
+                    for ((label, pattern) in markerPatterns) {
+                        pattern.findAll(active).forEach { match ->
+                            val lineNumber = active.substring(0, match.range.first).count { it == '\n' } + 1
+                            hits.add("${srcDir.relativize(file)}:$lineNumber contains $label")
+                        }
+                    }
+                    active.lines().forEachIndexed { index, line ->
+                        val match = Regex("""^public\s+(?:abstract\s+|final\s+)?(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b""")
+                            .find(line)
+                            ?: return@forEachIndexed
+                        val publicType = match.groupValues[1]
+                        val fileStem = file.fileName.toString().substringBeforeLast('.')
+                        if (publicType != fileStem) {
+                            hits.add("${srcDir.relativize(file)}:${index + 1} public type $publicType does not match file $fileStem")
                         }
                     }
                 }

@@ -36,7 +36,7 @@ class AstTransformPass(
         val changes = mutableListOf<Change>()
         val errors = mutableListOf<String>()
         val skipped = mutableListOf<String>()
-        val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17))
+        val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE))
 
         val javaFiles = Files.walk(projectDir)
             .filter { it.extension == "java" }
@@ -87,9 +87,23 @@ class AstTransformPass(
             transformer.visit(cu, null)
         }
 
+        val staleImportsRemoved = removeStaleImports(cu)
+
         // Add missing imports for types introduced by AST transforms
         if (changes.isNotEmpty()) {
             addMissingImports(cu)
+        }
+
+        if (staleImportsRemoved) {
+            changes.add(Change(
+                file = file,
+                line = 1,
+                description = "Remove stale Forge/NeoForge imports for APIs removed in 1.21",
+                before = "stale removed API imports",
+                after = "imports removed",
+                confidence = Confidence.HIGH,
+                ruleId = "ast-stale-imports"
+            ))
         }
 
         if (!dryRun && changes.isNotEmpty()) {
@@ -109,6 +123,7 @@ class AstTransformPass(
         val neededImports = mapOf(
             "net.neoforged.fml.ModContainer" to "ModContainer",
             "net.neoforged.fml.common.EventBusSubscriber" to "@EventBusSubscriber",
+            "net.neoforged.bus.api.ICancellableEvent" to "ICancellableEvent",
         )
 
         for ((importFqn, marker) in neededImports) {
@@ -117,11 +132,15 @@ class AstTransformPass(
             }
         }
 
-        // Remove stale imports
+    }
+
+    private fun removeStaleImports(cu: CompilationUnit): Boolean {
         val staleImports = listOf(
             "net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext",
+            "net.minecraftforge.eventbus.api.Cancelable",
+            "net.neoforged.bus.api.Cancelable",
         )
-        cu.imports.removeIf { it.nameAsString in staleImports }
+        return cu.imports.removeIf { it.nameAsString in staleImports }
     }
 }
 

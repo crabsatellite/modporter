@@ -86,8 +86,35 @@ class AstTransformTest {
         val transformed = projectDir.resolve("src/main/java/com/example/TestEvent.java").readText()
 
         assertFalse(transformed.contains("@Cancelable"))
-        assertTrue(transformed.contains("ICancellableEvent"))
+        assertFalse(transformed.contains("import net.minecraftforge.eventbus.api.Cancelable;"))
+        assertTrue(transformed.contains("import net.neoforged.bus.api.ICancellableEvent;"))
+        assertTrue(transformed.contains("public class TestEvent extends Event implements ICancellableEvent"))
         assertTrue(result.changes.any { it.ruleId == "ast-cancelable" })
+    }
+
+    @Test
+    fun `stale cancelable import is removed even when no annotation changed`() {
+        val projectDir = createTestFile("DocumentedEvent.java", """
+            package com.example;
+            import net.neoforged.bus.api.Cancelable;
+            import net.neoforged.neoforge.event.entity.EntityEvent;
+
+            /**
+             * This event is not {@link Cancelable}.
+             */
+            public class DocumentedEvent extends EntityEvent {
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = AstTransformPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/DocumentedEvent.java").readText()
+
+        assertFalse(transformed.contains("import net.neoforged.bus.api.Cancelable;"))
+        assertTrue(transformed.contains("This event is not {@link Cancelable}."))
+        assertTrue(result.changes.any { it.ruleId == "ast-stale-imports" })
     }
 
     @Test

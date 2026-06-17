@@ -5,6 +5,7 @@ hotbath	HotBath	local	..\hotBath-1.20	-	.	false	-
 showercore	ShowerCore	local	..\ShowerCore-1.20	-	.	false	hotbath
 sakura	Sakura Mod	local	..\Sakura_mod-1.20.1	-	.	false	-
 twilightforest	Twilight Forest	git	https://github.com/TeamTwilight/twilightforest.git	1.20.1	.	true	-
+aether	The Aether	git	https://github.com/The-Aether-Team/The-Aether.git	1.20.1-develop	.	true	-
 radios	Radios	missing	-	-	.	false	-
 leaningtower	LeaningTower	missing	-	-	.	false	-
 villagertourism	VillagerTourism	missing	-	-	.	false	-
