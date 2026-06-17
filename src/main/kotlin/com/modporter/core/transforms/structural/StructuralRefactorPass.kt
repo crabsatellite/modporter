@@ -398,6 +398,16 @@ class StructuralRefactorPass : Pass {
             errors.add("DropExperienceBlock constructor migration error: ${e.message}")
         }
 
+        // StairBlock now takes BlockState directly instead of a supplier. Custom
+        // subclasses that only forward the legacy Supplier<BlockState> argument
+        // should expose the same constructor boundary as vanilla StairBlock.
+        try {
+            val stairBlockChanges = migrateStairBlockStateSupplierConstructors(projectDir, dryRun)
+            changes.addAll(stairBlockChanges)
+        } catch (e: Exception) {
+            errors.add("StairBlock constructor migration error: ${e.message}")
+        }
+
         // FlowerBlock now takes Holder<MobEffect> directly. Subclasses that
         // only forward the legacy Supplier<MobEffect> constructor need the same
         // signature, and call sites should pass holder constants directly.
@@ -22822,6 +22832,98 @@ public class ${builder.className} implements RecipeBuilder {
             trimmed.contains("ConstantInt.") ||
             trimmed.contains("ClampedInt.") ||
             trimmed.contains("IntProvider.")
+    }
+
+    private fun migrateStairBlockStateSupplierConstructors(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val changes = mutableListOf<Change>()
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        val migratedConstructors = linkedSetOf<String>()
+
+        for (file in javaFiles) {
+            val source = file.readText()
+            if (!source.contains("extends StairBlock") || !source.contains("Supplier<BlockState>") || !source.contains("super(")) continue
+            val className = javaTopLevelTypeName(source) ?: continue
+            val migrated = migrateStairBlockSubclassConstructorSource(source, className)
+            if (migrated != source) {
+                migratedConstructors += className
+                changes.add(Change(
+                    file = file,
+                    line = 0,
+                    description = "Migrate StairBlock subclass constructor from state supplier to BlockState",
+                    before = "Subclass(Supplier<BlockState> state, Properties properties); super(state, properties)",
+                    after = "Subclass(BlockState state, Properties properties); super(state, properties)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-stairblock-state-constructor"
+                ))
+                if (!dryRun) {
+                    file.writeText(migrated)
+                }
+            }
+        }
+
+        if (migratedConstructors.isEmpty()) return changes
+        for (file in javaFiles) {
+            val source = file.readText()
+            val migrated = migrateStairBlockConstructorCallSitesSource(source, migratedConstructors)
+            if (migrated != source) {
+                changes.add(Change(
+                    file = file,
+                    line = 0,
+                    description = "Pass BlockState directly to StairBlock subclass constructors",
+                    before = "new CustomStairsBlock(() -> BLOCK.defaultBlockState(), properties)",
+                    after = "new CustomStairsBlock(BLOCK.defaultBlockState(), properties)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-stairblock-state-constructor"
+                ))
+                if (!dryRun) {
+                    file.writeText(migrated)
+                }
+            }
+        }
+        return changes
+    }
+
+    private fun migrateStairBlockSubclassConstructorSource(source: String, className: String): String {
+        val id = """[A-Za-z_$][\w$]*"""
+        val constructorPattern = Regex(
+            """public\s+${Regex.escape(className)}\s*\(\s*(?:java\.util\.function\.)?Supplier\s*<\s*BlockState\s*>\s+($id)\s*,\s*((?:BlockBehaviour\.)?Properties)\s+($id)\s*\)"""
+        )
+        val match = constructorPattern.find(source) ?: return source
+        val stateName = match.groupValues[1]
+        val propertiesType = match.groupValues[2]
+        val propertiesName = match.groupValues[3]
+        val superPattern = Regex("""super\(\s*${Regex.escape(stateName)}\s*,\s*${Regex.escape(propertiesName)}\s*\)\s*;""")
+        if (!superPattern.containsMatchIn(source)) return source
+        var result = constructorPattern.replaceFirst(
+            source,
+            "public $className(BlockState $stateName, $propertiesType $propertiesName)"
+        )
+        if (!Regex("""\bSupplier\s*<""").containsMatchIn(result) &&
+            !Regex("""\bjava\.util\.function\.Supplier\s*<""").containsMatchIn(result)) {
+            result = removeImport(result, "java.util.function.Supplier")
+        }
+        return result
+    }
+
+    private fun migrateStairBlockConstructorCallSitesSource(source: String, constructorClasses: Set<String>): String {
+        if (!source.contains("new ") || !source.contains("() ->") || !source.contains(".defaultBlockState()")) return source
+        var result = source
+        for (className in constructorClasses) {
+            result = rewriteJavaNew(result, className) { args ->
+                if (args.size != 2) return@rewriteJavaNew null
+                val stateSupplier = args[0].trim()
+                if (!stateSupplier.startsWith("() ->") || !stateSupplier.contains(".defaultBlockState()")) {
+                    return@rewriteJavaNew null
+                }
+                val state = stateSupplier.removePrefix("() ->").trim()
+                "new $className($state, ${args[1].trim()})"
+            }
+        }
+        return result
     }
 
     private fun migrateFlowerBlockMobEffectHolderConstructors(projectDir: Path, dryRun: Boolean): List<Change> {

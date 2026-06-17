@@ -10632,6 +10632,48 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates stair block subclass constructors from state suppliers to block states`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RichStairsBlock.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.minecraft.world.level.block.StairBlock;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class RichStairsBlock extends StairBlock {
+                public RichStairsBlock(Supplier<BlockState> state, BlockBehaviour.Properties properties) {
+                    super(state, properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleBlocks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class ExampleBlocks {
+                public Object rich() {
+                    return new RichStairsBlock(() -> ModBlocks.STONE.get().defaultBlockState(), BlockBehaviour.Properties.ofFullCopy(ModBlocks.STONE.get()));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("RichStairsBlock.java").readText()
+        val registry = srcDir.resolve("ExampleBlocks.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-stairblock-state-constructor" })
+        assertTrue(block.contains("public RichStairsBlock(BlockState state, BlockBehaviour.Properties properties)"), block)
+        assertTrue(block.contains("super(state, properties);"), block)
+        assertFalse(block.contains("java.util.function.Supplier"), block)
+        assertTrue(registry.contains("new RichStairsBlock(ModBlocks.STONE.get().defaultBlockState(), BlockBehaviour.Properties.ofFullCopy(ModBlocks.STONE.get()))"), registry)
+        assertFalse(registry.contains("() -> ModBlocks.STONE"), registry)
+    }
+
+    @Test
     fun `migrates legacy vanilla block registry codec banner and near packet APIs by source shape`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
