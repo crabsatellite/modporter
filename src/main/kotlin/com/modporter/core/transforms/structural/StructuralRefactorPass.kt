@@ -9277,12 +9277,54 @@ ${entries.joinToString(",\n")}
         result = Regex(
             """(?m)^[ \t]*if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\)\s*return;\s*\r?\n"""
         ).replace(result, "")
+        splitTickEventParameterNames(result, "Post").forEach { eventName ->
+            result = removeSplitTickPhaseChecksForEventName(result, eventName, "END")
+        }
+        splitTickEventParameterNames(result, "Pre").forEach { eventName ->
+            result = removeSplitTickPhaseChecksForEventName(result, eventName, "START")
+        }
         result = Regex(
             """if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\|\|\s*([^{}\r\n;]+?)\s*\)\s*\{"""
         ).replace(result) { match -> "if (${match.groupValues[1].trim()}) {" }
         result = Regex(
             """if\s*\(\s*([^{}\r\n;]+?)\s*\|\|\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\)\s*\{"""
         ).replace(result) { match -> "if (${match.groupValues[1].trim()}) {" }
+        return result
+    }
+
+    private fun splitTickEventParameterNames(source: String, phaseClass: String): Set<String> {
+        val splitTypes = "(?:ClientTickEvent|ServerTickEvent|LevelTickEvent|PlayerTickEvent|EntityTickEvent|RenderFrameEvent)"
+        return Regex("""\b$splitTypes\.${Regex.escape(phaseClass)}\s+([A-Za-z_$][\w$]*)""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+    }
+
+    private fun removeSplitTickPhaseChecksForEventName(source: String, eventName: String, phase: String): String {
+        val event = Regex.escape(eventName)
+        val phaseToken = Regex.escape(phase)
+        var result = source
+        result = Regex(
+            """(?m)^[ \t]*if\s*\(\s*$event\.phase\s*!=\s*TickEvent\.Phase\.$phaseToken\s*\)\s*return;\s*\r?\n"""
+        ).replace(result, "")
+        result = Regex(
+            """if\s*\(\s*$event\.phase\s*!=\s*TickEvent\.Phase\.$phaseToken\s*\|\|\s*([^{}\r\n;]+?)\s*\)\s*\{"""
+        ).replace(result) { match -> "if (${match.groupValues[1].trim()}) {" }
+        result = Regex(
+            """if\s*\(\s*([^{}\r\n;]+?)\s*\|\|\s*$event\.phase\s*!=\s*TickEvent\.Phase\.$phaseToken\s*\)\s*\{"""
+        ).replace(result) { match -> "if (${match.groupValues[1].trim()}) {" }
+        result = Regex(
+            """if\s*\(\s*$event\.phase\s*==\s*TickEvent\.Phase\.$phaseToken\s*&&\s*([^{}\r\n;]+?)\s*\)\s*\{"""
+        ).replace(result) { match -> "if (${match.groupValues[1].trim()}) {" }
+        result = Regex(
+            """if\s*\(\s*([^{}\r\n;]+?)\s*&&\s*$event\.phase\s*==\s*TickEvent\.Phase\.$phaseToken\s*\)\s*\{"""
+        ).replace(result) { match -> "if (${match.groupValues[1].trim()}) {" }
+        result = Regex("""if\s*\(\s*$event\.phase\s*==\s*TickEvent\.Phase\.$phaseToken\s*\)\s*\{""")
+            .replace(result, "{")
+        result = Regex("""$event\.phase\s*==\s*TickEvent\.Phase\.$phaseToken\s*&&\s*""")
+            .replace(result, "")
+        result = Regex("""\s*&&\s*$event\.phase\s*==\s*TickEvent\.Phase\.$phaseToken""")
+            .replace(result, "")
         return result
     }
 

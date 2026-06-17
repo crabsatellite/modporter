@@ -3510,13 +3510,24 @@ class StructuralRefactorExtraTest {
 
                 @SubscribeEvent
                 public static void onClientTick(ClientTickEvent.Post event) {
+                    if (event.phase == TickEvent.Phase.END) {
+                        ping();
+                    }
                     if (event.phase != TickEvent.Phase.END || pending <= 0) {
                         return;
                     }
                     pending--;
                 }
 
+                @SubscribeEvent
+                public static void onNamedClientTick(ClientTickEvent.Post tick) {
+                    if (tick.phase == TickEvent.Phase.END && pending > 0) {
+                        ping();
+                    }
+                }
+
                 private static void use(LivingEntity entity) {}
+                private static void ping() {}
             }
         """.trimIndent())
 
@@ -3531,8 +3542,12 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("if (!(event.getEntity() instanceof LivingEntity entity)) return;"))
         assertTrue(migrated.contains("public static void onPlayerTick(PlayerTickEvent.Post event)"))
         assertTrue(migrated.contains("if (pending <= 0) {"))
+        assertTrue(migrated.contains("public static void onNamedClientTick(ClientTickEvent.Post tick)"))
+        assertTrue(migrated.contains("if (pending > 0) {"))
         assertTrue(!migrated.contains("LivingEvent.LivingTickEvent"))
         assertTrue(!migrated.contains("TickEvent.Phase"))
+        assertTrue(!migrated.contains("event.phase"))
+        assertTrue(!migrated.contains("tick.phase"))
     }
 
     @Test
