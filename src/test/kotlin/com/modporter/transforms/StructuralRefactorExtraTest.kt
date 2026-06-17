@@ -3517,14 +3517,21 @@ class StructuralRefactorExtraTest {
             package com.example;
 
             import net.minecraft.core.BlockPos;
+            import net.minecraft.core.NonNullList;
             import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
             import net.minecraft.network.Connection;
             import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.item.ItemStack;
             import net.minecraft.world.level.block.entity.BlockEntity;
             import net.minecraft.world.level.block.state.BlockState;
             import org.jetbrains.annotations.NotNull;
 
             public class CustomBE extends BlockEntity {
+                private final NonNullList<ItemStack> items = NonNullList.withSize(1, ItemStack.EMPTY);
+                private Component name;
+
                 public CustomBE(BlockPos pos, BlockState state) {
                     super(null, pos, state);
                 }
@@ -3532,11 +3539,15 @@ class StructuralRefactorExtraTest {
                 @Override
                 protected void saveAdditional(@NotNull CompoundTag tag) {
                     super.saveAdditional(tag, registries);
+                    ContainerHelper.saveAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);
+                    tag.putString("Name", Component.Serializer.toJson(this.name));
                 }
 
                 @Override
                 public void load(@NotNull CompoundTag tag) {
                     super.loadAdditional(tag, registries);
+                    ContainerHelper.loadAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);
+                    this.name = Component.Serializer.fromJson(tag.getString("Name"));
                 }
 
                 @Override
@@ -3548,13 +3559,14 @@ class StructuralRefactorExtraTest {
                 @Override
                 public void handleUpdateTag(@NotNull CompoundTag tag) {
                     super.handleUpdateTag(tag);
+                    this.load(tag);
                 }
 
                 @Override
                 public void onDataPacket(@NotNull Connection net, @NotNull ClientboundBlockEntityDataPacket pkt) {
                     CompoundTag tag = pkt.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
                     if (tag != null) {
-                        load(tag);
+                        this.handleUpdateTag(tag);
                     }
                 }
             }
@@ -3572,7 +3584,79 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("public void handleUpdateTag(@NotNull CompoundTag tag, HolderLookup.Provider lookupProvider)"))
         assertTrue(migrated.contains("public void onDataPacket(@NotNull Connection connection, @NotNull ClientboundBlockEntityDataPacket pkt, HolderLookup.Provider lookupProvider)"))
         assertTrue(migrated.contains("CompoundTag tag = pkt.getTag();"))
-        assertTrue(migrated.contains("loadWithComponents(tag, lookupProvider);"))
+        assertTrue(migrated.contains("ContainerHelper.saveAllItems(tag, this.items, registries);"))
+        assertTrue(migrated.contains("ContainerHelper.loadAllItems(tag, this.items, registries);"))
+        assertTrue(migrated.contains("Component.Serializer.toJson(this.name, registries)"))
+        assertTrue(migrated.contains("Component.Serializer.fromJson(tag.getString(\"Name\"), registries)"))
+        assertTrue(migrated.contains("this.loadAdditional(tag, lookupProvider);"))
+        assertTrue(migrated.contains("this.handleUpdateTag(tag, lookupProvider);"))
+        assertFalse(migrated.contains("RegistryAccess.EMPTY"))
+    }
+
+    @Test
+    fun `migrates GameEventListener event holder signatures and comparisons`() {
+        val projectDir = createFile("ListenerBE.java", """
+            package com.example;
+
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.level.gameevent.GameEvent;
+            import net.minecraft.world.level.gameevent.GameEventListener;
+            import net.minecraft.world.level.gameevent.PositionSource;
+            import net.minecraft.world.phys.Vec3;
+
+            public class ListenerBE {
+                class Listener implements GameEventListener {
+                    public PositionSource getListenerSource() {
+                        return null;
+                    }
+
+                    public int getListenerRadius() {
+                        return 4;
+                    }
+
+                    @Override
+                    public boolean handleGameEvent(ServerLevel level, GameEvent event, GameEvent.Context context, Vec3 pos) {
+                        if (event == ModGameEvents.FROZEN.get() || event == GameEvent.BLOCK_PLACE) {
+                            return true;
+                        }
+                        return event != GameEvent.BLOCK_DESTROY;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/ListenerBE.java").readText()
+
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"))
+        assertTrue(migrated.contains("boolean handleGameEvent(ServerLevel level, Holder<GameEvent> event, GameEvent.Context context, Vec3 pos)"))
+        assertTrue(migrated.contains("event.is(ModGameEvents.FROZEN) || event.is(GameEvent.BLOCK_PLACE)"))
+        assertTrue(migrated.contains("return !event.is(GameEvent.BLOCK_DESTROY);"))
+        assertFalse(migrated.contains("event =="))
+        assertFalse(migrated.contains("event !="))
+    }
+
+    @Test
+    fun `propagates cancellable event interface to shared event base classes`() {
+        val projectDir = createFile("BaseFreezeEvent.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.Event;
+            import net.neoforged.bus.api.ICancellableEvent;
+
+            public class BaseFreezeEvent extends Event {
+                public static class FromBlock extends BaseFreezeEvent implements ICancellableEvent {
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/BaseFreezeEvent.java").readText()
+
+        assertTrue(migrated.contains("public class BaseFreezeEvent extends Event implements ICancellableEvent {"))
+        assertTrue(migrated.contains("public static class FromBlock extends BaseFreezeEvent implements ICancellableEvent"))
     }
 
     @Test
@@ -11505,7 +11589,8 @@ class StructuralRefactorExtraTest {
         assertTrue(creative.contains("new EnchantmentInstance(enchantment, enchantment.value().getMaxLevel())"))
         assertTrue(misc.contains("REGISTRY.byNameCodec()"))
         assertTrue(misc.contains("BuiltInRegistries.ENTITY_TYPE.byNameCodec()"))
-        assertTrue(misc.contains("Component.Serializer.toJson(Component.literal(\"ok\"), net.minecraft.core.RegistryAccess.EMPTY)"))
+        assertTrue(misc.contains("Component.Serializer.toJson(Component.literal(\"ok\"))"))
+        assertTrue(!misc.contains("RegistryAccess.EMPTY"))
         assertTrue(!misc.contains("ExtraCodecs.lazyInitializedCodec"))
         assertTrue(misc.contains("new Music(Sounds.MUSIC.getDelegate(), 20, 40, true)"))
         assertTrue(misc.contains("player.getMainHandItem().isCorrectToolForDrops(state)"))

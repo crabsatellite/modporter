@@ -8988,6 +8988,18 @@ ${entries.joinToString(",\n")}
                 needsHolderLookup = true
                 "super.handleUpdateTag(${match.groupValues[1]}, lookupProvider);"
             }
+        javaMethodText(result, "handleUpdateTag")?.let { method ->
+            val providerName = holderLookupProviderFromParameters(currentMethodParametersBeforeOffset(method, method.indexOf('{')))
+                ?: "lookupProvider"
+            val migratedMethod = Regex("""\b(?:this\.)?load\s*\(\s*(\w+)\s*\)\s*;""")
+                .replace(method) { match ->
+                    needsHolderLookup = true
+                    "this.loadAdditional(${match.groupValues[1]}, $providerName);"
+                }
+            if (migratedMethod != method) {
+                result = result.replace(method, migratedMethod)
+            }
+        }
 
         result = Regex(
             """public\s+void\s+onDataPacket\s*\(\s*([^,)]*(?:net\.minecraft\.network\.)?Connection\s+)(\w+)\s*,\s*([^,)]*(?:net\.minecraft\.network\.protocol\.game\.)?ClientboundBlockEntityDataPacket\s+)(\w+)\s*\)"""
@@ -9005,6 +9017,18 @@ ${entries.joinToString(",\n")}
                 .replace(result) { match ->
                     "CompoundTag ${match.groupValues[1]} = $packetName.getTag();"
                 }
+        }
+        javaMethodText(result, "onDataPacket")?.let { method ->
+            val providerName = holderLookupProviderFromParameters(currentMethodParametersBeforeOffset(method, method.indexOf('{')))
+                ?: "lookupProvider"
+            val migratedMethod = Regex("""\b(?:this\.)?handleUpdateTag\s*\(\s*(\w+)\s*\)\s*;""")
+                .replace(method) { match ->
+                    needsHolderLookup = true
+                    "this.handleUpdateTag(${match.groupValues[1]}, $providerName);"
+                }
+            if (migratedMethod != method) {
+                result = result.replace(method, migratedMethod)
+            }
         }
         result = Regex("""if\s*\(\s*(\w+)\s*!=\s*null\s*\)\s*\{\s*\r?\n\s*(?:this\.)?load\s*\(\s*\1\s*\)\s*;""")
             .replace(result) { match ->
@@ -9406,6 +9430,8 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyAdvancementDatagenSource(result, criterionInstanceFactoryHints)
         result = migrateLegacyDatagenTagConstantsSource(result)
         result = migrateLegacyComponentSerializationSource(result)
+        result = migrateRegistryAccessEmptyFallbacks(result)
+        result = migrateLegacyGameEventListenerSource(result)
         result = migrateLegacyNetworkBufferCodecsSource(result)
         result = migrateHolderValueMethodArgumentSource(result, holderValueParameterHints)
         result = migrateSynchedEntityDataBufferSource(result)
@@ -9503,6 +9529,7 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyHolderSoundEventPlaySoundArguments(result)
         result = migrateLegacySpawnEggItemTypeCalls(result)
         result = migrateLegacyTriStateEventResults(result)
+        result = migrateLegacyCancellableEventBaseClasses(result)
         result = migrateLegacySleepingTimeCheckEventSource(result)
         result = migrateLegacyCancellableEventHelperParameters(result)
         result = migrateLegacyCancellableEventHelperCallSites(result)
@@ -13859,6 +13886,7 @@ ${indent}}"""
     }
 
     private fun registryAccessFromParameters(parameters: List<String>): String? {
+        holderLookupProviderFromParameters(parameters)?.let { return it }
         val parameterPattern = Regex("""(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:<[^>]+>)?)\s+([A-Za-z_$][\w$]*)$""")
         val parsed = parameters.mapNotNull { parameter ->
             val cleaned = parameter.trim()
@@ -13893,6 +13921,36 @@ ${indent}}"""
         if (entityRegistryAccess.size == 1) return entityRegistryAccess.single()
         return null
     }
+
+    private fun holderLookupProviderFromParameters(parameters: List<String>): String? {
+        val parameterPattern = Regex("""(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s+([A-Za-z_$][\w$]*)$""")
+        val providers = parameters.mapNotNull { parameter ->
+            val cleaned = parameter.trim()
+                .replace(Regex("""\s+"""), " ")
+            val match = parameterPattern.find(cleaned) ?: return@mapNotNull null
+            val type = match.groupValues[1]
+            if (type == "HolderLookup.Provider" || type == "net.minecraft.core.HolderLookup.Provider") {
+                match.groupValues[2]
+            } else {
+                null
+            }
+        }.distinct()
+        return providers.singleOrNull()
+    }
+
+    private fun registryAccessExpressionAt(source: String, offset: Int): String? {
+        val parameters = currentMethodParametersBeforeOffset(source, offset)
+        return holderLookupProviderFromParameters(parameters)
+            ?: registryAccessFromParameters(parameters)
+            ?: selfRegistryAccessExpression(source)
+    }
+
+    private fun selfRegistryAccessExpression(source: String): String? =
+        if (Regex("""\bextends\s+(?:Mob|Monster|LivingEntity|Entity|[A-Za-z_$][\w$]*(?:Entity|Projectile))\b""").containsMatchIn(source)) {
+            "this.registryAccess()"
+        } else {
+            null
+        }
 
     private fun migrateLegacyDamageBonusMobTypeCalls(source: String): String {
         if (!source.contains("EnchantmentHelper.getDamageBonus(") || !source.contains(".getMobType()")) return source
@@ -15367,15 +15425,95 @@ public $className(Properties $propertiesName, WoodType $typeName) {
     }
 
     private fun migrateLegacyComponentSerializationSource(source: String): String {
-        if (!source.contains("Component.Serializer.toJson(")) return source
-        return rewriteJavaInvocationArguments(source, "Component.Serializer.toJson") { args ->
-            if (args.size != 1) {
-                null
-            } else {
-                listOf(args[0], "net.minecraft.core.RegistryAccess.EMPTY")
+        if (!source.contains("Component.Serializer.toJson(") && !source.contains("Component.Serializer.fromJson(")) return source
+        var result = source
+        result = rewriteJavaInvocationArgumentsWithOffset(result, "Component.Serializer.toJson") { args, offset ->
+            val registries = registryAccessExpressionAt(result, offset) ?: return@rewriteJavaInvocationArgumentsWithOffset null
+            when {
+                args.size == 1 -> listOf(args[0], registries)
+                args.size == 2 && isRegistryAccessEmptyExpression(args[1]) -> listOf(args[0], registries)
+                else -> null
             }
         }
+        result = rewriteJavaInvocationArgumentsWithOffset(result, "Component.Serializer.fromJson") { args, offset ->
+            val registries = registryAccessExpressionAt(result, offset) ?: return@rewriteJavaInvocationArgumentsWithOffset null
+            when {
+                args.size == 1 -> listOf(args[0], registries)
+                args.size == 2 && isRegistryAccessEmptyExpression(args[1]) -> listOf(args[0], registries)
+                else -> null
+            }
+        }
+        return result
     }
+
+    private fun migrateRegistryAccessEmptyFallbacks(source: String): String {
+        if (!source.contains("RegistryAccess.EMPTY")) return source
+        var result = source
+        var cursor = 0
+        val qualifiedEmpty = "net.minecraft.core.RegistryAccess.EMPTY"
+        while (cursor < result.length) {
+            val index = result.indexOf(qualifiedEmpty, cursor)
+            if (index < 0) break
+            val replacement = registryAccessExpressionAt(result, index)
+            if (replacement == null || replacement == qualifiedEmpty) {
+                cursor = index + qualifiedEmpty.length
+                continue
+            }
+            result = result.substring(0, index) + replacement + result.substring(index + qualifiedEmpty.length)
+            cursor = index + replacement.length
+        }
+        return result
+    }
+
+    private fun isRegistryAccessEmptyExpression(expression: String): Boolean =
+        expression.trim() == "net.minecraft.core.RegistryAccess.EMPTY" || expression.trim() == "RegistryAccess.EMPTY"
+
+    private fun migrateLegacyGameEventListenerSource(source: String): String {
+        if (!source.contains("GameEventListener") || !source.contains("handleGameEvent(")) return source
+        var result = source
+        var changed = false
+        result = Regex(
+            """boolean\s+handleGameEvent\s*\(\s*ServerLevel\s+([A-Za-z_$][\w$]*)\s*,\s*GameEvent\s+([A-Za-z_$][\w$]*)\s*,\s*GameEvent\.Context\s+([A-Za-z_$][\w$]*)\s*,\s*Vec3\s+([A-Za-z_$][\w$]*)\s*\)"""
+        ).replace(result) { match ->
+            changed = true
+            "boolean handleGameEvent(ServerLevel ${match.groupValues[1]}, Holder<GameEvent> ${match.groupValues[2]}, GameEvent.Context ${match.groupValues[3]}, Vec3 ${match.groupValues[4]})"
+        }
+
+        val holderEventVariables = Regex("""\bHolder\s*<\s*GameEvent\s*>\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(result)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (holderEventVariables.isEmpty()) return if (changed) addImportIfMissing(result, "net.minecraft.core.Holder") else result
+
+        val eventConstant = """((?:[A-Za-z_$][\w$]*\.)+[A-Z0-9_$][A-Za-z0-9_$]*(?:\.get\(\))?)"""
+        for (eventVariable in holderEventVariables) {
+            result = Regex("""\b${Regex.escape(eventVariable)}\s*==\s*$eventConstant""")
+                .replace(result) { match ->
+                    changed = true
+                    "${eventVariable}.is(${normaliseGameEventHolderComparison(match.groupValues[1])})"
+                }
+            result = Regex("""$eventConstant\s*==\s*\b${Regex.escape(eventVariable)}\b""")
+                .replace(result) { match ->
+                    changed = true
+                    "${eventVariable}.is(${normaliseGameEventHolderComparison(match.groupValues[1])})"
+                }
+            result = Regex("""\b${Regex.escape(eventVariable)}\s*!=\s*$eventConstant""")
+                .replace(result) { match ->
+                    changed = true
+                    "!${eventVariable}.is(${normaliseGameEventHolderComparison(match.groupValues[1])})"
+                }
+            result = Regex("""$eventConstant\s*!=\s*\b${Regex.escape(eventVariable)}\b""")
+                .replace(result) { match ->
+                    changed = true
+                    "!${eventVariable}.is(${normaliseGameEventHolderComparison(match.groupValues[1])})"
+                }
+        }
+
+        return if (changed) addImportIfMissing(result, "net.minecraft.core.Holder") else result
+    }
+
+    private fun normaliseGameEventHolderComparison(expression: String): String =
+        expression.trim().removeSuffix(".get()")
 
     private fun migrateRequiredMapCodecConstants(source: String): String {
         if (!source.contains("Codec<") || !source.contains("CODEC")) return source
@@ -16322,6 +16460,31 @@ protected EntityDimensions getDefaultDimensions(Pose $poseName) {
             }
         }
         return result
+    }
+
+    private fun migrateLegacyCancellableEventBaseClasses(source: String): String {
+        if (!source.contains("extends Event") || !source.contains("ICancellableEvent")) return source
+        val id = """[A-Za-z_$][\w$]*"""
+        var result = source
+        var changed = false
+        val classHeader = Regex("""\b(public\s+(?:abstract\s+)?class\s+($id)\s+extends\s+Event)(\s+implements\s+([^({}\r\n]+))?\s*\{""")
+        result = classHeader.replace(result) { match ->
+            val className = match.groupValues[2]
+            val implementsClause = match.groupValues[4]
+            if (implementsClause.contains("ICancellableEvent")) return@replace match.value
+            val childImplementsCancellation = Regex("""\bclass\s+$id\s+extends\s+${Regex.escape(className)}\s+implements\s+[^{}\r\n]*\bICancellableEvent\b""")
+                .containsMatchIn(source)
+            if (!childImplementsCancellation) return@replace match.value
+
+            changed = true
+            val header = match.groupValues[1]
+            if (implementsClause.isBlank()) {
+                "$header implements ICancellableEvent {"
+            } else {
+                "$header implements $implementsClause, ICancellableEvent {"
+            }
+        }
+        return if (changed) addImportIfMissing(result, "net.neoforged.bus.api.ICancellableEvent") else result
     }
 
     private fun migrateLegacySleepingTimeCheckEventSource(source: String): String {
@@ -21727,6 +21890,40 @@ $encodeLines
             val originalArgsSource = result.substring(openParen + 1, closeParen)
             val args = splitTopLevelJavaArgs(originalArgsSource)
             val migratedArgs = transform(args)
+            if (migratedArgs == null || migratedArgs == args) {
+                cursor = closeParen + 1
+                continue
+            }
+            val replacementArgs = migratedArgs.joinToString(", ") { it.trim() }
+            result = result.substring(0, openParen + 1) + replacementArgs + result.substring(closeParen)
+            cursor = openParen + 1 + replacementArgs.length
+        }
+        return result
+    }
+
+    private fun rewriteJavaInvocationArgumentsWithOffset(
+        source: String,
+        methodName: String,
+        transform: (args: List<String>, offset: Int) -> List<String>?
+    ): String {
+        var result = source
+        var cursor = 0
+        val token = "$methodName("
+        while (true) {
+            val tokenIndex = result.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            if (tokenIndex > 0 && (result[tokenIndex - 1].isLetterOrDigit() || result[tokenIndex - 1] == '_' || result[tokenIndex - 1] == '$')) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val openParen = tokenIndex + methodName.length
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            val migratedArgs = transform(args, tokenIndex)
             if (migratedArgs == null || migratedArgs == args) {
                 cursor = closeParen + 1
                 continue
