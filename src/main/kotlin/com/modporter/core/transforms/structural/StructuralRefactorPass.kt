@@ -19657,6 +19657,57 @@ ${modifierLines.joinToString("\n")}
         return result
     }
 
+    private fun migrateRecipeHolderLoopTypeParameters(source: String): String {
+        if (!source.contains("getAllRecipesFor(") || !source.contains("RecipeType<")) return source
+        val id = """[A-Za-z_$][\w$]*"""
+        var result = source
+        var searchStart = 0
+        val methodPattern = Regex(
+            """<\s*($id)\s+extends\s+($id)\s*>[^{;]*?\([^)]*\bRecipeType\s*<\s*\1\s*>\s+($id)\b[^)]*\)\s*\{"""
+        )
+        var changed = false
+        while (true) {
+            val match = methodPattern.find(result, searchStart) ?: break
+            val openBrace = match.range.last
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace < 0) {
+                searchStart = match.range.last + 1
+                continue
+            }
+
+            val typeParam = match.groupValues[1]
+            val superParam = match.groupValues[2]
+            val recipeTypeVar = match.groupValues[3]
+            val body = result.substring(openBrace + 1, closeBrace)
+            val loopPattern = Regex(
+                """for\s*\(\s*RecipeHolder\s*<\s*${Regex.escape(superParam)}\s*>\s+($id)\s*:\s*([^;\r\n]*getAllRecipesFor\s*\(\s*${Regex.escape(recipeTypeVar)}\s*\)[^;\r\n]*)\)"""
+            )
+            var migratedBody = loopPattern.replace(body) { loop ->
+                "for (RecipeHolder<$typeParam> ${loop.groupValues[1]} : ${loop.groupValues[2]})"
+            }
+            val directLoopPattern = Regex(
+                """(?m)^([ \t]*)for\s*\(\s*${Regex.escape(superParam)}\s+($id)\s*:\s*([^;\r\n]*getAllRecipesFor\s*\(\s*${Regex.escape(recipeTypeVar)}\s*\)[^;\r\n]*)\)\s*\{"""
+            )
+            migratedBody = directLoopPattern.replace(migratedBody) { loop ->
+                val indent = loop.groupValues[1]
+                val recipeVar = loop.groupValues[2]
+                val recipeCall = loop.groupValues[3]
+                "${indent}for (RecipeHolder<$typeParam> ${recipeVar}Holder : $recipeCall) {\n${indent}    $superParam $recipeVar = ${recipeVar}Holder.value();"
+            }
+            if (migratedBody != body) {
+                changed = true
+                result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
+                searchStart = openBrace + 1 + migratedBody.length
+            } else {
+                searchStart = closeBrace + 1
+            }
+        }
+        if (changed) {
+            result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeHolder")
+        }
+        return result
+    }
+
     private fun migrateRecipeManagerByKeyHolderAccessSource(source: String): String {
         if (!source.contains(".byKey(") || !source.contains(".get()")) return source
         val id = """[A-Za-z_$][\w$]*"""
@@ -19682,6 +19733,7 @@ ${modifierLines.joinToString("\n")}
 
         result = migrateLegacyRecordShapedCraftingRecipeSource(result)
         result = migrateLegacyGsonRegistryRecipeSerializerSource(result)
+        result = migrateRecipeHolderLoopTypeParameters(result)
 
         val id = """[A-Za-z_$][\w$]*"""
         val annotations = """(?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*)*"""

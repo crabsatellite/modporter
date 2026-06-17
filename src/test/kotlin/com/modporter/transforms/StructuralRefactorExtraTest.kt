@@ -5799,6 +5799,56 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates recipe holder loops to method recipe type parameter bounds`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("Conversion.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+
+            public interface Conversion<R extends MatchEventRecipe & BlockStateRecipe> {
+                default <T extends R> boolean convert(RecipeType<T> recipeType, Level level) {
+                    for (R recipe : level.getRecipeManager().getAllRecipesFor(recipeType)) { // existing source comment
+                        if (recipe.matches()) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+
+                default <T extends R> boolean convertWithoutContext(RecipeType<T> recipeType, Level level) {
+                    for (R recipe : level.getRecipeManager().getAllRecipesFor(recipeType)) {
+                        if (recipe.matches()) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            }
+
+            interface MatchEventRecipe {
+                boolean matches();
+            }
+
+            interface BlockStateRecipe {
+                boolean matches();
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("Conversion.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertEquals(2, Regex("""for\s*\(\s*RecipeHolder<T>\s+recipeHolder\s*:\s*level\.getRecipeManager\(\)\.getAllRecipesFor\(recipeType\)\s*\)""").findAll(transformed).count(), transformed)
+        assertTrue(transformed.contains("import net.minecraft.world.item.crafting.RecipeHolder;"), transformed)
+        assertTrue(transformed.contains("R recipe = recipeHolder.value();"), transformed)
+        assertFalse(transformed.contains("RecipeHolder<R> recipeHolder"), transformed)
+        assertFalse(transformed.contains("for (R recipe : level.getRecipeManager().getAllRecipesFor(recipeType))"), transformed)
+    }
+
+    @Test
     fun `migrates legacy item tag enchantment and mob spawn equipment APIs`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
