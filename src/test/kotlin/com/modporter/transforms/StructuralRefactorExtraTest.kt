@@ -2649,11 +2649,34 @@ class StructuralRefactorExtraTest {
                 }
             }
         """.trimIndent())
+        blockDir.resolve("FarmCopyBlock.java").writeText("""
+            package com.example.block;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.block.FarmBlock;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.common.IPlantable;
+
+            public class FarmCopyBlock extends FarmBlock {
+                public FarmCopyBlock(Properties properties) {
+                    super(properties);
+                }
+
+                private static boolean shouldMaintainFarmland(BlockGetter level, BlockPos pos) {
+                    BlockState plant = level.getBlockState(pos.above());
+                    BlockState state = level.getBlockState(pos);
+                    return plant.getBlock() instanceof IPlantable plantable && state.canSustainPlant(level, pos, Direction.UP, plantable);
+                }
+            }
+        """.trimIndent())
 
         val pass = StructuralRefactorPass()
         val result = pass.apply(tempDir)
         val glass = blockDir.resolve("AuroralizedGlassBlock.java").readText()
         val soil = blockDir.resolve("UberousSoilBlock.java").readText()
+        val farm = blockDir.resolve("FarmCopyBlock.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-transparent-block-beacon-color" })
         assertTrue(result.changes.any { it.ruleId == "struct-legacy-plant-api" })
@@ -2668,6 +2691,9 @@ class StructuralRefactorExtraTest {
         assertTrue(!soil.contains("getPlantType("))
         assertTrue(!soil.contains("IPlantable"))
         assertTrue(!soil.contains("PlantType"))
+        assertTrue(farm.contains("return level.getBlockState(pos.above()).is(BlockTags.MAINTAINS_FARMLAND);"), farm)
+        assertTrue(!farm.contains("!plant.getBlock() instanceof"), farm)
+        assertTrue(!farm.contains("IPlantable"), farm)
     }
 
     @Test

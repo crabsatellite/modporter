@@ -7094,6 +7094,19 @@ public class $className extends SimpleCriterionTrigger<$className.$instanceName>
         result = Regex("""(?m)^[ \t]*import\s+net\.neoforged\.neoforge\.common\.SpecialPlantable\s*/\*.*?\*/;\s*\r?\n""")
             .replace(result, "")
 
+        var migratedFarmlandMaintain = false
+        val id = """[A-Za-z_$][\w$]*"""
+        result = Regex(
+            """(?s)private\s+static\s+boolean\s+shouldMaintainFarmland\s*\(\s*BlockGetter\s+($id)\s*,\s*BlockPos\s+($id)\s*\)\s*\{\s*BlockState\s+($id)\s*=\s*\1\.getBlockState\(\s*\2\.above\(\)\s*\)\s*;\s*BlockState\s+($id)\s*=\s*\1\.getBlockState\(\s*\2\s*\)\s*;\s*return\s+\3\.getBlock\(\)\s+instanceof\s+(?:IPlantable|SpecialPlantable)\s+($id)\s*&&\s*\4\.canSustainPlant\(\s*\1\s*,\s*\2\s*,\s*Direction\.UP\s*,\s*\5\s*\)\s*;\s*}"""
+        ).replace(result) { match ->
+            migratedFarmlandMaintain = true
+            val level = match.groupValues[1]
+            val pos = match.groupValues[2]
+            """private static boolean shouldMaintainFarmland(BlockGetter $level, BlockPos $pos) {
+        return $level.getBlockState($pos.above()).is(BlockTags.MAINTAINS_FARMLAND);
+    }"""
+        }
+
         result = Regex(
             """(?s)\n[ \t]*@Override\s*\r?\n[ \t]*public\s+PlantType\s+getPlantType\s*\([^)]*\)\s*\{.*?\n[ \t]*}\s*"""
         ).replace(result, "\n")
@@ -7113,7 +7126,7 @@ public class $className extends SimpleCriterionTrigger<$className.$instanceName>
         }
         result = Regex("""bonemealableBlock\s+instanceof\s+(?:IPlantable|SpecialPlantable)\s+\w+\s*&&\s*\w+\.getPlantType\s*\(\s*level\s*,\s*fromPos\s*\)\s*==\s*PlantType\.CROP""")
             .replace(result, "above.is(BlockTags.CROPS)")
-        if (migratedCanSustain || result.contains("BlockTags.CROPS")) {
+        if (migratedCanSustain || migratedFarmlandMaintain || result.contains("BlockTags.CROPS")) {
             result = addImportIfMissing(result, "net.minecraft.tags.BlockTags")
         }
         if (migratedCanSustain) {
@@ -18920,9 +18933,23 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
             "$receiver.canSustainPlant(${args[0].trim()}, ${args[1].trim()}, ${args[2].trim()}, ${args[3].trim()}, $migratedPlant)"
         }
         result = Regex("""!\s*([^;\r\n]+?\.canSustainPlant\((?:[^()]|\([^()]*\))*\))""")
-            .replace(result) { match -> "${match.groupValues[1]}.isFalse()" }
+            .replace(result) { match ->
+                val expression = match.groupValues[1]
+                if (expression.contains("&&") || expression.contains("||") || expression.contains(" instanceof ")) {
+                    match.value
+                } else {
+                    "$expression.isFalse()"
+                }
+            }
         result = Regex("""\breturn\s+([^;\r\n!]+?\.canSustainPlant\((?:[^()]|\([^()]*\))*\))\s*;""")
-            .replace(result) { match -> "return !${match.groupValues[1]}.isFalse();" }
+            .replace(result) { match ->
+                val expression = match.groupValues[1]
+                if (expression.contains("&&") || expression.contains("||") || expression.contains(" instanceof ")) {
+                    match.value
+                } else {
+                    "return !$expression.isFalse();"
+                }
+            }
         result = Regex("""return\s+!super\.canSustainPlant\(((?:[^()]|\([^()]*\))*)\)\.isFalse\(\);""")
             .replace(result) { match -> "return super.canSustainPlant(${match.groupValues[1]});" }
         return result
