@@ -2489,6 +2489,66 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `entity getLevel accessors migrate only resolved entity receivers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/entity")
+        srcDir.createDirectories()
+        srcDir.resolve("BaseAnimal.java").writeText("""
+            package com.example.entity;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.animal.Animal;
+            import net.minecraft.world.level.Level;
+
+            public abstract class BaseAnimal extends Animal {
+                protected BaseAnimal(EntityType<? extends Animal> type, Level level) {
+                    super(type, level);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Mount.java").writeText("""
+            package com.example.entity;
+
+            import com.mojang.brigadier.context.CommandContext;
+            import net.minecraft.commands.CommandSourceStack;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.animal.Animal;
+            import net.minecraft.world.level.Level;
+
+            public class Mount extends BaseAnimal {
+                public Mount(EntityType<? extends Animal> type, Level level) {
+                    super(type, level);
+                }
+
+                public void tickMount(Entity entity, CommandSourceStack source) {
+                    this.getLevel().getGameTime();
+                    entity.getLevel().getGameTime();
+                    source.getLevel().getGameTime();
+                }
+
+                public void conflictingNames(Entity duplicate) {
+                    duplicate.getLevel().getGameTime();
+                }
+
+                public void conflictingNames(CommandContext<?> duplicate) {
+                    duplicate.getSource();
+                    duplicate.getLevel();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        val migrated = srcDir.resolve("Mount.java").readText()
+        assertTrue(result.changes.any { it.ruleId == "struct-entity-getlevel-accessor" })
+        assertTrue(migrated.contains("this.level().getGameTime();"), migrated)
+        assertTrue(migrated.contains("entity.level().getGameTime();"), migrated)
+        assertTrue(migrated.contains("source.getLevel().getGameTime();"), migrated)
+        assertTrue(migrated.contains("duplicate.getLevel().getGameTime();"), migrated)
+        assertTrue(migrated.contains("duplicate.getLevel();"), migrated)
+    }
+
+    @Test
     fun `attachment registration helper is not treated as subscribe event`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val capabilityDir = srcDir.resolve("capability")

@@ -305,6 +305,13 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            val entityLevelChanges = migrateEntityLevelAccessorCalls(projectDir, dryRun)
+            changes.addAll(entityLevelChanges)
+        } catch (e: Exception) {
+            errors.add("Entity level accessor migration error: ${e.message}")
+        }
+
+        try {
             val cumulusChanges = migrateCumulusMenuApi(projectDir, dryRun)
             changes.addAll(cumulusChanges)
         } catch (e: Exception) {
@@ -540,6 +547,16 @@ class StructuralRefactorPass : Pass {
             changes.addAll(attachmentRegistrationChanges)
         } catch (e: Exception) {
             errors.add("Attachment registration cleanup error: ${e.message}")
+        }
+
+        // Some later project-level rewrites can touch entity sources after the
+        // common API pass. Run the accessor migration once more at the end so
+        // Entity#getLevel() cannot be reintroduced by write-order effects.
+        try {
+            val finalEntityLevelChanges = migrateEntityLevelAccessorCalls(projectDir, dryRun)
+            changes.addAll(finalEntityLevelChanges)
+        } catch (e: Exception) {
+            errors.add("Final entity level accessor migration error: ${e.message}")
         }
 
         return PassResult(name, changes, errors, skipped)
@@ -25001,6 +25018,289 @@ $encodeLines
     private fun hasSimpleTypeReference(source: String, typeName: String): Boolean =
         Regex("""(?<![.\w$])${Regex.escape(typeName)}(?![\w$])""")
             .containsMatchIn(source)
+
+    private data class JavaInheritanceType(
+        val file: Path,
+        val packageName: String,
+        val className: String,
+        val parentType: String?,
+        val imports: Map<String, String>,
+        val wildcardImports: Set<String>,
+        val source: String
+    ) {
+        val fqn: String
+            get() = if (packageName.isBlank()) className else "$packageName.$className"
+    }
+
+    private fun migrateEntityLevelAccessorCalls(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        val types = javaFiles.mapNotNull { file -> readJavaInheritanceType(file) }
+        if (types.isEmpty()) return emptyList()
+
+        val typeByFqn = types.associateBy { it.fqn }
+        val typeBySimple = types.groupBy { it.className }
+        val entityMemo = mutableMapOf<String, Boolean>()
+
+        fun resolveTypeReference(rawType: String, owner: JavaInheritanceType): String? {
+            val normalized = normalizeJavaTypeReference(rawType) ?: return null
+            if (normalized.contains(".")) {
+                if (normalized.first().isLowerCase()) return normalized
+                val firstSegment = normalized.substringBefore('.')
+                owner.imports[firstSegment]?.let { imported ->
+                    return "$imported.${normalized.substringAfter('.')}"
+                }
+                val samePackage = if (owner.packageName.isBlank()) firstSegment else "${owner.packageName}.$firstSegment"
+                if (samePackage in typeByFqn) {
+                    return "$samePackage.${normalized.substringAfter('.')}"
+                }
+                return normalized
+            }
+
+            owner.imports[normalized]?.let { return it }
+            if (owner.packageName.isNotBlank()) {
+                val samePackage = "${owner.packageName}.$normalized"
+                if (samePackage in typeByFqn) return samePackage
+            }
+            typeBySimple[normalized]?.singleOrNull()?.let { return it.fqn }
+            owner.wildcardImports.forEach { pkg ->
+                val candidate = "$pkg.$normalized"
+                if (candidate in typeByFqn || pkg.startsWith("net.minecraft.world.entity")) {
+                    return candidate
+                }
+            }
+            return normalized
+        }
+
+        fun isEntityDerivedFqn(typeName: String, seen: Set<String> = emptySet()): Boolean {
+            val normalized = normalizeJavaTypeReference(typeName) ?: return false
+            entityMemo[normalized]?.let { return it }
+            if (normalized in seen) return false
+            if (isMinecraftEntityClass(normalized)) {
+                entityMemo[normalized] = true
+                return true
+            }
+
+            val sourceType = typeByFqn[normalized] ?: typeBySimple[normalized]?.singleOrNull()
+            val parent = sourceType?.parentType
+            if (sourceType == null || parent == null) {
+                entityMemo[normalized] = false
+                return false
+            }
+            val parentFqn = resolveTypeReference(parent, sourceType)
+            val result = parentFqn != null && isEntityDerivedFqn(parentFqn, seen + normalized)
+            entityMemo[normalized] = result
+            return result
+        }
+
+        fun isEntityTypeReference(typeName: String, owner: JavaInheritanceType): Boolean {
+            val fqn = resolveTypeReference(typeName, owner) ?: return false
+            return isEntityDerivedFqn(fqn)
+        }
+
+        val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE))
+        val changes = mutableListOf<Change>()
+
+        for (type in types) {
+            val original = type.file.readText()
+            if (!original.contains(".getLevel()") && !original.contains("this.getLevel()")) continue
+
+            var migrated = original
+            if (isEntityDerivedFqn(type.fqn) && !declaresGetLevelMethod(original)) {
+                migrated = migrated.replace("this.getLevel()", "this.level()")
+            }
+
+            val entityVariables = collectEntityVariableNames(original, type, parser, ::isEntityTypeReference)
+            if (entityVariables.isNotEmpty()) {
+                migrated = replaceEntityVariableGetLevelCalls(migrated, entityVariables)
+            }
+
+            if (migrated != original) {
+                if (!dryRun) {
+                    type.file.writeText(migrated)
+                }
+                changes.add(Change(
+                    file = type.file,
+                    line = 0,
+                    description = "Migrate Entity#getLevel() accessor to Entity#level() using source inheritance",
+                    before = "entity.getLevel()",
+                    after = "entity.level()",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-entity-getlevel-accessor"
+                ))
+            }
+        }
+        return changes
+    }
+
+    private fun readJavaInheritanceType(file: Path): JavaInheritanceType? {
+        val source = file.readText()
+        val className = javaTopLevelTypeName(source) ?: return null
+        val imports = linkedMapOf<String, String>()
+        val wildcardImports = linkedSetOf<String>()
+        Regex("""(?m)^[ \t]*import\s+(?!static\b)([\w.]+(?:\.\*)?)\s*;""")
+            .findAll(source)
+            .forEach { match ->
+                val importName = match.groupValues[1]
+                if (importName.endsWith(".*")) {
+                    wildcardImports += importName.removeSuffix(".*")
+                } else {
+                    imports[importName.substringAfterLast('.')] = importName
+                }
+            }
+        val id = """[A-Za-z_$][\w$]*"""
+        val parentType = Regex(
+            """(?s)\bclass\s+${Regex.escape(className)}(?:\s*<[^>{};]+>)?\s+extends\s+($id(?:\.$id)*)"""
+        ).find(source)?.groupValues?.get(1)
+        return JavaInheritanceType(
+            file = file,
+            packageName = packageNameOf(source),
+            className = className,
+            parentType = parentType,
+            imports = imports,
+            wildcardImports = wildcardImports,
+            source = source
+        )
+    }
+
+    private fun normalizeJavaTypeReference(typeName: String): String? {
+        var normalized = typeName.trim()
+        if (normalized.isBlank()) return null
+        normalized = Regex("""^@\w+(?:\([^)]*\))?\s+""").replace(normalized, "")
+        normalized = normalized.removePrefix("final ").trim()
+        normalized = Regex("""^\?\s+extends\s+""").replace(normalized, "")
+        normalized = Regex("""^\?\s+super\s+""").replace(normalized, "")
+        normalized = normalized.substringBefore('<').substringBefore('[').trim()
+        return if (Regex("""[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*""").matches(normalized)) {
+            normalized
+        } else {
+            null
+        }
+    }
+
+    private fun isMinecraftEntityClass(typeName: String): Boolean {
+        if (!typeName.startsWith("net.minecraft.world.entity.")) return false
+        val simpleName = typeName.substringAfterLast('.')
+        val knownEntityClassNames = setOf(
+            "Entity",
+            "LivingEntity",
+            "Mob",
+            "PathfinderMob",
+            "AgeableMob",
+            "TamableAnimal",
+            "Animal",
+            "AbstractGolem",
+            "Monster",
+            "FlyingMob",
+            "WaterAnimal",
+            "AbstractFish",
+            "AbstractSchoolingFish",
+            "AbstractHorse",
+            "AbstractChestedHorse",
+            "Horse",
+            "Llama",
+            "TraderLlama",
+            "SkeletonHorse",
+            "ZombieHorse",
+            "Player",
+            "Projectile",
+            "ThrowableProjectile",
+            "ThrowableItemProjectile",
+            "AbstractArrow",
+            "Arrow",
+            "SpectralArrow",
+            "Fireball",
+            "LargeFireball",
+            "SmallFireball",
+            "AbstractHurtingProjectile",
+            "WitherSkull",
+            "ItemEntity",
+            "ExperienceOrb",
+            "PrimedTnt",
+            "FallingBlockEntity",
+            "HangingEntity",
+            "Painting",
+            "ItemFrame",
+            "GlowItemFrame",
+            "ArmorStand",
+            "LightningBolt",
+            "EndCrystal",
+            "AbstractVillager",
+            "Villager",
+            "WanderingTrader",
+            "Raider",
+            "EnderDragon"
+        )
+        if (simpleName in knownEntityClassNames) return true
+        val packageAfterEntity = typeName.removePrefix("net.minecraft.world.entity.").substringBefore('.')
+        return packageAfterEntity in setOf(
+            "animal",
+            "ambient",
+            "boss",
+            "decoration",
+            "item",
+            "monster",
+            "npc",
+            "player",
+            "projectile",
+            "raid",
+            "vehicle"
+        )
+    }
+
+    private fun declaresGetLevelMethod(source: String): Boolean =
+        Regex(
+            """(?m)^[ \t]*(?:@\w+(?:\([^)]*\))?\s*)*(?:(?:public|protected|private|static|final|abstract|synchronized|native)\s+)*(?:[A-Za-z_$][\w$]*(?:\s*<[^;{}()]*>)?(?:\s*\[\s*])?(?:\.[A-Za-z_$][\w$]*)*)\s+getLevel\s*\("""
+        ).containsMatchIn(source)
+
+    private fun collectEntityVariableNames(
+        source: String,
+        owner: JavaInheritanceType,
+        parser: JavaParser,
+        isEntityTypeReference: (String, JavaInheritanceType) -> Boolean
+    ): Set<String> {
+        val parseResult = parser.parse(source)
+        if (!parseResult.isSuccessful) return emptySet()
+        val cu = parseResult.result.orElse(null) ?: return emptySet()
+        val declarations = linkedMapOf<String, MutableList<Boolean>>()
+
+        fun record(name: String, typeName: String) {
+            declarations.getOrPut(name) { mutableListOf() } += isEntityTypeReference(typeName, owner)
+        }
+
+        cu.findAll(Parameter::class.java).forEach { parameter ->
+            record(parameter.nameAsString, parameter.type.asString())
+        }
+        cu.findAll(VariableDeclarator::class.java).forEach { variable ->
+            record(variable.nameAsString, variable.type.asString())
+        }
+
+        val id = """[A-Za-z_$][\w$]*"""
+        Regex("""\binstanceof\s+($id(?:\.$id)*)\s+($id)\b""")
+            .findAll(source)
+            .forEach { match ->
+                record(match.groupValues[2], match.groupValues[1])
+            }
+
+        return declarations
+            .filterValues { markers -> markers.isNotEmpty() && markers.all { it } }
+            .keys
+    }
+
+    private fun replaceEntityVariableGetLevelCalls(source: String, entityVariables: Set<String>): String {
+        var result = source
+        entityVariables
+            .sortedByDescending { it.length }
+            .forEach { variable ->
+                result = Regex("""(?<![\w$])${Regex.escape(variable)}\.getLevel\(\)""")
+                    .replace(result, "$variable.level()")
+            }
+        return result
+    }
 
     private fun findMatchingBrace(source: String, openBrace: Int): Int {
         var depth = 0
