@@ -6,6 +6,7 @@ import com.modporter.registry.PipelineOptions
 import com.modporter.registry.PipelineRegistry
 import com.modporter.report.ReportGenerator
 import com.github.ajalt.clikt.core.CliktCommand
+import com.github.ajalt.clikt.core.UsageError
 import com.github.ajalt.clikt.core.subcommands
 import com.github.ajalt.clikt.parameters.options.*
 import com.github.ajalt.clikt.parameters.types.path
@@ -54,7 +55,10 @@ class PortCommand : CliktCommand(
     private val dryRun by option("--dry-run", help = "Preview changes without modifying files")
         .flag(default = false)
 
-    private val minConfidence by option("--min-confidence", help = "Minimum confidence level (high, medium, low)")
+    private val minConfidence by option(
+        "--min-confidence",
+        help = "Minimum confidence level for dry-run/report output (high, medium, low)"
+    )
         .default("low")
 
     private val report by option("--report", help = "Write detailed report to file")
@@ -71,8 +75,16 @@ class PortCommand : CliktCommand(
 
     override fun run() {
         val pipelineDef = resolvePipeline(pipelineId, src)
-
         val projectDir = out ?: src.resolveSibling("${src.fileName}-neoforge")
+        val confidence = parseConfidence(minConfidence)
+
+        if (!dryRun && confidence != Confidence.LOW) {
+            throw UsageError(
+                "--min-confidence filters reported changes only. Use --dry-run with " +
+                    "--min-confidence $minConfidence to review filtered changes, then run apply " +
+                    "mode without a confidence filter."
+            )
+        }
 
         if (!dryRun && projectDir != src) {
             echo("Copying project to $projectDir ...")
@@ -80,7 +92,6 @@ class PortCommand : CliktCommand(
         }
 
         val targetDir = if (dryRun) src else projectDir
-        val confidence = parseConfidence(minConfidence)
         val options = PipelineOptions(offline = offline, resolveDeps = resolveDeps)
 
         echo("═══════════════════════════════════════════")
@@ -124,7 +135,8 @@ class PortCommand : CliktCommand(
     private fun parseConfidence(value: String): Confidence = when (value.lowercase()) {
         "high" -> Confidence.HIGH
         "medium" -> Confidence.MEDIUM
-        else -> Confidence.LOW
+        "low" -> Confidence.LOW
+        else -> throw UsageError("Invalid --min-confidence '$value'; expected high, medium, or low.")
     }
 }
 

@@ -13,6 +13,8 @@ repositories {
     mavenCentral()
 }
 
+val testKitRuntimeOnly by configurations.creating
+
 dependencies {
     // Java AST parsing
     implementation("com.github.javaparser:javaparser-core:3.25.8")
@@ -35,7 +37,8 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.1")
     testImplementation("io.kotest:kotest-assertions-core:5.8.0")
-    testImplementation(gradleTestKit())
+    testCompileOnly(gradleTestKit())
+    testKitRuntimeOnly(gradleTestKit())
 }
 
 application {
@@ -44,9 +47,81 @@ application {
 
 tasks.test {
     useJUnitPlatform()
+    filter {
+        excludeTestsMatching("com.modporter.integration.CompilationVerificationTest")
+    }
     testLogging {
         events("passed", "skipped", "failed")
         showStandardStreams = false
+        showExceptions = true
+        showCauses = true
+    }
+}
+
+tasks.register<Test>("testKitTest") {
+    description = "Runs Gradle TestKit-backed integration tests in an isolated task"
+    group = "verification"
+
+    useJUnitPlatform()
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath + testKitRuntimeOnly
+    filter {
+        includeTestsMatching("com.modporter.integration.CompilationVerificationTest")
+    }
+    shouldRunAfter(tasks.test)
+
+    testLogging {
+        events("passed", "skipped", "failed")
+        showStandardStreams = false
+        showExceptions = true
+        showCauses = true
+    }
+}
+
+fun Test.defaultEnvironment(name: String, value: String) {
+    if (System.getenv(name).isNullOrBlank()) {
+        environment(name, value)
+    }
+}
+
+tasks.register<Test>("realModBenchmark") {
+    description = "Ports real mod benchmark targets from src/test/resources/benchmarks/real-mods.tsv"
+    group = "verification"
+
+    useJUnitPlatform()
+    environment("MODPORTER_REAL_MOD_TEST", "true")
+    filter {
+        includeTestsMatching("com.modporter.integration.RealModBenchmarkTest")
+    }
+    shouldRunAfter(tasks.test)
+    outputs.upToDateWhen { false }
+
+    testLogging {
+        events("passed", "skipped", "failed", "standard_out", "standard_error")
+        showStandardStreams = true
+        showExceptions = true
+        showCauses = true
+    }
+}
+
+tasks.register<Test>("strictRealModBenchmark") {
+    description = "Ports real mod benchmark targets and requires strict runtime success gates"
+    group = "verification"
+
+    useJUnitPlatform()
+    environment("MODPORTER_REAL_MOD_TEST", "true")
+    defaultEnvironment("MODPORTER_BENCHMARK_STRICT_RUNTIME", "true")
+    defaultEnvironment("MODPORTER_BENCHMARK_CASES", "constructionwand,instantworldmirror,hotbath,showercore,sakura,twilightforest")
+    defaultEnvironment("MODPORTER_BENCHMARK_TIMEOUT_SECONDS", "360")
+    filter {
+        includeTestsMatching("com.modporter.integration.RealModBenchmarkTest")
+    }
+    shouldRunAfter(tasks.test)
+    outputs.upToDateWhen { false }
+
+    testLogging {
+        events("passed", "skipped", "failed", "standard_out", "standard_error")
+        showStandardStreams = true
         showExceptions = true
         showCauses = true
     }

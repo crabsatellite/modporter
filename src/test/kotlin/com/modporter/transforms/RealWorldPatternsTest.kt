@@ -285,8 +285,8 @@ class RealWorldPatternsTest {
 
         val content = tempDir.resolve("src/main/java/com/example/ModEvents.java").readText()
 
-        assertTrue(content.contains("LivingDamageEvent.Post"),
-            "LivingHurtEvent should become LivingDamageEvent.Post")
+        assertTrue(content.contains("LivingDamageEvent"),
+            "LivingHurtEvent should enter the LivingDamageEvent boundary before structural Pre/Post selection")
         assertTrue(content.contains("@EventBusSubscriber"),
             "Should simplify @Mod.EventBusSubscriber")
         assertFalse(content.contains("@Mod.EventBusSubscriber"),

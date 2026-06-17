@@ -5,8 +5,8 @@ import java.nio.file.Path
 /**
  * Confidence level for a transformation.
  * HIGH = deterministic rename, guaranteed correct
- * MEDIUM = pattern-based, likely correct but should review
- * LOW = heuristic/AI-based, needs human verification
+ * MEDIUM = pattern-based, expected to validate under strict gates
+ * LOW = heuristic/AI-based, blocks strict success until covered by an automated gate
  */
 enum class Confidence { HIGH, MEDIUM, LOW }
 

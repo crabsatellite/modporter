@@ -32,16 +32,16 @@ class ReportGenerator {
             appendLine()
 
             // Detailed changes by confidence
-            appendLine("## Changes Requiring Manual Review")
+            appendLine("## Changes Requiring Automated Validation")
             appendLine()
-            appendLine("### MEDIUM Confidence (likely correct, please verify)")
+            appendLine("### MEDIUM Confidence (expected to validate under strict gates)")
             appendLine()
             for (passResult in result.passResults) {
                 val mediumChanges = passResult.changes.filter { it.confidence == Confidence.MEDIUM }
                 if (mediumChanges.isNotEmpty()) {
                     appendLine("#### ${passResult.passName}")
                     for (change in mediumChanges) {
-                        appendLine("- **${change.file}:${change.line}** â€” ${change.description}")
+                        appendLine("- **${change.file}:${change.line}** â€?${change.description}")
                         appendLine("  - Before: `${change.before}`")
                         appendLine("  - After: `${change.after}`")
                     }
@@ -49,14 +49,14 @@ class ReportGenerator {
                 }
             }
 
-            appendLine("### LOW Confidence (needs human verification)")
+            appendLine("### LOW Confidence (blocks strict success until an automated gate covers it)")
             appendLine()
             for (passResult in result.passResults) {
                 val lowChanges = passResult.changes.filter { it.confidence == Confidence.LOW }
                 if (lowChanges.isNotEmpty()) {
                     appendLine("#### ${passResult.passName}")
                     for (change in lowChanges) {
-                        appendLine("- **${change.file}:${change.line}** â€” ${change.description}")
+                        appendLine("- **${change.file}:${change.line}** â€?${change.description}")
                         appendLine("  - Before: `${change.before}`")
                         appendLine("  - After: `${change.after}`")
                     }
@@ -79,18 +79,18 @@ class ReportGenerator {
                 }
             }
 
-            // Manual TODO list
-            appendLine("## Remaining Manual Work")
+            // Blocking migration areas still require concrete automated rules before a hands-off port is valid.
+            appendLine("## Blocking Migration Work")
             appendLine()
-            appendLine("The following changes could NOT be automated and require manual intervention:")
+            appendLine("The following areas are not accepted as completed until automated migrations and tests cover them:")
             appendLine()
-            appendLine("- [ ] **NBT â†’ DataComponents**: Convert all `stack.getTag()`/`setTag()` to typed `DataComponentType` access")
-            appendLine("- [ ] **Enchantment system**: Convert code-defined enchantments to data-driven JSON in `data/<modid>/enchantment/`")
-            appendLine("- [ ] **Recipe system**: Update `Recipe<Container>` to `Recipe<RecipeInput>` with new input types")
-            appendLine("- [ ] **build.gradle**: Update to NeoGradle plugin and Java 21 toolchain")
-            appendLine("- [ ] **Rendering pipeline**: Verify vertex rendering changes (color format, buffer builder)")
-            appendLine("- [ ] **Test compilation**: Run `./gradlew build` and fix remaining compile errors")
-            appendLine("- [ ] **Runtime test**: Launch the game and verify mod functionality")
+            appendLine("- **NBT/DataComponents**: Convert all `stack.getTag()`/`setTag()` to typed `DataComponentType` access")
+            appendLine("- **Enchantment system**: Convert code-defined enchantments to data-driven JSON in `data/<modid>/enchantment/`")
+            appendLine("- **Recipe system**: Update `Recipe<Container>` to `Recipe<RecipeInput>` with new input types")
+            appendLine("- **build.gradle**: Update to NeoGradle plugin and Java 21 toolchain")
+            appendLine("- **Rendering pipeline**: Verify vertex rendering changes, including color format and buffer builder APIs")
+            appendLine("- **Compilation**: `./gradlew build` must pass without suppressed source logic")
+            appendLine("- **Runtime**: Client, server, GameTest, and world-load runs must pass with clean logs")
         }
 
         outputPath.writeText(report)

@@ -38,7 +38,7 @@ public class SampleMod {
     public static class Events {
         @SubscribeEvent
         public static void onEntityHurt(LivingDamageEvent.Post event) {
-            float damage = event.getAmount();
+            float damage = event.getNewDamage();
         }
     }
 }

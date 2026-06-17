@@ -54,7 +54,7 @@
       "forgeMethod": "endVertex",
       "neoForgeClass": "",
       "neoForgeMethod": "",
-      "description": "endVertex() removed - auto-flushed"
+      "description": "endVertex() is no longer emitted explicitly because vertices are auto-flushed"
     },
     {
       "forgeClass": "BufferBuilder",

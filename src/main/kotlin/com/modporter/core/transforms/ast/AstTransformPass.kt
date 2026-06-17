@@ -3,6 +3,7 @@ package com.modporter.core.transforms.ast
 import com.modporter.core.pipeline.*
 import com.modporter.mapping.MappingDatabase
 import com.github.javaparser.JavaParser
+import com.github.javaparser.ParserConfiguration
 import com.github.javaparser.ast.CompilationUnit
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
 import com.github.javaparser.ast.body.ConstructorDeclaration
@@ -34,7 +35,8 @@ class AstTransformPass(
     private fun processFiles(projectDir: Path, dryRun: Boolean): PassResult {
         val changes = mutableListOf<Change>()
         val errors = mutableListOf<String>()
-        val parser = JavaParser()
+        val skipped = mutableListOf<String>()
+        val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17))
 
         val javaFiles = Files.walk(projectDir)
             .filter { it.extension == "java" }
@@ -45,7 +47,7 @@ class AstTransformPass(
 
         for (file in javaFiles) {
             try {
-                val result = processFile(file, parser, dryRun)
+                val result = processFile(file, parser, dryRun, skipped)
                 changes.addAll(result)
             } catch (e: Exception) {
                 errors.add("AST parse error in ${file}: ${e.message}")
@@ -53,14 +55,17 @@ class AstTransformPass(
             }
         }
 
-        return PassResult(name, changes, errors)
+        return PassResult(name, changes, errors, skipped)
     }
 
-    private fun processFile(file: Path, parser: JavaParser, dryRun: Boolean): List<Change> {
+    private fun processFile(file: Path, parser: JavaParser, dryRun: Boolean, skipped: MutableList<String>): List<Change> {
         val source = file.readText()
         val parseResult = parser.parse(source)
         if (!parseResult.isSuccessful) {
-            logger.warn { "Could not parse $file, skipping AST transforms" }
+            val problems = parseResult.problems.joinToString("; ") { it.verboseMessage }.ifBlank { "unknown parse failure" }
+            val languageLevel = parser.parserConfiguration.languageLevel
+            skipped.add("Could not parse $file for AST transforms (languageLevel=$languageLevel): $problems")
+            logger.warn { "Could not parse $file for AST transforms (languageLevel=$languageLevel): $problems" }
             return emptyList()
         }
 
@@ -324,11 +329,12 @@ class EndVertexRemover(
     override fun visit(n: MethodCallExpr, arg: Void?): Visitable {
         if (n.nameAsString == "endVertex" && n.arguments.isEmpty()) {
             val line = n.begin.map { it.line }.orElse(0)
+            val replacement = n.scope.map { it.toString() }.orElse("")
             changes.add(Change(
                 file = file, line = line,
                 description = "Remove endVertex() call (auto-flushed in 1.21)",
                 before = n.toString(),
-                after = "/* endVertex() removed */",
+                after = replacement,
                 confidence = Confidence.MEDIUM,
                 ruleId = "ast-remove-endvertex"
             ))

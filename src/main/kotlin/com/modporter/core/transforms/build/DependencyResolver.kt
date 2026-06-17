@@ -15,7 +15,8 @@ import java.time.Duration
  * Strategy:
  * 1. Check known-good mappings from neoforge-deps.json (offline-safe)
  * 2. If status is "check_online" and not offline, query Modrinth API
- * 3. Fall back to exclusion for unavailable deps
+ * 3. Remove only deps with an explicit stale/bundled mapping
+ * 4. Leave unavailable deps active so resolution or compilation fails honestly
  */
 class DependencyResolver(
     private val offlineMode: Boolean = false,
@@ -34,7 +35,7 @@ class DependencyResolver(
             return when (known.status) {
                 "available" -> {
                     if (known.neoforgeCoords.isNotEmpty()) {
-                        log.info("Resolved dependency: ${known.forgePrefix} → NeoForge (${known.notes})")
+                        log.info("Resolved dependency: ${known.forgePrefix} -> NeoForge (${known.notes})")
                         DepResolution.Resolved(
                             coords = known.neoforgeCoords,
                             mavenUrl = known.mavenUrl,
@@ -53,6 +54,10 @@ class DependencyResolver(
                         resolveOnline(known)
                     }
                 }
+                "remove" -> {
+                    log.info("Dependency removed by explicit mapping: ${known.forgePrefix} (${known.notes})")
+                    DepResolution.Remove(known.notes)
+                }
                 else -> {
                     log.info("Dependency unavailable: ${known.forgePrefix} (${known.notes})")
                     DepResolution.Unavailable(known.notes)
@@ -68,6 +73,16 @@ class DependencyResolver(
         return DepResolution.Unknown
     }
 
+    fun resolveReferencedClass(binaryName: String): DepResolution {
+        val known = knownDeps.find { dep ->
+            dep.packagePrefixes.any { prefix ->
+                binaryName == prefix.trimEnd('.') || binaryName.startsWith(prefix)
+            }
+        } ?: return DepResolution.Unknown
+
+        return resolve(known.forgePrefix)
+    }
+
     private fun resolveOnline(known: KnownDep): DepResolution {
         val slug = known.modrinthSlug ?: return DepResolution.Unavailable("No Modrinth slug for ${known.forgePrefix}")
 
@@ -80,7 +95,7 @@ class DependencyResolver(
 
     private fun resolveUnknownOnline(forgeDep: String): DepResolution {
         // Try to extract a slug from the dependency coordinate
-        // e.g., "some.group:mod-name:1.0" → try "mod-name" as slug
+        // e.g., "some.group:mod-name:1.0" -> try "mod-name" as slug
         val parts = forgeDep.split(":")
         if (parts.size < 2) return DepResolution.Unknown
 
@@ -187,6 +202,7 @@ sealed class DepResolution {
     ) : DepResolution()
 
     data class Unavailable(val reason: String) : DepResolution()
+    data class Remove(val reason: String) : DepResolution()
     data object Unknown : DepResolution()
 }
 
@@ -202,6 +218,7 @@ data class KnownDepsFile(
 data class KnownDep(
     val forgePrefix: String,
     val modrinthSlug: String? = null,
+    val packagePrefixes: List<String> = emptyList(),
     val neoforgeCoords: List<NeoForgeCoord> = emptyList(),
     val mavenUrl: String? = null,
     val status: String = "unavailable",

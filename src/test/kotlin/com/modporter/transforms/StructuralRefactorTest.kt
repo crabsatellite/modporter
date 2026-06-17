@@ -78,7 +78,7 @@ class StructuralRefactorTest {
     }
 
     @Test
-    fun `all structural changes have MEDIUM or LOW confidence`() {
+    fun `automated structural migrations report high confidence`() {
         val projectDir = createTestFile("ComplexMod.java", """
             package com.example;
             import net.minecraftforge.common.capabilities.ICapabilityProvider;
@@ -98,7 +98,35 @@ class StructuralRefactorTest {
 
         assertTrue(result.changes.isNotEmpty())
         assertTrue(result.changes.all {
-            it.confidence == Confidence.MEDIUM || it.confidence == Confidence.LOW
+            it.confidence == Confidence.HIGH
         })
+    }
+
+    @Test
+    fun `modern Java source syntax is parsed without skipped structural transforms`() {
+        val projectDir = createTestFile("ModernSyntax.java", """
+            package com.example;
+            import java.util.List;
+
+            public record ModernSyntax(int size) {
+                public String describe(Object value) {
+                    if (value instanceof String text) {
+                        return text;
+                    }
+                    return switch (size) {
+                        case 0 -> "empty";
+                        case 1 -> {
+                            yield List.of("one").get(0);
+                        }
+                        default -> "many";
+                    };
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.analyze(projectDir)
+
+        assertTrue(result.skipped.isEmpty(), "Structural pass must parse modern Java source syntax: ${result.skipped}")
     }
 }

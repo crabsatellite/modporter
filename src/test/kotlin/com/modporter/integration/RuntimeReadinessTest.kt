@@ -298,7 +298,13 @@ class RuntimeReadinessTest {
 
         assertTrue(content.contains("neoForge {"), "Has neoForge block")
         assertTrue(content.contains("client()"), "Has client run config")
+        assertTrue(content.contains("clientWorld {"), "Has quickplay client world run config")
+        assertTrue(content.contains("--quickPlayPath"), "Client world run config writes a quickplay log")
+        assertTrue(content.contains("--quickPlaySingleplayer"), "Client world run config quick-loads a smoke save")
         assertTrue(content.contains("server()"), "Has server run config")
+        assertTrue(content.contains("gameTestServer {"), "Has game test server run config")
+        assertTrue(content.contains("prepareGameTestServerRun"), "Copies gametest structures before GameTest server")
+        assertTrue(content.contains("run/gameteststructures"), "GameTest structures are staged into run directory")
         assertTrue(content.contains("data()"), "Has data run config")
     }
 

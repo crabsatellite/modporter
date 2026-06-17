@@ -1,0 +1,11 @@
+# id	displayName	provider	location	ref	subdir	required	dependencies
+constructionwand	ConstructionWand	git	https://github.com/Theta-Dev/ConstructionWand.git	1.20	.	true	-
+instantworldmirror	InstantWorldMirror	local	..\InstantWorldMirror - 1.20.1	-	.	false	-
+hotbath	HotBath	local	..\hotBath-1.20	-	.	false	-
+showercore	ShowerCore	local	..\ShowerCore-1.20	-	.	false	hotbath
+sakura	Sakura Mod	local	..\Sakura_mod-1.20.1	-	.	false	-
+twilightforest	Twilight Forest	git	https://github.com/TeamTwilight/twilightforest.git	1.20.1	.	true	-
+radios	Radios	missing	-	-	.	false	-
+leaningtower	LeaningTower	missing	-	-	.	false	-
+villagertourism	VillagerTourism	missing	-	-	.	false	-
+ping_system	ping_system	missing	-	-	.	false	-

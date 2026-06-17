@@ -12,8 +12,8 @@ private val logger = KotlinLogging.logger {}
  * Transforms build.gradle/build.gradle.kts from Forge 1.20.1 MDK to NeoForge 1.21.1.
  *
  * Key transformations:
- * - Forge Gradle plugin → NeoForge ModDev plugin
- * - net.minecraftforge:forge dependency → neoForge { version = "..." }
+ * - Forge Gradle plugin -> NeoForge ModDev plugin
+ * - net.minecraftforge:forge dependency -> neoForge { version = "..." }
  * - Repository URLs
  * - Mappings configuration
  * - Run configurations
@@ -90,18 +90,18 @@ class BuildSystemPass(
             }
         }
 
-        // Update Gradle wrapper if too old (ModDevGradle requires Gradle 8.5+, Java 21 requires 8.5+)
+        // Update Gradle wrapper if too old (ModDevGradle 2.x requires Gradle 8.8+).
         val wrapperProps = projectDir.resolve("gradle/wrapper/gradle-wrapper.properties")
         if (wrapperProps.exists()) {
             val wrapperContent = wrapperProps.readText()
             val versionMatch = Regex("""gradle-(\d+)\.(\d+)""").find(wrapperContent)
             val majorVersion = versionMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
             val minorVersion = versionMatch?.groupValues?.get(2)?.toIntOrNull() ?: 0
-            val needsUpdate = majorVersion < 8 || (majorVersion == 8 && minorVersion < 5)
+            val needsUpdate = majorVersion < 8 || (majorVersion == 8 && minorVersion < 8)
             if (needsUpdate) {
                 changes.add(Change(
                     file = wrapperProps, line = 0,
-                    description = "Update Gradle wrapper from $majorVersion.$minorVersion to 8.14.4 (ModDevGradle + Java 21 require 8.5+)",
+                    description = "Update Gradle wrapper from $majorVersion.$minorVersion to 8.14.4 (NeoForge ModDev 2.x requires Gradle 8.8+)",
                     before = "gradle-${majorVersion}.${minorVersion}.x",
                     after = "gradle-8.14.4",
                     confidence = Confidence.HIGH,
@@ -110,7 +110,7 @@ class BuildSystemPass(
                 if (!dryRun) {
                     wrapperProps.writeText(
                         wrapperContent.replace(
-                            Regex("""gradle-[\d.]+-bin\.zip"""),
+                            Regex("""gradle-[\d.]+-(?:bin|all)\.zip"""),
                             "gradle-8.14.4-bin.zip"
                         )
                     )
@@ -118,13 +118,177 @@ class BuildSystemPass(
             }
         }
 
-        // Cleanup: remove references to excluded classes from remaining Java files
         try {
-            val cleanupResult = cleanupExcludedReferences(projectDir, dryRun)
-            changes.addAll(cleanupResult.first)
-            errors.addAll(cleanupResult.second)
+            changes.addAll(rewriteLegacyTreeGrowers(projectDir, dryRun))
         } catch (e: Exception) {
-            errors.add("Failed to cleanup excluded references: ${e.message}")
+            errors.add("Failed to rewrite legacy tree growers: ${e.message}")
+        }
+
+        try {
+            changes.addAll(rewriteLegacyArmorMaterials(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to rewrite legacy armor materials: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateDataGenerationApis(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate data generation APIs: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateCustomStatRegistration(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate custom stat registration: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateRegisterEventResourceLocations(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate RegisterEvent resource locations: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateWorldCarverRegisterEvents(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate world carver RegisterEvent registration: ${e.message}")
+        }
+
+        try {
+            changes.addAll(rewriteLegacyCapabilityHooks(projectDir, dryRun))
+            changes.addAll(addLegacyCapabilityShims(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to add legacy capability compatibility shims: ${e.message}")
+        }
+
+        try {
+            changes.addAll(addLegacyMmlibShims(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to add legacy MMLib compatibility shims: ${e.message}")
+        }
+
+        try {
+            changes.addAll(cleanupDuplicateOverrides(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to cleanup duplicate overrides: ${e.message}")
+        }
+
+        try {
+            changes.addAll(addMissingEmptyGameTestStructures(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to add empty GameTest structures: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateAnimalSpawnPlacements(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate animal spawn placements: ${e.message}")
+        }
+
+        try {
+            changes.addAll(cleanupSplitTickPhaseChecks(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to cleanup split tick phase checks: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateStructureTemplatePoolReflectionFields(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate structure template pool reflection fields: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migratePendingBlockEntityReflectionFields(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate pending block entity reflection fields: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateEntityVisibilityReflectionHooks(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate entity visibility reflection hooks: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateCreativeModeInventorySelectedTabReflection(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate creative inventory selected tab reflection: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateEntityRenderersAddLayersReflection(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate entity renderer add-layers reflection: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateObfuscationReflectionMethodHandles(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate obfuscation reflection method handles: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateClassForNameReflection(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate Class.forName reflection: ${e.message}")
+        }
+
+        try {
+            changes.addAll(rewriteDeferredHolderReflectionCollectors(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to rewrite DeferredHolder reflection collectors: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateClientEventPackageTargets(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate client event package targets: ${e.message}")
+        }
+
+        try {
+            changes.addAll(guardClientOnlyEventRegistrations(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to guard client-only event registrations: ${e.message}")
+        }
+
+        try {
+            changes.addAll(restoreNonItemStackGetTagCalls(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to restore non-ItemStack getTag calls: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateModifyBakingResultModelLocations(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate model baking result locations: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateBlockPropertiesNoParticlesOnBreak(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate noParticlesOnBreak block properties: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateAccessTransformers(projectDir, dryRun))
+            changes.addAll(configureAccessTransformers(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate access transformers: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateCoremodScripts(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate coremod scripts: ${e.message}")
+        }
+
+        try {
+            errors.addAll(detectForbiddenReflection(projectDir))
+            if (!dryRun) {
+                errors.addAll(detectLegacyCoremodApiReferences(projectDir))
+            }
+        } catch (e: Exception) {
+            errors.add("Failed to scan hard gates: ${e.message}")
         }
 
         // Handle gradle.properties
@@ -211,23 +375,24 @@ class BuildSystemPass(
 
         // 2. Replace Forge dependency with neoForge block
         val forgeDependencyPatterns = listOf(
-            Regex("""minecraft[^\S\r\n]*\(?[^\S\r\n]*['"]net\.minecraftforge:forge:[^'"]+['"][^\S\r\n]*\)?"""),
+            Regex("""minecraft[^\S\r\n]*\(?[^\S\r\n]*['"]net\.(?:minecraftforge|neoforged):forge:[^'"]+['"][^\S\r\n]*\)?"""),
             Regex("""implementation\s+['"]net\.minecraftforge:forge:[^'"]+['"]"""),
             Regex("""implementation[^\S\r\n]*\([^\S\r\n]*['"]net\.minecraftforge:forge:[^'"]+['"][^\S\r\n]*\)"""),
         )
         for (pattern in forgeDependencyPatterns) {
             if (pattern.containsMatchIn(content)) {
-                val match = pattern.find(content)!!
-                changes.add(Change(
-                    file = file, line = content.lineNumberAt(match.range.first),
-                    description = "Replace Forge dependency with NeoForge configuration",
-                    before = match.value,
-                    after = "// NeoForge dependency is now configured via neoForge { } block",
-                    confidence = Confidence.HIGH,
-                    ruleId = "build-dependency"
-                ))
-                content = content.replace(match.value,
-                    "// NeoForge dependency is now configured via neoForge { } block")
+                val matches = pattern.findAll(content).toList()
+                for (match in matches) {
+                    changes.add(Change(
+                        file = file, line = content.lineNumberAt(match.range.first),
+                        description = "Replace Forge dependency with NeoForge configuration",
+                        before = match.value,
+                        after = "// NeoForge dependency is now configured via neoForge { } block",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-dependency"
+                    ))
+                }
+                content = pattern.replace(content, "// NeoForge dependency is now configured via neoForge { } block")
             }
         }
 
@@ -341,6 +506,8 @@ class BuildSystemPass(
             content = content.replace("maven.minecraftforge.net", "maven.neoforged.net/releases")
         }
 
+        content = addMavenRepositoryContentFilters(content, file, changes)
+
         // 6. Update Java toolchain from 17 to 21
         val java17Pattern = Regex("""JavaLanguageVersion\.of\s*\(\s*17\s*\)""")
         if (java17Pattern.containsMatchIn(content)) {
@@ -418,51 +585,72 @@ class BuildSystemPass(
             fgMatch = Regex("""fg\.deobf\(""").find(content)
         }
 
+        // 10a. ForgeGradle contributes mod* dependency configurations; ModDev does not.
+        val forgeModConfigurations = mapOf(
+            "modCompileOnly" to "compileOnly",
+            "modRuntimeOnly" to "runtimeOnly",
+            "modImplementation" to "implementation",
+            "modApi" to "api",
+        )
+        for ((fromConfig, toConfig) in forgeModConfigurations) {
+            val configPattern = Regex("""^(\s*)${Regex.escape(fromConfig)}\b""", RegexOption.MULTILINE)
+            val configMatch = configPattern.find(content)
+            if (configMatch != null) {
+                changes.add(Change(
+                    file = file, line = content.lineNumberAt(configMatch.range.first),
+                    description = "Replace ForgeGradle dependency configuration $fromConfig",
+                    before = fromConfig,
+                    after = toConfig,
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-mod-dependency-configuration"
+                ))
+                content = configPattern.replace(content) { match ->
+                    "${match.groupValues[1]}$toConfig"
+                }
+            }
+        }
+
         // 10b. Resolve third-party dependencies: check for NeoForge 1.21.1 versions
         val resolver = DependencyResolver(offlineMode = offlineMode, mappingsPrefix = mappingsPrefix)
         val resolvedPrefixes = mutableSetOf<String>()
         val newMavenRepos = mutableSetOf<String>()
         content = resolveDependencies(content, resolver, resolvedPrefixes, newMavenRepos, changes, file)
+        content = addReflectedOptionalApiDependencies(
+            content,
+            file.parent,
+            resolver,
+            resolvedPrefixes,
+            newMavenRepos,
+            changes,
+            file
+        )
 
         // 10c. Add maven repositories for resolved dependencies
         if (newMavenRepos.isNotEmpty()) {
             content = addMavenRepositories(content, newMavenRepos, changes, file)
         }
 
-        // 11. Comment out dependencies referencing old MC version that won't resolve
-        content = commentOutOldDeps(content, resolvedPrefixes)
+        // 10d. NeoForge bundles Mixin/MixinExtras; old standalone processors can break Mojmap remapping.
+        content = removeBundledMixinDependencies(content, changes, file)
 
-        // 12. Exclude integration source packages with unavailable dependencies
-        if (!content.contains("sourceSets.main.java {")) {
-            val detectionResult = detectUnavailableIntegrations(file.parent, content)
-            val integrationExclusions = detectionResult.exclusions
-            if (integrationExclusions.isNotEmpty()) {
-                val exclusionBlock = buildString {
-                    append("\n// Exclude optional integration modules whose dependencies are not yet available for NeoForge 1.21\n")
-                    append("sourceSets.main.java {\n")
-                    for (pkg in integrationExclusions) {
-                        append("    exclude '${pkg}'\n")
-                    }
-                    append("}\n")
-                }
-                val insertPoint = content.indexOf("dependencies {")
-                if (insertPoint > 0) {
-                    content = content.substring(0, insertPoint) + exclusionBlock + "\n" + content.substring(insertPoint)
-                    changes.add(Change(
-                        file = file, line = content.lineNumberAt(insertPoint),
-                        description = "Exclude integration packages: ${integrationExclusions.joinToString(", ")}",
-                        before = "(no exclusions)",
-                        after = "sourceSets.main.java { exclude ... }",
-                        confidence = Confidence.HIGH,
-                        ruleId = "build-exclude-integrations"
-                    ))
-                }
-            }
+        // 11. Keep unresolved dependencies active while removing ForgeGradle-only wrappers.
+        content = normalizeOldDependencyWrappers(content, resolvedPrefixes)
 
-            // 12b. Clean up unavailable dep references in files too large to exclude
-            if (detectionResult.cleanupTargets.isNotEmpty()) {
-                cleanupUnavailableDepRefs(detectionResult.cleanupTargets, changes, file)
-            }
+        // 11b. Guard optional run-preparation hooks whose task may not exist under ModDev
+        val prepareGameTestTaskPattern = Regex("""tasks\.named\(\s*(['"])prepareGameTestServerRun\1\s*\)\.configure\s*\{""")
+        val prepareGameTestTaskMatch = prepareGameTestTaskPattern.find(content)
+        if (prepareGameTestTaskMatch != null) {
+            val quote = prepareGameTestTaskMatch.groupValues[1]
+            val replacement = "tasks.matching { it.name == ${quote}prepareGameTestServerRun${quote} }.configureEach {"
+            changes.add(Change(
+                file = file, line = content.lineNumberAt(prepareGameTestTaskMatch.range.first),
+                description = "Guard prepareGameTestServerRun hook when the task is absent",
+                before = prepareGameTestTaskMatch.value,
+                after = replacement,
+                confidence = Confidence.HIGH,
+                ruleId = "build-guard-optional-run-task"
+            ))
+            content = prepareGameTestTaskPattern.replace(content, replacement)
         }
 
         // 13. Remove reobfJar references and related comments
@@ -568,6 +756,2462 @@ class BuildSystemPass(
         return changes to emptyList()
     }
 
+    private fun addMissingEmptyGameTestStructures(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val declaredTemplates = mutableSetOf<String>()
+        srcDir.toFile().walkTopDown()
+            .filter { it.isFile && it.extension == "java" }
+            .forEach { file ->
+                val content = file.readText()
+                if (!content.contains("@GameTest")) return@forEach
+
+                val constants = Regex("""(?:private|public|protected)?\s*(?:static\s+)?final\s+String\s+(\w+)\s*=\s*"([^"]+)"""")
+                    .findAll(content)
+                    .associate { it.groupValues[1] to it.groupValues[2] }
+
+                Regex("""@GameTest\s*\(([^)]*)\)""", RegexOption.DOT_MATCHES_ALL)
+                    .findAll(content)
+                    .forEach { match ->
+                        val args = match.groupValues[1]
+                        val templateValue = Regex("""template\s*=\s*("([^"]+)"|(\w+))""").find(args) ?: return@forEach
+                        val literal = templateValue.groupValues[2]
+                        val constantName = templateValue.groupValues[3]
+                        val template = literal.ifBlank { constants[constantName].orEmpty() }
+                        if (template.isNotBlank()) declaredTemplates.add(template)
+                    }
+            }
+
+        val emptyTemplates = declaredTemplates
+            .filter { template ->
+                val normalized = template.lowercase()
+                "empty" in normalized || Regex("""(?:^|_)1x1(?:_|$)""").containsMatchIn(normalized)
+            }
+            .toSortedSet()
+        if (emptyTemplates.isEmpty()) return emptyList()
+
+        val structuresDir = projectDir.resolve("src/main/resources/gameteststructures")
+        val changes = mutableListOf<Change>()
+        for (template in emptyTemplates) {
+            if (gameTestStructureExists(projectDir, template)) continue
+            val target = structuresDir.resolve("$template.snbt")
+            changes.add(Change(
+                file = target,
+                line = 0,
+                description = "Create missing empty GameTest structure '$template'",
+                before = "(missing)",
+                after = "1x1 empty GameTest SNBT structure",
+                confidence = Confidence.HIGH,
+                ruleId = "build-gametest-empty-structure"
+            ))
+            if (!dryRun) {
+                target.parent.createDirectories()
+                target.writeText(EMPTY_GAMETEST_STRUCTURE_SNBT)
+            }
+        }
+        return changes
+    }
+
+    private fun gameTestStructureExists(projectDir: Path, template: String): Boolean {
+        val relative = template.replace('.', '/')
+        val resourceRoots = listOf(
+            projectDir.resolve("src/main/resources/gameteststructures/$relative.snbt"),
+            projectDir.resolve("src/main/resources/gameteststructures/$template.snbt"),
+            projectDir.resolve("src/main/resources/data"),
+            projectDir.resolve("src/generated/resources/data")
+        )
+        if (resourceRoots.take(2).any { it.exists() }) return true
+
+        for (dataRoot in resourceRoots.drop(2)) {
+            if (!dataRoot.exists()) continue
+            dataRoot.listDirectoryEntries().forEach { namespaceDir ->
+                if (namespaceDir.resolve("structures/$relative.nbt").exists()) return true
+                if (namespaceDir.resolve("structure/$relative.nbt").exists()) return true
+            }
+        }
+        return false
+    }
+
+    private fun migrateStructureTemplatePoolReflectionFields(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("StructureTemplatePool.class") ||
+                    (!original.contains("\"f_210560_\"") && !original.contains("\"f_210559_\""))) {
+                    return@forEach
+                }
+
+                var modified = original
+                modified = replaceStructurePoolFieldAccess(modified, "templatesField", "f_210560_", "templates")
+                modified = replaceStructurePoolFieldAccess(modified, "rawTemplatesField", "f_210559_", "rawTemplates")
+                modified = modified
+                    .replace("via reflection (the fields are private in StructureTemplatePool)", "through access-transformer-backed fields")
+                    .replace("via reflection.", "through access-transformer-backed fields.")
+                    .replace("via reflection", "through access-transformer-backed fields")
+                if (!modified.contains("ObfuscationReflectionHelper.findField(")) {
+                    modified = modified.replace(
+                        Regex("""(?m)^[ \t]*import\s+net\.neoforged\.fml\.util\.ObfuscationReflectionHelper;\s*\r?\n"""),
+                        ""
+                    )
+                }
+                if (!Regex("""\bField\s+\w+""").containsMatchIn(modified)) {
+                    modified = removeJavaImport(modified, "java.lang.reflect.Field")
+                }
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "StructureTemplatePool internals: reflection -> access-transformer-backed direct fields",
+                        before = "ObfuscationReflectionHelper.findField(... f_210560_/f_210559_)",
+                        after = "pool.templates/pool.rawTemplates plus access transformer entries",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-structure-pool-at-direct-fields"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                    changes.addAll(ensureAccessTransformerEntries(
+                        projectDir,
+                        listOf(
+                            "public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool templates",
+                            "public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates"
+                        ),
+                        dryRun,
+                        "build-structure-pool-at-entries",
+                        "Expose StructureTemplatePool fields through Access Transformers instead of reflection"
+                    ))
+                }
+            }
+        return changes
+    }
+
+    private fun replaceStructurePoolFieldAccess(
+        content: String,
+        variableName: String,
+        oldFieldName: String,
+        newFieldName: String
+    ): String {
+        var result = content
+        result = Regex("""\(\s*[^()]+?\s*\)\s*$variableName\.get\(([^()]+)\)""").replace(result) { match ->
+            "${match.groupValues[1].trim()}.$newFieldName"
+        }
+        result = Regex("""\b$variableName\.get\(([^()]+)\)""").replace(result) { match ->
+            "${match.groupValues[1].trim()}.$newFieldName"
+        }
+        result = Regex("""\b$variableName\.set\(\s*([^,()]+)\s*,\s*([^;]+?)\s*\)\s*;""").replace(result) { match ->
+            "${match.groupValues[1].trim()}.$newFieldName = ${match.groupValues[2].trim()};"
+        }
+
+        val multiline = Regex(
+            """(?m)^([ \t]*)Field\s+$variableName\s*=\s*ObfuscationReflectionHelper\.findField\(\s*\r?\n[ \t]*StructureTemplatePool\.class,\s*"${Regex.escape(oldFieldName)}"\);\s*(?://[^\r\n]*)?"""
+        )
+        result = multiline.replace(result, "")
+
+        val singleLine = Regex(
+            """(?m)^([ \t]*)Field\s+$variableName\s*=\s*ObfuscationReflectionHelper\.findField\(\s*StructureTemplatePool\.class,\s*"${Regex.escape(oldFieldName)}"\s*\);\s*(?://[^\r\n]*)?"""
+        )
+        result = singleLine.replace(result, "")
+        result = Regex("""(?m)^[ \t]*$variableName\.setAccessible\(true\);\s*\r?\n""").replace(result, "")
+        return result
+    }
+
+    private fun migratePendingBlockEntityReflectionFields(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("LevelChunk.class.getDeclaredFields()") ||
+                    !original.contains("pendingBlockEntitiesField") ||
+                    !original.contains("clearPendingBlockEntities")) {
+                    return@forEach
+                }
+
+                var modified = original
+                modified = removeJavaImport(modified, "java.lang.reflect.Field")
+                modified = Regex("""(?m)^[ \t]*private\s+static\s+Field\s+pendingBlockEntitiesField\s*=\s*null\s*;\s*\r?\n""")
+                    .replace(modified, "")
+                modified = Regex("""(?m)^[ \t]*private\s+static\s+boolean\s+pendingBEFieldInitialized\s*=\s*false\s*;\s*\r?\n""")
+                    .replace(modified, "")
+
+                val methodMatch = Regex(
+                    """private\s+static\s+void\s+clearPendingBlockEntities\s*\(\s*LevelChunk\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
+                ).find(modified) ?: return@forEach
+                val chunkParam = methodMatch.groupValues[1]
+                val openBrace = modified.indexOf('{', methodMatch.range.first)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(modified, openBrace) else -1
+                if (closeBrace <= openBrace) return@forEach
+
+                val methodBody = modified.substring(openBrace + 1, closeBrace)
+                val logger = Regex("""([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.LOGGER)\.(?:trace|debug|info)\s*\(""")
+                    .find(methodBody)
+                    ?.groupValues
+                    ?.get(1)
+                    ?: "LOGGER"
+                val replacement = """
+private static void clearPendingBlockEntities(LevelChunk $chunkParam) {
+        Map<BlockPos, CompoundTag> pendingBlockEntities = $chunkParam.pendingBlockEntities;
+        if (!pendingBlockEntities.isEmpty()) {
+            int count = pendingBlockEntities.size();
+            pendingBlockEntities.clear();
+            if (count > 0) {
+                $logger.debug("Cleared {} pending block entities from chunk", count);
+            }
+        }
+    }
+""".trimIndent()
+                modified = modified.substring(0, methodMatch.range.first) +
+                    replacement +
+                    modified.substring(closeBrace + 1)
+                modified = ensureJavaImport(modified, "java.util.Map")
+                modified = ensureJavaImport(modified, "net.minecraft.core.BlockPos")
+                modified = ensureJavaImport(modified, "net.minecraft.nbt.CompoundTag")
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "LevelChunk pending block entities: reflection -> access-transformer-backed direct field",
+                        before = "LevelChunk.class.getDeclaredFields() + Field#setAccessible",
+                        after = "chunk.pendingBlockEntities.clear() plus access transformer entry",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-levelchunk-pending-blockentities-at"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                    changes.addAll(ensureAccessTransformerEntries(
+                        projectDir,
+                        listOf("public net.minecraft.world.level.chunk.ChunkAccess pendingBlockEntities"),
+                        dryRun,
+                        "build-levelchunk-pending-blockentities-at-entry",
+                        "Expose ChunkAccess pendingBlockEntities through Access Transformers instead of reflection"
+                    ))
+                }
+            }
+        return changes
+    }
+
+    private fun migrateEntityVisibilityReflectionHooks(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("declaresVisibilityHook") ||
+                    !original.contains(".getMethod(") ||
+                    !original.contains("startSeenByPlayer") ||
+                    !original.contains("stopSeenByPlayer")) {
+                    return@forEach
+                }
+
+                var modified = original
+                val hookMethod = Regex(
+                    """private\s+static\s+boolean\s+hasNativePlayerVisibilityHook\s*\(\s*Entity\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
+                ).find(modified) ?: return@forEach
+                val entityParam = hookMethod.groupValues[1]
+                val hookOpenBrace = modified.indexOf('{', hookMethod.range.first)
+                val hookCloseBrace = if (hookOpenBrace >= 0) findMatchingBrace(modified, hookOpenBrace) else -1
+                if (hookCloseBrace <= hookOpenBrace) return@forEach
+
+                val hookBody = modified.substring(hookOpenBrace + 1, hookCloseBrace)
+                if (!hookBody.contains("declaresVisibilityHook") ||
+                    !hookBody.contains("startSeenByPlayer") ||
+                    !hookBody.contains("stopSeenByPlayer")) {
+                    return@forEach
+                }
+
+                val replacementHook = """
+private static boolean hasNativePlayerVisibilityHook(Entity $entityParam) {
+        return $entityParam instanceof WitherBoss;
+    }
+""".trimIndent()
+                modified = modified.substring(0, hookMethod.range.first) +
+                    replacementHook +
+                    modified.substring(hookCloseBrace + 1)
+
+                val declaresMethod = Regex(
+                    """private\s+static\s+boolean\s+declaresVisibilityHook\s*\(\s*Class<\?>\s+[A-Za-z_$][\w$]*\s*,\s*String\s+[A-Za-z_$][\w$]*\s*\)\s*\{"""
+                ).find(modified)
+                if (declaresMethod != null) {
+                    val openBrace = modified.indexOf('{', declaresMethod.range.first)
+                    val closeBrace = if (openBrace >= 0) findMatchingBrace(modified, openBrace) else -1
+                    if (closeBrace > openBrace) {
+                        modified = modified.substring(0, declaresMethod.range.first).trimEnd() +
+                            "\n\n" +
+                            modified.substring(closeBrace + 1).trimStart()
+                    }
+                }
+
+                modified = removeJavaImport(modified, "java.lang.reflect.Method")
+                val modifiedWithoutImports = Regex("""(?m)^[ \t]*import\s+[^;]+;\s*\r?\n""").replace(modified, "")
+                if (!Regex("""\bServerPlayer\b""").containsMatchIn(modifiedWithoutImports)) {
+                    modified = removeJavaImport(modified, "net.minecraft.server.level.ServerPlayer")
+                }
+                modified = ensureJavaImport(modified, "net.minecraft.world.entity.boss.wither.WitherBoss")
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Entity visibility hook reflection -> explicit vanilla boss visibility API check",
+                        before = "Class#getMethod(... startSeenByPlayer/stopSeenByPlayer)",
+                        after = "entity instanceof WitherBoss",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-entity-visibility-hook-no-reflection"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                }
+            }
+        return changes
+    }
+
+    private fun migrateClientEventPackageTargets(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("@Mixin(") || !original.contains(".client.ColorHandler")) {
+                    return@forEach
+                }
+
+                val importPattern = Regex("""(?m)^([ \t]*import\s+)([a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)*)\.client\.ColorHandler;\s*$""")
+                val modified = importPattern.replace(original) { match ->
+                    "${match.groupValues[1]}${match.groupValues[2]}.client.event.ColorHandler;"
+                }
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Retarget client ColorHandler mixin import to event package",
+                        before = "<mod>.client.ColorHandler",
+                        after = "<mod>.client.event.ColorHandler",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-client-event-colorhandler-target"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                }
+            }
+        return changes
+    }
+
+    private data class JavaClassInfo(
+        val path: Path,
+        val packageName: String?,
+        val className: String,
+        val qualifiedName: String,
+        val source: String,
+        val isClientOnly: Boolean
+    )
+
+    private fun guardClientOnlyEventRegistrations(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val javaFiles = java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .toList()
+        if (javaFiles.isEmpty()) return emptyList()
+
+        val classes = javaFiles.map { javaFile ->
+            val source = javaFile.readText()
+            val packageName = Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+                .find(source)
+                ?.groupValues
+                ?.get(1)
+            val className = javaFile.fileName.toString().removeSuffix(".java")
+            JavaClassInfo(
+                path = javaFile,
+                packageName = packageName,
+                className = className,
+                qualifiedName = if (packageName.isNullOrBlank()) className else "$packageName.$className",
+                source = source,
+                isClientOnly = isClientOnlyJavaSource(source)
+            )
+        }
+        val classesBySimpleName = classes.groupBy { it.className }
+        val classesByQualifiedName = classes.associateBy { it.qualifiedName }
+        val clientQualifiedNames = classes.filter { it.isClientOnly }.map { it.qualifiedName }.toSet()
+        val changes = mutableListOf<Change>()
+
+        for (javaFile in javaFiles) {
+            val original = javaFile.readText()
+            var modified = original
+            val guarded = guardClientOnlyListenerReferences(
+                modified,
+                clientQualifiedNames,
+                classesBySimpleName,
+                classesByQualifiedName
+            )
+            if (guarded != modified) {
+                modified = guarded
+                changes.add(Change(
+                    file = javaFile,
+                    line = 1,
+                    description = "Guard client-only event listener method references from dedicated-server class loading",
+                    before = "eventBus.addListener(ClientOnlyClass::handler)",
+                    after = "FMLLoader Dist.CLIENT guard around the original listener registration",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-client-only-listener-dist-guard"
+                ))
+            }
+
+            val annotated = addClientDistToEventBusSubscribers(modified)
+            if (annotated != modified) {
+                modified = annotated
+                changes.add(Change(
+                    file = javaFile,
+                    line = 1,
+                    description = "Mark EventBusSubscriber classes that handle client lifecycle/events as Dist.CLIENT",
+                    before = "@EventBusSubscriber without value = Dist.CLIENT",
+                    after = "@EventBusSubscriber(..., value = Dist.CLIENT)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-client-eventbus-subscriber-dist"
+                ))
+            }
+
+            if (modified != original && !dryRun) {
+                javaFile.writeText(modified)
+            }
+        }
+
+        return changes
+    }
+
+    private fun isClientOnlyJavaSource(source: String): Boolean =
+        source.contains("net.minecraft.client.") ||
+            source.contains("net.neoforged.neoforge.client.event.") ||
+            Regex("""(?m)^\s*package\s+.*\.client(?:\.|;)""").containsMatchIn(source) ||
+            Regex("""@OnlyIn\s*\(\s*(?:Dist\.)?CLIENT\s*\)""").containsMatchIn(source) ||
+            Regex("""@(?:Mod\.)?EventBusSubscriber\s*\([\s\S]*?\bvalue\s*=\s*(?:net\.neoforged\.api\.distmarker\.)?Dist\.CLIENT""")
+                .containsMatchIn(source)
+
+    private fun guardClientOnlyListenerReferences(
+        source: String,
+        clientQualifiedNames: Set<String>,
+        classesBySimpleName: Map<String, List<JavaClassInfo>>,
+        classesByQualifiedName: Map<String, JavaClassInfo>
+    ): String {
+        val listenerPattern = Regex(
+            """(?m)^([ \t]*)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.addListener\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)::([A-Za-z_$][\w$]*)\s*\)\s*;\s*(?://[^\r\n]*)?$"""
+        )
+        var result = source
+        for (match in listenerPattern.findAll(source).toList().asReversed()) {
+            val targetRef = match.groupValues[3]
+            val methodName = match.groupValues[4]
+            if (!shouldGuardClientOnlyListenerReference(
+                    targetRef,
+                    methodName,
+                    source,
+                    clientQualifiedNames,
+                    classesBySimpleName,
+                    classesByQualifiedName
+                )
+            ) {
+                continue
+            }
+            if (isWithinDistClientGuard(result, match.range.first)) {
+                continue
+            }
+            val indent = match.groupValues[1]
+            val originalLine = match.value.trim()
+            val replacement = buildString {
+                append(indent)
+                append("if (net.neoforged.fml.loading.FMLLoader.getDist() == net.neoforged.api.distmarker.Dist.CLIENT) {")
+                append(System.lineSeparator())
+                append(indent)
+                append("    ")
+                append(originalLine)
+                append(System.lineSeparator())
+                append(indent)
+                append("}")
+            }
+            result = result.replaceRange(match.range, replacement)
+        }
+        return result
+    }
+
+    private fun shouldGuardClientOnlyListenerReference(
+        targetRef: String,
+        methodName: String,
+        source: String,
+        clientQualifiedNames: Set<String>,
+        classesBySimpleName: Map<String, List<JavaClassInfo>>,
+        classesByQualifiedName: Map<String, JavaClassInfo>
+    ): Boolean {
+        val targetClass = resolveListenerTargetClass(targetRef, source, classesBySimpleName, classesByQualifiedName)
+        if (targetClass != null) {
+            return shouldGuardClientOnlyListenerMethod(targetClass, methodName)
+        }
+
+        return if (targetRef.contains(".")) {
+            targetRef in clientQualifiedNames
+        } else {
+            val imported = Regex("""(?m)^\s*import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.${Regex.escape(targetRef)})\s*;""")
+                .find(source)
+                ?.groupValues
+                ?.get(1)
+            if (imported != null) {
+                imported in clientQualifiedNames
+            } else {
+                val localMatches = classesBySimpleName[targetRef].orEmpty()
+                localMatches.size == 1 && localMatches.single().isClientOnly
+            }
+        }
+    }
+
+    private fun resolveListenerTargetClass(
+        targetRef: String,
+        source: String,
+        classesBySimpleName: Map<String, List<JavaClassInfo>>,
+        classesByQualifiedName: Map<String, JavaClassInfo>
+    ): JavaClassInfo? {
+        if (targetRef.contains(".")) {
+            classesByQualifiedName[targetRef]?.let { return it }
+        }
+
+        val imported = Regex("""(?m)^\s*import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.${Regex.escape(targetRef)})\s*;""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+        if (imported != null) {
+            classesByQualifiedName[imported]?.let { return it }
+        }
+
+        val currentPackage = Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+        val localMatches = classesBySimpleName[targetRef].orEmpty()
+        if (currentPackage != null) {
+            localMatches.singleOrNull { it.packageName == currentPackage }?.let { return it }
+        }
+        return localMatches.singleOrNull()
+    }
+
+    private fun shouldGuardClientOnlyListenerMethod(targetClass: JavaClassInfo, methodName: String): Boolean {
+        val methodSource = findJavaMethodSource(targetClass.source, methodName)
+            ?: return targetClass.isClientOnly
+        return javaMethodContainsClientOnlyApis(methodSource, targetClass.source)
+    }
+
+    private fun findJavaMethodSource(source: String, methodName: String): String? {
+        val methodPattern = Regex(
+            """(?m)(?:^|[\r\n])([ \t]*(?:@[^\r\n]+\s*)*(?:(?:public|protected|private|static|final|synchronized|native|abstract|strictfp)\s+)*(?:<[^>{};]+>\s*)?(?:[A-Za-z_$][\w$]*(?:\s*<[^>{};]+>)?(?:\s*\[\s*])?(?:\s*,\s*)?|\?|extends|super|&|\.)+(?:\s+)+${Regex.escape(methodName)}\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\s*\{)"""
+        )
+        val match = methodPattern.find(source) ?: return null
+        val openBrace = source.indexOf('{', match.range.first)
+        if (openBrace < 0) return null
+        val closeBrace = findMatchingBrace(source, openBrace)
+        if (closeBrace <= openBrace) return null
+        return source.substring(match.range.first, closeBrace + 1)
+    }
+
+    private fun javaMethodContainsClientOnlyApis(methodSource: String, classSource: String): Boolean {
+        if (
+            methodSource.contains("net.minecraft.client.") ||
+            methodSource.contains("net.neoforged.neoforge.client.event.")
+        ) {
+            return true
+        }
+
+        val clientImportedNames = Regex(
+            """(?m)^\s*import\s+(net\.minecraft\.client\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*|net\.neoforged\.neoforge\.client\.event\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;"""
+        ).findAll(classSource).map { it.groupValues[1].substringAfterLast('.') }.toSet()
+        val knownClientEventNames = setOf(
+            "FMLClientSetupEvent",
+            "ClientTickEvent",
+            "CustomizeGuiOverlayEvent",
+            "EntityRenderersEvent",
+            "InputEvent",
+            "ModelEvent",
+            "RegisterClientCommandsEvent",
+            "RegisterClientExtensionsEvent",
+            "RegisterClientReloadListenersEvent",
+            "RegisterClientTooltipComponentFactoriesEvent",
+            "RegisterColorHandlersEvent",
+            "RegisterDimensionSpecialEffectsEvent",
+            "RegisterGuiLayersEvent",
+            "RegisterKeyMappingsEvent",
+            "RegisterMenuScreensEvent",
+            "RegisterNamedRenderTypesEvent",
+            "RegisterParticleProvidersEvent",
+            "RegisterPresetEditorsEvent",
+            "RegisterRecipeBookCategoriesEvent",
+            "RegisterShadersEvent",
+            "RenderGuiEvent",
+            "RenderLevelStageEvent",
+            "RenderLivingEvent",
+            "RenderNameTagEvent",
+            "RenderPlayerEvent",
+            "ScreenEvent",
+            "TextureAtlasStitchedEvent",
+            "ViewportEvent"
+        )
+        return (clientImportedNames + knownClientEventNames)
+            .any { name -> Regex("""\b${Regex.escape(name)}\b""").containsMatchIn(methodSource) }
+    }
+
+    private fun isWithinDistClientGuard(source: String, offset: Int): Boolean {
+        val guardPattern = Regex(
+            """if\s*\(\s*(?:net\.neoforged\.fml\.loading\.)?(?:FMLLoader\.getDist\(\)|FMLEnvironment\.dist)\s*==\s*(?:net\.neoforged\.api\.distmarker\.)?Dist\.CLIENT\s*\)\s*\{"""
+        )
+        return guardPattern.findAll(source.substring(0, offset.coerceAtMost(source.length)))
+            .any { match ->
+                val openBrace = source.indexOf('{', match.range.first)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+                closeBrace > offset
+            }
+    }
+
+    private fun addClientDistToEventBusSubscribers(source: String): String {
+        val annotationPattern = Regex("""@(?:Mod\.)?EventBusSubscriber\s*\(""")
+        var result = source
+        for (match in annotationPattern.findAll(source).toList().asReversed()) {
+            val openParen = result.indexOf('(', match.range.first)
+            val closeParen = if (openParen >= 0) findClosing(result, openParen, '(', ')') else -1
+            if (closeParen <= openParen) continue
+            val annotation = result.substring(match.range.first, closeParen + 1)
+            if (Regex("""\bvalue\s*=""").containsMatchIn(annotation)) continue
+
+            val classMatch = Regex(
+                """\s*(?:public\s+|protected\s+|private\s+|static\s+|final\s+|abstract\s+)*class\s+([A-Za-z_$][\w$]*)\b"""
+            ).find(result, closeParen + 1) ?: continue
+            if (classMatch.range.first - closeParen > 240) continue
+            val openBrace = result.indexOf('{', classMatch.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (closeBrace <= openBrace) continue
+            val classBody = result.substring(openBrace + 1, closeBrace)
+            if (!classBodyContainsClientOnlyApis(classBody)) continue
+
+            result = result.replaceRange(
+                match.range.first,
+                closeParen + 1,
+                addDistClientValueToEventBusSubscriberAnnotation(annotation)
+            )
+        }
+        return result
+    }
+
+    private fun classBodyContainsClientOnlyApis(body: String): Boolean =
+        body.contains("net.minecraft.client.") ||
+            body.contains("net.neoforged.neoforge.client.event.") ||
+            Regex("""\bFMLClientSetupEvent\b""").containsMatchIn(body) ||
+            Regex("""\b(?:EntityRenderersEvent|ModelEvent|RegisterColorHandlersEvent|RegisterParticleProvidersEvent|RegisterKeyMappingsEvent|RegisterShadersEvent)\b""")
+                .containsMatchIn(body)
+
+    private fun addDistClientValueToEventBusSubscriberAnnotation(annotation: String): String {
+        val closeParen = annotation.lastIndexOf(')')
+        if (closeParen < 0) return annotation
+        val beforeClose = annotation.substring(0, closeParen).trimEnd()
+        val separator = if (beforeClose.endsWith("(")) "" else ", "
+        return if (!annotation.contains('\n')) {
+            beforeClose + separator + "value = net.neoforged.api.distmarker.Dist.CLIENT" + annotation.substring(closeParen)
+        } else {
+            val closeLineIndent = annotation.substringBeforeLast(")")
+                .substringAfterLast('\n', "")
+                .takeWhile { it == ' ' || it == '\t' }
+            val multilineSeparator = if (beforeClose.endsWith("(") || beforeClose.endsWith(",")) "" else ","
+            beforeClose + multilineSeparator +
+                System.lineSeparator() +
+                closeLineIndent +
+                "    value = net.neoforged.api.distmarker.Dist.CLIENT" +
+                annotation.substring(closeParen)
+        }
+    }
+
+    private fun migrateCreativeModeInventorySelectedTabReflection(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("CreativeModeInventoryScreen.class.getDeclaredField(\"selectedTab\")") ||
+                    !original.contains("setAccessible(true)") ||
+                    !original.contains("field.get(null)")) {
+                    return@forEach
+                }
+
+                val methodMatch = Regex(
+                    """private\s+static\s+CreativeModeTab\s+getSelectedTab\s*\(\s*\)\s*\{"""
+                ).find(original) ?: return@forEach
+                val openBrace = original.indexOf('{', methodMatch.range.first)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(original, openBrace) else -1
+                if (closeBrace <= openBrace) return@forEach
+
+                val replacement = """
+private static CreativeModeTab getSelectedTab() {
+    CreativeModeTab selectedTab = CreativeModeInventoryScreen.selectedTab;
+    return selectedTab != null ? selectedTab : CreativeModeTabs.getDefaultTab();
+  }
+""".trimIndent()
+                var modified = original.substring(0, methodMatch.range.first) +
+                    replacement +
+                    original.substring(closeBrace + 1)
+                if (!Regex("""\bjava\.lang\.reflect\.""").containsMatchIn(modified)) {
+                    modified = removeJavaImport(modified, "java.lang.reflect.Field")
+                }
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "CreativeModeInventoryScreen selectedTab: reflection -> access-transformer-backed direct field",
+                        before = "CreativeModeInventoryScreen.class.getDeclaredField(\"selectedTab\")",
+                        after = "CreativeModeInventoryScreen.selectedTab plus access transformer entry",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-creative-selectedtab-at"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                    changes.addAll(ensureAccessTransformerEntries(
+                        projectDir,
+                        listOf("public net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen selectedTab"),
+                        dryRun,
+                        "build-creative-selectedtab-at-entry",
+                        "Expose CreativeModeInventoryScreen selectedTab through Access Transformers instead of reflection"
+                    ))
+                }
+            }
+        return changes
+    }
+
+    private fun migrateEntityRenderersAddLayersReflection(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("EntityRenderersEvent.AddLayers.class.getDeclaredField(\"renderers\")") ||
+                    !original.contains(".setAccessible(true)")) {
+                    return@forEach
+                }
+
+                val methodMatch = Regex(
+                    """public\s+static\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*EntityRenderersEvent\.AddLayers\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
+                ).find(original) ?: return@forEach
+                val methodName = methodMatch.groupValues[1]
+                val eventParam = methodMatch.groupValues[2]
+                val openBrace = original.indexOf('{', methodMatch.range.first)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(original, openBrace) else -1
+                if (closeBrace <= openBrace) return@forEach
+
+                val body = original.substring(openBrace + 1, closeBrace)
+                val skinBlockStart = body.indexOf("$eventParam.getSkins().forEach")
+                    .takeIf { it >= 0 }
+                    ?: return@forEach
+                val skinBlockEnd = findJavaStatementEnd(body, skinBlockStart)
+                    .takeIf { it > skinBlockStart }
+                    ?: return@forEach
+                val skinBlock = body.substring(skinBlockStart, skinBlockEnd + 1).trim()
+                val rendererStream = Regex(
+                    """(?s)\(\(Map<[^;]+>\)\s*[A-Za-z_$][\w$]*\.get\(\s*${Regex.escape(eventParam)}\s*\)\)\.values\(\)\.stream\(\)\s*\.(.*?)\s*;"""
+                ).find(body) ?: return@forEach
+                val streamTail = rendererStream.groupValues[1].trim()
+                val replacementMethod = """
+public static void $methodName(EntityRenderersEvent.AddLayers $eventParam) {
+        $skinBlock
+        $eventParam.getEntityTypes().stream().map($eventParam::getRenderer).
+                $streamTail;
+    }
+""".trimIndent()
+
+                var modified = original.substring(0, methodMatch.range.first) +
+                    replacementMethod +
+                    original.substring(closeBrace + 1)
+                modified = removeJavaImport(modified, "java.lang.reflect.Field")
+                modified = Regex("""(?m)^[ \t]*private\s+static\s+Field\s+[A-Za-z_$][\w$]*\s*;\s*\r?\n""")
+                    .replace(modified, "")
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "EntityRenderersEvent.AddLayers renderers: reflection -> public renderer lookup API",
+                        before = "EntityRenderersEvent.AddLayers.class.getDeclaredField(\"renderers\")",
+                        after = "event.getEntityTypes().stream().map(event::getRenderer)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-entityrenderers-addlayers-api"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                }
+            }
+        return changes
+    }
+
+    private fun migrateObfuscationReflectionMethodHandles(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("ObfuscationReflectionHelper.findMethod(") ||
+                    !original.contains("MethodHandle")) {
+                    return@forEach
+                }
+
+                var modified = original
+                var touched = false
+                val invokerImports = linkedSetOf<String>()
+                if (modified.contains("ObfuscationReflectionHelper.findMethod(LivingEntity.class, \"m_5592_\"") &&
+                    modified.contains("handle_LivingEntity_getDeathSound")) {
+                    modified = replaceLivingEntityDeathSoundMethodHandle(modified)
+                    val packageName = javaPackageName(original) ?: return@forEach
+                    invokerImports.add("${generatedMixinPackage(packageName)}.ModPorterLivingEntityInvoker")
+                    changes.addAll(ensureMixinInvoker(
+                        projectDir = projectDir,
+                        sourceFile = javaFile,
+                        packageName = packageName,
+                        invokerName = "ModPorterLivingEntityInvoker",
+                        targetClassName = "LivingEntity",
+                        targetImport = "net.minecraft.world.entity.LivingEntity",
+                        extraImports = listOf("net.minecraft.sounds.SoundEvent"),
+                        methodSource = """
+                            @Invoker("getDeathSound")
+                            SoundEvent modporter${'$'}getDeathSound();
+                        """.trimIndent(),
+                        dryRun = dryRun
+                    ))
+                    touched = true
+                }
+                if (modified.contains("ObfuscationReflectionHelper.findMethod(HangingEntity.class, \"m_6022_\"") &&
+                    modified.contains("handle_HangingEntity_setDirection")) {
+                    modified = replaceHangingEntitySetDirectionMethodHandle(modified)
+                    val packageName = javaPackageName(original) ?: return@forEach
+                    invokerImports.add("${generatedMixinPackage(packageName)}.ModPorterHangingEntityInvoker")
+                    changes.addAll(ensureMixinInvoker(
+                        projectDir = projectDir,
+                        sourceFile = javaFile,
+                        packageName = packageName,
+                        invokerName = "ModPorterHangingEntityInvoker",
+                        targetClassName = "HangingEntity",
+                        targetImport = "net.minecraft.world.entity.decoration.HangingEntity",
+                        extraImports = listOf("net.minecraft.core.Direction"),
+                        methodSource = """
+                            @Invoker("setDirection")
+                            void modporter${'$'}setDirection(Direction direction);
+                        """.trimIndent(),
+                        dryRun = dryRun
+                    ))
+                    touched = true
+                }
+                if (!touched) return@forEach
+
+                modified = removeObfuscationMethodHandleScaffolding(modified)
+                modified = removeJavaImport(modified, "net.neoforged.fml.util.ObfuscationReflectionHelper")
+                modified = removeJavaImport(modified, "net.minecraftforge.fml.util.ObfuscationReflectionHelper")
+                modified = removeJavaImport(modified, "java.lang.invoke.MethodHandle")
+                modified = removeJavaImport(modified, "java.lang.invoke.MethodHandles")
+                modified = removeJavaImport(modified, "java.lang.reflect.Method")
+                invokerImports.forEach { importName ->
+                    modified = addJavaImportIfMissing(modified, importName)
+                }
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "ObfuscationReflectionHelper method handles -> mixin invoker method calls",
+                        before = "ObfuscationReflectionHelper.findMethod(...) + MethodHandle.invoke",
+                        after = "generated @Invoker interfaces and direct invoker calls",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-obfuscation-methodhandle-mixin-invoker"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                }
+            }
+        return changes
+    }
+
+    private fun replaceLivingEntityDeathSoundMethodHandle(source: String): String {
+        val methodMatch = Regex("""@Nullable\s+public\s+static\s+SoundEvent\s+getDeathSound\s*\(\s*LivingEntity\s+([A-Za-z_$][\w$]*)\s*\)\s*\{""")
+            .find(source)
+            ?: return source
+        val param = methodMatch.groupValues[1]
+        val openBrace = source.indexOf('{', methodMatch.range.first)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        if (closeBrace <= openBrace) return source
+        val replacement = """
+@Nullable
+public static SoundEvent getDeathSound(LivingEntity $param) {
+        return ((ModPorterLivingEntityInvoker) $param).modporter${'$'}getDeathSound();
+    }
+""".trimIndent()
+        return source.substring(0, methodMatch.range.first) +
+            replacement +
+            source.substring(closeBrace + 1)
+    }
+
+    private fun replaceHangingEntitySetDirectionMethodHandle(source: String): String =
+        Regex(
+            """(?s)try\s*\{\s*handle_HangingEntity_setDirection\.invoke\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\);\s*\}\s*catch\s*\(\s*Throwable\s+[A-Za-z_$][\w$]*\s*\)\s*\{\s*[A-Za-z_$][\w$]*\.printStackTrace\(\);\s*\}"""
+        ).replace(source) { match -> "((ModPorterHangingEntityInvoker) ${match.groupValues[1]}).modporter${'$'}setDirection(${match.groupValues[2]});" }
+
+    private fun removeObfuscationMethodHandleScaffolding(source: String): String {
+        var result = source
+        result = Regex("""(?m)^[ \t]*private\s+static\s+final\s+MethodHandles\.Lookup\s+[A-Za-z_$][\w$]*\s*=.*\r?\n""")
+            .replace(result, "")
+        result = Regex("""(?m)^[ \t]*private\s+static\s+final\s+Method\s+[A-Za-z_$][\w$]*\s*=.*\r?\n""")
+            .replace(result, "")
+        result = Regex("""(?m)^[ \t]*private\s+static\s+final\s+MethodHandle\s+[A-Za-z_$][\w$]*\s*;\s*\r?\n""")
+            .replace(result, "")
+        while (true) {
+            val staticMatch = Regex("""(?m)^[ \t]*static\s*\{""").find(result) ?: break
+            val openBrace = result.indexOf('{', staticMatch.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (closeBrace <= openBrace) break
+            val block = result.substring(staticMatch.range.first, closeBrace + 1)
+            if (!block.contains("MethodHandle") || !block.contains("unreflect(")) break
+            result = result.substring(0, staticMatch.range.first).trimEnd() +
+                System.lineSeparator() +
+                result.substring(closeBrace + 1).trimStart()
+        }
+        return result
+    }
+
+    private fun restoreNonItemStackGetTagCalls(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val replacement = ".getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()"
+        val changes = mutableListOf<Change>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains(replacement) || !original.contains("TagKey<") || !original.contains("getTag()")) {
+                    return@forEach
+                }
+                val tagGetterOwners = Regex("""\bclass\s+([A-Za-z_$][\w$]*)\b""")
+                    .findAll(original)
+                    .mapNotNull { match ->
+                        val openBrace = original.indexOf('{', match.range.last)
+                        val closeBrace = if (openBrace >= 0) findMatchingBrace(original, openBrace) else -1
+                        if (closeBrace <= openBrace) return@mapNotNull null
+                        val body = original.substring(openBrace + 1, closeBrace)
+                        if (Regex("""public\s+TagKey\s*<[^>]+>\s+getTag\s*\(\s*\)\s*\{""").containsMatchIn(body)) {
+                            match.groupValues[1]
+                        } else {
+                            null
+                        }
+                    }
+                    .toSet()
+                if (tagGetterOwners.isEmpty()) return@forEach
+
+                var modified = original
+                for (owner in tagGetterOwners) {
+                    val variables = Regex("""\b${Regex.escape(owner)}\s+([A-Za-z_$][\w$]*)\b""")
+                        .findAll(original)
+                        .map { it.groupValues[1] }
+                        .toSet()
+                    for (variable in variables) {
+                        modified = modified.replace("$variable$replacement", "$variable.getTag()")
+                    }
+                }
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Restore getTag calls on local TagKey holder types after ItemStack NBT migration",
+                        before = "holder.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY).copyTag()",
+                        after = "holder.getTag()",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-restore-non-itemstack-gettag"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                }
+            }
+        return changes
+    }
+
+    private fun migrateModifyBakingResultModelLocations(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("ModelEvent.ModifyBakingResult") ||
+                    !original.contains("event.getModels().replaceAll")) {
+                    return@forEach
+                }
+
+                val lambdaMatch = Regex("""replaceAll\s*\(\s*\(\s*([A-Za-z_$][\w$]*)\s*,\s*[A-Za-z_$][\w$]*\s*\)\s*->""")
+                    .find(original)
+                    ?: return@forEach
+                val locationVar = lambdaMatch.groupValues[1]
+                val callPattern = Regex("""(\.[A-Za-z_$][\w$]*\(\s*)${Regex.escape(locationVar)}(\s*\))""")
+                val modified = callPattern.replace(original) { match ->
+                    "${match.groupValues[1]}$locationVar.id()${match.groupValues[2]}"
+                }
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Pass ResourceLocation id() from ModelResourceLocation keys in ModifyBakingResult",
+                        before = "model predicate receives ModelResourceLocation record",
+                        after = "model predicate receives location.id() ResourceLocation",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-modelresource-location-id"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                }
+            }
+        return changes
+    }
+
+    private fun migrateClassForNameReflection(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("Class.forName(")) return@forEach
+
+                var modified = original
+                modified = removeRedundantClassForNameOnClassObjects(modified)
+                modified = rewriteClassForNamePresenceChecksWithoutReflection(modified)
+                modified = rewriteStringApiVerificationWithoutReflection(modified)
+                modified = rewriteClassForNameIsInstanceChecks(modified)
+                modified = rewriteSeasonStateReflectionWithoutReflection(modified)
+                val enumRewrite = rewriteClassForNameEnumValueOf(projectDir, javaFile, modified, dryRun)
+                modified = enumRewrite.first
+                changes.addAll(enumRewrite.second)
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Class.forName reflection -> static class/API checks",
+                        before = "Class.forName(...)",
+                        after = "direct Class<?> registration, ModList loaded check, or direct enum reference",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-class-forname-no-reflection"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                }
+            }
+        return changes
+    }
+
+    private fun rewriteClassForNameIsInstanceChecks(source: String): String {
+        val forNameAssignment = Regex("""([A-Za-z_$][\w$]*)\s*=\s*Class\.forName\(\s*"([^"]+)"\s*\)\s*;""")
+            .find(source)
+            ?: return source
+        val classVariable = forNameAssignment.groupValues[1]
+        val binaryName = forNameAssignment.groupValues[2]
+        val returnMatch = Regex("""return\s+$classVariable\s*!=\s*null\s*&&\s*$classVariable\.isInstance\(\s*([A-Za-z_$][\w$]*)\s*\)\s*;""")
+            .find(source)
+            ?: return source
+        val valueExpression = returnMatch.groupValues[1]
+        val tryStart = source.lastIndexOf("try", forNameAssignment.range.first)
+        if (tryStart < 0) return source
+        val openBrace = source.indexOf('{', tryStart)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        if (closeBrace <= openBrace || returnMatch.range.last > closeBrace) return source
+        val catchEnd = findFollowingCatchBlockEnd(source, closeBrace + 1)
+        if (catchEnd <= closeBrace) return source
+
+        var result = source.substring(0, tryStart) +
+            "return modporterRuntimeInstanceOf($valueExpression, \"$binaryName\");" +
+            source.substring(catchEnd + 1)
+
+        result = Regex("""(?m)^[ \t]*private\s+static\s+Class<\?>\s+${Regex.escape(classVariable)}\s*=\s*null\s*;\s*\r?\n""")
+            .replace(result, "")
+        result = Regex("""(?m)^[ \t]*private\s+static\s+boolean\s+[A-Za-z_$][\w$]*Resolved\s*=\s*false\s*;\s*\r?\n""")
+            .replace(result, "")
+
+        return ensureRuntimeInstanceHelper(result)
+    }
+
+    private fun ensureRuntimeInstanceHelper(source: String): String {
+        if (source.contains("modporterRuntimeInstanceOf(") &&
+            Regex("""private\s+static\s+boolean\s+modporterRuntimeInstanceOf\s*\(""").containsMatchIn(source)) {
+            return source
+        }
+        val insertAt = source.lastIndexOf('}')
+        if (insertAt < 0) return source
+        val helper = """
+
+    private static boolean modporterRuntimeInstanceOf(Object value, String binaryClassName) {
+        if (value == null) return false;
+        Class<?> type = value.getClass();
+        while (type != null) {
+            if (modporterRuntimeTypeMatches(type, binaryClassName)) return true;
+            type = type.getSuperclass();
+        }
+        return false;
+    }
+
+    private static boolean modporterRuntimeTypeMatches(Class<?> type, String binaryClassName) {
+        if (binaryClassName.equals(type.getName())) return true;
+        for (Class<?> iface : type.getInterfaces()) {
+            if (modporterRuntimeTypeMatches(iface, binaryClassName)) return true;
+        }
+        return false;
+    }
+""".trimEnd()
+        return source.substring(0, insertAt).trimEnd() + helper + System.lineSeparator() + source.substring(insertAt)
+    }
+
+    private fun findFollowingCatchBlockEnd(source: String, searchFrom: Int): Int {
+        val catchMatch = Regex("""\G\s*catch\s*\([^)]*\)\s*\{""")
+            .find(source, searchFrom)
+            ?: Regex("""\s*catch\s*\([^)]*\)\s*\{""").find(source, searchFrom)
+            ?: return -1
+        val openBrace = source.indexOf('{', catchMatch.range.first)
+        return if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+    }
+
+    private fun rewriteSeasonStateReflectionWithoutReflection(source: String): String {
+        if (!source.contains("getSeasonState") ||
+            !source.contains("getSubSeason") ||
+            !source.contains("Class.forName(")) {
+            return source
+        }
+
+        val resolveMethodMatch = Regex("""private\s+static\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{""")
+            .findAll(source)
+            .firstOrNull { match ->
+                val openBrace = source.indexOf('{', match.range.first)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+                closeBrace > openBrace &&
+                    source.substring(openBrace + 1, closeBrace).contains("Class.forName(") &&
+                    source.substring(openBrace + 1, closeBrace).contains("getSeasonState")
+            }
+            ?: return source
+        val resolveOpenBrace = source.indexOf('{', resolveMethodMatch.range.first)
+        val resolveCloseBrace = if (resolveOpenBrace >= 0) findMatchingBrace(source, resolveOpenBrace) else -1
+        if (resolveCloseBrace <= resolveOpenBrace) return source
+        val resolveMethodName = resolveMethodMatch.groupValues[1]
+        val resolveBody = source.substring(resolveOpenBrace + 1, resolveCloseBrace)
+
+        val helperMatch = Regex("""Class<\?>\s+[A-Za-z_$][\w$]*\s*=\s*Class\.forName\(\s*"([^"]+)"\s*\)\s*;\s*([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\.getMethod\(\s*"getSeasonState"\s*,\s*Level\.class\s*\)""")
+            .find(resolveBody)
+            ?: return source
+        val helperClass = helperMatch.groupValues[1]
+        val helperMethodField = helperMatch.groupValues[2]
+        val stateMatch = Regex("""Class<\?>\s+[A-Za-z_$][\w$]*\s*=\s*Class\.forName\(\s*"([^"]+)"\s*\)\s*;\s*([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\.getMethod\(\s*"getSubSeason"\s*\)""")
+            .find(resolveBody)
+            ?: return source
+        val stateClass = stateMatch.groupValues[1]
+        val stateMethodField = stateMatch.groupValues[2]
+        val subSeasonMatch = Regex("""Class<\?>\s+[A-Za-z_$][\w$]*\s*=\s*Class\.forName\(\s*"([^"]+\$[A-Za-z_$][\w$]*)"\s*\)\s*;\s*([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\.getMethod\(\s*"name"\s*\)""")
+            .find(resolveBody)
+            ?: return source
+        val subSeasonBinary = subSeasonMatch.groupValues[1]
+        val subSeasonNameField = subSeasonMatch.groupValues[2]
+
+        val helperSimple = helperClass.substringAfterLast('.')
+        val stateSimple = stateClass.substringAfterLast('.')
+        val subSeasonType = subSeasonBinary.substringAfter('$')
+
+        var result = source.substring(0, resolveMethodMatch.range.first).trimEnd() +
+            System.lineSeparator() + System.lineSeparator() +
+            source.substring(resolveCloseBrace + 1).trimStart()
+
+        result = Regex("""(?m)^[ \t]*private\s+static\s+boolean\s+[A-Za-z_$][\w$]*Resolved\s*=\s*false\s*;\s*\r?\n""")
+            .replace(result, "")
+        result = Regex("""(?m)^[ \t]*private\s+static\s+Method\s+[A-Za-z_$][\w$]*\s*;\s*\r?\n""")
+            .replace(result, "")
+        result = Regex("""(?m)^[ \t]*${Regex.escape(resolveMethodName)}\(\);\s*\r?\n""").replace(result, "")
+        result = Regex("""(?m)^[ \t]*if\s*\(\s*${Regex.escape(helperMethodField)}\s*==\s*null\s*\)\s*return\s+[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*;\s*\r?\n""")
+            .replace(result, "")
+        result = Regex("""Object\s+([A-Za-z_$][\w$]*)\s*=\s*${Regex.escape(helperMethodField)}\.invoke\(\s*null\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*;""")
+            .replace(result) { match -> "$stateSimple ${match.groupValues[1]} = $helperSimple.getSeasonState(${match.groupValues[2]});" }
+        result = Regex("""Object\s+([A-Za-z_$][\w$]*)\s*=\s*${Regex.escape(stateMethodField)}\.invoke\(\s*([A-Za-z_$][\w$]*)\s*\)\s*;""")
+            .replace(result) { match -> "$subSeasonType ${match.groupValues[1]} = ${match.groupValues[2]}.getSubSeason();" }
+        result = Regex("""String\s+([A-Za-z_$][\w$]*)\s*=\s*\(String\)\s*${Regex.escape(subSeasonNameField)}\.invoke\(\s*([A-Za-z_$][\w$]*)\s*\)\s*;""")
+            .replace(result) { match -> "String ${match.groupValues[1]} = ${match.groupValues[2]}.name();" }
+
+        result = removeJavaImport(result, "java.lang.reflect.Method")
+        result = ensureJavaImport(result, helperClass)
+        result = ensureJavaImport(result, stateClass)
+        result = ensureJavaImport(result, subSeasonBinary.replace('$', '.'))
+        return result
+    }
+
+    private fun removeRedundantClassForNameOnClassObjects(source: String): String =
+        Regex("""(?m)^[ \t]*Class\.forName\(\s*([A-Za-z_$][\w$]*)\.getName\(\)\s*,\s*true\s*,\s*\1\.getClassLoader\(\)\s*\);\s*\r?\n""")
+            .replace(source, "")
+
+    private fun rewriteClassForNamePresenceChecksWithoutReflection(source: String): String {
+        val pattern = Regex(
+            """(?s)try\s*\{\s*Class\.forName\(\s*"([^"]+)"\s*\)\s*;\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*=\s*true\s*;\s*\}\s*catch\s*\(\s*ClassNotFoundException\s+[A-Za-z_$][\w$]*\s*\)\s*\{\s*\2\s*=\s*false\s*;\s*\}"""
+        )
+        val rewritten = pattern.replace(source) { match ->
+            """${match.groupValues[2]} = modporterClassResourcePresent("${match.groupValues[1]}");"""
+        }
+        return if (rewritten == source) source else ensureClassResourcePresenceHelper(rewritten)
+    }
+
+    private fun ensureClassResourcePresenceHelper(source: String): String {
+        if (Regex("""private\s+static\s+boolean\s+modporterClassResourcePresent\s*\(""").containsMatchIn(source)) {
+            return source
+        }
+        val insertAt = source.lastIndexOf('}')
+        if (insertAt < 0) return source
+        val helper = """
+
+    private static boolean modporterClassResourcePresent(String binaryClassName) {
+        ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+        if (classLoader == null) classLoader = ClassLoader.getSystemClassLoader();
+        return classLoader != null && classLoader.getResource(binaryClassName.replace('.', '/') + ".class") != null;
+    }
+""".trimEnd()
+        return source.substring(0, insertAt).trimEnd() + helper + System.lineSeparator() + source.substring(insertAt)
+    }
+
+    private fun rewriteStringApiVerificationWithoutReflection(source: String): String {
+        val methodMatch = Regex(
+            """public\s+static\s+void\s+verifyApiClasses\s*\(\s*String\s+([A-Za-z_$][\w$]*)\s*,\s*String\.\.\.\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
+        ).find(source) ?: return source
+
+        val openBrace = source.indexOf('{', methodMatch.range.first)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        if (closeBrace <= openBrace) return source
+        val body = source.substring(openBrace + 1, closeBrace)
+        if (!body.contains("Class.forName(")) return source
+
+        val modIdParam = methodMatch.groupValues[1]
+        val classNamesParam = methodMatch.groupValues[2]
+        val replacement = """
+public static void verifyApiClasses(String $modIdParam, String... $classNamesParam) {
+        if (!ModList.get().isLoaded($modIdParam)) {
+            throw new RuntimeException("API verification failed for mod '" + $modIdParam + "': mod is not loaded.");
+        }
+        LOGGER.debug("API verification for '{}' will be enforced by static linkage during compat initialization ({} declared classes).", $modIdParam, $classNamesParam.length);
+    }
+""".trimIndent()
+
+        return ensureJavaImport(
+            source.substring(0, methodMatch.range.first) + replacement + source.substring(closeBrace + 1),
+            "net.neoforged.fml.ModList"
+        )
+    }
+
+    private fun rewriteClassForNameEnumValueOf(
+        projectDir: Path,
+        javaFile: Path,
+        source: String,
+        dryRun: Boolean
+    ): Pair<String, List<Change>> {
+        var result = source
+        val changes = mutableListOf<Change>()
+        val packageName = Regex("""(?m)^package\s+([^;]+);""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?: return source to emptyList()
+        val tryPattern = Regex(
+            """try\s*\{\s*Class<\?>\s+([A-Za-z_$][\w$]*)\s*=\s*Class\.forName\(\s*"([^"]+\$([A-Za-z_$][\w$]*))"\s*\)\s*;\s*return\s+Enum\.valueOf\(\s*\(Class<\? extends Enum>\)\s*\1\.asSubclass\(Enum\.class\)\s*,\s*"([A-Za-z_$][\w$]*)"\s*\)\s*;\s*\}\s*catch\s*\(\s*ClassNotFoundException\s+[A-Za-z_$][\w$]*\s*\)\s*\{[^{}]*\}""",
+            RegexOption.DOT_MATCHES_ALL
+        )
+        val accessorImports = linkedSetOf<String>()
+
+        for (match in tryPattern.findAll(source).toList().asReversed()) {
+            val binaryName = match.groupValues[2]
+            val simpleNestedName = match.groupValues[3]
+            val enumConstant = match.groupValues[4]
+            val accessorName = "ModPorter${simpleNestedName}Accessor"
+            accessorImports.add("${generatedMixinPackage(packageName)}.$accessorName")
+            result = result.substring(0, match.range.first) +
+                "return $accessorName.modporter${'$'}valueOf(\"$enumConstant\");" +
+                result.substring(match.range.last + 1)
+            changes.addAll(ensureNestedEnumMixinInvoker(
+                projectDir = projectDir,
+                sourceFile = javaFile,
+                packageName = packageName,
+                accessorName = accessorName,
+                targetBinaryName = binaryName,
+                dryRun = dryRun
+            ))
+        }
+
+        accessorImports.forEach { importName ->
+            result = addJavaImportIfMissing(result, importName)
+        }
+        if (!result.contains("Class<? extends Enum>") && !result.contains("Enum.valueOf(")) {
+            result = Regex("""(?m)^[ \t]*@SuppressWarnings\(\s*\{?\s*"rawtypes"\s*,\s*"unchecked"\s*\}?\s*\)\s*\r?\n""")
+                .replace(result, "")
+        }
+        return result to changes
+    }
+
+    private fun rewriteDeferredHolderReflectionCollectors(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val javaFiles = java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .toList()
+        val filesByClassName = javaFiles.associateBy { it.fileName.toString().removeSuffix(".java") }
+        val changes = mutableListOf<Change>()
+
+        for (javaFile in javaFiles) {
+            val original = javaFile.readText()
+            if (!original.contains("getDeclaredFields()") ||
+                !original.contains("DeferredHolder.class.isAssignableFrom") ||
+                !original.contains("java.lang.reflect.Field")) {
+                continue
+            }
+
+            var modified = original
+            val methodPattern = Regex(
+                """(?m)^([ \t]*)private\s+static\s+List\s*<\s*DeferredHolder\s*<\s*([^>]+?)\s*>\s*>\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{"""
+            )
+            for (methodMatch in methodPattern.findAll(original).toList().asReversed()) {
+                val openBrace = modified.indexOf('{', methodMatch.range.last)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(modified, openBrace) else -1
+                if (closeBrace <= openBrace) continue
+                val body = modified.substring(openBrace + 1, closeBrace)
+                val registryClass = Regex(
+                    """for\s*\(\s*Field\s+[A-Za-z_$][\w$]*\s*:\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.class\.getDeclaredFields\(\)\s*\)"""
+                ).find(body)?.groupValues?.get(1) ?: continue
+                val registrySimpleName = registryClass.substringAfterLast('.')
+                val registryFile = filesByClassName[registrySimpleName] ?: continue
+                val deferredHolderFields = collectPublicStaticDeferredHolderFields(registryFile.readText())
+                if (deferredHolderFields.isEmpty()) continue
+
+                val indent = methodMatch.groupValues[1]
+                val generic = methodMatch.groupValues[2].trim()
+                val methodName = methodMatch.groupValues[3]
+                val listType = "List<DeferredHolder<$generic>>"
+                val addLines = deferredHolderFields.joinToString(System.lineSeparator()) { fieldName ->
+                    "$indent    out.add($registryClass.$fieldName);"
+                }
+                val replacement = buildString {
+                    append(indent)
+                    append("private static ")
+                    append(listType)
+                    append(" ")
+                    append(methodName)
+                    append("() {")
+                    append(System.lineSeparator())
+                    append(indent)
+                    append("    ")
+                    append(listType)
+                    append(" out = new ArrayList<>();")
+                    append(System.lineSeparator())
+                    append(addLines)
+                    append(System.lineSeparator())
+                    append(indent)
+                    append("    return out;")
+                    append(System.lineSeparator())
+                    append(indent)
+                    append("}")
+                }
+                modified = modified.substring(0, methodMatch.range.first) +
+                    replacement +
+                    modified.substring(closeBrace + 1)
+            }
+
+            if (modified != original) {
+                modified = removeJavaImport(modified, "java.lang.reflect.Field")
+                modified = removeJavaImport(modified, "java.lang.reflect.Modifier")
+                if (!modified.contains("new ArrayList<>()")) {
+                    modified = removeJavaImport(modified, "java.util.ArrayList")
+                }
+                changes.add(Change(
+                    file = javaFile,
+                    line = 1,
+                    description = "Rewrite DeferredHolder registry field reflection collector to explicit source-derived list",
+                    before = "Registry.class.getDeclaredFields() + java.lang.reflect.Field",
+                    after = "explicit registry DeferredHolder field list",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-deferredholder-reflection-collector"
+                ))
+                if (!dryRun) javaFile.writeText(modified)
+            }
+        }
+
+        return changes
+    }
+
+    private fun collectPublicStaticDeferredHolderFields(source: String): List<String> =
+        Regex(
+            """(?m)^[ \t]*public\s+static\s+final\s+DeferredHolder\s*<[^;=]+>\s+([A-Za-z_$][\w$]*)\s*="""
+        ).findAll(source)
+            .map { it.groupValues[1] }
+            .toList()
+
+    private fun ensureNestedEnumMixinInvoker(
+        projectDir: Path,
+        sourceFile: Path,
+        packageName: String,
+        accessorName: String,
+        targetBinaryName: String,
+        dryRun: Boolean
+    ): List<Change> {
+        val changes = mutableListOf<Change>()
+        val generatedPackageName = generatedMixinPackage(packageName)
+        val accessorFile = sourceFile.parent.resolve("modporter").resolve("mixin").resolve("$accessorName.java")
+        val accessorSource = """
+package $generatedPackageName;
+
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.gen.Invoker;
+
+@Mixin(targets = "$targetBinaryName", remap = false)
+public interface $accessorName {
+    @Invoker(value = "valueOf", remap = false)
+    static Object modporter${'$'}valueOf(String name) {
+        throw new AssertionError("Mixin invoker was not applied");
+    }
+}
+""".trimIndent()
+
+        if (!accessorFile.exists() || accessorFile.readText() != accessorSource) {
+            changes.add(Change(
+                file = accessorFile,
+                line = 1,
+                description = "Generate mixin invoker for package-private nested enum access",
+                before = "(missing invoker)",
+                after = "$accessorName targets $targetBinaryName",
+                confidence = Confidence.HIGH,
+                ruleId = "build-class-forname-enum-mixin-invoker"
+            ))
+            if (!dryRun) {
+                accessorFile.parent.createDirectories()
+                accessorFile.writeText(accessorSource)
+            }
+        }
+
+        changes.addAll(ensureMixinConfigEntry(projectDir, generatedPackageName, accessorName, dryRun))
+        return changes
+    }
+
+    private fun javaPackageName(source: String): String? =
+        Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+
+    private fun generatedMixinPackage(packageName: String): String =
+        "$packageName.modporter.mixin"
+
+    private fun ensureMixinInvoker(
+        projectDir: Path,
+        sourceFile: Path,
+        packageName: String,
+        invokerName: String,
+        targetClassName: String,
+        targetImport: String,
+        extraImports: List<String>,
+        methodSource: String,
+        dryRun: Boolean
+    ): List<Change> {
+        val changes = mutableListOf<Change>()
+        val generatedPackageName = generatedMixinPackage(packageName)
+        val invokerFile = sourceFile.parent.resolve("modporter").resolve("mixin").resolve("$invokerName.java")
+        val imports = (extraImports + targetImport + listOf(
+            "org.spongepowered.asm.mixin.Mixin",
+            "org.spongepowered.asm.mixin.gen.Invoker"
+        )).distinct().sorted().joinToString(System.lineSeparator()) { "import $it;" }
+        val invokerSource = """
+package $generatedPackageName;
+
+$imports
+
+@Mixin($targetClassName.class)
+public interface $invokerName {
+    ${methodSource.prependIndent("    ").trimStart()}
+}
+""".trimIndent()
+
+        if (!invokerFile.exists() || invokerFile.readText() != invokerSource) {
+            changes.add(Change(
+                file = invokerFile,
+                line = 1,
+                description = "Generate mixin invoker for protected vanilla method access",
+                before = "(missing invoker)",
+                after = "$invokerName targets $targetImport",
+                confidence = Confidence.HIGH,
+                ruleId = "build-protected-method-mixin-invoker"
+            ))
+            if (!dryRun) {
+                invokerFile.parent.createDirectories()
+                invokerFile.writeText(invokerSource)
+            }
+        }
+
+        changes.addAll(ensureMixinConfigEntry(projectDir, generatedPackageName, invokerName, dryRun))
+        return changes
+    }
+
+    private fun ensureMixinConfigEntry(
+        projectDir: Path,
+        packageName: String,
+        mixinClassName: String,
+        dryRun: Boolean
+    ): List<Change> {
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        if (!resourcesDir.exists()) {
+            if (dryRun) return emptyList()
+            resourcesDir.createDirectories()
+        }
+
+        val changes = mutableListOf<Change>()
+        var registeredInExistingConfig = false
+        val candidates = mutableListOf<MixinConfigCandidate>()
+        java.nio.file.Files.walk(resourcesDir)
+            .filter { it.fileName.toString().endsWith(".mixins.json") }
+            .forEach { mixinConfig ->
+                val original = mixinConfig.readText()
+                val configPackage = Regex(""""package"\s*:\s*"([^"]+)"""")
+                    .find(original)
+                    ?.groupValues
+                    ?.get(1)
+                    ?: return@forEach
+                val relativeMixinName = relativeMixinNameForConfigPackage(packageName, mixinClassName, configPackage)
+                    ?: return@forEach
+                if (packageName != configPackage && !Regex(""""plugin"\s*:""").containsMatchIn(original)) {
+                    return@forEach
+                }
+                candidates.add(MixinConfigCandidate(mixinConfig, original, configPackage, relativeMixinName))
+            }
+
+        val selected = candidates.maxWithOrNull(
+            compareBy<MixinConfigCandidate> { it.configPackage.length }
+                .thenBy { if (it.configPackage == packageName) 1 else 0 }
+        )
+        if (selected != null) {
+            val modified = if (Regex(""""${Regex.escape(selected.relativeMixinName)}"""").containsMatchIn(selected.source)) {
+                selected.source
+            } else {
+                addMixinClassToConfig(selected.source, selected.configPackage, selected.relativeMixinName) ?: selected.source
+            }
+            if (modified != selected.source) {
+                changes.add(Change(
+                    file = selected.file,
+                    line = selected.source.lineNumberAt(selected.source.indexOf(""""mixins"""").coerceAtLeast(0)),
+                    description = "Register generated mixin invoker in mixin config",
+                    before = "mixins array without ${selected.relativeMixinName}",
+                    after = "mixins array includes ${selected.relativeMixinName}",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-register-generated-mixin-invoker"
+                ))
+                if (!dryRun) selected.file.writeText(modified)
+            }
+            registeredInExistingConfig = true
+            candidates
+                .filter { it.file != selected.file }
+                .forEach { stale ->
+                    val cleaned = removeMixinClassFromConfig(stale.source, stale.relativeMixinName)
+                    if (cleaned != stale.source) {
+                        changes.add(Change(
+                            file = stale.file,
+                            line = stale.source.lineNumberAt(stale.source.indexOf(stale.relativeMixinName).coerceAtLeast(0)),
+                            description = "Remove generated mixin invoker from less-specific mixin config",
+                            before = "mixins array includes ${stale.relativeMixinName}",
+                            after = "mixins array omits ${stale.relativeMixinName}",
+                            confidence = Confidence.HIGH,
+                            ruleId = "build-prune-generated-mixin-invoker"
+                        ))
+                        if (!dryRun) stale.file.writeText(cleaned)
+                    }
+                }
+        }
+        if (!registeredInExistingConfig) {
+            val configName = generatedMixinConfigName(projectDir)
+            val mixinConfig = resourcesDir.resolve(configName)
+            val original = if (mixinConfig.exists()) mixinConfig.readText() else ""
+            val modified = if (original.isBlank()) {
+                """
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "$packageName",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "$mixinClassName"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
+""".trimIndent() + System.lineSeparator()
+            } else {
+                addMixinClassToConfig(original, packageName, mixinClassName) ?: original
+            }
+            if (modified != original) {
+                changes.add(Change(
+                    file = mixinConfig,
+                    line = 1,
+                    description = "Create or update generated mixin config",
+                    before = "(missing mixin config entry)",
+                    after = "$configName includes $mixinClassName",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-generated-mixin-config"
+                ))
+                if (!dryRun) mixinConfig.writeText(modified)
+            }
+            changes.addAll(ensureNeoForgeModsTomlMixinEntry(projectDir, configName, dryRun))
+        }
+        return changes
+    }
+
+    private data class MixinConfigCandidate(
+        val file: Path,
+        val source: String,
+        val configPackage: String,
+        val relativeMixinName: String
+    )
+
+    private fun relativeMixinNameForConfigPackage(
+        generatedPackageName: String,
+        mixinClassName: String,
+        configPackageName: String
+    ): String? {
+        return when {
+            generatedPackageName == configPackageName -> mixinClassName
+            generatedPackageName.startsWith("$configPackageName.") ->
+                generatedPackageName.removePrefix("$configPackageName.") + "." + mixinClassName
+            else -> null
+        }
+    }
+
+    private fun addMixinClassToConfig(source: String, packageName: String, mixinClassName: String): String? {
+        if (!Regex(""""package"\s*:\s*"${Regex.escape(packageName)}"""").containsMatchIn(source)) return null
+        if (Regex(""""${Regex.escape(mixinClassName)}"""").containsMatchIn(source)) return source
+        val mixinsMatch = Regex(""""mixins"\s*:\s*\[""").find(source) ?: return null
+        val openBracket = source.indexOf('[', mixinsMatch.range.first)
+        val closeBracket = if (openBracket >= 0) findClosing(source, openBracket, '[', ']') else -1
+        if (closeBracket <= openBracket) return null
+        val inside = source.substring(openBracket + 1, closeBracket)
+        val insertion = if (inside.trim().isEmpty()) {
+            "\n    \"$mixinClassName\"\n  "
+        } else {
+            ",\n    \"$mixinClassName\""
+        }
+        return source.substring(0, closeBracket) + insertion + source.substring(closeBracket)
+    }
+
+    private fun removeMixinClassFromConfig(source: String, mixinClassName: String): String {
+        val mixinsMatch = Regex(""""mixins"\s*:\s*\[""").find(source) ?: return source
+        val openBracket = source.indexOf('[', mixinsMatch.range.first)
+        val closeBracket = if (openBracket >= 0) findClosing(source, openBracket, '[', ']') else -1
+        if (closeBracket <= openBracket) return source
+        val inside = source.substring(openBracket + 1, closeBracket)
+        val entries = Regex(""""([^"]+)"""")
+            .findAll(inside)
+            .map { it.groupValues[1] }
+            .toList()
+        if (mixinClassName !in entries) return source
+        val remaining = entries.filterNot { it == mixinClassName }
+        val indent = Regex("\\r?\\n([ \\t]*)\"").find(inside)?.groupValues?.get(1) ?: "    "
+        val replacement = if (remaining.isEmpty()) {
+            "\n  "
+        } else {
+            "\n" + remaining.joinToString(",\n") { "$indent\"$it\"" } + "\n  "
+        }
+        return source.substring(0, openBracket + 1) + replacement + source.substring(closeBracket)
+    }
+
+    private fun generatedMixinConfigName(projectDir: Path): String {
+        val modId = readFirstModId(projectDir) ?: "modporter"
+        return "$modId.modporter.mixins.json"
+    }
+
+    private fun readFirstModId(projectDir: Path): String? {
+        fun concreteModId(raw: String?): String? {
+            val value = raw?.trim()?.trim('"') ?: return null
+            return value.takeIf {
+                it.isNotBlank() &&
+                    !it.contains('$') &&
+                    !it.contains('{') &&
+                    Regex("""[a-z0-9_.-]+""", RegexOption.IGNORE_CASE).matches(it)
+            }
+        }
+
+        projectDir.resolve("gradle.properties")
+            .takeIf { it.exists() }
+            ?.readText()
+            ?.let { properties ->
+                Regex("""(?m)^\s*(?:mod_id|modid)\s*=\s*([^\s#]+)""")
+                    .find(properties)
+                    ?.groupValues
+                    ?.get(1)
+                    ?.let(::concreteModId)
+            }
+            ?.let { return it }
+
+        val candidates = listOf(
+            projectDir.resolve("src/main/resources/META-INF/neoforge.mods.toml"),
+            projectDir.resolve("src/main/resources/META-INF/mods.toml")
+        )
+        candidates.firstOrNull { it.exists() }
+            ?.readText()
+            ?.let { Regex("""(?m)^\s*modId\s*=\s*"([^"]+)"""").find(it)?.groupValues?.get(1) }
+            ?.let(::concreteModId)
+            ?.let { return it }
+
+        return detectModId(projectDir)
+    }
+
+    private fun ensureNeoForgeModsTomlMixinEntry(projectDir: Path, configName: String, dryRun: Boolean): List<Change> {
+        val modsToml = listOf(
+            projectDir.resolve("src/main/resources/META-INF/neoforge.mods.toml"),
+            projectDir.resolve("src/main/resources/META-INF/mods.toml")
+        ).firstOrNull { it.exists() } ?: return emptyList()
+        val original = modsToml.readText()
+        if (Regex("""(?m)^\s*config\s*=\s*"${Regex.escape(configName)}"""").containsMatchIn(original)) {
+            return emptyList()
+        }
+        val entry = """
+
+[[mixins]]
+config="$configName"
+""".trimEnd() + System.lineSeparator()
+        val modified = original.trimEnd() + System.lineSeparator() + entry
+        if (!dryRun) modsToml.writeText(modified)
+        return listOf(Change(
+            file = modsToml,
+            line = 1,
+            description = "Register generated mixin config in NeoForge mods metadata",
+            before = "neoforge.mods.toml without [[mixins]] $configName",
+            after = "[[mixins]] config=\"$configName\"",
+            confidence = Confidence.HIGH,
+            ruleId = "build-register-generated-mixin-config"
+        ))
+    }
+
+    private fun cleanupSplitTickPhaseChecks(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                var modified = original
+                val hadStartPhase = modified.contains("event.phase == TickEvent.Phase.START") ||
+                    modified.contains("event.phase != TickEvent.Phase.START")
+
+                if (hadStartPhase) {
+                    modified = modified
+                        .replace("RenderFrameEvent.Post", "RenderFrameEvent.Pre")
+                }
+
+                modified = Regex("""(?m)^[ \t]*if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\)\s*return;\s*\r?\n""")
+                    .replace(modified, "")
+                modified = Regex("""(?m)^[ \t]*if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.START\s*\)\s*return;\s*\r?\n""")
+                    .replace(modified, "")
+                modified = Regex("""if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\|\|\s*([^{}\r\n;]+?)\s*\)\s*\{""")
+                    .replace(modified) { match -> "if (${match.groupValues[1].trim()}) {" }
+                modified = Regex("""if\s*\(\s*([^{}\r\n;]+?)\s*\|\|\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\)\s*\{""")
+                    .replace(modified) { match -> "if (${match.groupValues[1].trim()}) {" }
+                modified = Regex("""event\.phase\s*==\s*TickEvent\.Phase\.END\s*&&\s*""").replace(modified, "")
+                modified = Regex("""\s*&&\s*event\.phase\s*==\s*TickEvent\.Phase\.END""").replace(modified, "")
+                modified = Regex("""if\s*\(\s*event\.phase\s*==\s*TickEvent\.Phase\.START\s*\)\s*\{""").replace(modified, "{")
+                modified = Regex("""event\.phase\s*==\s*TickEvent\.Phase\.START\s*&&\s*""").replace(modified, "")
+                modified = Regex("""\s*&&\s*event\.phase\s*==\s*TickEvent\.Phase\.START""").replace(modified, "")
+
+                if (!Regex("""\bTickEvent\.Phase\b""").containsMatchIn(modified)) {
+                    modified = removeJavaImport(modified, "net.minecraftforge.event.TickEvent")
+                    modified = removeJavaImport(modified, "net.neoforged.neoforge.event.TickEvent")
+                    modified = removeJavaImport(modified, "net.neoforged.neoforge.event.tick.TickEvent")
+                    modified = Regex("""(?m)^[ \t]*import\s+net\.(?:minecraftforge|neoforged\.neoforge)\.event(?:\.tick)?\.TickEvent;\s*(?:\r?\n)?""")
+                        .replace(modified, "")
+                    modified = modified.lines()
+                        .filterNot { line ->
+                            line.trim() == "import net.minecraftforge.event.TickEvent;" ||
+                                line.trim() == "import net.neoforged.neoforge.event.TickEvent;" ||
+                                line.trim() == "import net.neoforged.neoforge.event.tick.TickEvent;"
+                        }
+                        .joinToString(System.lineSeparator())
+                }
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Remove legacy TickEvent phase checks after NeoForge split tick events",
+                        before = "event.phase ==/!= TickEvent.Phase.*",
+                        after = "split Pre/Post event handlers without phase checks",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-cleanup-split-tick-phase"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                }
+            }
+
+        return changes
+    }
+
+    private fun migrateAccessTransformers(projectDir: Path, dryRun: Boolean): List<Change> {
+        val requiredEntries = collectRequiredAccessTransformerEntries(projectDir)
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+        if (!atFile.exists() && requiredEntries.isEmpty()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        val original = if (atFile.exists()) atFile.readText() else ""
+        val normalizedLines = original.lines().map { originalLine ->
+            val migrated = migrateAccessTransformerLine(originalLine)
+            originalLine to migrated
+        }
+        val entries = linkedSetOf<String>()
+        val output = mutableListOf<String>()
+        var lineChanged = false
+
+        for ((originalLine, line) in normalizedLines) {
+            if (line != originalLine) {
+                lineChanged = true
+            }
+            val entry = normalizeAccessTransformerEntry(line)
+            if (entry != null) {
+                if (entries.add(entry)) {
+                    output.add(line)
+                } else {
+                    lineChanged = true
+                }
+            } else {
+                output.add(line)
+            }
+        }
+
+        for (entry in requiredEntries) {
+            if (entries.add(entry)) {
+                if (output.isNotEmpty() && output.last().isNotBlank()) output.add("")
+                output.add(entry)
+            }
+        }
+
+        val modified = output.joinToString(System.lineSeparator()).trimEnd() +
+            if (output.isNotEmpty()) System.lineSeparator() else ""
+        if (modified != original || lineChanged) {
+            changes.add(Change(
+                file = atFile,
+                line = 1,
+                description = "Migrate and complete Access Transformer entries for 1.21 named members",
+                before = "1.20 SRG access transformer entries or missing AT file",
+                after = "1.21 named access transformer entries",
+                confidence = Confidence.HIGH,
+                ruleId = "build-access-transformer-entries-121"
+            ))
+            if (!dryRun) {
+                atFile.parent.createDirectories()
+                atFile.writeText(modified)
+            }
+        }
+
+        return changes
+    }
+
+    private fun migrateAccessTransformerLine(line: String): String {
+        val entry = normalizeAccessTransformerEntry(line) ?: return line
+        val migrated = when (entry) {
+            "public net.minecraft.world.entity.ai.goal.GoalSelector f_25345_" ->
+                "public net.minecraft.world.entity.ai.goal.GoalSelector availableGoals"
+            "public net.minecraft.server.level.ServerLevel m_143288_(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/BlockPos;" ->
+                "public net.minecraft.server.level.ServerLevel findLightningTargetAround(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/BlockPos;"
+            "public net.minecraft.client.renderer.LevelRenderer f_109450_" ->
+                "public net.minecraft.client.renderer.LevelRenderer rainSoundTime"
+            "public net.minecraft.client.renderer.LevelRenderer f_109472_" ->
+                "public net.minecraft.client.renderer.LevelRenderer skyBuffer"
+            "public net.minecraft.client.renderer.LevelRenderer f_109473_" ->
+                "public net.minecraft.client.renderer.LevelRenderer darkBuffer"
+            "public net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool f_210560_" ->
+                "public net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool templates"
+            "public net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool f_210559_" ->
+                "public net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates"
+            else -> migrateAccessTransformerLineFromComment(line, entry) ?: entry
+        }
+        val finalized = finalizeAccessTransformerEntry(migrated) ?: return ""
+        if (finalized == entry && migrated == entry) return line
+
+        val comment = line.substringAfter("#", "").trim()
+        return if (comment.isNotEmpty()) "$finalized # $comment" else finalized
+    }
+
+    private fun migrateAccessTransformerLineFromComment(line: String, entry: String): String? {
+        val commentName = line.substringAfter("#", "").trim().split(Regex("""\s+""")).firstOrNull()
+            ?.takeIf { Regex("""[A-Za-z_$][\w$]*""").matches(it) }
+            ?: return null
+        val specialName = mapOf(
+            "advancementToProgress" to "progress",
+            "x" to "centerX",
+            "z" to "centerZ",
+            "floorLevel" to "floorLevel",
+            "setFlammable" to "setFlammable",
+            "add" to "add",
+            "ctor" to "<init>",
+            "constructor" to "<init>"
+        )[commentName] ?: commentName
+
+        val migratedEntry = when {
+            Regex("""\bf_\d+_\b""").containsMatchIn(entry) ->
+                Regex("""\bf_\d+_\b""").replace(entry, specialName)
+            Regex("""\bm_\d+_""").containsMatchIn(entry) ->
+                Regex("""\bm_\d+_""").replace(entry, specialName)
+            else -> return null
+        }
+
+        return migratedEntry
+    }
+
+    private fun finalizeAccessTransformerEntry(entry: String): String? {
+        val descriptorAdjusted = entry
+            .replace(
+                "net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacerType <init>(Lcom/mojang/serialization/Codec;)V",
+                "net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacerType <init>(Lcom/mojang/serialization/MapCodec;)V"
+            )
+            .replace(
+                "net.minecraft.world.level.storage.loot.LootTable shuffleAndSplitItems(Lit/unimi/dsi/fastutil/objects/ObjectArrayList;ILnet/minecraft/util/RandomSource;)V",
+                "net.minecraft.world.level.storage.loot.LootTable shuffleAndSplitItems(Lit/unimi/dsi/fastutil/objects/ObjectArrayList;ILnet/minecraft/util/RandomSource;)V"
+            )
+
+        return if (shouldDropMigratedAccessTransformerEntry(descriptorAdjusted)) null else descriptorAdjusted
+    }
+
+    private fun shouldDropMigratedAccessTransformerEntry(entry: String): Boolean =
+            entry.contains("net.minecraft.world.entity.Mob maybeDisableShield(") ||
+            entry.contains("net.minecraft.world.level.block.state.BlockBehaviour material") ||
+            entry.contains("net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator defaultBlock") ||
+            entry.contains("net.minecraft.world.level.chunk.ChunkGenerator getPlacementsForStructure(") ||
+            entry.contains("net.minecraft.client.resources.model.ModelBakery UNREFERENCED_TEXTURES") ||
+            entry.contains("net.minecraft.world.entity.LivingEntity getDeathSound()") ||
+            entry.contains("net.minecraft.world.entity.decoration.HangingEntity setDirection(") ||
+            entry.contains("net.neoforged.neoforge.client.event.EntityRenderersEvent\$AddLayers renderers") ||
+            entry.contains("net.minecraft.client.renderer.WeatherEffectRenderer rainSoundTime")
+
+    private fun normalizeAccessTransformerEntry(line: String): String? {
+        val withoutComment = line.substringBefore("#").trim()
+        return withoutComment.ifBlank { null }?.replace(Regex("""\s+"""), " ")
+    }
+
+    private fun collectRequiredAccessTransformerEntries(projectDir: Path): Set<String> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptySet()
+
+        val entries = linkedSetOf<String>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val source = javaFile.readText()
+                if (source.contains(".availableGoals")) {
+                    entries.add("public net.minecraft.world.entity.ai.goal.GoalSelector availableGoals")
+                }
+                if (source.contains(".findLightningTargetAround(")) {
+                    entries.add("public net.minecraft.server.level.ServerLevel findLightningTargetAround(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/BlockPos;")
+                }
+                if (source.contains("StructureTemplatePool") && source.contains(".templates")) {
+                    entries.add("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool templates")
+                }
+                if (source.contains("StructureTemplatePool") && source.contains(".rawTemplates")) {
+                    entries.add("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates")
+                }
+                if (source.contains(".pendingBlockEntities")) {
+                    entries.add("public net.minecraft.world.level.chunk.ChunkAccess pendingBlockEntities")
+                }
+                if (source.contains("CreativeModeInventoryScreen.selectedTab")) {
+                    entries.add("public net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen selectedTab")
+                }
+                if (source.contains(".skyBuffer")) {
+                    entries.add("public net.minecraft.client.renderer.LevelRenderer skyBuffer")
+                }
+                if (source.contains(".darkBuffer")) {
+                    entries.add("public net.minecraft.client.renderer.LevelRenderer darkBuffer")
+                }
+                if (source.contains(".rainSoundTime")) {
+                    entries.add("public net.minecraft.client.renderer.LevelRenderer rainSoundTime")
+                }
+            }
+        return entries
+    }
+
+    private fun ensureAccessTransformerEntries(
+        projectDir: Path,
+        requiredEntries: List<String>,
+        dryRun: Boolean,
+        ruleId: String,
+        description: String
+    ): List<Change> {
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+        val original = if (atFile.exists()) atFile.readText() else ""
+        val existing = original.lines().mapNotNull(::normalizeAccessTransformerEntry).toMutableSet()
+        val missing = requiredEntries.filter { existing.add(it) }
+        if (missing.isEmpty()) return emptyList()
+
+        val separator = System.lineSeparator()
+        val modified = buildString {
+            append(original.trimEnd())
+            if (isNotEmpty()) append(separator).append(separator)
+            append(missing.joinToString(separator))
+            append(separator)
+        }
+        if (!dryRun) {
+            atFile.parent.createDirectories()
+            atFile.writeText(modified)
+        }
+        return listOf(Change(
+            file = atFile,
+            line = 1,
+            description = description,
+            before = "missing access transformer entries",
+            after = missing.joinToString(", "),
+            confidence = Confidence.HIGH,
+            ruleId = ruleId
+        ))
+    }
+
+    private fun migrateBlockPropertiesNoParticlesOnBreak(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val javaFiles = java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .toList()
+        val changedFiles = mutableListOf<Path>()
+        for (javaFile in javaFiles) {
+            val original = javaFile.readText()
+            if (!original.contains(".noParticlesOnBreak()")) continue
+            val migrated = rewriteNoParticlesOnBreakCalls(original)
+            if (migrated != original) {
+                changedFiles.add(javaFile)
+                if (!dryRun) {
+                    javaFile.writeText(migrated)
+                }
+            }
+        }
+        if (changedFiles.isEmpty()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        val helperFile = projectDir.resolve("src/main/java/com/modporter/compat/ModPorterBlockProperties.java")
+        if (!helperFile.exists()) {
+            changes.add(Change(
+                file = helperFile,
+                line = 1,
+                description = "Add Access-Transformer-backed block properties helper for removed noParticlesOnBreak builder API",
+                before = "BlockBehaviour.Properties.noParticlesOnBreak()",
+                after = "ModPorterBlockProperties.noParticlesOnBreak(properties)",
+                confidence = Confidence.HIGH,
+                ruleId = "build-block-properties-no-particles-helper"
+            ))
+            if (!dryRun) {
+                helperFile.parent.createDirectories()
+                helperFile.writeText(blockPropertiesHelperSource())
+            }
+        }
+        changes.add(Change(
+            file = changedFiles.first(),
+            line = 1,
+            description = "Rewrite removed noParticlesOnBreak builder calls to an AT-backed helper",
+            before = ".noParticlesOnBreak()",
+            after = "ModPorterBlockProperties.noParticlesOnBreak(properties)",
+            confidence = Confidence.HIGH,
+            ruleId = "build-block-properties-no-particles"
+        ))
+        changes.addAll(ensureAccessTransformerEntries(
+            projectDir = projectDir,
+            requiredEntries = listOf("public net.minecraft.world.level.block.state.BlockBehaviour\$Properties spawnTerrainParticles"),
+            dryRun = dryRun,
+            ruleId = "build-block-properties-no-particles-at",
+            description = "Expose BlockBehaviour.Properties spawnTerrainParticles through Access Transformers instead of reflection"
+        ))
+        return changes
+    }
+
+    private fun rewriteNoParticlesOnBreakCalls(source: String): String {
+        val token = ".noParticlesOnBreak()"
+        val result = StringBuilder()
+        var cursor = 0
+        while (cursor < source.length) {
+            val tokenIndex = source.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val receiverStart = findFluentReceiverStart(source, tokenIndex)
+            if (receiverStart < 0 || receiverStart >= tokenIndex) {
+                result.append(source, cursor, tokenIndex + token.length)
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val receiver = source.substring(receiverStart, tokenIndex).trim()
+            val leading = source.substring(receiverStart, tokenIndex).takeWhile { it.isWhitespace() }
+            result.append(source, cursor, receiverStart)
+            result.append(leading)
+            result.append("com.modporter.compat.ModPorterBlockProperties.noParticlesOnBreak($receiver)")
+            cursor = tokenIndex + token.length
+        }
+        if (cursor == 0) return source
+        result.append(source, cursor, source.length)
+        return result.toString()
+    }
+
+    private fun findFluentReceiverStart(source: String, tokenIndex: Int): Int {
+        var index = tokenIndex - 1
+        var parenDepth = 0
+        var bracketDepth = 0
+        while (index >= 0) {
+            val char = source[index]
+            when (char) {
+                ')' -> parenDepth++
+                '(' -> {
+                    if (parenDepth == 0) return index + 1
+                    parenDepth--
+                }
+                ']' -> bracketDepth++
+                '[' -> {
+                    if (bracketDepth == 0) return index + 1
+                    bracketDepth--
+                }
+                ',', ';', '{', '}', '=' -> if (parenDepth == 0 && bracketDepth == 0) return index + 1
+                '\n', '\r' -> {
+                    if (parenDepth == 0 && bracketDepth == 0) {
+                        val linePrefix = source.substring(index + 1, tokenIndex)
+                        if (!linePrefix.trimStart().startsWith(".")) return index + 1
+                    }
+                }
+            }
+            index--
+        }
+        return 0
+    }
+
+    private fun blockPropertiesHelperSource(): String = """
+        package com.modporter.compat;
+
+        import net.minecraft.world.level.block.state.BlockBehaviour;
+
+        public final class ModPorterBlockProperties {
+            private ModPorterBlockProperties() {
+            }
+
+            public static BlockBehaviour.Properties noParticlesOnBreak(BlockBehaviour.Properties properties) {
+                properties.spawnTerrainParticles = false;
+                return properties;
+            }
+        }
+    """.trimIndent()
+
+    private fun configureAccessTransformers(projectDir: Path, dryRun: Boolean): List<Change> {
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+        if (!atFile.exists()) return emptyList()
+
+        val buildFiles = listOf(projectDir.resolve("build.gradle"), projectDir.resolve("build.gradle.kts"))
+            .filter { it.exists() }
+        val changes = mutableListOf<Change>()
+        for (buildFile in buildFiles) {
+            val original = buildFile.readText()
+            if (original.contains("accessTransformers")) continue
+
+            val isKts = buildFile.fileName.toString().endsWith(".kts")
+            val insertion = if (isKts) {
+                """
+    validateAccessTransformers = true
+    accessTransformers.files.setFrom("src/main/resources/META-INF/accesstransformer.cfg")
+
+                """.trimIndent()
+            } else {
+                """
+    validateAccessTransformers = true
+    accessTransformers {
+        file('src/main/resources/META-INF/accesstransformer.cfg')
+    }
+
+                """.trimIndent()
+            }
+
+            val neoForgeMatch = Regex("""(?m)^(\s*neoForge\s*\{\s*\r?\n)""").find(original)
+            val modified = if (neoForgeMatch != null) {
+                val insertAt = neoForgeMatch.range.last + 1
+                original.substring(0, insertAt) + insertion + original.substring(insertAt)
+            } else {
+                val block = if (isKts) {
+                    """
+
+neoForge {
+$insertion}
+                    """.trimIndent()
+                } else {
+                    """
+
+neoForge {
+$insertion}
+                    """.trimIndent()
+                }
+                original.trimEnd() + System.lineSeparator() + block + System.lineSeparator()
+            }
+            if (modified != original) {
+                changes.add(Change(
+                    file = buildFile,
+                    line = 1,
+                    description = "Wire Access Transformers into ModDevGradle",
+                    before = "neoForge block without accessTransformers",
+                    after = "validateAccessTransformers plus accessTransformers cfg",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-access-transformer-config"
+                ))
+                if (!dryRun) buildFile.writeText(modified)
+            }
+        }
+        return changes
+    }
+
+    private fun detectForbiddenReflection(projectDir: Path): List<String> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val forbiddenPatterns = listOf(
+            "ObfuscationReflectionHelper" to Regex("""\bObfuscationReflectionHelper\b"""),
+            "getDeclaredField" to Regex("""\bgetDeclaredField\s*\("""),
+            "getDeclaredMethod" to Regex("""\bgetDeclaredMethod\s*\("""),
+            "getDeclaredConstructor" to Regex("""\bgetDeclaredConstructor\s*\("""),
+            "getMethod" to Regex("""\.getMethod\s*\("""),
+            "setAccessible" to Regex("""\bsetAccessible\s*\("""),
+            "Class.forName" to Regex("""\bClass\.forName\s*\("""),
+            "MethodHandle" to Regex("""\bMethodHandle\b"""),
+            "MethodHandles" to Regex("""\bMethodHandles\b"""),
+            "java.lang.reflect member access" to Regex("""\bjava\.lang\.reflect\.(?:Field|Method|Constructor)\b"""),
+            "unreflect" to Regex("""\bunreflect(?:Getter|Setter)?\s*\(""")
+        )
+        val errors = mutableListOf<String>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                javaFile.readLines().forEachIndexed { index, line ->
+                    val trimmed = line.trim()
+                    if (trimmed.startsWith("//") || trimmed.startsWith("*")) return@forEachIndexed
+                    for ((label, pattern) in forbiddenPatterns) {
+                        if (pattern.containsMatchIn(line)) {
+                            val relative = projectDir.relativize(javaFile).toString().replace('\\', '/')
+                            errors.add("Forbidden reflection in $relative:${index + 1}: $label")
+                        }
+                    }
+                }
+            }
+        return errors
+    }
+
+    private fun migrateCoremodScripts(projectDir: Path, dryRun: Boolean): List<Change> {
+        val asmDir = projectDir.resolve("src/main/resources/META-INF/asm")
+        if (!asmDir.exists()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        java.nio.file.Files.walk(asmDir)
+            .filter { it.toString().endsWith(".js") }
+            .forEach { script ->
+                val original = script.readText()
+                val modified = original.replace(
+                    "net.minecraftforge.coremod.api.ASMAPI",
+                    "net.neoforged.coremod.api.ASMAPI"
+                )
+                if (modified != original) {
+                    changes.add(Change(
+                        file = script,
+                        line = 1,
+                        description = "Migrate Forge coremod ASMAPI scripts to NeoForge coremods API",
+                        before = "net.minecraftforge.coremod.api.ASMAPI",
+                        after = "net.neoforged.coremod.api.ASMAPI",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-coremod-asmapi-neoforge"
+                    ))
+                    if (!dryRun) script.writeText(modified)
+                }
+            }
+        return changes
+    }
+
+    private fun detectLegacyCoremodApiReferences(projectDir: Path): List<String> {
+        val asmDir = projectDir.resolve("src/main/resources/META-INF/asm")
+        if (!asmDir.exists()) return emptyList()
+
+        val errors = mutableListOf<String>()
+        java.nio.file.Files.walk(asmDir)
+            .filter { it.toString().endsWith(".js") }
+            .forEach { script ->
+                script.readLines().forEachIndexed { index, line ->
+                    if (line.contains("net.minecraftforge.coremod.api.ASMAPI")) {
+                        val relative = projectDir.relativize(script).toString().replace('\\', '/')
+                        errors.add("Legacy Forge coremod ASMAPI reference in $relative:${index + 1}")
+                    }
+                }
+            }
+        return errors
+    }
+
+    private data class AnimalSpawnPlacementTarget(val fieldName: String, val entityClass: String)
+
+    private fun migrateAnimalSpawnPlacements(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val javaFiles = java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .toList()
+
+        val changes = mutableListOf<Change>()
+        val registries = mutableListOf<String>()
+
+        for (javaFile in javaFiles) {
+            val original = javaFile.readText()
+            if (original.contains("RegisterSpawnPlacementsEvent") &&
+                Regex("""\bstatic\s+void\s+registerSpawnPlacements\s*\(""").containsMatchIn(original)
+            ) {
+                registries.add(fullyQualifiedJavaClassName(javaFile, original))
+                continue
+            }
+            if (!original.contains("EntityType.Builder.of") || !original.contains("MobCategory.CREATURE")) continue
+            if (original.contains("registerSpawnPlacements(")) continue
+
+            val targets = findAnimalSpawnPlacementTargets(original, javaFiles)
+            if (targets.isEmpty()) continue
+
+            var modified = original
+            modified = ensureJavaImport(modified, "net.minecraft.world.entity.SpawnPlacementTypes")
+            modified = ensureJavaImport(modified, "net.minecraft.world.entity.animal.Animal")
+            modified = ensureJavaImport(modified, "net.minecraft.world.level.levelgen.Heightmap")
+            modified = ensureJavaImport(modified, "net.neoforged.neoforge.event.entity.RegisterSpawnPlacementsEvent")
+
+            val body = targets.joinToString("\n") { target ->
+                "        event.register(${target.fieldName}.get(), SpawnPlacementTypes.ON_GROUND, Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, Animal::checkAnimalSpawnRules, RegisterSpawnPlacementsEvent.Operation.REPLACE);"
+            }
+            val method = """
+
+    public static void registerSpawnPlacements(RegisterSpawnPlacementsEvent event) {
+$body
+    }
+""".trimEnd()
+
+            val insertAt = modified.lastIndexOf('}')
+            if (insertAt < 0) continue
+            modified = modified.substring(0, insertAt) + method + "\n" + modified.substring(insertAt)
+
+            val registryName = fullyQualifiedJavaClassName(javaFile, modified)
+            registries.add(registryName)
+            changes.add(Change(
+                file = javaFile,
+                line = 0,
+                description = "Register animal spawn placement predicates on the NeoForge mod bus",
+                before = "MobCategory.CREATURE entity without RegisterSpawnPlacementsEvent handler",
+                after = "RegisterSpawnPlacementsEvent with Animal::checkAnimalSpawnRules",
+                confidence = Confidence.HIGH,
+                ruleId = "build-entity-animal-spawn-placement"
+            ))
+            if (!dryRun) javaFile.writeText(modified)
+        }
+
+        if (registries.isEmpty()) return changes
+        val modFiles = javaFiles.filter { file ->
+            val text = file.readText()
+            text.contains("@Mod(") && text.contains("IEventBus")
+        }
+        for (modFile in modFiles) {
+            var modified = modFile.readText()
+            val original = modified
+            val eventBusNames = Regex("""\bIEventBus\s+([A-Za-z_$][\w$]*)\s*=""")
+                .findAll(modified)
+                .map { it.groupValues[1] }
+                .distinct()
+                .toList()
+            for (registryName in registries.distinct()) {
+                if (modified.contains("$registryName::registerSpawnPlacements")) continue
+                for (eventBusName in eventBusNames) {
+                    val escapedBusName = Regex.escape(eventBusName)
+                    val listenerLine = "$eventBusName.addListener($registryName::registerSpawnPlacements);"
+                    val inserted = insertModBusListenerAfter(
+                        modified,
+                        listenerLine,
+                        listOf(
+                            Regex("""(?m)^([ \t]*)$escapedBusName\.addListener\(${Regex.escape(registryName)}::(?:registerAttributes|addEntityAttributes)\);\s*$"""),
+                            Regex("""(?m)^([ \t]*)$escapedBusName\.addListener\([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*::(?:registerAttributes|addEntityAttributes)\);\s*$"""),
+                            Regex("""(?m)^([ \t]*)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.(?:ENTITY_TYPES|ENTITIES)\.register\($escapedBusName\);\s*$"""),
+                            Regex("""(?m)^([ \t]*)IEventBus\s+$escapedBusName\s*=\s*[^;]+;\s*$""")
+                        )
+                    )
+                    if (inserted != null) {
+                        modified = inserted
+                        break
+                    }
+                }
+            }
+            if (modified != original) {
+                changes.add(Change(
+                    file = modFile,
+                    line = 0,
+                    description = "Register animal spawn placement listener on the mod event bus",
+                    before = "@Mod constructor without registerSpawnPlacements listener",
+                    after = "modEventBus.addListener(EntityRegistry::registerSpawnPlacements)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-modbus-animal-spawn-placement-listener"
+                ))
+                if (!dryRun) modFile.writeText(modified)
+            }
+        }
+
+        return changes
+    }
+
+    private fun findAnimalSpawnPlacementTargets(registrySource: String, javaFiles: List<Path>): List<AnimalSpawnPlacementTarget> {
+        val pattern = Regex(
+            """public\s+static\s+final\s+DeferredHolder[\s\S]*?\s+([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\.register\(\s*"[^"]+"\s*,\s*\(\)\s*->\s*EntityType\.Builder\.of\(\s*([A-Za-z_$][\w$]*)::new\s*,\s*MobCategory\.CREATURE\s*\)""",
+            setOf(RegexOption.MULTILINE)
+        )
+        return pattern.findAll(registrySource)
+            .mapNotNull { match ->
+                val fieldName = match.groupValues[1]
+                val entityClass = match.groupValues[2]
+                if (javaClassExtends(javaFiles, entityClass, "Animal")) {
+                    AnimalSpawnPlacementTarget(fieldName, entityClass)
+                } else {
+                    null
+                }
+            }
+            .toList()
+    }
+
+    private fun javaClassExtends(javaFiles: List<Path>, className: String, parentName: String): Boolean {
+        return javaFiles.any { file ->
+            file.fileName.toString() == "$className.java" &&
+                Regex("""\bclass\s+${Regex.escape(className)}\s+extends\s+${Regex.escape(parentName)}\b""")
+                    .containsMatchIn(file.readText())
+        }
+    }
+
+    private fun fullyQualifiedJavaClassName(file: Path, source: String): String {
+        val className = file.fileName.toString().removeSuffix(".java")
+        val packageName = Regex("""(?m)^package\s+([\w.]+);""").find(source)?.groupValues?.get(1)
+        return if (packageName.isNullOrBlank()) className else "$packageName.$className"
+    }
+
+    private fun insertModBusListenerAfter(content: String, listenerLine: String, anchors: List<Regex>): String? {
+        for (anchor in anchors) {
+            val match = anchor.find(content) ?: continue
+            val indent = match.groupValues.getOrNull(1).orEmpty()
+            val insertion = "${match.value}\n$indent$listenerLine"
+            return content.replaceRange(match.range, insertion)
+        }
+        return null
+    }
+
     private fun transformGradleProperties(
         file: Path, dryRun: Boolean
     ): Pair<List<Change>, List<String>> {
@@ -650,6 +3294,19 @@ class BuildSystemPass(
             ))
         }
 
+        val baseMcVersion = Regex("""(?m)^base_minecraft_version\s*=\s*1\.20(?:\.\d+)?\s*$""").find(content)
+        if (baseMcVersion != null) {
+            changes.add(Change(
+                file = file, line = content.lineNumberAt(baseMcVersion.range.first),
+                description = "Update base Minecraft version to 1.21 for derived runtime dependency coordinates",
+                before = baseMcVersion.value,
+                after = "base_minecraft_version=1.21",
+                confidence = Confidence.HIGH,
+                ruleId = "build-props-base-mc-version"
+            ))
+            content = content.replaceRange(baseMcVersion.range, "base_minecraft_version=1.21")
+        }
+
         // Update version ranges
         val rangeReplacements = listOf(
             Regex("""minecraft_version_range\s*=\s*.+""") to "minecraft_version_range=[1.21.1,1.22)",
@@ -693,7 +3350,7 @@ class BuildSystemPass(
                 description = "Replace Forge references in gradle.properties",
                 before = "net.minecraftforge",
                 after = "net.neoforged",
-                confidence = Confidence.MEDIUM,
+                confidence = Confidence.HIGH,
                 ruleId = "build-props-forge-ref"
             ))
             content = content.replace("net.minecraftforge", "net.neoforged")
@@ -749,6 +3406,103 @@ class BuildSystemPass(
             }
         } catch (_: Exception) {}
         return null
+    }
+
+    private fun addMavenRepositoryContentFilters(
+        input: String,
+        file: Path,
+        changes: MutableList<Change>
+    ): String {
+        var content = input
+        var searchStart = 0
+        while (true) {
+            val match = Regex("""(?m)^[ \t]*maven\s*\{""").find(content, searchStart) ?: break
+            val openBrace = content.indexOf('{', match.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(content, openBrace) else -1
+            if (closeBrace <= openBrace) break
+
+            val block = content.substring(match.range.first, closeBrace + 1)
+            val needsTamaizedFilter = block.contains("maven.tamaized.com/releases") &&
+                !Regex("""\bcontent\s*\{""").containsMatchIn(block)
+            if (needsTamaizedFilter) {
+                val baseIndent = content.substring(match.range.first, openBrace).takeWhile { it == ' ' || it == '\t' }
+                val childIndent = "$baseIndent    "
+                val filter = "\n${childIndent}content {\n${childIndent}    includeGroup \"tamaized\"\n$childIndent}"
+                content = content.substring(0, closeBrace) + filter + content.substring(closeBrace)
+                changes.add(Change(
+                    file = file,
+                    line = content.lineNumberAt(match.range.first),
+                    description = "Restrict Tamaized Maven repository to the tamaized group so CurseMaven dependencies resolve from CurseMaven",
+                    before = "maven.tamaized.com/releases without content filter",
+                    after = "content { includeGroup \"tamaized\" }",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-repository-content-filter"
+                ))
+                searchStart = closeBrace + filter.length + 1
+            } else {
+                searchStart = closeBrace + 1
+            }
+        }
+        return content
+    }
+
+    private fun addJavaImportIfMissing(source: String, importName: String): String {
+        if (source.contains("import $importName;")) return source
+        val importLine = "import $importName;\n"
+        val lastImport = Regex("""^import\s+[^;]+;""", RegexOption.MULTILINE)
+            .findAll(source)
+            .lastOrNull()
+        if (lastImport != null) {
+            val insertPos = lastImport.range.last + 1
+            return source.substring(0, insertPos) + "\n" + importLine + source.substring(insertPos)
+        }
+
+        val packageDecl = Regex("""^package\s+[^;]+;""", RegexOption.MULTILINE).find(source)
+        if (packageDecl != null) {
+            val insertPos = packageDecl.range.last + 1
+            return source.substring(0, insertPos) + "\n\n" + importLine + source.substring(insertPos)
+        }
+
+        return importLine + source
+    }
+
+    private fun ensureJavaImport(source: String, importName: String): String =
+        addJavaImportIfMissing(source, importName)
+
+    private fun removeJavaImport(source: String, importName: String): String =
+        source.replace(Regex("""(?m)^[ \t]*import\s+${Regex.escape(importName)};\s*\r?\n"""), "")
+
+    private fun detectWorldCarverModIdExpression(source: String, projectDir: Path): String? {
+        Regex("""@(?:Mod\.)?EventBusSubscriber\s*\([^)]*\bmodid\s*=\s*([^,)]+)""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
+
+        Regex("\\b([A-Za-z_$][\\w$]*)\\.prefix\\(\\s*\"")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return "$it.ID" }
+
+        Regex("""\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.(ID|MOD_ID|MODID)\b""")
+            .find(source)
+            ?.value
+            ?.let { return it }
+
+        return projectModIdExpression(projectDir)
+    }
+
+    private fun camelOrConstantToRegistryPath(name: String): String {
+        val raw = if (name.all { it.isUpperCase() || it == '_' || it.isDigit() }) {
+            name.lowercase()
+        } else {
+            name.replace(Regex("""([a-z0-9])([A-Z])"""), "$1_$2").lowercase()
+        }
+        return raw.replace("__", "_").trim('_')
     }
 
     /**
@@ -829,7 +3583,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
     /**
      * Resolve third-party dependencies: find NeoForge 1.21.1 versions and rewrite coordinates.
-     * Dependencies that can be resolved are rewritten in-place; unresolvable ones are left for commentOutOldDeps.
+     * Dependencies that can be resolved are rewritten in-place; unresolved ones stay active.
      */
     private fun resolveDependencies(
         content: String,
@@ -874,19 +3628,13 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                     continue
                 }
 
-                // Filter out coords already emitted (e.g., multiple JEI deps → single resolved set)
+                // Filter out coords already emitted (e.g., multiple JEI deps -> single resolved set)
                 val newCoords = resolution.coords.filter { it.coord !in emittedCoords }
 
                 val indent = lines[blockStart].takeWhile { it == ' ' || it == '\t' }
                 if (newCoords.isNotEmpty()) {
                     // Replace the entire dep block with resolved NeoForge coordinates
-                    val replacementLines = newCoords.map { coord ->
-                        if (!coord.transitive) {
-                            "${indent}${coord.config}(\"${coord.coord}\") { transitive = false }"
-                        } else {
-                            "${indent}${coord.config} \"${coord.coord}\""
-                        }
-                    }
+                    val replacementLines = newCoords.map { coord -> renderResolvedDependency(indent, coord) }
                     for (k in (j - 1) downTo blockStart) lines.removeAt(k)
                     for ((idx, line) in replacementLines.withIndex()) {
                         lines.add(blockStart + idx, line)
@@ -901,7 +3649,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                     ))
                     i = blockStart + replacementLines.size
                 } else {
-                    // All coords already emitted — just remove the duplicate Forge dep
+                    // All coords already emitted �?just remove the duplicate Forge dep
                     for (k in (j - 1) downTo blockStart) lines.removeAt(k)
                     i = blockStart
                 }
@@ -910,6 +3658,168 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                 resolvedPrefixes.addAll(resolution.coords.map { it.coord.substringBefore(":") })
                 emittedCoords.addAll(resolution.coords.map { it.coord })
                 resolution.mavenUrl?.let { newMavenRepos.add(it) }
+            } else if (resolution is DepResolution.Remove) {
+                for (k in (j - 1) downTo blockStart) lines.removeAt(k)
+                changes.add(Change(
+                    file = file, line = blockStart + 1,
+                    description = "Removed dependency with no NeoForge 1.21.1 runtime target: ${resolution.reason}",
+                    before = blockText.trim(),
+                    after = "",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-remove-dep"
+                ))
+                i = blockStart
+            } else {
+                i = j
+            }
+        }
+        return lines.joinToString("\n")
+    }
+
+    private fun addReflectedOptionalApiDependencies(
+        content: String,
+        projectDir: Path,
+        resolver: DependencyResolver,
+        resolvedPrefixes: MutableSet<String>,
+        newMavenRepos: MutableSet<String>,
+        changes: MutableList<Change>,
+        file: Path
+    ): String {
+        val referencedClasses = reflectedBinaryClassNames(projectDir)
+        if (referencedClasses.isEmpty()) return content
+
+        val coords = linkedSetOf<NeoForgeCoord>()
+        for (binaryName in referencedClasses) {
+            val resolution = resolver.resolveReferencedClass(binaryName)
+            if (resolution !is DepResolution.Resolved) continue
+            resolution.coords
+                .filter { coord -> coord.config != "runtimeOnly" }
+                .map { coord -> if (coord.config == "compileOnly") coord else coord.copy(config = "compileOnly") }
+                .forEach { coord ->
+                    coords.add(coord)
+                    coord.mavenRepositoryUrl()?.let(newMavenRepos::add)
+                }
+            resolution.mavenUrl?.let(newMavenRepos::add)
+        }
+        val missing = coords.filter { coord -> !content.contains(coord.coord) }
+        if (missing.isEmpty()) return content
+
+        val modified = insertDependencies(content, missing)
+        changes.add(Change(
+            file = file,
+            line = 1,
+            description = "Add compileOnly dependencies for statically migrated optional API references",
+            before = "Class.forName optional API references without compile classpath",
+            after = missing.joinToString(", ") { it.coord },
+            confidence = Confidence.HIGH,
+            ruleId = "build-reflected-optional-api-dependencies"
+        ))
+        resolvedPrefixes.addAll(missing.map { it.coord.substringBefore(":") })
+        return modified
+    }
+
+    private fun reflectedBinaryClassNames(projectDir: Path): Set<String> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptySet()
+
+        val pattern = Regex("""Class\.forName\(\s*"([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+(?:\$[A-Za-z_$][\w$]*)?)"\s*\)""")
+        val names = linkedSetOf<String>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                pattern.findAll(javaFile.readText()).forEach { match ->
+                    names.add(match.groupValues[1])
+                }
+            }
+        return names
+    }
+
+    private fun insertDependencies(content: String, coords: List<NeoForgeCoord>): String {
+        val dependencyLines = coords.joinToString(System.lineSeparator()) { coord ->
+            renderResolvedDependency("    ", coord)
+        }
+        val dependenciesMatch = Regex("""dependencies\s*\{""").find(content)
+        if (dependenciesMatch != null) {
+            val insertPos = dependenciesMatch.range.last + 1
+            return content.substring(0, insertPos) +
+                System.lineSeparator() +
+                dependencyLines +
+                content.substring(insertPos)
+        }
+
+        val insertion = "dependencies {" +
+            System.lineSeparator() +
+            dependencyLines +
+            System.lineSeparator() +
+            "}" +
+            System.lineSeparator() +
+            System.lineSeparator()
+        val insertAt = Regex("""(?m)^tasks\.""").find(content)?.range?.first ?: content.length
+        return content.substring(0, insertAt) + insertion + content.substring(insertAt)
+    }
+
+    private fun NeoForgeCoord.mavenRepositoryUrl(): String? =
+        when {
+            coord.startsWith("curse.maven:") -> "https://www.cursemaven.com"
+            coord.startsWith("maven.modrinth:") -> "https://api.modrinth.com/maven"
+            else -> null
+        }
+
+    private fun renderResolvedDependency(indent: String, coord: NeoForgeCoord): String {
+        val dependency = coord.coord.trim()
+        return if (dependency.startsWith("files(")) {
+            "${indent}${coord.config} $dependency"
+        } else if (!coord.transitive) {
+            "${indent}${coord.config}(\"${coord.coord}\") { transitive = false }"
+        } else {
+            "${indent}${coord.config} \"${coord.coord}\""
+        }
+    }
+
+    private fun removeBundledMixinDependencies(
+        content: String,
+        changes: MutableList<Change>,
+        file: Path
+    ): String {
+        val depKeywords = listOf("compileOnly", "runtimeOnly", "implementation", "annotationProcessor", "testAnnotationProcessor", "testImplementation")
+        val bundledPrefixes = listOf("org.spongepowered:mixin", "io.github.llamalad7:mixinextras")
+        val lines = content.lines().toMutableList()
+        var i = 0
+        while (i < lines.size) {
+            val trimmed = lines[i].trim()
+            if (trimmed.startsWith("//") || depKeywords.none { trimmed.startsWith(it) }) {
+                i++
+                continue
+            }
+
+            val blockStart = i
+            var depth = 0
+            var j = i
+            do {
+                for (ch in lines[j]) {
+                    when (ch) {
+                        '(', '[' -> depth++
+                        ')', ']' -> depth--
+                    }
+                }
+                j++
+            } while (j < lines.size && depth > 0)
+
+            val blockText = lines.subList(blockStart, j).joinToString("\n")
+            if (bundledPrefixes.any { prefix -> blockText.contains(prefix) }) {
+                changes.add(Change(
+                    file = file,
+                    line = blockStart + 1,
+                    description = "Remove standalone Mixin/MixinExtras dependency bundled by NeoForge",
+                    before = blockText.trim(),
+                    after = "(dependency removed; NeoForge provides Mixin runtime)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-remove-bundled-mixin-dependency"
+                ))
+                for (k in (j - 1) downTo blockStart) {
+                    lines.removeAt(k)
+                }
+                i = blockStart
             } else {
                 i = j
             }
@@ -929,17 +3839,17 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         var result = content
         val repoBlock = Regex("""repositories\s*\{""")
         val repoMatch = repoBlock.find(result)
+        fun renderRepo(url: String): String =
+            when {
+                url.contains("modrinth") -> "    maven {\n        name = \"Modrinth\"\n        url = \"$url\"\n        content { includeGroup \"maven.modrinth\" }\n    }"
+                url.contains("cursemaven") -> "    maven {\n        name = \"CurseMaven\"\n        url = \"$url\"\n        content { includeGroup \"curse.maven\" }\n    }"
+                else -> "    maven { url = \"$url\" }"
+            }
         if (repoMatch != null) {
             val insertPos = repoMatch.range.last + 1
             val newRepoLines = repos
                 .filter { url -> !result.contains(url) }
-                .joinToString("\n") { url ->
-                    val repoName = when {
-                        url.contains("modrinth") -> "\n    maven {\n        name = \"Modrinth\"\n        url = \"$url\"\n        content { includeGroup \"maven.modrinth\" }\n    }"
-                        else -> "\n    maven { url = \"$url\" }"
-                    }
-                    repoName
-                }
+                .joinToString("\n") { url -> "\n${renderRepo(url)}" }
             if (newRepoLines.isNotBlank()) {
                 result = result.substring(0, insertPos) + newRepoLines + result.substring(insertPos)
                 changes.add(Change(
@@ -951,19 +3861,37 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                     ruleId = "build-add-maven-repos"
                 ))
             }
+        } else {
+            val newRepoLines = repos
+                .filter { url -> !result.contains(url) }
+                .joinToString("\n") { renderRepo(it) }
+            if (newRepoLines.isNotBlank()) {
+                val repoSection = "repositories {\n$newRepoLines\n}\n\n"
+                val insertPos = result.indexOf("dependencies {").takeIf { it >= 0 } ?: result.length
+                result = result.substring(0, insertPos) + repoSection + result.substring(insertPos)
+                changes.add(Change(
+                    file = file, line = result.lineNumberAt(insertPos),
+                    description = "Create maven repositories block for resolved NeoForge dependencies",
+                    before = "(no repositories block)",
+                    after = repos.joinToString(", "),
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-add-maven-repos"
+                ))
+            }
         }
         return result
     }
 
     /**
-     * Comment out dependency declarations that reference old MC version libraries.
-     * Handles both single-line and multi-line (map-style) dependency declarations.
+     * Keep third-party dependencies active while removing ForgeGradle-only wrappers.
+     * Dependency incompatibility must surface as a real resolution/compile failure.
      */
-    private fun commentOutOldDeps(content: String, skipPrefixes: Set<String> = emptySet()): String {
+    private fun normalizeOldDependencyWrappers(content: String, skipPrefixes: Set<String> = emptySet()): String {
         val allDepPrefixes = listOf("mezz.jei:", "squeek.appleskin:", "com.blamejared.crafttweaker:",
             "Crafttweaker_Annotation_Processors", "org.spongepowered:mixin:", "vazkii.botania",
             "org.valkyrienskies", "maven.modrinth:", "curse.maven:", "top.theillusivec4:",
             "com.github.", "de.ellpeck.", "mcjty.", "com.tterrag.",
+            "vazkii.patchouli", "cn.mcmod_mmf.mysterious_mountain_lib",
             "com.simibubi.create", "net.createmod.ponder", "dev.engine-room.flywheel",
             "io.github.llamalad7:mixinextras")
         // Filter out prefixes that were already resolved to NeoForge versions
@@ -973,7 +3901,6 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         val depKeywords = listOf("compileOnly", "runtimeOnly", "implementation", "annotationProcessor", "def ")
 
         val lines = content.lines().toMutableList()
-        val commentedVars = mutableSetOf<String>()
         var i = 0
         while (i < lines.size) {
             val trimmed = lines[i].trim()
@@ -994,647 +3921,2498 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
             val blockText = lines.subList(blockStart, j).joinToString("\n")
             if (depPrefixes.any { blockText.contains(it) }) {
-                val defMatch = Regex("""def\s+(\w+)\s*=""").find(lines[blockStart].trim())
-                if (defMatch != null) commentedVars.add(defMatch.groupValues[1])
+                val replacementLines = blockText.lines().map { removeFgDeobfWrapper(it) }
                 for (k in blockStart until j) {
-                    lines[k] = "    // TODO: Update for NeoForge 1.21.1 — ${lines[k].trim()}"
+                    lines[k] = replacementLines[k - blockStart]
                 }
             }
             i = j
         }
-        // Second pass: comment out lines referencing variables from commented def lines
-        if (commentedVars.isNotEmpty()) {
-            for (idx in lines.indices) {
-                val trimmed = lines[idx].trim()
-                if (!trimmed.startsWith("//") && commentedVars.any { v -> Regex("""\b$v\b""").containsMatchIn(trimmed) } &&
-                    depKeywords.any { trimmed.startsWith(it) }) {
-                    lines[idx] = "    // TODO: Update for NeoForge 1.21.1 — ${lines[idx].trim()}"
-                }
-            }
-        }
         return lines.joinToString("\n")
     }
 
-    /**
-     * Result of detecting unavailable integrations.
-     * @param exclusions files/dirs to exclude from sourceSets
-     * @param cleanupTargets map of file path to set of import prefixes to comment out (for large files that shouldn't be excluded entirely)
-     */
-    data class IntegrationDetectionResult(
-        val exclusions: List<String>,
-        val cleanupTargets: Map<Path, Set<String>> = emptyMap()
+    private fun removeFgDeobfWrapper(line: String): String =
+        line.replace(
+            Regex("""compileOnly\s+fg\.deobf\(\s*([^)]+?)\s*\)"""),
+            "compileOnly $1"
+        )
+
+    private data class LegacyTreeGrower(
+        val className: String,
+        val path: Path,
+        val returnExpressions: List<String>
     )
 
-    /**
-     * Detect integration source packages that depend on unavailable external libraries.
-     * Scans src/main/java for "integration" subdirectories whose dependencies were commented out.
-     * Returns exclusions and cleanup targets.
-     */
-    private fun detectUnavailableIntegrations(projectDir: Path, buildContent: String = ""): IntegrationDetectionResult {
-        val srcDir = projectDir.resolve("src/main/java")
-        if (!srcDir.exists()) return IntegrationDetectionResult(emptyList())
+    private data class LegacyArmorMaterial(
+        val enumName: String,
+        val path: Path,
+        val packageName: String,
+        val modIdExpr: String,
+        val modImport: String?,
+        val extraImports: List<String>,
+        val constants: List<LegacyArmorMaterialConstant>
+    )
 
-        // Map of dependency group prefixes to their expected integration package names
-        val depToIntegration = mapOf(
-            "mezz.jei" to "jei",
-            "com.blamejared.crafttweaker" to "crafttweaker",
-            "moze_intel.projecte" to "projecte",
-            "com.refinedmods" to "refinedstorage",
-            "appeng" to "ae2",
-            "mekanism" to "mekanism",
-            "top.theillusivec4.curios" to "curios",
-            "vazkii.botania" to "botania",
-            "org.valkyrienskies" to "valkyrienskies",
-            "maven.modrinth:valkyrien" to "valkyrienskies",
-        )
+    private data class LegacyArmorMaterialConstant(
+        val fieldName: String,
+        val registryName: String,
+        val textureName: String,
+        val protections: List<String>,
+        val enchantmentValue: String,
+        val equipSound: String,
+        val repairIngredient: String,
+        val toughness: String,
+        val knockbackResistance: String,
+        val bodyProtection: String? = null
+    )
 
-        // Map of dependency identifiers to their Java import package prefixes
-        val depImportPrefixes = mapOf(
-            "vazkii.botania" to "vazkii.botania",
-            "mezz.jei" to "mezz.jei",
-            "org.valkyrienskies" to "org.valkyrienskies",
-            "maven.modrinth:valkyrien" to "org.valkyrienskies",
-            "top.theillusivec4:" to "top.theillusivec4",
-            "com.github." to "com.github.",
-            "curse.maven:playeranimator" to "dev.kosmx.playerAnim",
-            "curse.maven:scorched-guns" to "top.ribs.scguns",
-            "curse.maven:geckolib" to "software.bernie.geckolib",
-            "curse.maven:framework" to "net.minecraftforge.fml",
-            "curse.maven:curios" to "top.theillusivec4.curios",
-            "com.simibubi.create" to "com.simibubi.create",
-            "net.createmod.ponder" to "net.createmod.ponder",
-            "dev.engine-room.flywheel" to "dev.engine_room.flywheel",
-        )
+    private data class CustomStatDeclaration(
+        val fieldName: String,
+        val modIdExpr: String,
+        val pathName: String
+    )
 
-        // Use in-memory content if provided, otherwise read from disk
-        val effectiveContent = if (buildContent.isNotEmpty()) buildContent else {
-            val buildGradle = projectDir.resolve("build.gradle")
-            if (buildGradle.exists()) buildGradle.readText() else ""
-        }
-
-        val allKnownDeps = (depToIntegration.keys + depImportPrefixes.keys).distinct()
-        val commentedDeps = allKnownDeps.filter { dep ->
-            // Check if the dependency line is commented out (starts with //)
-            effectiveContent.lines().any { line ->
-                val trimmed = line.trim()
-                trimmed.startsWith("//") && trimmed.contains(dep)
-            }
-        }
-        if (commentedDeps.isEmpty()) return IntegrationDetectionResult(emptyList())
-
-        // Find actual integration directories in the source tree
-        val exclusions = mutableListOf<String>()
-        val cleanupTargets = mutableMapOf<Path, MutableSet<String>>()
-        try {
-            // Check both "integration", "integrations", and "compat" directory names
-            if (commentedDeps.isNotEmpty()) java.nio.file.Files.walk(srcDir)
-                .filter { java.nio.file.Files.isDirectory(it) &&
-                    (it.fileName.toString() == "integration" || it.fileName.toString() == "integrations" || it.fileName.toString() == "compat") }
-                .forEach { integrationDir ->
-                    for (dep in commentedDeps) {
-                        val integrationName = depToIntegration[dep] ?: continue
-                        val subDir = integrationDir.resolve(integrationName)
-                        if (subDir.exists() && java.nio.file.Files.isDirectory(subDir)) {
-                            val relativePath = srcDir.relativize(subDir).toString().replace('\\', '/')
-                            exclusions.add("$relativePath/**")
-                        }
-                    }
-                }
-
-            // Also find individual files that import commented-out dependency packages
-            // (for cases like HandlerBotania.java not in an integration directory)
-            for (dep in commentedDeps) {
-                val importPrefix = depImportPrefixes[dep] ?: continue
-                java.nio.file.Files.walk(srcDir)
-                    .filter { it.toString().endsWith(".java") }
-                    .forEach { javaFile ->
-                        val text = javaFile.toFile().readText()
-                        if (text.contains("import $importPrefix") ||
-                            text.contains("// [forge2neo] import $importPrefix")) {
-                            val relativePath = srcDir.relativize(javaFile).toString().replace('\\', '/')
-                            if (exclusions.any { relativePath == it || relativePath.startsWith(it.removeSuffix("/**") + "/") }) return@forEach
-                            val lineCount = text.lines().size
-                            val depRefCount = Regex("""\b${Regex.escape(importPrefix.substringAfterLast('.'))}\b""").findAll(text).count()
-                            val fullPrefixRefs = text.lines().count { l -> l.contains(importPrefix) }
-                            if (lineCount < 50 || depRefCount >= 4 || fullPrefixRefs >= 1) {
-                                logger.info { "Excluding $relativePath (dep=$dep, lines=$lineCount)" }
-                                exclusions.add(relativePath)
-                            } else {
-                                // File is too large/important to exclude — mark for cleanup instead
-                                cleanupTargets.getOrPut(javaFile) { mutableSetOf() }.add(importPrefix)
-                            }
-                        }
-                    }
-            }
-
-            // Exclude files that use removed/rewritten APIs that can't be fixed by text replacement
-            val removedApiPatterns = listOf(
-                "Capabilities.ITEM_HANDLER",       // Forge capability API removed
-                "LazyOptional<IItemHandler>",       // Capability wrapping removed
-                "ICapabilityProvider",              // Capability interface removed
-                "ItemStack.of(CompoundTag",         // Changed to codec-based in 1.21
-                "ItemStack::of",                    // Method reference variant
-                "ContainerHelper.saveAllItems",     // Signature changed in 1.21
-                "ContainerHelper.loadAllItems",     // Signature changed in 1.21
-                "HandlerCapability",                // References excluded capability handler
-            )
-            // Also exclude data gen files (they reference changed RecipeProvider/ItemModelProvider APIs
-            // and pre-generated resources already exist in src/generated/resources)
-            val dataGenPatterns = listOf(
-                "extends RecipeProvider",
-                "extends ItemModelProvider",
-                "extends BlockStateProvider",
-                "GatherDataEvent",
-            )
-            java.nio.file.Files.walk(srcDir)
-                .filter { it.toString().endsWith(".java") }
-                .forEach { javaFile ->
-                    val text = javaFile.toFile().readText()
-                    if (removedApiPatterns.any { pattern -> text.contains(pattern) } ||
-                        dataGenPatterns.any { pattern -> text.contains(pattern) }) {
-                        val relativePath = srcDir.relativize(javaFile).toString().replace('\\', '/')
-                        if (exclusions.none { relativePath.startsWith(it.removeSuffix("/**")) }) {
-                            exclusions.add(relativePath)
-                        }
-                    }
-                }
-
-            // Cascade: find files that import classes from excluded files
-            // This handles interfaces/classes defined in excluded files but referenced by non-excluded files
-            var changed = true
-            while (changed) {
-                changed = false
-                // Collect simple class names of all excluded files
-                val excludedClassNames = exclusions.mapNotNull { path ->
-                    if (path.endsWith("/**")) null
-                    else path.substringAfterLast('/').removeSuffix(".java")
-                }.toSet()
-                if (excludedClassNames.isEmpty()) break
-
-                java.nio.file.Files.walk(srcDir)
-                    .filter { it.toString().endsWith(".java") }
-                    .forEach { javaFile ->
-                        val relativePath = srcDir.relativize(javaFile).toString().replace('\\', '/')
-                        if (exclusions.any { relativePath == it || relativePath.startsWith(it.removeSuffix("/**") + "/") }) return@forEach
-                        val text = javaFile.toFile().readText()
-                        // Check if this file references an excluded class (via import or same-package usage)
-                        for (className in excludedClassNames) {
-                            val hasImport = text.contains(".$className;")
-                            val hasSamePackageRef = text.contains(className)
-                            if (hasImport || hasSamePackageRef) {
-                                val lineCount = text.lines().size
-                                // Count references to determine coupling strength
-                                val refCount = Regex("""\b${Regex.escape(className)}\b""").findAll(text).count()
-                                // Exclude thin files (< 30 lines) or heavily coupled files (5+ refs or >20% ref density)
-                                val refDensity = refCount.toDouble() / lineCount.coerceAtLeast(1)
-                                if (lineCount < 30 || refCount >= 5 || refDensity > 0.1) {
-                                    exclusions.add(relativePath)
-                                    changed = true
-                                    break
-                                }
-                            }
-                        }
-                    }
-            }
-        } catch (e: Exception) {
-            logger.warn { "Error detecting unavailable integrations: ${e.message}" }
-        }
-
-        return IntegrationDetectionResult(exclusions, cleanupTargets)
-    }
-
-    /**
-     * After determining excluded source files, clean up references to those files from remaining code.
-     * This handles:
-     * - Commenting out imports of excluded classes
-     * - Removing 'implements ExcludedInterface' from class declarations
-     * - Commenting out method calls to excluded classes (e.g., ExcludedClass.method())
-     * - Removing @Override methods that implement excluded interfaces
-     */
-
-    /**
-     * Clean up references to unavailable deps in files too large to exclude entirely.
-     * Comments out imports and wraps usage blocks in compile-guard comments.
-     */
-    private fun cleanupUnavailableDepRefs(
-        cleanupTargets: Map<Path, Set<String>>,
-        changes: MutableList<Change>,
-        buildFile: Path
-    ) {
-        for ((javaFile, importPrefixes) in cleanupTargets) {
-            var text = javaFile.readText()
-            val original = text
-            for (prefix in importPrefixes) {
-                // Comment out import lines matching this prefix
-                text = text.replace(Regex("""^(import\s+${Regex.escape(prefix)}\..+;)$""", RegexOption.MULTILINE)) {
-                    "// [modporter] unavailable dep: ${it.groupValues[1]}"
-                }
-                // Find simple class names imported from this prefix and comment out their usages
-                val importedClasses = Regex("""import\s+${Regex.escape(prefix)}\.[\w.]*\.(\w+);""")
-                    .findAll(original)
-                    .map { it.groupValues[1] }
-                    .toSet()
-                for (className in importedClasses) {
-                    // Comment out lines that reference this class (but not the import we already handled)
-                    text = text.replace(Regex("""^(\s*(?!.*//\s*\[modporter\]).+\b${Regex.escape(className)}\b.*)$""", RegexOption.MULTILINE)) {
-                        val line = it.groupValues[1]
-                        if (line.trimStart().startsWith("//")) line // already commented
-                        else "${line.substringBefore(line.trimStart())}// [modporter] unavailable dep: ${line.trimStart()}"
-                    }
-                }
-            }
-            if (text != original) {
-                javaFile.writeText(text)
-                logger.info { "Cleaned up unavailable dep refs in ${javaFile.fileName}" }
-                changes.add(Change(
-                    file = javaFile,
-                    line = 1,
-                    description = "Comment out unavailable dep references (${importPrefixes.joinToString(", ")})",
-                    before = "(references to unavailable deps)",
-                    after = "(commented out)",
-                    confidence = Confidence.HIGH,
-                    ruleId = "build-cleanup-unavailable-deps"
-                ))
-            }
-        }
-    }
-
-    private fun cleanupExcludedReferences(projectDir: Path, dryRun: Boolean): Pair<List<Change>, List<String>> {
+    private fun rewriteLegacyArmorMaterials(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
-        val errors = mutableListOf<String>()
         val srcDir = projectDir.resolve("src/main/java")
-        if (!srcDir.exists()) return changes to errors
+        if (!srcDir.exists()) return changes
 
-        // Parse exclusions from build.gradle
-        val buildGradle = projectDir.resolve("build.gradle")
-        val buildContent = if (buildGradle.exists()) buildGradle.readText() else ""
-        val excludePattern = Regex("""exclude\s+'([^']+)'""")
-        val excludedPaths = excludePattern.findAll(buildContent).map { it.groupValues[1] }.toList()
-
-        // Collect simple class names of excluded files
-        val excludedClassNames = excludedPaths.mapNotNull { path ->
-            if (path.endsWith("/**")) null
-            else path.substringAfterLast('/').removeSuffix(".java")
-        }.toMutableSet()
-
-        // Also collect class names from commented-out third-party imports
-        // These are classes from unavailable deps that were commented by text-replacement rules
+        val materials = mutableListOf<LegacyArmorMaterial>()
         java.nio.file.Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
-                val text = javaFile.toFile().readText()
-                val commentedImportPattern = Regex("""// \[forge2neo\] import [\w.]+\.(\w+);.*(?:re-enable|unavailable)""")
-                commentedImportPattern.findAll(text).forEach { match ->
-                    excludedClassNames.add(match.groupValues[1])
-                }
-            }
-
-        if (excludedClassNames.isEmpty()) return changes to errors
-
-        // Scan remaining Java files for references to excluded classes
-        java.nio.file.Files.walk(srcDir)
-            .filter { it.toString().endsWith(".java") }
-            .forEach { javaFile ->
-                val relativePath = srcDir.relativize(javaFile).toString().replace('\\', '/')
-                // Skip excluded files themselves
-                if (excludedPaths.any { relativePath == it || relativePath.startsWith(it.removeSuffix("/**") + "/") }) return@forEach
-
-                val text = javaFile.toFile().readText()
-                var modified = text
-
-                for (className in excludedClassNames) {
-                    if (!modified.contains(className)) continue
-
-                    // 1. Comment out import lines for excluded classes
-                    modified = modified.replace(
-                        Regex("""^(import\s+[\w.]+\.$className\s*;)""", RegexOption.MULTILINE),
-                        "// [forge2neo] $1 // excluded"
-                    )
-
-                    // 2. Remove 'implements ExcludedInterface' or ', ExcludedInterface' from class declarations
-                    // Handle "implements ExcludedClass" (only interface)
-                    modified = modified.replace(
-                        Regex("""([^\S\r\n]+)implements\s+$className\s*(?=\{)"""),
-                        "$1"
-                    )
-                    // Handle "implements Other, ExcludedClass" or "implements ExcludedClass, Other"
-                    // Only in implements/extends clauses (line must contain implements or extends keyword)
-                    modified = modified.replace(
-                        Regex("""^(.*(?:implements|extends)\s+.+),\s*\b$className\b(.*)$""", RegexOption.MULTILINE),
-                        "$1$2"
-                    )
-                    modified = modified.replace(
-                        Regex("""^(.*(?:implements|extends)\s+)\b$className\b\s*,\s*(.*)$""", RegexOption.MULTILINE),
-                        "$1$2"
-                    )
-
-                    // 3. Comment out standalone method calls: ExcludedClass.method(...)
-                    modified = modified.replace(
-                        Regex("""^(\s*)($className\.\w+\([^)\r\n]*\)\s*;)""", RegexOption.MULTILINE),
-                        "$1// [forge2neo] $2 // excluded"
-                    )
-                    // Also handle fully-qualified references: com.package.ExcludedClass.method(...)
-                    modified = modified.replace(
-                        Regex("""^(\s*)([\w.]+\.$className\.\w+\([^)\r\n]*\)\s*;)""", RegexOption.MULTILINE),
-                        "$1// [forge2neo] $2 // excluded"
-                    )
-
-                    // 3b. Handle if-blocks that contain excluded class references:
-                    // Comment out ALL body lines in the if-block (cascading deps make partial commenting unsafe).
-                    // If the body had a return and there's an else branch, comment the whole if+else structure
-                    // and promote the else-body to unconditional code.
-                    val ifBlockPattern = Regex("""^(\s*)if\s*\(.*?\)[^\S\r\n]*\{""", RegexOption.MULTILINE)
-                    var ifMatch = ifBlockPattern.find(modified)
-                    while (ifMatch != null) {
-                        val braceStart = modified.indexOf('{', ifMatch.range.first)
-                        if (braceStart < 0) break
-                        val braceEnd = findClosing(modified, braceStart, '{', '}')
-                        if (braceEnd < 0) break
-                        val ifBody = modified.substring(braceStart + 1, braceEnd)
-                        val classRef = Regex("""\b${Regex.escape(className)}\b""")
-                        if (classRef.containsMatchIn(ifBody)) {
-                            val indent = ifMatch.groupValues[1]
-                            val bodyHasReturn = ifBody.lines().any { it.trim().startsWith("return ") || it.trim() == "return;" }
-
-                            // Check for else branch after the if-block closing brace
-                            val afterIfBlock = modified.substring(braceEnd + 1)
-                            val elseMatch = Regex("""^\s*else\s*\{""").find(afterIfBlock)
-
-                            if (bodyHasReturn && elseMatch != null) {
-                                // Comment out the entire if + promote the else body
-                                val elseBraceStart = braceEnd + 1 + afterIfBlock.indexOf('{', elseMatch.range.first)
-                                val elseBraceEnd = findClosing(modified, elseBraceStart, '{', '}')
-                                if (elseBraceEnd > elseBraceStart) {
-                                    val elseBody = modified.substring(elseBraceStart + 1, elseBraceEnd)
-                                    // Comment out the if-condition + body, keep else body as unconditional
-                                    val ifCondLine = modified.substring(ifMatch.range.first, braceStart + 1)
-                                    val commentedIf = ifCondLine.lines().joinToString("\n") { line ->
-                                        val trimmed = line.trimStart()
-                                        if (trimmed.isEmpty()) line
-                                        else "${line.substringBefore(trimmed)}// [forge2neo] $trimmed // excluded: $className unavailable"
-                                    }
-                                    val commentedBody = ifBody.lines().joinToString("\n") { line ->
-                                        val trimmed = line.trimStart()
-                                        if (trimmed.isEmpty() || trimmed.startsWith("//")) line
-                                        else "${line.substringBefore(trimmed)}// [forge2neo] $trimmed // excluded: $className unavailable"
-                                    }
-                                    // Replace: if(...){body} else {elseBody} → commented-if + elseBody (unconditional)
-                                    modified = modified.substring(0, ifMatch.range.first) +
-                                        commentedIf + commentedBody + "\n${indent}// [forge2neo] } else { // excluded: $className unavailable" +
-                                        elseBody + "\n${indent}// [forge2neo] } // excluded: else block promoted to unconditional" +
-                                        modified.substring(elseBraceEnd + 1)
-                                    ifMatch = ifBlockPattern.find(modified, ifMatch.range.first + 1)
-                                    continue
-                                }
-                            }
-
-                            // Default: just comment out the if-body lines
-                            val bodyLines = ifBody.lines()
-                            val commentedBody = bodyLines.joinToString("\n") { line ->
-                                val trimmed = line.trimStart()
-                                if (trimmed.isEmpty() || trimmed.startsWith("//")) line
-                                else "${line.substringBefore(trimmed)}// [forge2neo] $trimmed // excluded: $className unavailable"
-                            }
-                            // If body had a return, add a fallback to prevent compilation errors
-                            val fallback = if (bodyHasReturn) {
-                                "\n${indent}    // [forge2neo] fallback for excluded return path\n${indent}    return null;"
-                            } else ""
-                            modified = modified.substring(0, braceStart + 1) + commentedBody + fallback + modified.substring(braceEnd)
-                        }
-                        ifMatch = ifBlockPattern.find(modified, braceEnd.coerceAtLeast(ifMatch.range.last + 1))
-                    }
-
-                    // 3c. Comment out standalone assignment: Type var = ExcludedClass.method(...)
-                    modified = modified.replace(
-                        Regex("""^(\s*)([\w.<>\[\]]+\s+\w+\s*=\s*$className\.[^;\r\n]+;)""", RegexOption.MULTILINE),
-                        "$1// [forge2neo] $2 // excluded"
-                    )
-
-                    // 3d. Comment out variable declarations with excluded types: List<ExcludedClass> var = ...
-                    // Use [^;\r\n] to stay within a single line (not cross line boundaries)
-                    modified = modified.replace(
-                        Regex("""^(\s*)(.*\b$className\b[^;\r\n]*;)""", RegexOption.MULTILINE)
-                    ) { match ->
-                        val indent = match.groupValues[1]
-                        val code = match.groupValues[2]
-                        // Skip already commented lines
-                        if (code.trimStart().startsWith("//")) match.value
-                        else "$indent// [forge2neo] $code // excluded: $className unavailable"
-                    }
-
-                    // 3e. Comment out for-loops with excluded type + their body
-                    val forPattern = Regex("""^(\s*)for\s*\([^)\r\n]*\b$className\b[^)\r\n]*\)\s*\{""", RegexOption.MULTILINE)
-                    var forMatch = forPattern.find(modified)
-                    while (forMatch != null) {
-                        val braceStart = modified.indexOf('{', forMatch.range.first)
-                        if (braceStart < 0) break
-                        val braceEnd = findClosing(modified, braceStart, '{', '}')
-                        if (braceEnd < 0) break
-                        val indent = forMatch.groupValues[1]
-                        val fullBlock = modified.substring(forMatch.range.first, braceEnd + 1)
-                        val commented = fullBlock.lines().joinToString("\n") { line ->
-                            if (line.isBlank()) line
-                            else "$indent// [forge2neo] ${line.trimStart()}"
-                        }
-                        modified = modified.substring(0, forMatch.range.first) +
-                            "$indent// [forge2neo] Commented for-block: $className unavailable\n" +
-                            commented + modified.substring(braceEnd + 1)
-                        forMatch = forPattern.find(modified, forMatch.range.first + commented.length)
-                    }
-
-                    // 4. Comment out import of the excluded class itself
-                    modified = modified.replace(
-                        Regex("""^(import\s+[\w.]*$className\s*;)""", RegexOption.MULTILINE),
-                        "// [forge2neo] $1 // excluded"
-                    )
-
-                    // 4b. Remove methods that override excluded interface methods
-                    // Must run BEFORE the final sweep, which would comment only the signature line
-                    val methodPattern = Regex(
-                        """([^\S\r\n]*@Override[^\S\r\n]*\r?\n[^\S\r\n]*public\s+\w+\s+\w+\s*\([^)\r\n]*\b${Regex.escape(className)}\b[^)\r\n]*\)\s*\{)""",
-                        RegexOption.MULTILINE
-                    )
-                    val overrideMatch = methodPattern.find(modified)
-                    if (overrideMatch != null) {
-                        val braceStart = modified.indexOf('{', overrideMatch.range.first)
-                        if (braceStart >= 0) {
-                            val braceEnd = findClosing(modified, braceStart, '{', '}')
-                            if (braceEnd > 0) {
-                                val methodBlock = modified.substring(overrideMatch.range.first, braceEnd + 1)
-                                modified = modified.replace(methodBlock,
-                                    "\n    // [forge2neo] Removed method referencing excluded class $className")
-                            }
-                        }
-                    }
-
-                    // 5. Final sweep: comment out ALL remaining lines that reference the excluded class
-                    // Also comment out orphaned blocks that follow commented-out for/variable declarations
-                    val classRef = Regex("""\b${Regex.escape(className)}\b""")
-                    val lines = modified.lines().toMutableList()
-                    var changed = false
-                    var idx = 0
-                    while (idx < lines.size) {
-                        val line = lines[idx]
-                        val trimmed = line.trimStart()
-                        // Skip already-commented lines and blank lines
-                        if (trimmed.startsWith("//") || trimmed.isEmpty()) {
-                            // Check if this is a commented-out for-loop followed by an orphaned block
-                            if (trimmed.startsWith("// [forge2neo]") && trimmed.contains("for(") && trimmed.contains(className)) {
-                                // Find and comment out the following block { ... }
-                                var nextIdx = idx + 1
-                                while (nextIdx < lines.size && lines[nextIdx].isBlank()) nextIdx++
-                                if (nextIdx < lines.size && lines[nextIdx].trimStart() == "{") {
-                                    val blockText = lines.subList(nextIdx, lines.size).joinToString("\n")
-                                    val braceEnd = findClosing(blockText, 0, '{', '}')
-                                    if (braceEnd > 0) {
-                                        val blockLines = blockText.substring(0, braceEnd + 1).lines().size
-                                        val indent = line.substringBefore(line.trimStart())
-                                        for (bi in nextIdx until nextIdx + blockLines) {
-                                            if (bi < lines.size) {
-                                                val bLine = lines[bi].trimStart()
-                                                if (!bLine.startsWith("//")) {
-                                                    lines[bi] = "$indent// [forge2neo] $bLine"
-                                                    changed = true
-                                                }
-                                            }
-                                        }
-                                        idx = nextIdx + blockLines
-                                        continue
-                                    }
-                                }
-                            }
-                            idx++
-                            continue
-                        }
-                        if (classRef.containsMatchIn(line)) {
-                            val indent = line.substringBefore(trimmed)
-
-                            // If this is a method/block signature (ends with {), comment the entire method
-                            if (trimmed.trimEnd().endsWith("{")) {
-                                // Use original text (before commenting) to find matching brace
-                                val origBlockText = lines.subList(idx, lines.size).joinToString("\n")
-                                val bracePos = origBlockText.indexOf('{')
-                                if (bracePos >= 0) {
-                                    val braceEnd = findClosing(origBlockText, bracePos, '{', '}')
-                                    if (braceEnd > 0) {
-                                        val blockLines = origBlockText.substring(0, braceEnd + 1).lines().size
-                                        // Comment ALL lines in the method (signature + body)
-                                        for (bi in idx until (idx + blockLines).coerceAtMost(lines.size)) {
-                                            val bLine = lines[bi].trimStart()
-                                            if (bLine.isNotEmpty() && !bLine.startsWith("//")) {
-                                                lines[bi] = "$indent// [forge2neo] $bLine // excluded: $className unavailable"
-                                                changed = true
-                                            }
-                                        }
-                                        // Also comment @Override on previous line if present
-                                        if (idx > 0) {
-                                            val prevTrimmed = lines[idx - 1].trimStart().trimEnd()
-                                            if (prevTrimmed == "@Override" || prevTrimmed == "@Override\r") {
-                                                lines[idx - 1] = "$indent// [forge2neo] @Override // excluded: $className unavailable"
-                                                changed = true
-                                            }
-                                        }
-                                        idx += blockLines
-                                        continue
-                                    }
-                                }
-                            }
-
-                            // Default: comment this line and any continuation lines (multi-line statements)
-                            lines[idx] = "$indent// [forge2neo] $trimmed // excluded: $className unavailable"
-                            changed = true
-
-                            // If this line has unbalanced parens, comment continuation lines until balanced
-                            var openParens = trimmed.count { it == '(' } - trimmed.count { it == ')' }
-                            if (openParens > 0) {
-                                var contIdx = idx + 1
-                                while (contIdx < lines.size && openParens > 0) {
-                                    val contLine = lines[contIdx].trimStart()
-                                    if (contLine.isEmpty() || contLine.startsWith("//")) {
-                                        contIdx++
-                                        continue
-                                    }
-                                    openParens += contLine.count { it == '(' } - contLine.count { it == ')' }
-                                    lines[contIdx] = "$indent// [forge2neo] $contLine // excluded: $className unavailable (continuation)"
-                                    changed = true
-                                    contIdx++
-                                }
-                                idx = contIdx
-                                continue
-                            }
-                        }
-                        idx++
-                    }
-                    if (changed) {
-                        modified = lines.joinToString("\n")
-                    }
-
-                    // Post-processing: find commented-out variable declarations and comment their usages
-                    val varLines = modified.lines().toMutableList()
-                    var varChanged = false
-                    for (vi in varLines.indices) {
-                        val vLine = varLines[vi]
-                        if (!vLine.trimStart().startsWith("// [forge2neo]")) continue
-                        // Extract variable name from commented declaration like: // [forge2neo] Type varName = ...
-                        val varMatch = Regex("""// \[forge2neo\]\s+(?:\w+(?:<[^>]*>)?)\s+(\w+)\s*=""").find(vLine) ?: continue
-                        val varName = varMatch.groupValues[1]
-                        // Comment subsequent lines in the same block that use this variable
-                        var braceDepth = 0
-                        for (vj in (vi + 1) until varLines.size) {
-                            val nextLine = varLines[vj].trimStart()
-                            if (nextLine == "}") {
-                                if (braceDepth == 0) break
-                                braceDepth--
-                            }
-                            if (nextLine.endsWith("{")) braceDepth++
-                            if (!nextLine.startsWith("//") && nextLine.isNotEmpty() &&
-                                Regex("""\b${Regex.escape(varName)}\b""").containsMatchIn(nextLine)) {
-                                val indent = varLines[vj].substringBefore(nextLine)
-                                varLines[vj] = "$indent// [forge2neo] $nextLine // excluded: variable '$varName' unavailable"
-                                varChanged = true
-                            }
-                        }
-                    }
-                    if (varChanged) {
-                        modified = varLines.joinToString("\n")
-                    }
-                }
-
-                // Second pass: find field names from commented-out declarations and comment their usages
-                // Match: // [forge2neo] ... DeferredHolder<...> FIELD_NAME = ...
-                val commentedFieldPattern = Regex("""// \[forge2neo\].*(?:DeferredHolder|RegistryObject|Supplier)[^=]*>\s+(\w+)\s*=""")
-                val commentedFields = commentedFieldPattern.findAll(modified).map { it.groupValues[1] }.toSet()
-                for (fieldName in commentedFields) {
-                    modified = modified.replace(
-                        Regex("""^(\s*)(?!//)(.+\b${Regex.escape(fieldName)}\b.*)$""", RegexOption.MULTILINE)
-                    ) { match ->
-                        val indent = match.groupValues[1]
-                        val code = match.groupValues[2]
-                        if (code.trimStart().startsWith("//")) match.value
-                        else "$indent// [forge2neo] $code // excluded: $fieldName unavailable (field commented out)"
-                    }
-                }
-
-                if (modified != text) {
-                    if (!dryRun) {
-                        javaFile.toFile().writeText(modified)
-                    }
+                val original = javaFile.readText()
+                val material = parseLegacyArmorMaterial(javaFile, original) ?: return@forEach
+                val replacement = renderArmorMaterialRegistry(material)
+                if (replacement != original) {
                     changes.add(Change(
                         file = javaFile,
-                        line = 0,
-                        description = "Cleanup references to excluded classes in ${javaFile.fileName}",
-                        before = "(references to excluded classes)",
-                        after = "(references commented out / removed)",
+                        line = 1,
+                        description = "Rewrite legacy ArmorMaterial enum as 1.21 registry-backed ArmorMaterial holder class",
+                        before = "enum ${material.enumName} implements ArmorMaterial",
+                        after = "${material.enumName}.ARMOR_MATERIALS DeferredRegister",
                         confidence = Confidence.HIGH,
-                        ruleId = "build-cleanup-excluded-refs"
+                        ruleId = "build-legacy-armor-material-registry"
+                    ))
+                    if (!dryRun) {
+                        javaFile.writeText(replacement)
+                    }
+                }
+                materials.add(material)
+            }
+
+        if (materials.isEmpty()) return changes
+
+        changes.addAll(rewriteLegacyArmorMaterialConsumers(srcDir, materials, dryRun))
+        changes.addAll(registerLegacyArmorMaterials(srcDir, materials, dryRun))
+        return changes
+    }
+
+    private fun migrateDataGenerationApis(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+
+        val recipeProviders = linkedSetOf<String>()
+        val abstractRecipeProviders = linkedSetOf<String>()
+        val abstractRecipeProviderModIds = mutableMapOf<String, String>()
+        val lootTableProviders = linkedSetOf<String>()
+        val lootModifierProviders = linkedSetOf<String>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val content = javaFile.readText()
+                Regex("""class\s+([A-Za-z_$][\w$]*)\s+extends\s+RecipeProvider\b""")
+                    .find(content)
+                    ?.let { recipeProviders.add(it.groupValues[1]) }
+                Regex("""class\s+([A-Za-z_$][\w$]*)\s+extends\s+AbstractRecipeProvider\b""")
+                    .find(content)
+                    ?.let {
+                        val providerClass = it.groupValues[1]
+                        abstractRecipeProviders.add(providerClass)
+                        inferModIdExpression(content, projectDir)?.let { modIdExpr ->
+                            abstractRecipeProviderModIds[providerClass] = modIdExpr
+                        }
+                    }
+                Regex("""class\s+([A-Za-z_$][\w$]*)\s+extends\s+LootTableProvider\b""")
+                    .find(content)
+                    ?.let { lootTableProviders.add(it.groupValues[1]) }
+                Regex("""class\s+([A-Za-z_$][\w$]*)\s+extends\s+GlobalLootModifierProvider\b""")
+                    .find(content)
+                    ?.let { lootModifierProviders.add(it.groupValues[1]) }
+            }
+        if (recipeProviders.isEmpty() &&
+            abstractRecipeProviders.isEmpty() &&
+            lootTableProviders.isEmpty() &&
+            lootModifierProviders.isEmpty()) return changes
+
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                var modified = original
+
+                for (providerClass in recipeProviders) {
+                    val constructorPattern = Regex(
+                        """(?m)^([ \t]*)public\s+${Regex.escape(providerClass)}\s*\(\s*PackOutput\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*super\(\s*([A-Za-z_$][\w$]*)\s*\);\s*}"""
+                    )
+                    modified = constructorPattern.replace(modified) { match ->
+                        val indent = match.groupValues[1]
+                        val packOutputParam = match.groupValues[2]
+                        val superArg = match.groupValues[3]
+                        if (packOutputParam != superArg) {
+                            match.value
+                        } else {
+                            "$indent" +
+                                "public $providerClass(PackOutput $packOutputParam, CompletableFuture<HolderLookup.Provider> lookupProvider) {\n" +
+                                "$indent    super($packOutputParam, lookupProvider);\n" +
+                                "$indent}"
+                        }
+                    }
+
+                    val constructorCall = Regex("""new\s+${Regex.escape(providerClass)}\s*\(\s*packOutput\s*\)""")
+                    modified = constructorCall.replace(modified, "new $providerClass(packOutput, event.getLookupProvider())")
+                }
+
+                val lookupProviderExpr = Regex("""CompletableFuture\s*<\s*HolderLookup\.Provider\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*event\.getLookupProvider\(\)""")
+                    .find(modified)
+                    ?.groupValues
+                    ?.get(1)
+                    ?: "event.getLookupProvider()"
+
+                for (providerClass in abstractRecipeProviders) {
+                    val constructorPattern = Regex(
+                        """(?m)^([ \t]*)public\s+${Regex.escape(providerClass)}\s*\(\s*PackOutput\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*super\(\s*([A-Za-z_$][\w$]*)\s*\);\s*}"""
+                    )
+                    val constructorCall = Regex("""new\s+${Regex.escape(providerClass)}\s*\(\s*packOutput\s*\)""")
+                    val providerModIdExpr = abstractRecipeProviderModIds[providerClass]
+                    if (providerModIdExpr == null) {
+                        if (constructorPattern.containsMatchIn(modified) || constructorCall.containsMatchIn(modified)) {
+                            throw IllegalStateException(
+                                "Cannot derive mod id for AbstractRecipeProvider $providerClass from Java source, Gradle properties, or mod metadata"
+                            )
+                        }
+                        continue
+                    }
+                    modified = constructorPattern.replace(modified) { match ->
+                        val indent = match.groupValues[1]
+                        val packOutputParam = match.groupValues[2]
+                        val superArg = match.groupValues[3]
+                        if (packOutputParam != superArg) {
+                            match.value
+                        } else {
+                            "$indent" +
+                                "public $providerClass(PackOutput $packOutputParam, CompletableFuture<HolderLookup.Provider> lookupProvider) {\n" +
+                                "$indent    super($packOutputParam, $providerModIdExpr, lookupProvider);\n" +
+                                "$indent}"
+                        }
+                    }
+
+                    modified = constructorCall.replace(modified, "new $providerClass(packOutput, $lookupProviderExpr)")
+                }
+
+                for (providerClass in lootTableProviders) {
+                    modified = migrateLootTableProviderConstructor(modified, providerClass)
+
+                    val constructorCall = Regex("""new\s+${Regex.escape(providerClass)}\s*\(\s*packOutput\s*\)""")
+                    modified = constructorCall.replace(modified, "new $providerClass(packOutput, $lookupProviderExpr)")
+                }
+
+                for (providerClass in lootModifierProviders) {
+                    val constructorPattern = Regex(
+                        """(?m)^([ \t]*)public\s+${Regex.escape(providerClass)}\s*\(\s*PackOutput\s+([A-Za-z_$][\w$]*)\s*,\s*String\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*super\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\);\s*}"""
+                    )
+                    modified = constructorPattern.replace(modified) { match ->
+                        val indent = match.groupValues[1]
+                        val outputParam = match.groupValues[2]
+                        val modidParam = match.groupValues[3]
+                        val superOutput = match.groupValues[4]
+                        val superModid = match.groupValues[5]
+                        if (outputParam != superOutput || modidParam != superModid) {
+                            match.value
+                        } else {
+                            "$indent" +
+                                "public $providerClass(PackOutput $outputParam, CompletableFuture<HolderLookup.Provider> lookupProvider, String $modidParam) {\n" +
+                                "$indent    super($outputParam, lookupProvider, $modidParam);\n" +
+                                "$indent}"
+                        }
+                    }
+
+                    val constructorCall = Regex("""new\s+${Regex.escape(providerClass)}\s*\(\s*packOutput\s*,\s*([^)]+?)\s*\)""")
+                    modified = constructorCall.replace(modified) { match ->
+                        "new $providerClass(packOutput, $lookupProviderExpr, ${match.groupValues[1].trim()})"
+                    }
+                }
+
+                if (modified.contains("extends RecipeProvider")) {
+                    modified = Regex(
+                        """private\s+void\s+specialRecipe\s*\(\s*RecipeOutput\s+consumer\s*,\s*SimpleCraftingRecipeSerializer<[^>]+>\s+serializer\s*\)"""
+                    ).replace(
+                        modified,
+                        "private void specialRecipe(RecipeOutput consumer, java.util.function.Function<net.minecraft.world.item.crafting.CraftingBookCategory, net.minecraft.world.item.crafting.Recipe<?>> recipeFactory, ResourceLocation name)"
+                    )
+                    modified = modified.replace(
+                        Regex("""(?m)^[ \t]*ResourceLocation\s+name\s*=\s*(?:BuiltInRegistries|Registries)\.RECIPE_SERIALIZER\.getKey\(serializer\);\s*\r?\n"""),
+                        ""
+                    )
+                    modified = modified.replace("SpecialRecipeBuilder.special(serializer)", "SpecialRecipeBuilder.special(recipeFactory)")
+                    modified = Regex(
+                        """specialRecipe\(([^,\r\n]+),\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.SERIALIZER\s*\)"""
+                    ).replace(modified) { match ->
+                        "specialRecipe(${match.groupValues[1]}, ${match.groupValues[2]}::new, BuiltInRegistries.RECIPE_SERIALIZER.getKey(${match.groupValues[2]}.SERIALIZER))"
+                    }
+                }
+
+                if (modified != original) {
+                    if (modified.contains("CompletableFuture<HolderLookup.Provider>")) {
+                        modified = ensureJavaImport(modified, "java.util.concurrent.CompletableFuture")
+                        modified = ensureJavaImport(modified, "net.minecraft.core.HolderLookup")
+                    }
+                    if (modified.contains("BuiltInRegistries.")) {
+                        modified = ensureJavaImport(modified, "net.minecraft.core.registries.BuiltInRegistries")
+                    }
+                    if (!dryRun) javaFile.writeText(modified)
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Migrate 1.21 data generation provider APIs",
+                        before = "(legacy datagen provider API)",
+                        after = "(lookup-provider aware datagen API)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-datagen-api-121"
                     ))
                 }
             }
 
-        return changes to errors
+        return changes
+    }
+
+    private fun inferModIdExpression(source: String, projectDir: Path): String? {
+        Regex("""\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.(MOD_ID|MODID|ID)\b""")
+            .find(source)
+            ?.value
+            ?.let { return it }
+
+        Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.let { return "\"$it\"" }
+
+        Regex("""@Mod\s*\(\s*([^)]+?)\s*\)""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
+
+        return projectModIdExpression(projectDir)
+    }
+
+    private fun projectModIdExpression(projectDir: Path): String? =
+        detectUniqueProjectModId(projectDir)?.let(::javaStringLiteral)
+
+    private fun detectUniqueProjectModId(projectDir: Path): String? {
+        val candidates = linkedSetOf<String>()
+
+        fun addCandidate(raw: String?) {
+            val value = raw?.trim()?.trim('"') ?: return
+            if (value.isNotBlank() &&
+                !value.contains('$') &&
+                !value.contains('{') &&
+                Regex("""[a-z0-9_.-]+""", RegexOption.IGNORE_CASE).matches(value)
+            ) {
+                candidates.add(value)
+            }
+        }
+
+        projectDir.resolve("gradle.properties")
+            .takeIf { it.exists() }
+            ?.readText()
+            ?.let { properties ->
+                Regex("""(?m)^\s*(?:mod_id|modid)\s*=\s*([^\s#]+)""")
+                    .findAll(properties)
+                    .forEach { addCandidate(it.groupValues[1]) }
+            }
+
+        listOf(
+            projectDir.resolve("src/main/resources/META-INF/neoforge.mods.toml"),
+            projectDir.resolve("src/main/resources/META-INF/mods.toml")
+        ).forEach { toml ->
+            toml.takeIf { it.exists() }
+                ?.readText()
+                ?.let { text ->
+                    Regex("(?m)^\\s*modId\\s*=\\s*\"([^\"]+)\"")
+                        .findAll(text)
+                        .forEach { addCandidate(it.groupValues[1]) }
+                }
+        }
+
+        val srcDir = projectDir.resolve("src/main/java")
+        if (srcDir.exists()) {
+            java.nio.file.Files.walk(srcDir)
+                .filter { it.toString().endsWith(".java") }
+                .forEach { file ->
+                    val text = file.readText()
+                    Regex("""@Mod\s*\(\s*"([a-z0-9_.-]+)"\s*\)""", RegexOption.IGNORE_CASE)
+                        .findAll(text)
+                        .forEach { addCandidate(it.groupValues[1]) }
+
+                    Regex("""@Mod\s*\(\s*(?:[A-Za-z_$][\w$]*\.)?([A-Za-z_$][\w$]*)\s*\)""")
+                        .findAll(text)
+                        .forEach { match ->
+                            findJavaStringConstant(text, match.groupValues[1])?.let(::addCandidate)
+                        }
+                }
+        }
+
+        return candidates.singleOrNull()
+    }
+
+    private fun findJavaStringConstant(source: String, constantName: String): String? =
+        Regex("(?m)\\b(?:public\\s+|protected\\s+|private\\s+)?(?:static\\s+)?(?:final\\s+)?String\\s+${Regex.escape(constantName)}\\s*=\\s*\"([^\"]+)\"")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+
+    private fun javaStringLiteral(value: String): String =
+        "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+    private fun migrateLootTableProviderConstructor(source: String, providerClass: String): String {
+        val constructorPattern = Regex(
+            """(?ms)^([ \t]*)public\s+${Regex.escape(providerClass)}\s*\(\s*PackOutput\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*super\((.*?)\);\s*}"""
+        )
+        return constructorPattern.replace(source) { match ->
+            val indent = match.groupValues[1]
+            val outputParam = match.groupValues[2]
+            val superArgs = splitTopLevel(match.groupValues[3], ',')
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+            if (superArgs.firstOrNull() != outputParam || superArgs.any { it.contains("lookupProvider") }) {
+                match.value
+            } else {
+                "$indent" +
+                    "public $providerClass(PackOutput $outputParam, CompletableFuture<HolderLookup.Provider> lookupProvider) {\n" +
+                    "$indent    super(${(superArgs + "lookupProvider").joinToString(", ")});\n" +
+                    "$indent}"
+            }
+        }
+    }
+
+    private fun migrateCustomStatRegistration(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+
+        val javaFiles = java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .toList()
+        val migratedStatClasses = linkedSetOf<String>()
+
+        val statDeclarationPattern = Regex(
+            """public\s+static\s+final\s+ResourceLocation\s+([A-Za-z_$][\w$]*)\s*=\s*(?:ResourceLocation\.fromNamespaceAndPath\s*\(\s*([^,]+?)\s*,\s*"([^"]+)"\s*\)|new\s+ResourceLocation\s*\(\s*([^,]+?)\s*,\s*"([^"]+)"\s*\))\s*;"""
+        )
+
+        for (javaFile in javaFiles) {
+            val original = javaFile.readText()
+            if (!original.contains("BuiltInRegistries.CUSTOM_STAT") || !original.contains("Stats.CUSTOM.get")) {
+                continue
+            }
+
+            val declarations = statDeclarationPattern.findAll(original)
+                .mapNotNull { match ->
+                    val modIdExpr = match.groupValues[2].ifBlank { match.groupValues[4] }.trim()
+                    val pathName = match.groupValues[3].ifBlank { match.groupValues[5] }.trim()
+                    if (modIdExpr.isBlank() || pathName.isBlank()) {
+                        null
+                    } else {
+                        CustomStatDeclaration(match.groupValues[1], modIdExpr, pathName)
+                    }
+                }
+                .toList()
+            if (declarations.isEmpty()) continue
+
+            val className = javaFile.fileName.toString().removeSuffix(".java")
+            var modified = original
+            val oldImports = listOf(
+                "net.minecraft.core.Registry",
+                "net.minecraft.core.registries.BuiltInRegistries",
+                "net.minecraft.stats.StatFormatter",
+                "net.minecraft.stats.Stats"
+            )
+            for (importName in oldImports) {
+                modified = modified.replace(
+                    Regex("""(?m)^[ \t]*import\s+${Regex.escape(importName)};\s*\r?\n"""),
+                    ""
+                )
+            }
+            modified = ensureJavaImport(modified, "net.minecraft.core.registries.Registries")
+            modified = ensureJavaImport(modified, "net.neoforged.bus.api.IEventBus")
+            modified = ensureJavaImport(modified, "net.neoforged.neoforge.registries.DeferredRegister")
+
+            if (!modified.contains("DeferredRegister<ResourceLocation> CUSTOM_STATS")) {
+                val classMatch = Regex("""\bclass\s+${Regex.escape(className)}\b[^{]*\{""").find(modified)
+                if (classMatch != null) {
+                    val declaration = "\n    private static final DeferredRegister<ResourceLocation> CUSTOM_STATS =\n" +
+                        "            DeferredRegister.create(Registries.CUSTOM_STAT, ${declarations.first().modIdExpr});\n"
+                    modified = modified.substring(0, classMatch.range.last + 1) +
+                        declaration +
+                        modified.substring(classMatch.range.last + 1)
+                }
+            }
+
+            val missingRegistrations = declarations.filterNot {
+                modified.contains("CUSTOM_STATS.register(\"${it.pathName}\"")
+            }
+            if (missingRegistrations.isNotEmpty()) {
+                val latestConstant = statDeclarationPattern.findAll(modified).lastOrNull()
+                if (latestConstant != null) {
+                    val staticBlock = buildString {
+                        append("\n\n    static {\n")
+                        for (declaration in missingRegistrations) {
+                            append("        CUSTOM_STATS.register(\"${declaration.pathName}\", () -> ${declaration.fieldName});\n")
+                        }
+                        append("    }")
+                    }
+                    modified = modified.substring(0, latestConstant.range.last + 1) +
+                        staticBlock +
+                        modified.substring(latestConstant.range.last + 1)
+                }
+            }
+
+            modified = Regex(
+                """(?s)\n([ \t]*)public\s+static\s+void\s+register\s*\(\s*\)\s*\{.*?\n\1\}"""
+            ).replace(modified) { match ->
+                "\n${match.groupValues[1]}public static void register(IEventBus modEventBus) {\n" +
+                    "${match.groupValues[1]}    CUSTOM_STATS.register(modEventBus);\n" +
+                    "${match.groupValues[1]}}"
+            }
+            modified = Regex(
+                """(?s)\n[ \t]*private\s+static\s+void\s+registerStat\s*\([^)]*\)\s*\{.*?\n[ \t]*\}"""
+            ).replace(modified, "")
+
+            if (modified != original) {
+                migratedStatClasses.add(className)
+                changes.add(Change(
+                    file = javaFile,
+                    line = 1,
+                    description = "Migrate legacy custom stat registration to DeferredRegister",
+                    before = "Registry.register(BuiltInRegistries.CUSTOM_STAT, ...)",
+                    after = "DeferredRegister.create(Registries.CUSTOM_STAT, ...)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-custom-stat-deferred-register"
+                ))
+                if (!dryRun) javaFile.writeText(modified)
+            }
+        }
+
+        if (migratedStatClasses.isEmpty()) return changes
+
+        for (javaFile in javaFiles) {
+            val original = javaFile.readText()
+            var modified = original
+            for (className in migratedStatClasses) {
+                val oldCallPattern = Regex("""(?m)^[ \t]*${Regex.escape(className)}\.register\(\);\s*(?://.*)?\r?\n?""")
+                if (!oldCallPattern.containsMatchIn(modified)) continue
+
+                modified = oldCallPattern.replace(modified, "")
+                val newCall = "$className.register(modEventBus);"
+                if (!modified.contains(newCall)) {
+                    val lines = modified.lines().toMutableList()
+                    val registerIdx = lines.indexOfLast {
+                        it.contains(".register(modEventBus);") && !it.contains(newCall)
+                    }
+                    val eventBusIdx = lines.indexOfFirst { it.contains("IEventBus modEventBus") && it.contains("{") }
+                    val insertIdx = when {
+                        registerIdx >= 0 -> registerIdx + 1
+                        eventBusIdx >= 0 -> eventBusIdx + 1
+                        else -> -1
+                    }
+                    if (insertIdx >= 0) {
+                        val indent = lines.getOrNull((insertIdx - 1).coerceAtLeast(0))
+                            ?.takeWhile { it.isWhitespace() }
+                            ?.ifBlank { "        " }
+                            ?: "        "
+                        lines.add(insertIdx, "$indent$newCall")
+                        modified = lines.joinToString("\n")
+                    }
+                }
+            }
+
+            if (modified != original) {
+                changes.add(Change(
+                    file = javaFile,
+                    line = 1,
+                    description = "Register custom stats on the mod event bus before registry freeze",
+                    before = "ModStats.register() during setup",
+                    after = "ModStats.register(modEventBus) during construction",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-custom-stat-mod-event-bus"
+                ))
+                if (!dryRun) javaFile.writeText(modified)
+            }
+        }
+
+        return changes
+    }
+
+    private fun migrateRegisterEventResourceLocations(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("registry.register(ResourceLocation.parse(")) return@forEach
+
+                val modIdExpr = Regex("""@EventBusSubscriber\s*\([^)]*\bmodid\s*=\s*([^,)]+)""")
+                    .find(original)
+                    ?.groupValues
+                    ?.get(1)
+                    ?.trim()
+                    ?: Regex("""@Mod\s*\(\s*([^)]+?)\s*\)""")
+                        .find(original)
+                        ?.groupValues
+                        ?.get(1)
+                        ?.trim()
+                    ?: Regex("""(?:public\s+)?(?:static\s+)?final\s+String\s+(?:MODID|MOD_ID)\s*=\s*"([^"]+)"""")
+                        .find(original)
+                        ?.groupValues
+                        ?.get(1)
+                        ?.let { "\"$it\"" }
+                    ?: detectModId(projectDir)?.let { "\"$it\"" }
+                    ?: return@forEach
+
+                val modified = Regex("""registry\.register\(\s*ResourceLocation\.parse\("([A-Za-z0-9_./-]+)"\)\s*,""")
+                    .replace(original) { match ->
+                        val path = match.groupValues[1]
+                        if (path.contains(":")) {
+                            match.value
+                        } else {
+                            """registry.register(ResourceLocation.fromNamespaceAndPath($modIdExpr, "$path"),"""
+                        }
+                    }
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Namespace RegisterEvent resource location IDs with the current mod id",
+                        before = "registry.register(ResourceLocation.parse(\"name\"), ...)",
+                        after = "registry.register(ResourceLocation.fromNamespaceAndPath(MODID, \"name\"), ...)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-registerevent-resource-location-namespace"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                }
+            }
+
+        return changes
+    }
+
+    private fun migrateWorldCarverRegisterEvents(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+        val migratedCarverClasses = linkedSetOf<String>()
+
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("RegisterEvent") ||
+                    (!original.contains("WORLD_CARVERS") && !original.contains("Registries.CARVER"))) {
+                    return@forEach
+                }
+
+                var modified = original
+                val fieldIds = Regex(""""([A-Za-z0-9_./-]+)"\s*\)\s*,\s*([A-Za-z_$][\w$]*)""")
+                    .findAll(original)
+                    .associate { it.groupValues[2] to it.groupValues[1] }
+                    .toMutableMap()
+                val migratedFields = linkedSetOf<String>()
+                val modIdExpr = detectWorldCarverModIdExpression(original, projectDir)
+                    ?: throw IllegalStateException(
+                        "Cannot derive mod id for world carver registration in " +
+                            projectDir.relativize(javaFile).toString().replace('\\', '/')
+                    )
+
+                modified = Regex("""(?m)^[ \t]*@(?:Mod\.)?EventBusSubscriber\([^\r\n]*\)\s*\r?\n""")
+                    .replace(modified, "")
+
+                val carverFieldPattern = Regex(
+                    """(?ms)^([ \t]*)public\s+static\s+final\s+([A-Za-z_$][\w$]*)\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+\2\s*\((.*?)\);"""
+                )
+                modified = carverFieldPattern.replace(modified) { match ->
+                    val indent = match.groupValues[1]
+                    val type = match.groupValues[2]
+                    val field = match.groupValues[3]
+                    val args = match.groupValues[4].trim()
+                    if (!type.endsWith("Carver")) {
+                        match.value
+                    } else {
+                        val registryName = fieldIds[field] ?: camelOrConstantToRegistryPath(field)
+                        migratedFields.add(field)
+                        "$indent" +
+                            "public static final DeferredHolder<WorldCarver<?>, $type> $field = " +
+                            "CARVER_TYPES.register(\"$registryName\", () -> new $type($args));"
+                    }
+                }
+
+                if (migratedFields.isNotEmpty()) {
+                    val classMatch = Regex("""(?m)^[ \t]*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*class\s+([A-Za-z_$][\w$]*)[^{]*\{""").find(modified)
+                    if (classMatch != null) {
+                        val className = classMatch.groupValues[1]
+                        migratedCarverClasses.add(className)
+                        Regex("""(?m)^package\s+([\w.]+);""").find(modified)?.groupValues?.get(1)?.let { packageName ->
+                            migratedCarverClasses.add("$packageName.$className")
+                        }
+                        if (!modified.contains("DeferredRegister<WorldCarver<?>> CARVER_TYPES")) {
+                            val insertPos = classMatch.range.last + 1
+                            modified = modified.substring(0, insertPos) +
+                                "\n\tpublic static final DeferredRegister<WorldCarver<?>> CARVER_TYPES = DeferredRegister.create(Registries.CARVER, $modIdExpr);\n" +
+                                modified.substring(insertPos)
+                        }
+                    }
+                }
+
+                val registerMethodPattern = Regex(
+                    """(?m)^[ \t]*(?://[^\r\n]*\r?\n\s*)*(?:@[^\r\n]+\r?\n\s*)*public\s+static\s+void\s+register\s*\(\s*RegisterEvent\s+[A-Za-z_$][\w$]*\s*\)\s*\{"""
+                )
+                val methodMatch = registerMethodPattern.find(modified)
+                if (methodMatch != null) {
+                    val openBrace = modified.indexOf('{', methodMatch.range.first)
+                    val closeBrace = if (openBrace >= 0) findMatchingBrace(modified, openBrace) else -1
+                    if (closeBrace > openBrace) {
+                        var removeEnd = closeBrace + 1
+                        if (removeEnd < modified.length && modified[removeEnd] == '\r') removeEnd++
+                        if (removeEnd < modified.length && modified[removeEnd] == '\n') removeEnd++
+                        modified = modified.substring(0, methodMatch.range.first) + modified.substring(removeEnd)
+                    }
+                }
+
+                for (field in migratedFields) {
+                    modified = Regex("""\b${Regex.escape(field)}\.configured\(""")
+                        .replace(modified, "$field.value().configured(")
+                }
+
+                if (migratedFields.isNotEmpty()) {
+                    modified = addJavaImportIfMissing(modified, "net.minecraft.world.level.levelgen.carver.WorldCarver")
+                    modified = addJavaImportIfMissing(modified, "net.neoforged.neoforge.registries.DeferredHolder")
+                    modified = addJavaImportIfMissing(modified, "net.neoforged.neoforge.registries.DeferredRegister")
+                    modified = removeJavaImport(modified, "net.minecraftforge.eventbus.api.SubscribeEvent")
+                    modified = removeJavaImport(modified, "net.neoforged.bus.api.SubscribeEvent")
+                    modified = removeJavaImport(modified, "net.minecraftforge.fml.common.Mod")
+                    modified = removeJavaImport(modified, "net.neoforged.fml.common.Mod")
+                    modified = removeJavaImport(modified, "net.minecraftforge.registries.ForgeRegistries")
+                    modified = removeJavaImport(modified, "net.neoforged.neoforge.registries.ForgeRegistries")
+                    modified = removeJavaImport(modified, "net.minecraftforge.registries.RegisterEvent")
+                    modified = removeJavaImport(modified, "net.neoforged.neoforge.registries.RegisterEvent")
+                    if (!Regex("""\bObjects\.""").containsMatchIn(modified)) {
+                        modified = removeJavaImport(modified, "java.util.Objects")
+                    }
+                    if (!Regex("""\bResourceLocation\b""").containsMatchIn(modified)) {
+                        modified = removeJavaImport(modified, "net.minecraft.resources.ResourceLocation")
+                    }
+                    if (!Regex("""\bBuiltInRegistries\b""").containsMatchIn(modified)) {
+                        modified = removeJavaImport(modified, "net.minecraft.core.registries.BuiltInRegistries")
+                    }
+                }
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Migrate world carver RegisterEvent registration to DeferredRegister",
+                        before = "RegisterEvent + ForgeRegistries.WORLD_CARVERS",
+                        after = "DeferredRegister<WorldCarver<?>> CARVER_TYPES",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-world-carver-deferred-register"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                }
+            }
+
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                val listenerPattern = Regex(
+                    """(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.addListener\(\s*((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)::register\s*\);\s*$"""
+                )
+                val modified = listenerPattern.replace(original) { match ->
+                    val indent = match.groupValues[1]
+                    val bus = match.groupValues[2]
+                    val carverClass = match.groupValues[3]
+                    val simpleName = carverClass.substringAfterLast('.')
+                    if (carverClass in migratedCarverClasses || simpleName in migratedCarverClasses) {
+                        "$indent$carverClass.CARVER_TYPES.register($bus);"
+                    } else {
+                        match.value
+                    }
+                }
+                if (modified != original) {
+                    val match = listenerPattern.find(original)
+                    changes.add(Change(
+                        file = javaFile,
+                        line = match?.let { original.lineNumberAt(it.range.first) } ?: 1,
+                        description = "Register migrated world carver DeferredRegister on the mod event bus",
+                        before = match?.value?.trim() ?: "CarverTypes::register listener",
+                        after = "CarverTypes.CARVER_TYPES.register(modEventBus)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-world-carver-modbus-register"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                }
+            }
+
+        return changes
+    }
+
+    private fun parseLegacyArmorMaterial(path: Path, content: String): LegacyArmorMaterial? {
+        val enumMatch = Regex("""public\s+enum\s+([A-Za-z_$][\w$]*)\s+implements\s+ArmorMaterial\b""")
+            .find(content) ?: return null
+        val enumName = enumMatch.groupValues[1]
+        val bodyStart = content.indexOf('{', enumMatch.range.last)
+        if (bodyStart < 0) return null
+        val constantsEnd = findLegacyEnumConstantsEnd(content, bodyStart + 1)
+        if (constantsEnd < 0) return null
+
+        val constants = splitTopLevel(content.substring(bodyStart + 1, constantsEnd), ',')
+            .mapNotNull { parseLegacyArmorMaterialConstant(it) }
+        if (constants.isEmpty()) return null
+
+        val packageName = Regex("""(?m)^package\s+([\w.]+);""")
+            .find(content)?.groupValues?.get(1) ?: return null
+        val modIdExpr = Regex("""return\s+([A-Za-z_$][\w$.]*\.MODID)\s*\+""")
+            .find(content)?.groupValues?.get(1)
+            ?: Regex("""\b([A-Za-z_$][\w$]*\.MODID)\b""").find(content)?.groupValues?.get(1)
+            ?: Regex("""\b([A-Za-z_$][\w$]*\.ID)\b""").find(content)?.groupValues?.get(1)
+            ?: "\"${packageName.substringAfterLast('.')}\""
+        val modClass = when {
+            modIdExpr.endsWith(".MODID") -> modIdExpr.substringBefore(".MODID")
+            modIdExpr.endsWith(".ID") -> modIdExpr.substringBefore(".ID")
+            else -> ""
+        }
+        val modImport = if (modClass.isNotBlank() && !modClass.contains("\"") && !modClass.contains(".")) {
+            Regex("""(?m)^import\s+([\w.]+\.$modClass);""").find(content)?.groupValues?.get(1)
+        } else {
+            null
+        }
+        val sourceImports = Regex("""(?m)^import\s+([\w.]+);""")
+            .findAll(content)
+            .map { it.groupValues[1] }
+            .toList()
+        val referencedTopLevelSymbols = constants
+            .flatMap { listOf(it.equipSound, it.repairIngredient) }
+            .flatMap { Regex("""\b([A-Z][A-Za-z0-9_$]*)\.""").findAll(it).map { match -> match.groupValues[1] }.toList() }
+            .toSet()
+        val extraImports = sourceImports
+            .filter { importName -> referencedTopLevelSymbols.contains(importName.substringAfterLast('.')) }
+            .filterNot { it == modImport }
+
+        return LegacyArmorMaterial(enumName, path, packageName, modIdExpr, modImport, extraImports, constants)
+    }
+
+    private fun parseLegacyArmorMaterialConstant(raw: String): LegacyArmorMaterialConstant? {
+        val withoutLineComments = raw.lines()
+            .filterNot { it.trimStart().startsWith("//") }
+            .joinToString("\n")
+            .trim()
+            .trimEnd(',')
+            .trim()
+        if (withoutLineComments.isEmpty()) return null
+        val match = Regex("""(?s)^([A-Za-z_$][\w$]*)\s*\((.*)\)$""").find(withoutLineComments) ?: return null
+        val args = splitTopLevel(match.groupValues[2], ',').map { it.trim() }
+        if (args.size == 7 && args[2].contains("EnumMap") && args[2].contains("ArmorItem.Type")) {
+            return parseEnumMapArmorMaterialConstant(match.groupValues[1], args)
+        }
+        if (args.size < 9) return null
+
+        val protections = Regex("""new\s+int\s*\[\]\s*\{([^}]*)\}""")
+            .find(args[3])
+            ?.groupValues
+            ?.get(1)
+            ?.split(',')
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?: return null
+        if (protections.size < 4) return null
+
+        return LegacyArmorMaterialConstant(
+            fieldName = match.groupValues[1],
+            registryName = stripJavaString(args[0]),
+            textureName = stripJavaString(args[1]),
+            protections = protections,
+            enchantmentValue = args[4],
+            equipSound = args[5],
+            toughness = args[6],
+            knockbackResistance = args[7],
+            repairIngredient = args.drop(8).joinToString(", ")
+        )
+    }
+
+    private fun parseEnumMapArmorMaterialConstant(
+        fieldName: String,
+        args: List<String>
+    ): LegacyArmorMaterialConstant? {
+        val protectionsByType = Regex("""ArmorItem\.Type\.(BOOTS|LEGGINGS|CHESTPLATE|HELMET|BODY)\s*,\s*([^) ;]+)\s*\)""")
+            .findAll(args[2])
+            .associate { it.groupValues[1] to it.groupValues[2].trim() }
+        val protections = listOf("BOOTS", "LEGGINGS", "CHESTPLATE", "HELMET")
+            .map { protectionsByType[it] ?: return null }
+        val registryName = stripJavaString(args[0])
+        return LegacyArmorMaterialConstant(
+            fieldName = fieldName,
+            registryName = registryName,
+            textureName = registryName,
+            protections = protections,
+            enchantmentValue = args[3],
+            equipSound = args[4],
+            toughness = args[5],
+            knockbackResistance = "0.0F",
+            repairIngredient = args[6],
+            bodyProtection = protectionsByType["BODY"] ?: protections[2]
+        )
+    }
+
+    private fun findLegacyEnumConstantsEnd(content: String, start: Int): Int {
+        var parenDepth = 0
+        var braceDepth = 0
+        var inString = false
+        var escaped = false
+        for (i in start until content.length) {
+            val ch = content[i]
+            if (inString) {
+                escaped = ch == '\\' && !escaped
+                if (ch == '"' && !escaped) inString = false
+                if (ch != '\\') escaped = false
+                continue
+            }
+            when (ch) {
+                '"' -> inString = true
+                '(' -> parenDepth++
+                ')' -> parenDepth--
+                '{' -> braceDepth++
+                '}' -> braceDepth--
+                ';' -> if (parenDepth == 0 && braceDepth == 0) return i
+            }
+        }
+        return -1
+    }
+
+    private fun splitTopLevel(value: String, delimiter: Char): List<String> {
+        val result = mutableListOf<String>()
+        var start = 0
+        var parenDepth = 0
+        var braceDepth = 0
+        var bracketDepth = 0
+        var inString = false
+        var escaped = false
+        for (i in value.indices) {
+            val ch = value[i]
+            if (inString) {
+                escaped = ch == '\\' && !escaped
+                if (ch == '"' && !escaped) inString = false
+                if (ch != '\\') escaped = false
+                continue
+            }
+            when (ch) {
+                '"' -> inString = true
+                '(' -> parenDepth++
+                ')' -> parenDepth--
+                '{' -> braceDepth++
+                '}' -> braceDepth--
+                '[' -> bracketDepth++
+                ']' -> bracketDepth--
+                delimiter -> if (parenDepth == 0 && braceDepth == 0 && bracketDepth == 0) {
+                    result.add(value.substring(start, i))
+                    start = i + 1
+                }
+            }
+        }
+        result.add(value.substring(start))
+        return result
+    }
+
+    private fun splitTopLevelArgs(value: String): List<String> =
+        splitTopLevel(value, ',').map { it.trim() }.filter { it.isNotBlank() }
+
+    private fun treeGrowerExpression(grower: LegacyTreeGrower, args: List<String>): String {
+        val registryName = grower.className
+            .removeSuffix("TreeGrower")
+            .removeSuffix("Grower")
+            .ifBlank { grower.className }
+            .let(::camelOrConstantToRegistryPath)
+        val configuredFeature = grower.returnExpressions.firstOrNull()
+            ?.let { "Optional.of($it)" }
+            ?: "Optional.empty()"
+        return "new TreeGrower(\"$registryName\", $configuredFeature, Optional.empty(), Optional.empty())"
+    }
+
+    private fun legacyTreeGrowerHelperSource(source: String, grower: LegacyTreeGrower): String {
+        val classPattern = Regex(
+            """(?ms)(public\s+)?class\s+${Regex.escape(grower.className)}\s+extends\s+AbstractTreeGrower\b[^{]*\{.*\}\s*$"""
+        )
+        if (!classPattern.containsMatchIn(source)) return source
+
+        var result = source
+        result = removeJavaImport(result, "net.minecraft.world.level.block.grower.AbstractTreeGrower")
+        result = removeJavaImport(result, "net.minecraft.util.RandomSource")
+        result = ensureJavaImport(result, "java.util.Optional")
+        result = ensureJavaImport(result, "net.minecraft.world.level.block.grower.TreeGrower")
+
+        val expression = treeGrowerExpression(grower, emptyList())
+        val replacement = """
+public final class ${grower.className} {
+    public static final TreeGrower GROWER = $expression;
+
+    private ${grower.className}() {
+    }
+}
+""".trimEnd()
+        return classPattern.replace(result, replacement)
+    }
+
+    private fun migrateLegacyTreeGrowerSubclass(source: String, projectDir: Path): String {
+        if (!source.contains("getConfiguredFeature(") && !source.contains("getConfiguredMegaFeature(")) return source
+        val classPattern = Regex("""\bclass\s+(\w+)\s+extends\s+(AbstractMegaTreeGrower|AbstractTreeGrower|TreeGrower)\b""")
+        if (!classPattern.containsMatchIn(source)) return source
+
+        val compatPackage = detectCompatShimPackage(projectDir)
+        var result = source
+        result = removeJavaImport(result, "net.minecraft.world.level.block.grower.AbstractTreeGrower")
+        result = removeJavaImport(result, "net.minecraft.world.level.block.grower.AbstractMegaTreeGrower")
+        result = removeJavaImport(result, "net.minecraft.world.level.block.grower.TreeGrower")
+        result = ensureJavaImport(result, "$compatPackage.ModPorterAbstractTreeGrower")
+        result = classPattern.replace(result) { match ->
+            "class ${match.groupValues[1]} extends ModPorterAbstractTreeGrower"
+        }
+        return result
+    }
+
+    private fun ensureLegacyTreeGrowerCompatBase(projectDir: Path, dryRun: Boolean): List<Change> {
+        val compatPackage = detectCompatShimPackage(projectDir)
+        val srcDir = projectDir.resolve("src/main/java")
+        val compatFile = srcDir.resolve(compatPackage.replace('.', '/')).resolve("ModPorterAbstractTreeGrower.java")
+        val source = legacyTreeGrowerCompatSource(compatPackage)
+        if (compatFile.exists() && compatFile.readText() == source) return emptyList()
+        if (!dryRun) {
+            compatFile.parent.createDirectories()
+            compatFile.writeText(source)
+        }
+        return listOf(Change(
+            file = compatFile,
+            line = 1,
+            description = "Generate compatibility base for legacy AbstractTreeGrower subclasses",
+            before = "AbstractTreeGrower/AbstractMegaTreeGrower inheritance",
+            after = "ModPorterAbstractTreeGrower extends TreeGrower and preserves overridden feature selection",
+            confidence = Confidence.HIGH,
+            ruleId = "build-tree-grower-compat-base"
+        ))
+    }
+
+    private fun legacyTreeGrowerCompatSource(packageName: String): String = """
+package $packageName;
+
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Holder;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.level.BlockGetter;
+import net.minecraft.world.level.LevelAccessor;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.grower.TreeGrower;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.ChunkGenerator;
+import net.minecraft.world.level.levelgen.feature.ConfiguredFeature;
+
+public abstract class ModPorterAbstractTreeGrower extends TreeGrower {
+    private static final AtomicInteger NEXT_ID = new AtomicInteger();
+
+    protected ModPorterAbstractTreeGrower() {
+        super("modporter_legacy_tree_" + NEXT_ID.getAndIncrement(), Optional.empty(), Optional.empty(), Optional.empty());
+    }
+
+    protected abstract ResourceKey<ConfiguredFeature<?, ?>> getConfiguredFeature(RandomSource random, boolean flowers);
+
+    protected ResourceKey<ConfiguredFeature<?, ?>> getConfiguredMegaFeature(RandomSource random) {
+        return null;
+    }
+
+    @Override
+    public boolean growTree(ServerLevel level, ChunkGenerator chunkGenerator, BlockPos pos, BlockState state, RandomSource random) {
+        ResourceKey<ConfiguredFeature<?, ?>> megaFeature = this.getConfiguredMegaFeature(random);
+        if (megaFeature != null) {
+            Holder<ConfiguredFeature<?, ?>> holder = level.registryAccess()
+                    .registryOrThrow(Registries.CONFIGURED_FEATURE)
+                    .getHolder(megaFeature)
+                    .orElse(null);
+            var event = net.neoforged.neoforge.event.EventHooks.fireBlockGrowFeature(level, random, pos, holder);
+            holder = event.getFeature();
+            if (event.isCanceled()) return false;
+            if (holder != null) {
+                for (int x = 0; x >= -1; x--) {
+                    for (int z = 0; z >= -1; z--) {
+                        if (isTwoByTwoSapling(state, level, pos, x, z)) {
+                            ConfiguredFeature<?, ?> configuredFeature = holder.value();
+                            BlockState air = Blocks.AIR.defaultBlockState();
+                            level.setBlock(pos.offset(x, 0, z), air, 4);
+                            level.setBlock(pos.offset(x + 1, 0, z), air, 4);
+                            level.setBlock(pos.offset(x, 0, z + 1), air, 4);
+                            level.setBlock(pos.offset(x + 1, 0, z + 1), air, 4);
+                            if (configuredFeature.place(level, chunkGenerator, random, pos.offset(x, 0, z))) {
+                                return true;
+                            }
+                            level.setBlock(pos.offset(x, 0, z), state, 4);
+                            level.setBlock(pos.offset(x + 1, 0, z), state, 4);
+                            level.setBlock(pos.offset(x, 0, z + 1), state, 4);
+                            level.setBlock(pos.offset(x + 1, 0, z + 1), state, 4);
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+
+        ResourceKey<ConfiguredFeature<?, ?>> feature = this.getConfiguredFeature(random, this.hasFlowers(level, pos));
+        if (feature == null) return false;
+        Holder<ConfiguredFeature<?, ?>> holder = level.registryAccess()
+                .registryOrThrow(Registries.CONFIGURED_FEATURE)
+                .getHolder(feature)
+                .orElse(null);
+        var event = net.neoforged.neoforge.event.EventHooks.fireBlockGrowFeature(level, random, pos, holder);
+        holder = event.getFeature();
+        if (event.isCanceled() || holder == null) return false;
+
+        ConfiguredFeature<?, ?> configuredFeature = holder.value();
+        BlockState fluidState = level.getFluidState(pos).createLegacyBlock();
+        level.setBlock(pos, fluidState, 4);
+        if (configuredFeature.place(level, chunkGenerator, random, pos)) {
+            if (level.getBlockState(pos) == fluidState) {
+                level.sendBlockUpdated(pos, state, fluidState, 2);
+            }
+            return true;
+        }
+        level.setBlock(pos, state, 4);
+        return false;
+    }
+
+    private static boolean isTwoByTwoSapling(BlockState state, BlockGetter level, BlockPos pos, int xOffset, int zOffset) {
+        Block block = state.getBlock();
+        return level.getBlockState(pos.offset(xOffset, 0, zOffset)).is(block)
+                && level.getBlockState(pos.offset(xOffset + 1, 0, zOffset)).is(block)
+                && level.getBlockState(pos.offset(xOffset, 0, zOffset + 1)).is(block)
+                && level.getBlockState(pos.offset(xOffset + 1, 0, zOffset + 1)).is(block);
+    }
+
+    private boolean hasFlowers(LevelAccessor level, BlockPos pos) {
+        for (BlockPos candidate : BlockPos.MutableBlockPos.betweenClosed(pos.below().north(2).west(2), pos.above().south(2).east(2))) {
+            if (level.getBlockState(candidate).is(BlockTags.FLOWERS)) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+""".trimIndent()
+
+    private fun stripJavaString(value: String): String =
+        value.trim().removePrefix("\"").removeSuffix("\"")
+
+    private fun renderArmorMaterialRegistry(material: LegacyArmorMaterial): String {
+        val imports = buildList {
+            material.modImport?.let { add("import $it;") }
+            material.extraImports.forEach { add("import $it;") }
+            add("import net.minecraft.Util;")
+            add("import net.minecraft.core.Holder;")
+            add("import net.minecraft.core.registries.Registries;")
+            add("import net.minecraft.resources.ResourceLocation;")
+            add("import net.minecraft.sounds.SoundEvent;")
+            add("import net.minecraft.sounds.SoundEvents;")
+            add("import net.minecraft.world.item.ArmorItem;")
+            add("import net.minecraft.world.item.ArmorMaterial;")
+            add("import net.minecraft.world.item.Items;")
+            add("import net.minecraft.world.item.crafting.Ingredient;")
+            add("import net.neoforged.neoforge.registries.DeferredHolder;")
+            add("import net.neoforged.neoforge.registries.DeferredRegister;")
+            add("import java.util.EnumMap;")
+            add("import java.util.HashMap;")
+            add("import java.util.List;")
+            add("import java.util.Map;")
+            add("import java.util.function.Supplier;")
+        }.distinct().joinToString("\n")
+
+        val constants = material.constants.joinToString("\n\n") { renderArmorMaterialConstant(it) }
+        return """
+            package ${material.packageName};
+
+            $imports
+
+            public class ${material.enumName} {
+
+                public static final DeferredRegister<ArmorMaterial> ARMOR_MATERIALS =
+                        DeferredRegister.create(Registries.ARMOR_MATERIAL, ${material.modIdExpr});
+
+                private static final Map<Holder<ArmorMaterial>, String> TEXTURE_NAMES = new HashMap<>();
+
+            $constants
+
+                public static String getTextureName(Holder<ArmorMaterial> holder) {
+                    return TEXTURE_NAMES.get(holder);
+                }
+
+                private static DeferredHolder<ArmorMaterial, ArmorMaterial> registerWithTexture(
+                        String name,
+                        String textureName,
+                        EnumMap<ArmorItem.Type, Integer> defense,
+                        int enchantmentValue,
+                        Holder<SoundEvent> equipSound,
+                        Supplier<Ingredient> repairIngredient,
+                        float toughness,
+                        float knockbackResistance
+                ) {
+                    List<ArmorMaterial.Layer> layers = "arcticarmor".equals(textureName)
+                            ? List.of(
+                                    new ArmorMaterial.Layer(ResourceLocation.fromNamespaceAndPath(${material.modIdExpr}, textureName), "_dyed", true),
+                                    new ArmorMaterial.Layer(ResourceLocation.fromNamespaceAndPath(${material.modIdExpr}, textureName), "_overlay", false)
+                            )
+                            : List.of(new ArmorMaterial.Layer(ResourceLocation.fromNamespaceAndPath(${material.modIdExpr}, textureName)));
+                    DeferredHolder<ArmorMaterial, ArmorMaterial> holder = ARMOR_MATERIALS.register(name, () -> new ArmorMaterial(
+                            defense,
+                            enchantmentValue,
+                            equipSound,
+                            repairIngredient,
+                            layers,
+                            toughness,
+                            knockbackResistance
+                    ));
+                    TEXTURE_NAMES.put(holder, textureName);
+                    return holder;
+                }
+
+                private ${material.enumName}() {
+                }
+            }
+        """.trimIndent()
+    }
+
+    private fun renderArmorMaterialConstant(constant: LegacyArmorMaterialConstant): String {
+        val rawSound = constant.equipSound.removeSuffix(".get()")
+        val sound = if (rawSound.startsWith("SoundEvents.") &&
+            !rawSound.contains("ARMOR_EQUIP_")) {
+            "Holder.direct($rawSound)"
+        } else {
+            rawSound
+        }
+        return """
+                public static final DeferredHolder<ArmorMaterial, ArmorMaterial> ${constant.fieldName} =
+                        registerWithTexture("${constant.registryName}", "${constant.textureName}",
+                                Util.make(new EnumMap<>(ArmorItem.Type.class), map -> {
+                                    map.put(ArmorItem.Type.BOOTS, ${constant.protections[0]});
+                                    map.put(ArmorItem.Type.LEGGINGS, ${constant.protections[1]});
+                                    map.put(ArmorItem.Type.CHESTPLATE, ${constant.protections[2]});
+                                    map.put(ArmorItem.Type.HELMET, ${constant.protections[3]});
+                                    map.put(ArmorItem.Type.BODY, ${constant.bodyProtection ?: constant.protections[2]});
+                                }),
+                                ${constant.enchantmentValue},
+                                $sound,
+                                ${constant.repairIngredient},
+                                ${constant.toughness},
+                                ${constant.knockbackResistance}
+                        );
+        """.trimIndent()
+    }
+
+    private fun rewriteLegacyArmorMaterialConsumers(
+        srcDir: Path,
+        materials: List<LegacyArmorMaterial>,
+        dryRun: Boolean
+    ): List<Change> {
+        val changes = mutableListOf<Change>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                if (materials.any { it.path == javaFile }) return@forEach
+                val original = javaFile.readText()
+                var modified = original
+                var touched = false
+
+                for (material in materials) {
+                    if (modified.contains(material.enumName)) {
+                        modified = modified.replace(
+                            Regex("""\(\(${Regex.escape(material.enumName)}\)\s*getMaterial\(\)\)\.getTextureName\(\)"""),
+                            "${material.enumName}.getTextureName(this.material)"
+                        )
+                        modified = modified.replace(
+                            Regex("""\(\(${Regex.escape(material.enumName)}\)\s*this\.material\)\.getTextureName\(\)"""),
+                            "${material.enumName}.getTextureName(this.material)"
+                        )
+                        modified = modified.replace(
+                            Regex("""\b${Regex.escape(material.enumName)}\s+([A-Za-z_$][\w$]*)"""),
+                            "Holder<ArmorMaterial> $1"
+                        )
+                        touched = true
+                    }
+                }
+
+                if (modified.contains("extends ArmorItem")) {
+                    val before = modified
+                    modified = modified.replace(
+                        Regex("""\bArmorMaterial\s+([A-Za-z_$][\w$]*)"""),
+                        "Holder<ArmorMaterial> $1"
+                    )
+                    modified = rewriteLegacyArmorTextureOverride(modified)
+                    if (modified != before) touched = true
+                }
+
+                if (touched && modified != original) {
+                    if (modified.contains("Holder<ArmorMaterial>")) {
+                        modified = ensureJavaImport(modified, "net.minecraft.core.Holder")
+                        modified = ensureJavaImport(modified, "net.minecraft.world.item.ArmorMaterial")
+                    }
+                    if (Regex("""\bResourceLocation\b""").containsMatchIn(modified)) {
+                        modified = ensureJavaImport(modified, "net.minecraft.resources.ResourceLocation")
+                    }
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Rewrite ArmorItem consumers for 1.21 Holder<ArmorMaterial> and texture hook",
+                        before = "legacy ArmorMaterial item constructor/texture hook",
+                        after = "Holder<ArmorMaterial> constructor/ResourceLocation texture hook",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-legacy-armor-material-consumer"
+                    ))
+                    if (!dryRun) {
+                        javaFile.writeText(modified)
+                    }
+                }
+            }
+        return changes
+    }
+
+    private fun rewriteLegacyArmorTextureOverride(content: String): String {
+        var modified = content.replace(
+            Regex("""public\s+(@Nullable\s+)?String\s+getArmorTexture\s*\(\s*ItemStack\s+([A-Za-z_$][\w$]*)\s*,\s*Entity\s+([A-Za-z_$][\w$]*)\s*,\s*(?:net\.minecraft\.world\.entity\.)?EquipmentSlot\s+([A-Za-z_$][\w$]*)\s*,\s*String\s+[A-Za-z_$][\w$]*\s*\)""")
+        ) { match ->
+            val nullable = match.groupValues[1].ifBlank { "" }
+            "public ${nullable}ResourceLocation getArmorTexture(ItemStack ${match.groupValues[2]}, Entity ${match.groupValues[3]}, EquipmentSlot ${match.groupValues[4]}, ArmorMaterial.Layer layer, boolean innerModel)"
+        }
+        modified = modified.replace(
+            Regex("""return\s+([A-Za-z_$][\w$.]*\.MODID)\s*\+\s*":textures/models/armor/"\s*\+\s*([^;]+?)\s*\+\s*"\.png";"""),
+            """return ResourceLocation.fromNamespaceAndPath($1, "textures/models/armor/" + $2 + ".png");"""
+        )
+        modified = modified.replace(
+            Regex("""return\s+([A-Za-z_$][\w$.]*\.ARMOR_DIR\s*\+\s*"[^"]+"\s*);"""),
+            """return ResourceLocation.parse($1);"""
+        )
+        return modified
+    }
+
+    private fun registerLegacyArmorMaterials(
+        srcDir: Path,
+        materials: List<LegacyArmorMaterial>,
+        dryRun: Boolean
+    ): List<Change> {
+        val changes = mutableListOf<Change>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("@Mod(") || !original.contains("IEventBus")) return@forEach
+                val busName = Regex("""\bIEventBus\s+([A-Za-z_$][\w$]*)""")
+                    .find(original)
+                    ?.groupValues
+                    ?.get(1)
+                    ?: return@forEach
+
+                var modified = original
+                val packageName = Regex("""(?m)^package\s+([\w.]+);""")
+                    .find(original)?.groupValues?.get(1)
+
+                for (material in materials) {
+                    val registration = "${material.enumName}.ARMOR_MATERIALS.register($busName);"
+                    if (modified.contains(registration)) continue
+                    if (packageName != material.packageName) {
+                        modified = ensureJavaImport(modified, "${material.packageName}.${material.enumName}")
+                    }
+                    val lines = modified.lines().toMutableList()
+                    val firstRegisterIdx = lines.indexOfFirst { Regex("""\.register\(\s*${Regex.escape(busName)}\s*\)""").containsMatchIn(it) }
+                    val addListenerIdx = lines.indexOfFirst { it.contains("$busName.addListener") }
+                    val eventBusIdx = lines.indexOfFirst { Regex("""\bIEventBus\s+${Regex.escape(busName)}\b""").containsMatchIn(it) }
+                    val insertIdx = when {
+                        firstRegisterIdx >= 0 -> firstRegisterIdx
+                        eventBusIdx >= 0 -> eventBusIdx + 1
+                        addListenerIdx >= 0 -> addListenerIdx + 1
+                        else -> -1
+                    }
+                    if (insertIdx >= 0) {
+                        val indent = lines.getOrNull(insertIdx - 1)?.takeWhile { it.isWhitespace() } ?: "        "
+                        lines.add(insertIdx, "$indent$registration")
+                        modified = lines.joinToString("\n")
+                    }
+                }
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Register generated ArmorMaterial DeferredRegister on mod event bus",
+                        before = "(missing ArmorMaterial registry registration)",
+                        after = "ArmorMaterials.ARMOR_MATERIALS.register(modEventBus)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-register-armor-materials"
+                    ))
+                    if (!dryRun) {
+                        javaFile.writeText(modified)
+                    }
+                }
+            }
+        return changes
+    }
+
+    private fun rewriteLegacyTreeGrowers(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+
+        val growers = mutableListOf<LegacyTreeGrower>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val text = javaFile.readText()
+                val classMatch = Regex("""\bclass\s+(\w+)\s+extends\s+(AbstractMegaTreeGrower|AbstractTreeGrower|TreeGrower)\b""")
+                    .find(text)
+                    ?: return@forEach
+                if (!text.contains("getConfiguredFeature(") && !text.contains("getConfiguredMegaFeature(")) return@forEach
+                val className = classMatch
+                    ?.groupValues
+                    ?.get(1)
+                    ?: return@forEach
+                val returns = Regex("""return\s+([^;]+);""")
+                    .findAll(text)
+                    .map { it.groupValues[1].trim() }
+                    .filterNot { it == "super.growTree(level, generator, pos, state, random)" }
+                    .distinct()
+                    .toList()
+                growers.add(LegacyTreeGrower(className, javaFile, returns))
+            }
+
+        if (growers.isEmpty()) return changes
+
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .filter { javaFile -> growers.none { it.path == javaFile } }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                var modified = original
+                var touched = false
+
+                for (grower in growers) {
+                    if (modified.contains("AbstractTreeGrower") || modified.contains("AbstractMegaTreeGrower")) {
+                        touched = true
+                        modified = modified
+                            .replace(
+                                "import net.minecraft.world.level.block.grower.AbstractTreeGrower;",
+                                "import net.minecraft.world.level.block.grower.TreeGrower;"
+                            )
+                            .replace(
+                                "import net.minecraft.world.level.block.grower.AbstractMegaTreeGrower;",
+                                "import net.minecraft.world.level.block.grower.TreeGrower;"
+                            )
+                            .replace(Regex("""\bAbstractMegaTreeGrower\b"""), "TreeGrower")
+                            .replace(Regex("""\bAbstractTreeGrower\b"""), "TreeGrower")
+                    }
+                }
+
+                if (touched) {
+                    modified = ensureJavaImport(modified, "net.minecraft.world.level.block.grower.TreeGrower")
+
+                    if (!dryRun) javaFile.writeText(modified)
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Rewrite legacy AbstractTreeGrower call-site types to TreeGrower",
+                        before = "AbstractTreeGrower/AbstractMegaTreeGrower type references",
+                        after = "TreeGrower type references",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-tree-grower-compat"
+                    ))
+                }
+            }
+
+        for (grower in growers) {
+            val original = grower.path.readText()
+            val migrated = migrateLegacyTreeGrowerSubclass(original, projectDir)
+            if (migrated != original) {
+                if (!dryRun) grower.path.writeText(migrated)
+                changes.add(Change(
+                    file = grower.path,
+                    line = 1,
+                    description = "Retarget legacy AbstractTreeGrower subclass to generated TreeGrower compatibility base",
+                    before = "class ${grower.className} extends AbstractTreeGrower/AbstractMegaTreeGrower",
+                    after = "class ${grower.className} extends ModPorterAbstractTreeGrower",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-tree-grower-helper"
+                ))
+            }
+        }
+
+        changes.addAll(ensureLegacyTreeGrowerCompatBase(projectDir, dryRun))
+        changes.addAll(ensureAccessTransformerEntries(
+            projectDir,
+            listOf("public-f net.minecraft.world.level.block.grower.TreeGrower"),
+            dryRun,
+            "build-tree-grower-unfinal-at",
+            "Allow legacy custom tree growers to extend TreeGrower through a generated compatibility base"
+        ))
+
+        val obsoleteShim = srcDir.resolve("net/minecraft/world/level/block/grower/AbstractTreeGrower.java")
+        if (obsoleteShim.exists()) {
+            if (!dryRun) java.nio.file.Files.delete(obsoleteShim)
+            changes.add(Change(
+                file = obsoleteShim,
+                line = 1,
+                description = "Remove obsolete AbstractTreeGrower shim from Minecraft package",
+                before = "net.minecraft.world.level.block.grower.AbstractTreeGrower shim",
+                after = "(removed)",
+                confidence = Confidence.HIGH,
+                ruleId = "build-remove-abstract-tree-grower-shim"
+            ))
+        }
+
+        return changes
+    }
+
+    private fun addLegacyMmlibShims(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+
+        val localRecipeBasePackage = detectLocalRecipeBasePackage(srcDir)
+        if (localRecipeBasePackage != null) {
+            var needsLocalRecipeBase = false
+            java.nio.file.Files.walk(srcDir)
+                .filter { it.extension == "java" }
+                .forEach { javaFile ->
+                    val original = javaFile.readText()
+                    var migrated = original
+                        .replace("import cn.mcmod_mmf.mmlib.fluid.FluidIngredient;", "import $localRecipeBasePackage.FluidIngredient;")
+                        .replace("import cn.mcmod_mmf.mmlib.recipe.AbstractRecipe;", "import $localRecipeBasePackage.AbstractRecipe;")
+                        .replace("import cn.mcmod_mmf.mmlib.recipe.AbstractRecipeSerializer;", "import $localRecipeBasePackage.AbstractRecipeSerializer;")
+                        .replace("import cn.mcmod_mmf.mmlib.recipe.ChanceResult;", "import $localRecipeBasePackage.ChanceResult;")
+                        .replace("cn.mcmod_mmf.mmlib.fluid.FluidIngredient", "$localRecipeBasePackage.FluidIngredient")
+                        .replace("cn.mcmod_mmf.mmlib.recipe.AbstractRecipeSerializer", "$localRecipeBasePackage.AbstractRecipeSerializer")
+                        .replace("cn.mcmod_mmf.mmlib.recipe.AbstractRecipe", "$localRecipeBasePackage.AbstractRecipe")
+                        .replace("cn.mcmod_mmf.mmlib.recipe.ChanceResult", "$localRecipeBasePackage.ChanceResult")
+
+                    if (migrated != original) {
+                        needsLocalRecipeBase = true
+                        changes.add(Change(
+                            file = javaFile,
+                            line = 1,
+                            description = "Relocate removed MMLib recipe/fluid helpers to a project-local recipe base package",
+                            before = "cn.mcmod_mmf.mmlib.recipe / cn.mcmod_mmf.mmlib.fluid",
+                            after = localRecipeBasePackage,
+                            confidence = Confidence.HIGH,
+                            ruleId = "build-relocate-mmlib-recipe-base"
+                        ))
+                        if (!dryRun) {
+                            javaFile.writeText(migrated)
+                        }
+                    }
+                }
+
+            if (needsLocalRecipeBase) {
+                changes.addAll(addLocalMmlibRecipeBase(srcDir, localRecipeBasePackage, dryRun))
+            }
+        }
+
+        val obsoleteShimDir = srcDir.resolve("cn/mcmod_mmf/mmlib")
+        if (obsoleteShimDir.exists()) {
+            changes.add(Change(
+                file = obsoleteShimDir,
+                line = 1,
+                description = "Remove generated MMLib package shims and use the real MMLib dependency",
+                before = "src/main/java/cn/mcmod_mmf/mmlib/* generated shims",
+                after = "(removed)",
+                confidence = Confidence.HIGH,
+                ruleId = "build-remove-mmlib-package-shims"
+            ))
+            if (!dryRun) {
+                java.nio.file.Files.walk(obsoleteShimDir)
+                    .sorted(Comparator.reverseOrder())
+                    .forEach { java.nio.file.Files.deleteIfExists(it) }
+            }
+        }
+        return changes
+    }
+
+    private fun detectLocalRecipeBasePackage(srcDir: Path): String? {
+        val candidates = mutableListOf<String>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .forEach { javaFile ->
+                val source = javaFile.readText()
+                val packageName = Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+                    .find(source)
+                    ?.groupValues
+                    ?.get(1)
+                    ?: return@forEach
+                val usesRemovedMmlibRecipeBase =
+                    source.contains("cn.mcmod_mmf.mmlib.recipe.") ||
+                        source.contains("cn.mcmod_mmf.mmlib.fluid.FluidIngredient")
+                if (usesRemovedMmlibRecipeBase && packageName.endsWith(".recipes")) {
+                    candidates.add("${packageName}.base")
+                }
+            }
+        return candidates.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
+    }
+
+    private fun addLocalMmlibRecipeBase(srcDir: Path, basePackage: String, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val packageDir = srcDir.resolve(basePackage.replace('.', '/'))
+        val sources = linkedMapOf(
+            "AbstractRecipe.java" to localMmlibAbstractRecipeSource(basePackage),
+            "ChanceResult.java" to localMmlibChanceResultSource(basePackage),
+            "FluidIngredient.java" to localMmlibFluidIngredientSource(basePackage),
+            "AbstractRecipeSerializer.java" to localMmlibRecipeSerializerSource(basePackage)
+        )
+
+        for ((fileName, source) in sources) {
+            val file = packageDir.resolve(fileName)
+            if (file.exists()) continue
+            changes.add(Change(
+                file = file,
+                line = 1,
+                description = "Add project-local replacement for removed MMLib recipe helper $fileName",
+                before = "(missing)",
+                after = "$basePackage.$fileName",
+                confidence = Confidence.HIGH,
+                ruleId = "build-add-local-mmlib-recipe-base"
+            ))
+            if (!dryRun) {
+                packageDir.createDirectories()
+                file.writeText(source)
+            }
+        }
+        return changes
+    }
+
+    private fun localMmlibAbstractRecipeSource(basePackage: String): String = """
+package $basePackage;
+
+import com.google.gson.annotations.Expose;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.crafting.Recipe;
+import net.neoforged.neoforge.items.wrapper.RecipeWrapper;
+
+/**
+ * Project-local replacement for MMLib recipe base helpers removed in MMLib 1.21.1.
+ */
+public abstract class AbstractRecipe implements Recipe<RecipeWrapper> {
+    public String group = "";
+    @Expose
+    public float experience;
+    @Expose
+    public int recipeTime;
+
+    public float getExperience() {
+        return experience;
+    }
+
+    public int getRecipeTime() {
+        return recipeTime;
+    }
+
+    @Override
+    public String getGroup() {
+        return group;
+    }
+
+    @Override
+    public abstract ItemStack getResultItem(HolderLookup.Provider registries);
+
+    @Override
+    public boolean isSpecial() {
+        return true;
+    }
+}
+""".trimIndent()
+
+    private fun localMmlibChanceResultSource(basePackage: String): String = """
+package $basePackage;
+
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.item.ItemStack;
+
+public record ChanceResult(ItemStack stack, float chance) {
+    public static final ChanceResult EMPTY = new ChanceResult(ItemStack.EMPTY, 0.0F);
+
+    public ItemStack rollOutput(RandomSource random, int fortuneLevel) {
+        if (stack.isEmpty()) return ItemStack.EMPTY;
+        float adjustedChance = Math.min(1.0F, chance + Math.max(0, fortuneLevel) * 0.1F);
+        return random.nextFloat() < adjustedChance ? stack.copy() : ItemStack.EMPTY;
+    }
+}
+""".trimIndent()
+
+    private fun localMmlibFluidIngredientSource(basePackage: String): String = """
+package $basePackage;
+
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.tags.TagKey;
+import net.minecraft.world.level.material.Fluid;
+import net.neoforged.neoforge.fluids.FluidStack;
+
+public abstract class FluidIngredient implements Predicate<FluidStack> {
+    public static final FluidIngredient EMPTY = new EmptyFluidIngredient();
+
+    protected int amountRequired;
+    private List<FluidStack> matchingFluidStacks;
+
+    public static FluidIngredient fromTag(TagKey<Fluid> tag, int amount) {
+        return new TagFluidIngredient(tag, amount);
+    }
+
+    public static FluidIngredient fromFluid(Fluid fluid, int amount) {
+        return new SingleFluidIngredient(fluid, amount);
+    }
+
+    public static FluidIngredient fromFluid(Supplier<? extends Fluid> fluid, int amount) {
+        return fromFluid(fluid.get(), amount);
+    }
+
+    public static FluidIngredient fromFluidStack(FluidStack stack) {
+        return stack == null || stack.isEmpty() ? EMPTY : fromFluid(stack.getFluid(), stack.getAmount());
+    }
+
+    public int getAmount() {
+        return amountRequired;
+    }
+
+    public int getRequiredAmount() {
+        return amountRequired;
+    }
+
+    public List<FluidStack> getMatchingFluidStacks() {
+        if (matchingFluidStacks == null) {
+            matchingFluidStacks = determineMatchingFluidStacks();
+        }
+        return matchingFluidStacks;
+    }
+
+    public FluidStack[] getStacks() {
+        return getMatchingFluidStacks().toArray(FluidStack[]::new);
+    }
+
+    public JsonObject serialize() {
+        JsonObject json = new JsonObject();
+        writeInternal(json);
+        json.addProperty("amount", amountRequired);
+        return json;
+    }
+
+    public static boolean isFluidIngredient(JsonElement json) {
+        if (json == null || !json.isJsonObject()) return false;
+        JsonObject obj = json.getAsJsonObject();
+        return obj.has("fluid") || obj.has("tag");
+    }
+
+    public static FluidIngredient deserialize(JsonElement json) {
+        if (json == null || !json.isJsonObject()) return EMPTY;
+        JsonObject obj = json.getAsJsonObject();
+        int amount = obj.has("amount") ? obj.get("amount").getAsInt() : 1000;
+        if (obj.has("tag")) {
+            ResourceLocation tagId = ResourceLocation.parse(obj.get("tag").getAsString());
+            return fromTag(TagKey.create(Registries.FLUID, tagId), amount);
+        }
+        if (obj.has("fluid")) {
+            Fluid fluid = BuiltInRegistries.FLUID.get(ResourceLocation.parse(obj.get("fluid").getAsString()));
+            return fromFluid(fluid, amount);
+        }
+        return EMPTY;
+    }
+
+    @Override
+    public boolean test(FluidStack stack) {
+        return stack != null && stack.getAmount() >= amountRequired && testInternal(stack);
+    }
+
+    protected abstract boolean testInternal(FluidStack stack);
+    protected abstract List<FluidStack> determineMatchingFluidStacks();
+    protected abstract void writeInternal(JsonObject json);
+
+    private static final class EmptyFluidIngredient extends FluidIngredient {
+        private EmptyFluidIngredient() {
+            this.amountRequired = 0;
+        }
+
+        @Override
+        public boolean test(FluidStack stack) {
+            return false;
+        }
+
+        @Override
+        protected boolean testInternal(FluidStack stack) {
+            return false;
+        }
+
+        @Override
+        protected List<FluidStack> determineMatchingFluidStacks() {
+            return Collections.emptyList();
+        }
+
+        @Override
+        protected void writeInternal(JsonObject json) {
+        }
+    }
+
+    private static final class SingleFluidIngredient extends FluidIngredient {
+        private final Fluid fluid;
+
+        private SingleFluidIngredient(Fluid fluid, int amount) {
+            this.fluid = fluid;
+            this.amountRequired = amount;
+        }
+
+        @Override
+        protected boolean testInternal(FluidStack stack) {
+            return stack.getFluid().isSame(fluid);
+        }
+
+        @Override
+        protected List<FluidStack> determineMatchingFluidStacks() {
+            return Collections.singletonList(new FluidStack(fluid, amountRequired));
+        }
+
+        @Override
+        protected void writeInternal(JsonObject json) {
+            json.addProperty("fluid", BuiltInRegistries.FLUID.getKey(fluid).toString());
+        }
+    }
+
+    private static final class TagFluidIngredient extends FluidIngredient {
+        private final TagKey<Fluid> tag;
+
+        private TagFluidIngredient(TagKey<Fluid> tag, int amount) {
+            this.tag = tag;
+            this.amountRequired = amount;
+        }
+
+        @Override
+        protected boolean testInternal(FluidStack stack) {
+            return stack.getFluid().builtInRegistryHolder().is(tag);
+        }
+
+        @Override
+        protected List<FluidStack> determineMatchingFluidStacks() {
+            List<FluidStack> stacks = new ArrayList<>();
+            BuiltInRegistries.FLUID.getTag(tag).ifPresent(holders ->
+                holders.forEach(holder -> stacks.add(new FluidStack(holder.value(), amountRequired)))
+            );
+            return stacks;
+        }
+
+        @Override
+        protected void writeInternal(JsonObject json) {
+            json.addProperty("tag", tag.location().toString());
+        }
+    }
+}
+""".trimIndent()
+
+    private fun localMmlibRecipeSerializerSource(basePackage: String): String = """
+package $basePackage;
+
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonDeserializationContext;
+import com.google.gson.JsonDeserializer;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
+import com.google.gson.JsonSerializationContext;
+import com.google.gson.JsonSerializer;
+import com.google.gson.reflect.TypeToken;
+import com.mojang.serialization.DataResult;
+import com.mojang.serialization.DynamicOps;
+import com.mojang.serialization.JsonOps;
+import com.mojang.serialization.MapCodec;
+import com.mojang.serialization.MapLike;
+import com.mojang.serialization.RecordBuilder;
+import java.lang.reflect.Type;
+import java.util.stream.Stream;
+import net.minecraft.core.NonNullList;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.crafting.Ingredient;
+import net.minecraft.world.item.crafting.RecipeSerializer;
+import net.neoforged.neoforge.fluids.FluidStack;
+
+public class AbstractRecipeSerializer<T extends AbstractRecipe> implements RecipeSerializer<T> {
+    private final Class<T> recipeClass;
+    private final Gson gson;
+    private final MapCodec<T> mapCodec;
+    private final StreamCodec<RegistryFriendlyByteBuf, T> streamCodec;
+
+    public AbstractRecipeSerializer(Class<T> recipeClass) {
+        this.recipeClass = recipeClass;
+        this.gson = createGson();
+        this.mapCodec = createMapCodec();
+        this.streamCodec = createStreamCodec();
+    }
+
+    private Gson createGson() {
+        return new GsonBuilder()
+                .excludeFieldsWithoutExposeAnnotation()
+                .registerTypeHierarchyAdapter(Ingredient.class, new IngredientAdapter())
+                .registerTypeHierarchyAdapter(ItemStack.class, new ItemStackAdapter())
+                .registerTypeHierarchyAdapter(FluidStack.class, new FluidStackAdapter())
+                .registerTypeHierarchyAdapter(FluidIngredient.class, new FluidIngredientAdapter())
+                .registerTypeHierarchyAdapter(ChanceResult.class, new ChanceResultAdapter())
+                .registerTypeAdapter(new TypeToken<NonNullList<Ingredient>>(){}.getType(), new IngredientListAdapter())
+                .registerTypeAdapter(new TypeToken<NonNullList<ItemStack>>(){}.getType(), new ItemStackListAdapter())
+                .registerTypeAdapter(new TypeToken<NonNullList<ChanceResult>>(){}.getType(), new ChanceResultListAdapter())
+                .create();
+    }
+
+    private MapCodec<T> createMapCodec() {
+        return new MapCodec<>() {
+            @Override
+            public <O> RecordBuilder<O> encode(T input, DynamicOps<O> ops, RecordBuilder<O> prefix) {
+                JsonObject json = toJson(input);
+                for (var entry : json.entrySet()) {
+                    prefix = prefix.add(entry.getKey(), JsonOps.INSTANCE.convertTo(ops, entry.getValue()));
+                }
+                return prefix;
+            }
+
+            @Override
+            public <O> DataResult<T> decode(DynamicOps<O> ops, MapLike<O> input) {
+                try {
+                    JsonObject json = new JsonObject();
+                    input.entries().forEach(pair -> {
+                        String key = ops.getStringValue(pair.getFirst()).result().orElse("");
+                        if (!key.isEmpty()) {
+                            json.add(key, ops.convertTo(JsonOps.INSTANCE, pair.getSecond()));
+                        }
+                    });
+                    return DataResult.success(fromJson(json));
+                } catch (Exception e) {
+                    return DataResult.error(() -> "Failed to decode recipe: " + e.getMessage());
+                }
+            }
+
+            @Override
+            public <O> Stream<O> keys(DynamicOps<O> ops) {
+                return Stream.empty();
+            }
+        };
+    }
+
+    private StreamCodec<RegistryFriendlyByteBuf, T> createStreamCodec() {
+        return StreamCodec.of(
+                (buf, recipe) -> buf.writeUtf(gson.toJson(recipe)),
+                buf -> fromJson(com.google.gson.JsonParser.parseString(buf.readUtf(32767)).getAsJsonObject())
+        );
+    }
+
+    @Override
+    public MapCodec<T> codec() {
+        return mapCodec;
+    }
+
+    @Override
+    public StreamCodec<RegistryFriendlyByteBuf, T> streamCodec() {
+        return streamCodec;
+    }
+
+    public T fromJson(JsonObject json) {
+        return gson.fromJson(json, recipeClass);
+    }
+
+    public JsonObject toJson(T recipe) {
+        return gson.toJsonTree(recipe).getAsJsonObject();
+    }
+
+    private static class IngredientAdapter implements JsonSerializer<Ingredient>, JsonDeserializer<Ingredient> {
+        @Override
+        public JsonElement serialize(Ingredient src, Type typeOfSrc, JsonSerializationContext context) {
+            return Ingredient.CODEC.encodeStart(JsonOps.INSTANCE, src).result().orElse(JsonNull.INSTANCE);
+        }
+
+        @Override
+        public Ingredient deserialize(JsonElement json, Type typeOfT, JsonDeserializationContext context) throws JsonParseException {
+            return Ingredient.CODEC.decode(JsonOps.INSTANCE, json).result()
+                    .map(com.mojang.datafixers.util.Pair::getFirst)
+                    .orElse(Ingredient.EMPTY);
+        }
+    }
+
+    private static class ItemStackAdapter implements JsonSerializer<ItemStack>, JsonDeserializer<ItemStack> {
+        @Override
+        public JsonElement serialize(ItemStack src, Type typeOfSrc, JsonSerializationContext context) {
+            if (src.isEmpty()) return JsonNull.INSTANCE;
+            return ItemStack.CODEC.encodeStart(JsonOps.INSTANCE, src).result().orElse(JsonNull.INSTANCE);
+        }
+
+        @Override
+        public ItemStack deserialize(JsonElement json, Type typeOfT, JsonDeserializationContext context) throws JsonParseException {
+            return decodeItemStack(json, "ItemStack");
+        }
+    }
+
+    private static ItemStack decodeItemStack(JsonElement json, String contextName) throws JsonParseException {
+        if (json == null || json.isJsonNull()) return ItemStack.EMPTY;
+        JsonElement normalized = normalizeLegacyItemStackJson(json);
+        var decoded = ItemStack.CODEC.decode(JsonOps.INSTANCE, normalized);
+        return decoded.result()
+                .map(com.mojang.datafixers.util.Pair::getFirst)
+                .orElseThrow(() -> new JsonParseException(
+                        "Failed to decode " + contextName + ": " + decoded.error().map(Object::toString).orElse("unknown codec error")));
+    }
+
+    private static JsonElement normalizeLegacyItemStackJson(JsonElement json) {
+        if (json == null || json.isJsonNull()) return JsonNull.INSTANCE;
+        if (json.isJsonPrimitive() && json.getAsJsonPrimitive().isString()) {
+            JsonObject normalized = new JsonObject();
+            normalized.addProperty("id", json.getAsString());
+            return normalized;
+        }
+        if (!json.isJsonObject()) return json;
+        JsonObject obj = json.getAsJsonObject();
+        if (!obj.has("item") || obj.has("id")) return json;
+
+        JsonObject normalized = new JsonObject();
+        normalized.add("id", obj.get("item"));
+        copyIfPresent(obj, normalized, "count");
+        copyIfPresent(obj, normalized, "components");
+        if (obj.has("nbt")) {
+            JsonObject components = normalized.has("components") && normalized.get("components").isJsonObject()
+                    ? normalized.getAsJsonObject("components")
+                    : new JsonObject();
+            components.add("minecraft:custom_data", obj.get("nbt"));
+            normalized.add("components", components);
+        }
+        return normalized;
+    }
+
+    private static void copyIfPresent(JsonObject from, JsonObject to, String key) {
+        if (from.has(key)) {
+            to.add(key, from.get(key));
+        }
+    }
+
+    private static class FluidStackAdapter implements JsonSerializer<FluidStack>, JsonDeserializer<FluidStack> {
+        @Override
+        public JsonElement serialize(FluidStack src, Type typeOfSrc, JsonSerializationContext context) {
+            if (src.isEmpty()) return JsonNull.INSTANCE;
+            return FluidStack.CODEC.encodeStart(JsonOps.INSTANCE, src).result().orElse(JsonNull.INSTANCE);
+        }
+
+        @Override
+        public FluidStack deserialize(JsonElement json, Type typeOfT, JsonDeserializationContext context) throws JsonParseException {
+            if (json == null || json.isJsonNull()) return FluidStack.EMPTY;
+            return FluidStack.CODEC.decode(JsonOps.INSTANCE, json).result()
+                    .map(com.mojang.datafixers.util.Pair::getFirst)
+                    .orElse(FluidStack.EMPTY);
+        }
+    }
+
+    private static class FluidIngredientAdapter implements JsonSerializer<FluidIngredient>, JsonDeserializer<FluidIngredient> {
+        @Override
+        public JsonElement serialize(FluidIngredient src, Type typeOfSrc, JsonSerializationContext context) {
+            if (src == FluidIngredient.EMPTY) return JsonNull.INSTANCE;
+            return src.serialize();
+        }
+
+        @Override
+        public FluidIngredient deserialize(JsonElement json, Type typeOfT, JsonDeserializationContext context) throws JsonParseException {
+            if (json == null || json.isJsonNull()) return FluidIngredient.EMPTY;
+            return FluidIngredient.deserialize(json);
+        }
+    }
+
+    private static class ChanceResultAdapter implements JsonSerializer<ChanceResult>, JsonDeserializer<ChanceResult> {
+        @Override
+        public JsonElement serialize(ChanceResult src, Type typeOfSrc, JsonSerializationContext context) {
+            JsonObject json = new JsonObject();
+            json.add("item", ItemStack.CODEC.encodeStart(JsonOps.INSTANCE, src.stack()).result().orElse(JsonNull.INSTANCE));
+            json.addProperty("chance", src.chance());
+            return json;
+        }
+
+        @Override
+        public ChanceResult deserialize(JsonElement json, Type typeOfT, JsonDeserializationContext context) throws JsonParseException {
+            if (json == null || !json.isJsonObject()) return ChanceResult.EMPTY;
+            JsonObject obj = json.getAsJsonObject();
+            ItemStack stack = decodeItemStack(chanceResultStackJson(obj), "ChanceResult.item");
+            float chance = obj.has("chance") ? obj.get("chance").getAsFloat() : 1.0F;
+            return new ChanceResult(stack, chance);
+        }
+    }
+
+    private static JsonElement chanceResultStackJson(JsonObject obj) {
+        if (obj.has("stack")) return obj.get("stack");
+        if (!obj.has("item")) return JsonNull.INSTANCE;
+        JsonElement item = obj.get("item");
+        if (item != null && item.isJsonObject()) return item;
+
+        JsonObject stack = new JsonObject();
+        stack.add("item", item);
+        copyIfPresent(obj, stack, "count");
+        copyIfPresent(obj, stack, "components");
+        copyIfPresent(obj, stack, "nbt");
+        return stack;
+    }
+
+    private static class IngredientListAdapter implements JsonSerializer<NonNullList<Ingredient>>, JsonDeserializer<NonNullList<Ingredient>> {
+        @Override
+        public JsonElement serialize(NonNullList<Ingredient> src, Type typeOfSrc, JsonSerializationContext context) {
+            JsonArray array = new JsonArray();
+            for (Ingredient ingredient : src) {
+                array.add(context.serialize(ingredient));
+            }
+            return array;
+        }
+
+        @Override
+        public NonNullList<Ingredient> deserialize(JsonElement json, Type typeOfT, JsonDeserializationContext context) throws JsonParseException {
+            NonNullList<Ingredient> list = NonNullList.create();
+            if (json.isJsonArray()) {
+                for (JsonElement element : json.getAsJsonArray()) {
+                    Ingredient ingredient = context.deserialize(element, Ingredient.class);
+                    list.add(ingredient != null ? ingredient : Ingredient.EMPTY);
+                }
+            }
+            return list;
+        }
+    }
+
+    private static class ItemStackListAdapter implements JsonSerializer<NonNullList<ItemStack>>, JsonDeserializer<NonNullList<ItemStack>> {
+        @Override
+        public JsonElement serialize(NonNullList<ItemStack> src, Type typeOfSrc, JsonSerializationContext context) {
+            JsonArray array = new JsonArray();
+            for (ItemStack stack : src) {
+                array.add(context.serialize(stack));
+            }
+            return array;
+        }
+
+        @Override
+        public NonNullList<ItemStack> deserialize(JsonElement json, Type typeOfT, JsonDeserializationContext context) throws JsonParseException {
+            NonNullList<ItemStack> list = NonNullList.create();
+            if (json.isJsonArray()) {
+                for (JsonElement element : json.getAsJsonArray()) {
+                    ItemStack stack = context.deserialize(element, ItemStack.class);
+                    list.add(stack != null ? stack : ItemStack.EMPTY);
+                }
+            }
+            return list;
+        }
+    }
+
+    private static class ChanceResultListAdapter implements JsonSerializer<NonNullList<ChanceResult>>, JsonDeserializer<NonNullList<ChanceResult>> {
+        @Override
+        public JsonElement serialize(NonNullList<ChanceResult> src, Type typeOfSrc, JsonSerializationContext context) {
+            JsonArray array = new JsonArray();
+            for (ChanceResult result : src) {
+                array.add(context.serialize(result));
+            }
+            return array;
+        }
+
+        @Override
+        public NonNullList<ChanceResult> deserialize(JsonElement json, Type typeOfT, JsonDeserializationContext context) throws JsonParseException {
+            NonNullList<ChanceResult> list = NonNullList.create();
+            if (json.isJsonArray()) {
+                for (JsonElement element : json.getAsJsonArray()) {
+                    ChanceResult result = context.deserialize(element, ChanceResult.class);
+                    list.add(result != null ? result : ChanceResult.EMPTY);
+                }
+            }
+            return list;
+        }
+    }
+}
+""".trimIndent()
+
+    private fun rewriteLegacyCapabilityHooks(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("LazyOptional") &&
+                    !original.contains("getCapability(") &&
+                    !original.contains("invalidateCaps(")) {
+                    return@forEach
+                }
+
+                var modified = original
+                modified = Regex(
+                    """(?ms)^([ \t]*)(?:@Override\s+)?public\s+<T>\s+LazyOptional<T>\s+getCapability\s*\(([^)]*)\)\s*\{\s*return\s+super\.getCapability\s*\([^;]*\);\s*\}""",
+                    RegexOption.MULTILINE
+                ).replace(modified, "")
+                if (!Regex("""\bCapability\s*<""").containsMatchIn(modified)) {
+                    modified = Regex("""(?m)^[ \t]*import\s+[\w.]+\.compat\.Capability;\s*\r?\n""")
+                        .replace(modified, "")
+                    modified = Regex("""(?m)^[ \t]*import\s+net\.neoforged\.neoforge\.capabilities\.Capability;\s*\r?\n""")
+                        .replace(modified, "")
+                }
+                modified = Regex(
+                    """(?m)^([ \t]*)@Override\s*\r?\n([ \t]*public\s+void\s+invalidateCaps\s*\()"""
+                ).replace(modified) { match ->
+                    match.groupValues[1] + match.groupValues[2]
+                }
+                modified = Regex(
+                    """(?m)^[ \t]*super\.invalidateCaps\(\);\s*\r?\n"""
+                ).replace(modified, "")
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Rewrite legacy capability fallback hooks for removed Forge capability overrides",
+                        before = "super.getCapability(...) / super.invalidateCaps()",
+                        after = "delete super-only capability hook / local invalidation only",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-rewrite-legacy-capability-hooks"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                }
+            }
+
+        return changes
+    }
+
+    private fun addLegacyCapabilityShims(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+        val compatPackage = detectCompatShimPackage(projectDir)
+        val compatPath = compatPackage.replace('.', '/')
+
+        var needsLazyOptional = false
+        var needsCapability = false
+        var needsConditionalRecipe = false
+        var needsRenderUtils = false
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .filter { !srcDir.relativize(it).toString().replace('\\', '/').startsWith("net/neoforged/neoforge/") }
+            .forEach { javaFile ->
+                val text = javaFile.readText()
+                val relocatedLazyOptional = relocateLazyOptionalImports(text, compatPackage)
+                if (relocatedLazyOptional != text) {
+                    needsLazyOptional = true
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Relocate LazyOptional compatibility import out of NeoForge package",
+                        before = "net.neoforged.neoforge.common.util.LazyOptional",
+                        after = "$compatPackage.LazyOptional",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-relocate-lazyoptional-import"
+                    ))
+                    if (!dryRun) {
+                        javaFile.writeText(relocatedLazyOptional)
+                    }
+                } else if (text.contains("LazyOptional")) {
+                    needsLazyOptional = true
+                }
+                val capabilitySource = if (relocatedLazyOptional != text) relocatedLazyOptional else text
+                val relocatedCapability = relocateCapabilityImports(capabilitySource, compatPackage)
+                if (relocatedCapability != capabilitySource) {
+                    needsCapability = true
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Relocate Capability compatibility import out of NeoForge package",
+                        before = "net.neoforged.neoforge.capabilities.Capability",
+                        after = "$compatPackage.Capability",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-relocate-capability-import"
+                    ))
+                    if (!dryRun) {
+                        javaFile.writeText(relocatedCapability)
+                    }
+                } else if (capabilitySource.contains("net.neoforged.neoforge.capabilities.Capability") ||
+                    Regex("""\bCapability\s*<""").containsMatchIn(capabilitySource)) {
+                    needsCapability = true
+                }
+                val conditionalSource = if (relocatedCapability != capabilitySource) relocatedCapability else capabilitySource
+                val relocatedConditionalRecipe = relocateConditionalRecipeImports(conditionalSource, compatPackage)
+                if (relocatedConditionalRecipe != conditionalSource) {
+                    needsConditionalRecipe = true
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Relocate removed ConditionalRecipe builder API to generated NeoForge RecipeOutput adapter",
+                        before = "net.neoforged.neoforge.common.crafting.ConditionalRecipe",
+                        after = "$compatPackage.ConditionalRecipe",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-relocate-conditionalrecipe-import"
+                    ))
+                    if (!dryRun) {
+                        javaFile.writeText(relocatedConditionalRecipe)
+                    }
+                } else if (conditionalSource.contains("ConditionalRecipe.builder()") ||
+                    Regex("""\bConditionalRecipe\.Builder\b""").containsMatchIn(conditionalSource)) {
+                    needsConditionalRecipe = true
+                }
+                val renderSource = if (relocatedConditionalRecipe != conditionalSource) relocatedConditionalRecipe else conditionalSource
+                val relocatedRenderUtils = relocateRenderUtilsImportsAndCalls(renderSource, compatPackage)
+                if (relocatedRenderUtils != renderSource) {
+                    needsRenderUtils = true
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Relocate removed MMLib RenderUtils fluid helper to generated GUI fluid renderer",
+                        before = "cn.mcmod_mmf.mmlib.client.RenderUtils.renderFluidStack(...)",
+                        after = "$compatPackage.RenderUtils.renderFluidStack(guiGraphics, ...)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-relocate-renderutils-fluid"
+                    ))
+                    if (!dryRun) {
+                        javaFile.writeText(relocatedRenderUtils)
+                    }
+                } else if (renderSource.contains("RenderUtils.renderFluidStack(")) {
+                    needsRenderUtils = true
+                }
+            }
+
+        if (needsLazyOptional) {
+            val shim = srcDir.resolve("$compatPath/LazyOptional.java")
+            if (!shim.exists()) {
+                changes.add(Change(
+                    file = shim,
+                    line = 1,
+                    description = "Add LazyOptional source compatibility shim",
+                    before = "(missing)",
+                    after = "LazyOptional shim",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-add-lazyoptional-shim"
+                ))
+                if (!dryRun) {
+                    shim.parent.createDirectories()
+                    shim.writeText(legacyLazyOptionalShim(compatPackage))
+                }
+            }
+        }
+
+        if (needsCapability) {
+            val shim = srcDir.resolve("$compatPath/Capability.java")
+            if (!shim.exists()) {
+                changes.add(Change(
+                    file = shim,
+                    line = 1,
+                    description = "Add Capability type source compatibility shim",
+                    before = "(missing)",
+                    after = "Capability shim",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-add-capability-shim"
+                ))
+                if (!dryRun) {
+                    shim.parent.createDirectories()
+                    shim.writeText(legacyCapabilityShim(compatPackage))
+                }
+            }
+        }
+
+        if (needsConditionalRecipe) {
+            val shim = srcDir.resolve("$compatPath/ConditionalRecipe.java")
+            if (!shim.exists()) {
+                changes.add(Change(
+                    file = shim,
+                    line = 1,
+                    description = "Add ConditionalRecipe builder adapter backed by RecipeOutput.withConditions",
+                    before = "(missing)",
+                    after = "ConditionalRecipe adapter",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-add-conditionalrecipe-shim"
+                ))
+                if (!dryRun) {
+                    shim.parent.createDirectories()
+                    shim.writeText(legacyConditionalRecipeShim(compatPackage))
+                }
+            }
+        }
+
+        if (needsRenderUtils) {
+            val shim = srcDir.resolve("$compatPath/RenderUtils.java")
+            if (!shim.exists()) {
+                changes.add(Change(
+                    file = shim,
+                    line = 1,
+                    description = "Add GUI fluid render helper compatible with removed MMLib RenderUtils.renderFluidStack",
+                    before = "(missing)",
+                    after = "RenderUtils fluid renderer",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-add-renderutils-fluid-shim"
+                ))
+                if (!dryRun) {
+                    shim.parent.createDirectories()
+                    shim.writeText(legacyRenderUtilsShim(compatPackage))
+                }
+            }
+        }
+
+        changes.addAll(removeOldGlobalCapabilityShims(srcDir, dryRun))
+
+        return changes
+    }
+
+    private fun detectCompatShimPackage(projectDir: Path): String {
+        val modIdFromProperties = projectDir.resolve("gradle.properties")
+            .takeIf { it.exists() }
+            ?.readText()
+            ?.let { Regex("""(?m)^mod_?id\s*=\s*([A-Za-z0-9_.-]+)\s*$""").find(it)?.groupValues?.get(1) }
+        val modId = modIdFromProperties ?: detectModId(projectDir) ?: projectDir.fileName.toString()
+        return "com.modporter.generated.${sanitizePackageSegment(modId)}.compat"
+    }
+
+    private fun sanitizePackageSegment(value: String): String {
+        val sanitized = value.lowercase()
+            .replace(Regex("""[^a-z0-9_]"""), "_")
+            .trim('_')
+            .ifBlank { "mod" }
+        return if (sanitized.first().isDigit()) "m$sanitized" else sanitized
+    }
+
+    private fun removeOldGlobalCapabilityShims(srcDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val oldShims = listOf(
+            srcDir.resolve("com/modporter/compat/LazyOptional.java") to "build-remove-global-lazyoptional-shim",
+            srcDir.resolve("com/modporter/compat/Capability.java") to "build-remove-global-capability-shim"
+        )
+        for ((shim, ruleId) in oldShims) {
+            if (!shim.exists()) continue
+            val text = shim.readText()
+            val generatedByModporter = text.contains("generated by modporter") &&
+                text.contains("package com.modporter.compat;")
+            if (!generatedByModporter) continue
+            changes.add(Change(
+                file = shim,
+                line = 1,
+                description = "Remove old global capability shim package to avoid NeoForge module split-package conflicts",
+                before = "com.modporter.compat",
+                after = "per-mod generated capability shim package",
+                confidence = Confidence.HIGH,
+                ruleId = ruleId
+            ))
+            if (!dryRun) {
+                shim.deleteIfExists()
+            }
+        }
+        return changes
+    }
+
+    private fun relocateLazyOptionalImports(text: String, compatPackage: String): String =
+        text
+            .replace("import net.minecraftforge.common.util.LazyOptional;", "import $compatPackage.LazyOptional;")
+            .replace("import net.neoforged.neoforge.common.util.LazyOptional;", "import $compatPackage.LazyOptional;")
+            .replace("import net.minecraftforge.common.util.*;", "import $compatPackage.LazyOptional;")
+            .replace("import net.neoforged.neoforge.common.util.*;", "import $compatPackage.LazyOptional;")
+            .replace("import com.modporter.compat.LazyOptional;", "import $compatPackage.LazyOptional;")
+            .replace("net.minecraftforge.common.util.LazyOptional", "$compatPackage.LazyOptional")
+            .replace("net.neoforged.neoforge.common.util.LazyOptional", "$compatPackage.LazyOptional")
+            .replace("com.modporter.compat.LazyOptional", "$compatPackage.LazyOptional")
+
+    private fun relocateCapabilityImports(text: String, compatPackage: String): String =
+        text
+            .replace("import net.neoforged.neoforge.capabilities.Capability;", "import $compatPackage.Capability;")
+            .replace("import com.modporter.compat.Capability;", "import $compatPackage.Capability;")
+            .replace("net.neoforged.neoforge.capabilities.Capability", "$compatPackage.Capability")
+            .replace("com.modporter.compat.Capability", "$compatPackage.Capability")
+
+    private fun relocateConditionalRecipeImports(text: String, compatPackage: String): String =
+        text
+            .replace("import net.minecraftforge.common.crafting.ConditionalRecipe;", "import $compatPackage.ConditionalRecipe;")
+            .replace("import net.neoforged.neoforge.common.crafting.ConditionalRecipe;", "import $compatPackage.ConditionalRecipe;")
+            .replace("net.minecraftforge.common.crafting.ConditionalRecipe", "$compatPackage.ConditionalRecipe")
+            .replace("net.neoforged.neoforge.common.crafting.ConditionalRecipe", "$compatPackage.ConditionalRecipe")
+
+    private fun relocateRenderUtilsImportsAndCalls(text: String, compatPackage: String): String {
+        var result = text
+            .replace("import cn.mcmod_mmf.mmlib.client.RenderUtils;", "import $compatPackage.RenderUtils;")
+            .replace("cn.mcmod_mmf.mmlib.client.RenderUtils", "$compatPackage.RenderUtils")
+        result = Regex("""RenderUtils\.renderFluidStack\(\s*(?!ms\s*,)""")
+            .replace(result, "RenderUtils.renderFluidStack(ms, ")
+        return result
+    }
+
+    private fun cleanupDuplicateOverrides(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+
+        val duplicateOverride = Regex(
+            """(?m)^([ \t]*)@Override[ \t]*\r?\n((?:[ \t]*@[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\([^)\r\n]*\))?[ \t]*\r?\n)+[ \t]*)@Override"""
+        )
+
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                val modified = duplicateOverride.replace(original) { match ->
+                    match.groupValues[2] + "@Override"
+                }
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Remove duplicate @Override generated by chained method-signature rewrites",
+                        before = "@Override + annotations + @Override",
+                        after = "annotations + @Override",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-cleanup-duplicate-override"
+                    ))
+                    if (!dryRun) {
+                        javaFile.writeText(modified)
+                    }
+                }
+            }
+
+        return changes
     }
 
     companion object {
+        val EMPTY_GAMETEST_STRUCTURE_SNBT = """
+{
+  DataVersion: 3953,
+  size: [1, 1, 1],
+  entities: [],
+  blocks: [],
+  palette: []
+}
+""".trimIndent()
+
         val NEOFORGE_BLOCK = """
 neoForge {
     version = project.neo_forge_version
@@ -1650,11 +6428,21 @@ neoForge {
             systemProperty 'forge.logging.markers', 'REGISTRIES'
             logLevel = org.slf4j.event.Level.DEBUG
         }
+        clientWorld {
+            client()
+            programArguments.addAll '--quickPlayPath', 'quickplay/modporter_smoke_world.json', '--quickPlaySingleplayer', 'modporter_smoke_world'
+            systemProperty 'forge.logging.markers', 'REGISTRIES'
+            logLevel = org.slf4j.event.Level.DEBUG
+        }
         server {
             server()
             programArgument '--nogui'
             systemProperty 'forge.logging.markers', 'REGISTRIES'
             logLevel = org.slf4j.event.Level.DEBUG
+        }
+        gameTestServer {
+            type = "gameTestServer"
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
         }
         data {
             data()
@@ -1663,7 +6451,7 @@ neoForge {
     }
 
     mods {
-        "MOD_ID_PLACEHOLDER" {
+        "MOD_ID_TOKEN" {
             sourceSet(sourceSets.main)
         }
     }
@@ -1671,7 +6459,610 @@ neoForge {
 
 sourceSets.main.resources {
     srcDir 'src/generated/resources'
-}""".trimIndent().replace("MOD_ID_PLACEHOLDER", "\${project.mod_id}")
+}
+
+tasks.matching { it.name == 'prepareGameTestServerRun' }.configureEach {
+    doLast {
+        def gameTestStructures = file('src/main/resources/gameteststructures')
+        if (gameTestStructures.exists()) {
+            copy {
+                from gameTestStructures
+                into file('run/gameteststructures')
+            }
+        }
+    }
+}""".trimIndent().replace("MOD_ID_TOKEN", "\${project.mod_id}")
+
+        fun legacyLazyOptionalShim(compatPackage: String): String = """
+package $compatPackage;
+
+import java.util.Optional;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+
+/**
+ * Source-compatibility adapter generated by modporter for legacy call chains.
+ * NeoForge 1.21 removed LazyOptional; new capabilities should use RegisterCapabilitiesEvent directly.
+ */
+public final class LazyOptional<T> {
+    private final Supplier<? extends T> supplier;
+    private boolean valid = true;
+    private boolean resolved = false;
+    private T value;
+
+    private LazyOptional(Supplier<? extends T> supplier) {
+        this.supplier = supplier;
+    }
+
+    public static <T> LazyOptional<T> of(Supplier<? extends T> supplier) {
+        return new LazyOptional<>(supplier);
+    }
+
+    public static <T> LazyOptional<T> ofNullable(T value) {
+        return new LazyOptional<>(() -> value);
+    }
+
+    public static <T> LazyOptional<T> empty() {
+        return new LazyOptional<>(() -> null);
+    }
+
+    @SuppressWarnings("unchecked")
+    public <R> LazyOptional<R> cast() {
+        return new LazyOptional<>(() -> (R) this.orElse(null));
+    }
+
+    public void ifPresent(Consumer<? super T> consumer) {
+        T current = orElse(null);
+        if (current != null) {
+            consumer.accept(current);
+        }
+    }
+
+    public <R> LazyOptional<R> map(Function<? super T, ? extends R> mapper) {
+        return new LazyOptional<>(() -> {
+            T current = orElse(null);
+            return current != null ? mapper.apply(current) : null;
+        });
+    }
+
+    public LazyOptional<T> filter(Predicate<? super T> predicate) {
+        return new LazyOptional<>(() -> {
+            T current = orElse(null);
+            return current != null && predicate.test(current) ? current : null;
+        });
+    }
+
+    public T orElse(T other) {
+        if (!valid) {
+            return other;
+        }
+        if (!resolved) {
+            value = supplier.get();
+            resolved = true;
+        }
+        return value != null ? value : other;
+    }
+
+    public T orElseGet(Supplier<? extends T> other) {
+        T current = orElse(null);
+        return current != null ? current : other.get();
+    }
+
+    public <X extends Throwable> T orElseThrow(Supplier<? extends X> exceptionSupplier) throws X {
+        T current = orElse(null);
+        if (current != null) {
+            return current;
+        }
+        throw exceptionSupplier.get();
+    }
+
+    public Optional<T> resolve() {
+        return Optional.ofNullable(orElse(null));
+    }
+
+    public boolean isPresent() {
+        return orElse(null) != null;
+    }
+
+    public void invalidate() {
+        valid = false;
+        value = null;
+        resolved = true;
+    }
+}
+""".trimIndent()
+
+        fun legacyCapabilityShim(compatPackage: String): String = """
+package $compatPackage;
+
+/**
+ * Generated compatibility type for legacy Forge capability declarations.
+ * NeoForge 1.21 models capabilities with typed BlockCapability/ItemCapability objects.
+ */
+public final class Capability<T> {
+}
+""".trimIndent()
+
+        fun legacyConditionalRecipeShim(compatPackage: String): String = """
+package $compatPackage;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Consumer;
+import net.minecraft.advancements.Advancement;
+import net.minecraft.advancements.AdvancementHolder;
+import net.minecraft.data.recipes.RecipeOutput;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.item.crafting.Recipe;
+import net.neoforged.neoforge.common.conditions.ICondition;
+
+/**
+ * Source-compatibility adapter generated by modporter for Forge conditional recipe builders.
+ * NeoForge 1.21 carries recipe conditions through RecipeOutput.withConditions(...).
+ */
+public final class ConditionalRecipe {
+    private ConditionalRecipe() {
+    }
+
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    public static final class Builder {
+        private final List<ICondition> conditions = new ArrayList<>();
+        private final List<Consumer<RecipeOutput>> recipes = new ArrayList<>();
+        private ResourceLocation advancementId;
+
+        public Builder addCondition(ICondition condition) {
+            this.conditions.add(condition);
+            return this;
+        }
+
+        public Builder addRecipe(Consumer<RecipeOutput> recipe) {
+            this.recipes.add(recipe);
+            return this;
+        }
+
+        public Builder generateAdvancement(ResourceLocation id) {
+            this.advancementId = id;
+            return this;
+        }
+
+        public void build(RecipeOutput output, String namespace, String path) {
+            build(output, ResourceLocation.fromNamespaceAndPath(namespace, path));
+        }
+
+        public void build(RecipeOutput output, ResourceLocation id) {
+            RecipeOutput conditionalOutput = output.withConditions(conditions.toArray(ICondition[]::new));
+            RecipeOutput namedOutput = new RecipeOutput() {
+                @Override
+                public void accept(ResourceLocation generatedId, Recipe<?> recipe, AdvancementHolder advancement) {
+                    forward(conditionalOutput, recipe, advancement);
+                }
+
+                @Override
+                public void accept(ResourceLocation generatedId, Recipe<?> recipe, AdvancementHolder advancement, ICondition... extraConditions) {
+                    RecipeOutput target = extraConditions.length == 0 ? conditionalOutput : conditionalOutput.withConditions(extraConditions);
+                    forward(target, recipe, advancement);
+                }
+
+                private void forward(RecipeOutput target, Recipe<?> recipe, AdvancementHolder advancement) {
+                    AdvancementHolder forwardedAdvancement = advancement;
+                    if (advancementId != null && advancement != null) {
+                        forwardedAdvancement = new AdvancementHolder(advancementId, advancement.value());
+                    }
+                    target.accept(id, recipe, forwardedAdvancement);
+                }
+
+                @Override
+                public Advancement.Builder advancement() {
+                    return conditionalOutput.advancement();
+                }
+            };
+            for (Consumer<RecipeOutput> recipe : recipes) {
+                recipe.accept(namedOutput);
+            }
+        }
+    }
+}
+""".trimIndent()
+
+        fun legacyRenderUtilsShim(compatPackage: String): String = """
+package $compatPackage;
+
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.renderer.texture.TextureAtlas;
+import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+import net.minecraft.resources.ResourceLocation;
+import net.neoforged.neoforge.client.extensions.common.IClientFluidTypeExtensions;
+import net.neoforged.neoforge.fluids.FluidStack;
+
+/**
+ * Source-compatibility renderer generated by modporter for the removed MMLib RenderUtils.renderFluidStack helper.
+ * It draws the fluid still texture in 16x16 tiles and applies the fluid tint color.
+ */
+public final class RenderUtils {
+    private RenderUtils() {
+    }
+
+    public static void renderFluidStack(GuiGraphics guiGraphics, int x, int y, int width, int height, float z, FluidStack fluidStack) {
+        if (guiGraphics == null || fluidStack == null || fluidStack.isEmpty() || width <= 0 || height <= 0) {
+            return;
+        }
+
+        IClientFluidTypeExtensions extensions = IClientFluidTypeExtensions.of(fluidStack.getFluid());
+        ResourceLocation texture = extensions.getStillTexture(fluidStack);
+        TextureAtlasSprite sprite = Minecraft.getInstance()
+                .getTextureAtlas(TextureAtlas.LOCATION_BLOCKS)
+                .apply(texture);
+        int tint = extensions.getTintColor(fluidStack);
+        float alpha = ((tint >> 24) & 0xFF) / 255.0F;
+        if (alpha <= 0.0F) {
+            alpha = 1.0F;
+        }
+        float red = ((tint >> 16) & 0xFF) / 255.0F;
+        float green = ((tint >> 8) & 0xFF) / 255.0F;
+        float blue = (tint & 0xFF) / 255.0F;
+
+        guiGraphics.setColor(red, green, blue, alpha);
+        int zOffset = (int) z;
+        for (int drawX = 0; drawX < width; drawX += 16) {
+            for (int drawY = 0; drawY < height; drawY += 16) {
+                int drawWidth = Math.min(16, width - drawX);
+                int drawHeight = Math.min(16, height - drawY);
+                guiGraphics.blit(x + drawX, y + drawY, zOffset, drawWidth, drawHeight, sprite);
+            }
+        }
+        guiGraphics.setColor(1.0F, 1.0F, 1.0F, 1.0F);
+    }
+}
+""".trimIndent()
+
+        val LEGACY_MMLIB_FLUID_INGREDIENT_SHIM = """
+package cn.mcmod_mmf.mmlib.fluid;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.tags.TagKey;
+import net.minecraft.world.level.material.Fluid;
+import net.neoforged.neoforge.fluids.FluidStack;
+
+/**
+ * Generated compatibility implementation for old MMLib fluid ingredients on NeoForge 1.21.
+ */
+public abstract class FluidIngredient implements Predicate<FluidStack> {
+    public static final FluidIngredient EMPTY = new EmptyFluidIngredient();
+
+    protected int amountRequired;
+    private List<FluidStack> matchingFluidStacks;
+
+    public static FluidIngredient fromTag(TagKey<Fluid> tag, int amount) {
+        return new TagFluidIngredient(tag, amount);
+    }
+
+    public static FluidIngredient fromFluid(Fluid fluid, int amount) {
+        return new SingleFluidIngredient(fluid, amount);
+    }
+
+    public static FluidIngredient fromFluid(Supplier<? extends Fluid> fluid, int amount) {
+        return fromFluid(fluid.get(), amount);
+    }
+
+    public static FluidIngredient fromFluidStack(FluidStack stack) {
+        return stack == null || stack.isEmpty() ? EMPTY : fromFluid(stack.getFluid(), stack.getAmount());
+    }
+
+    public int getAmount() {
+        return amountRequired;
+    }
+
+    public int getRequiredAmount() {
+        return amountRequired;
+    }
+
+    public List<FluidStack> getMatchingFluidStacks() {
+        if (matchingFluidStacks == null) {
+            matchingFluidStacks = determineMatchingFluidStacks();
+        }
+        return matchingFluidStacks;
+    }
+
+    public FluidStack[] getStacks() {
+        return getMatchingFluidStacks().toArray(FluidStack[]::new);
+    }
+
+    public JsonObject serialize() {
+        JsonObject json = new JsonObject();
+        writeInternal(json);
+        json.addProperty("amount", amountRequired);
+        return json;
+    }
+
+    public static boolean isFluidIngredient(JsonElement json) {
+        if (json == null || !json.isJsonObject()) return false;
+        JsonObject obj = json.getAsJsonObject();
+        return obj.has("fluid") || obj.has("tag");
+    }
+
+    public static FluidIngredient deserialize(JsonElement json) {
+        if (json == null || !json.isJsonObject()) return EMPTY;
+        JsonObject obj = json.getAsJsonObject();
+        int amount = obj.has("amount") ? obj.get("amount").getAsInt() : 1000;
+        if (obj.has("tag")) {
+            ResourceLocation tagId = ResourceLocation.parse(obj.get("tag").getAsString());
+            return fromTag(TagKey.create(Registries.FLUID, tagId), amount);
+        }
+        if (obj.has("fluid")) {
+            Fluid fluid = BuiltInRegistries.FLUID.get(ResourceLocation.parse(obj.get("fluid").getAsString()));
+            return fromFluid(fluid, amount);
+        }
+        return EMPTY;
+    }
+
+    @Override
+    public boolean test(FluidStack stack) {
+        return stack != null && stack.getAmount() >= amountRequired && testInternal(stack);
+    }
+
+    protected abstract boolean testInternal(FluidStack stack);
+    protected abstract List<FluidStack> determineMatchingFluidStacks();
+    protected abstract void writeInternal(JsonObject json);
+
+    private static final class EmptyFluidIngredient extends FluidIngredient {
+        private EmptyFluidIngredient() {
+            this.amountRequired = 0;
+        }
+
+        @Override
+        public boolean test(FluidStack stack) {
+            return false;
+        }
+
+        @Override
+        protected boolean testInternal(FluidStack stack) {
+            return false;
+        }
+
+        @Override
+        protected List<FluidStack> determineMatchingFluidStacks() {
+            return Collections.emptyList();
+        }
+
+        @Override
+        protected void writeInternal(JsonObject json) {
+        }
+    }
+
+    private static final class SingleFluidIngredient extends FluidIngredient {
+        private final Fluid fluid;
+
+        private SingleFluidIngredient(Fluid fluid, int amount) {
+            this.fluid = fluid;
+            this.amountRequired = amount;
+        }
+
+        @Override
+        protected boolean testInternal(FluidStack stack) {
+            return stack.getFluid().isSame(fluid);
+        }
+
+        @Override
+        protected List<FluidStack> determineMatchingFluidStacks() {
+            return Collections.singletonList(new FluidStack(fluid, amountRequired));
+        }
+
+        @Override
+        protected void writeInternal(JsonObject json) {
+            json.addProperty("fluid", BuiltInRegistries.FLUID.getKey(fluid).toString());
+        }
+    }
+
+    private static final class TagFluidIngredient extends FluidIngredient {
+        private final TagKey<Fluid> tag;
+
+        private TagFluidIngredient(TagKey<Fluid> tag, int amount) {
+            this.tag = tag;
+            this.amountRequired = amount;
+        }
+
+        @Override
+        protected boolean testInternal(FluidStack stack) {
+            return stack.getFluid().builtInRegistryHolder().is(tag);
+        }
+
+        @Override
+        protected List<FluidStack> determineMatchingFluidStacks() {
+            List<FluidStack> stacks = new ArrayList<>();
+            BuiltInRegistries.FLUID.getTag(tag).ifPresent(holders ->
+                holders.forEach(holder -> stacks.add(new FluidStack(holder.value(), amountRequired)))
+            );
+            return stacks;
+        }
+
+        @Override
+        protected void writeInternal(JsonObject json) {
+            json.addProperty("tag", tag.location().toString());
+        }
+    }
+}
+""".trimIndent()
+
+        val LEGACY_MMLIB_ABSTRACT_RECIPE_SHIM = """
+package cn.mcmod_mmf.mmlib.recipe;
+
+import com.google.gson.annotations.Expose;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.core.RegistryAccess;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.crafting.Recipe;
+import net.neoforged.neoforge.items.wrapper.RecipeWrapper;
+
+/**
+ * Generated compatibility base for MMLib recipes on the NeoForge 1.21 Recipe API.
+ */
+public abstract class AbstractRecipe implements Recipe<RecipeWrapper> {
+    protected ResourceLocation id;
+    public String group = "";
+    @Expose
+    public float experience;
+    @Expose
+    public int recipeTime;
+
+    public void setId(ResourceLocation id) {
+        this.id = id;
+    }
+
+    public ResourceLocation getId() {
+        return id;
+    }
+
+    public float getExperience() {
+        return experience;
+    }
+
+    public int getRecipeTime() {
+        return recipeTime;
+    }
+
+    @Override
+    public String getGroup() {
+        return group;
+    }
+
+    public ItemStack getResultItem(RegistryAccess registryAccess) {
+        return getResultItem((HolderLookup.Provider) null);
+    }
+
+    @Override
+    public abstract ItemStack getResultItem(HolderLookup.Provider registries);
+
+    @Override
+    public boolean isSpecial() {
+        return true;
+    }
+}
+""".trimIndent()
+
+        val LEGACY_MMLIB_CHANCE_RESULT_SHIM = """
+package cn.mcmod_mmf.mmlib.recipe;
+
+import com.google.gson.annotations.Expose;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.item.ItemStack;
+
+/**
+ * Generated compatibility value type for MMLib chance results.
+ */
+public record ChanceResult(@Expose ItemStack stack, @Expose float chance) {
+    public static final ChanceResult EMPTY = new ChanceResult(ItemStack.EMPTY, 0.0F);
+
+    public ItemStack rollOutput(RandomSource random, int fortuneLevel) {
+        if (stack.isEmpty()) return ItemStack.EMPTY;
+        float effectiveChance = Math.min(1.0F, chance + Math.max(0, fortuneLevel) * 0.05F);
+        return random.nextFloat() <= effectiveChance ? stack.copy() : ItemStack.EMPTY;
+    }
+}
+""".trimIndent()
+
+        val LEGACY_MMLIB_ABSTRACT_RECIPE_SERIALIZER_SHIM = """
+package cn.mcmod_mmf.mmlib.recipe;
+
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
+import com.mojang.serialization.DataResult;
+import com.mojang.serialization.DynamicOps;
+import com.mojang.serialization.JsonOps;
+import com.mojang.serialization.MapCodec;
+import com.mojang.serialization.MapLike;
+import com.mojang.serialization.RecordBuilder;
+import java.util.stream.Stream;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.world.item.crafting.RecipeSerializer;
+
+/**
+ * Generated compatibility serializer for old Gson-backed MMLib recipes on the 1.21 RecipeSerializer API.
+ */
+public class AbstractRecipeSerializer<T extends AbstractRecipe> implements RecipeSerializer<T> {
+    private final Class<T> recipeClass;
+    private final Gson gson = new GsonBuilder().excludeFieldsWithoutExposeAnnotation().create();
+    private final MapCodec<T> mapCodec = new MapCodec<>() {
+        @Override
+        public <O> RecordBuilder<O> encode(T input, DynamicOps<O> ops, RecordBuilder<O> prefix) {
+            JsonObject json = toJson(input);
+            for (var entry : json.entrySet()) {
+                prefix = prefix.add(entry.getKey(), JsonOps.INSTANCE.convertTo(ops, entry.getValue()));
+            }
+            return prefix;
+        }
+
+        @Override
+        public <O> DataResult<T> decode(DynamicOps<O> ops, MapLike<O> input) {
+            try {
+                JsonObject json = new JsonObject();
+                input.entries().forEach(pair -> {
+                    String key = ops.getStringValue(pair.getFirst()).result().orElse("");
+                    if (!key.isEmpty()) {
+                        json.add(key, ops.convertTo(JsonOps.INSTANCE, pair.getSecond()));
+                    }
+                });
+                return DataResult.success(fromJson(json));
+            } catch (Exception e) {
+                return DataResult.error(() -> "Failed to decode legacy MMLib recipe: " + e.getMessage());
+            }
+        }
+
+        @Override
+        public <O> Stream<O> keys(DynamicOps<O> ops) {
+            return Stream.empty();
+        }
+    };
+    private final StreamCodec<RegistryFriendlyByteBuf, T> streamCodec = StreamCodec.of(
+        (buf, recipe) -> buf.writeUtf(gson.toJson(recipe)),
+        buf -> fromJson(com.google.gson.JsonParser.parseString(buf.readUtf(32767)).getAsJsonObject())
+    );
+
+    public AbstractRecipeSerializer(Class<T> recipeClass) {
+        this.recipeClass = recipeClass;
+    }
+
+    @Override
+    public MapCodec<T> codec() {
+        return mapCodec;
+    }
+
+    @Override
+    public StreamCodec<RegistryFriendlyByteBuf, T> streamCodec() {
+        return streamCodec;
+    }
+
+    public T fromJson(JsonObject json) {
+        try {
+            return gson.fromJson(json, recipeClass);
+        } catch (JsonParseException e) {
+            throw e;
+        }
+    }
+
+    public JsonObject toJson(T recipe) {
+        return gson.toJsonTree(recipe).getAsJsonObject();
+    }
+}
+""".trimIndent()
 
         val SETTINGS_GRADLE = """pluginManagement {
     repositories {
@@ -1707,6 +7098,83 @@ rootProject.name = '%%PROJECT_NAME%%'
                         if (depth == 0) return i
                     }
                 }
+            }
+            return -1
+        }
+
+        fun findJavaStatementEnd(content: String, startIndex: Int): Int {
+            var parenDepth = 0
+            var braceDepth = 0
+            var bracketDepth = 0
+            var inString = false
+            var inChar = false
+            var inLineComment = false
+            var inBlockComment = false
+            var escaped = false
+            var i = startIndex
+            while (i < content.length) {
+                val ch = content[i]
+                val next = content.getOrNull(i + 1)
+
+                if (inLineComment) {
+                    if (ch == '\n' || ch == '\r') inLineComment = false
+                    i++
+                    continue
+                }
+                if (inBlockComment) {
+                    if (ch == '*' && next == '/') {
+                        inBlockComment = false
+                        i += 2
+                    } else {
+                        i++
+                    }
+                    continue
+                }
+                if (inString) {
+                    if (escaped) {
+                        escaped = false
+                    } else if (ch == '\\') {
+                        escaped = true
+                    } else if (ch == '"') {
+                        inString = false
+                    }
+                    i++
+                    continue
+                }
+                if (inChar) {
+                    if (escaped) {
+                        escaped = false
+                    } else if (ch == '\\') {
+                        escaped = true
+                    } else if (ch == '\'') {
+                        inChar = false
+                    }
+                    i++
+                    continue
+                }
+
+                when {
+                    ch == '/' && next == '/' -> {
+                        inLineComment = true
+                        i += 2
+                        continue
+                    }
+                    ch == '/' && next == '*' -> {
+                        inBlockComment = true
+                        i += 2
+                        continue
+                    }
+                    ch == '"' -> inString = true
+                    ch == '\'' -> inChar = true
+                    ch == '(' -> parenDepth++
+                    ch == ')' -> if (parenDepth > 0) parenDepth--
+                    ch == '{' -> braceDepth++
+                    ch == '}' -> if (braceDepth > 0) braceDepth--
+                    ch == '[' -> bracketDepth++
+                    ch == ']' -> if (bracketDepth > 0) bracketDepth--
+                    ch == ';' && parenDepth == 0 && braceDepth == 0 && bracketDepth == 0 -> return i
+                }
+                i++
             }
             return -1
         }

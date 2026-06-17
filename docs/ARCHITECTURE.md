@@ -50,7 +50,7 @@ with increasing complexity.
                               ▼
                     ┌──────────────────┐
                     │ Report Generator  │
-                    │ (changes + TODOs) │
+                    │ (changes + gates) │
                     └──────────────────┘
 ```
 
@@ -148,8 +148,8 @@ For changes too complex for rule-based systems:
 - Extract code context around flagged patterns
 - Generate structured prompts with before/after examples
 - Call LLM API (Claude/GPT) for transformation suggestions
-- Present results for human review
-- Learn from accepted/rejected suggestions
+- Emit structured migration candidates for automated gate evaluation
+- Learn from accepted/rejected gate outcomes
 
 ## Module Structure
 
@@ -299,13 +299,13 @@ All Category A + B transformations. These are 100% correct, no ambiguity.
 
 ### Phase 2: Pattern-Based Heuristics (Ship with review mode)
 Category C transformations using AST pattern matching.
-Tool detects patterns, generates code, marks for human review.
+Tool detects patterns, generates code, and requires automated validation gates.
 ~80-85% total coverage.
 
 ### Phase 3: AI-Augmented (Experimental)
 Category D via LLM integration.
-Tool extracts context, generates prompts, presents suggestions.
-~90-95% total coverage with human-in-the-loop.
+Tool extracts context, generates prompts, and feeds candidates back through deterministic gates.
+~90-95% total coverage with strict automated validation.
 
 ## Benchmark Strategy
 
@@ -319,7 +319,7 @@ Tool extracts context, generates prompts, presents suggestions.
    - Rules applied count
    - Confidence distribution (HIGH/MEDIUM/LOW)
    - Compilation success rate after porting
-   - Manual fixes remaining count
+   - Strict gate failures remaining count
 
 ## CLI Interface Design
 
@@ -334,7 +334,7 @@ OPTIONS:
   --out <path>            Output directory (default: <src>-neoforge)
   --dry-run               Preview changes without modifying files
   --passes <list>         Run specific passes (text,ast,structural,build,resource,ai)
-  --min-confidence <lvl>  Only apply transforms at or above this level (high,medium,low)
+  --min-confidence <lvl>  Dry-run/report filter for proposed changes (high,medium,low)
   --ai-api-key <key>      API key for AI-assisted transforms
   --report <path>         Write detailed report to file
   --verbose               Show detailed transformation log

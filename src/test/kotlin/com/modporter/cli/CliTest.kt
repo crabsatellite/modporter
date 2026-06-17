@@ -1,11 +1,13 @@
 package com.modporter.cli
 
+import com.github.ajalt.clikt.core.UsageError
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
 import kotlin.io.path.*
 import kotlin.test.assertTrue
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 
 /**
  * Tests for CLI commands by invoking them programmatically.
@@ -120,6 +122,41 @@ class CliTest {
             "--min-confidence", "high"
         ))
         // Should complete without error
+    }
+
+    @Test
+    fun `port command rejects confidence filter in apply mode`() {
+        val projectDir = setupMiniMod()
+        val outDir = tempDir.resolve("filtered-out")
+
+        val error = assertFailsWith<UsageError> {
+            PortCommand().parse(listOf(
+                "--src", projectDir.toString(),
+                "--out", outDir.toString(),
+                "--min-confidence", "high"
+            ))
+        }
+
+        assertTrue(error.message?.contains("--dry-run") == true)
+        assertFalse(outDir.exists(), "Apply mode should fail before creating output")
+
+        val source = projectDir.resolve("src/main/java/com/example/Mini.java").readText()
+        assertTrue(source.contains("net.minecraftforge"), "Rejected apply should not modify source")
+    }
+
+    @Test
+    fun `port command rejects unknown confidence level`() {
+        val projectDir = setupMiniMod()
+
+        val error = assertFailsWith<UsageError> {
+            PortCommand().parse(listOf(
+                "--src", projectDir.toString(),
+                "--dry-run",
+                "--min-confidence", "certain"
+            ))
+        }
+
+        assertTrue(error.message?.contains("expected high, medium, or low") == true)
     }
 
     @Test

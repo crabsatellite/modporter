@@ -20,7 +20,7 @@ class ReportGeneratorTest {
         )
         val medChange = Change(
             file = Path.of("src/Cap.java"), line = 20,
-            description = "Capability detected", before = "ICapabilityProvider", after = "TODO migrate",
+            description = "Capability detected", before = "ICapabilityProvider", after = "RegisterCapabilitiesEvent provider",
             confidence = Confidence.MEDIUM, ruleId = "struct-cap"
         )
         val lowChange = Change(
@@ -85,6 +85,17 @@ class ReportGeneratorTest {
     }
 
     @Test
+    fun `report routes low confidence work through automated gates`() {
+        val reportPath = tempDir.resolve("report.md")
+        ReportGenerator().generate(sampleResult(), reportPath)
+        val content = reportPath.readText()
+
+        assertTrue(content.contains("Changes Requiring Automated Validation"))
+        assertTrue(content.contains("blocks strict success until an automated gate covers it"))
+        assertTrue(!Regex("""manual\s+review|manual\s+migration|manual\s+intervention|hand[- ]edit|human\s+verification|human\s+review""", RegexOption.IGNORE_CASE).containsMatchIn(content))
+    }
+
+    @Test
     fun `report contains errors section`() {
         val reportPath = tempDir.resolve("report.md")
         ReportGenerator().generate(sampleResult(), reportPath)
@@ -95,14 +106,15 @@ class ReportGeneratorTest {
     }
 
     @Test
-    fun `report contains manual work section`() {
+    fun `report contains blocking migration work section`() {
         val reportPath = tempDir.resolve("report.md")
         ReportGenerator().generate(sampleResult(), reportPath)
         val content = reportPath.readText()
 
-        assertTrue(content.contains("## Remaining Manual Work"))
+        assertTrue(content.contains("## Blocking Migration Work"))
         assertTrue(content.contains("DataComponents"))
         assertTrue(content.contains("build.gradle"))
+        assertTrue(!content.contains("TODO"))
     }
 
     @Test

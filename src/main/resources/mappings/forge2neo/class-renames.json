@@ -38,7 +38,7 @@
     {"forgeClass": "IForgeVertexConsumer", "neoForgeClass": "IVertexConsumerExtension", "description": "Client extension interface rename"},
     {"forgeClass": "IForgeShearable", "neoForgeClass": "IShearable", "description": "Irregular rename"},
     {"forgeClass": "RegistryObject", "neoForgeClass": "DeferredHolder", "description": "Registry object type change"},
-    {"forgeClass": "LivingHurtEvent", "neoForgeClass": "LivingDamageEvent.Post", "description": "Damage event rename"},
+    {"forgeClass": "LivingHurtEvent", "neoForgeClass": "LivingDamageEvent", "description": "Mutable living damage event boundary"},
     {"forgeClass": "LivingAttackEvent", "neoForgeClass": "LivingIncomingDamageEvent", "description": "Damage event rename"},
     {"forgeClass": "ShieldBlockEvent", "neoForgeClass": "LivingShieldBlockEvent", "description": "Event rename"},
     {"forgeClass": "RenderGuiOverlayEvent", "neoForgeClass": "RenderGuiLayerEvent", "description": "GUI event rename"},

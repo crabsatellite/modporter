@@ -22,7 +22,181 @@
       ],
       "mavenUrl": "https://maven.createmod.net",
       "status": "unavailable",
-      "notes": "Create: NeoForge 1.21.1 exists but API changed significantly, needs manual migration"
+      "notes": "Create: NeoForge 1.21.1 exists but API changed significantly; blocked until an automated compat adapter/API migration exists"
+    },
+    {
+      "forgePrefix": "curse.maven:create-328085",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "curse.maven:create-328085:7408951" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "Create CurseMaven: 7408951 exposes NeoForge FluidStack in OpenPipeEffectHandler for 1.21.1"
+    },
+    {
+      "forgePrefix": "curse.maven:cold-sweat-506194",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "curse.maven:cold-sweat-506194:7492465" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "Cold Sweat CurseMaven: 7492465 is the NeoForge 1.21.1 API build; keeps TempModifierEvent.Calculate.Pre cancellation semantics"
+    },
+    {
+      "forgePrefix": "curse.maven:alexs-mobs-426558",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "curse.maven:alexs-mobs-1-21-1-port-1415721:7391745" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "Alex's Mobs: public NeoForge 1.21.1 community port used for compile-only optional compat"
+    },
+    {
+      "forgePrefix": "curse.maven:citadel-331936",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "curse.maven:citadel-331936:7476597" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "Citadel CurseMaven: 7476597 is the official NeoForge 1.21.1 library build"
+    },
+    {
+      "forgePrefix": "curse.maven:alexs-caves-924854",
+      "modrinthSlug": null,
+      "packagePrefixes": [
+        "com.github.alexmodguy.alexscaves."
+      ],
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "curse.maven:alexs-caves-unofficial-port-1420348:7485074" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "Alex's Caves: public NeoForge 1.21.1 community port used for compile-only optional compat"
+    },
+    {
+      "forgePrefix": "curse.maven:epic-fight-mod-405076",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "curse.maven:epic-fight-mod-405076:8175609" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "Epic Fight CurseMaven: 8175609 is a NeoForge 1.21.1 API build"
+    },
+    {
+      "forgePrefix": "curse.maven:farmers-delight-398521",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "curse.maven:farmers-delight-398521:8083481" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "Farmer's Delight CurseMaven: 8083481 exposes NeoForge Holder-based ModEffects for 1.21.1"
+    },
+    {
+      "forgePrefix": "curse.maven:glitchcore-955399",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "curse.maven:glitchcore-955399:5660740" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "GlitchCore CurseMaven: 5660740 is a NeoForge 1.21.1 library build"
+    },
+    {
+      "forgePrefix": "curse.maven:tough-as-nails-246391",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "curse.maven:tough-as-nails-246391:5766204" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "Tough As Nails CurseMaven: 5766204 is a NeoForge 1.21.1 build"
+    },
+    {
+      "forgePrefix": "curse.maven:legendary-survival-overhaul-840254",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "curse.maven:legendary-survival-overhaul-840254:7254309" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "Legendary Survival Overhaul CurseMaven: 7254309 exposes NeoForge DeferredHolder MobEffectRegistry for 1.21.1"
+    },
+    {
+      "forgePrefix": "curse.maven:the-twilight-forest-227639",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "curse.maven:the-twilight-forest-227639:7398100" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "Twilight Forest CurseMaven: 7398100 is a NeoForge 1.21.1 build"
+    },
+    {
+      "forgePrefix": "team-twilight:crossdimcommands",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "runtimeOnly", "coord": "com.telepathicgrunt:CommandStructures-Neoforge:4.3.2+1.20.6" }
+      ],
+      "mavenUrl": "https://nexus.resourcefulbees.com/repository/maven-public/",
+      "status": "available",
+      "notes": "CrossDimCommands: replaced by CommandStructures NeoForge runtime coordinate used by the upstream 1.21.1 port"
+    },
+    {
+      "forgePrefix": "curse.maven:jade-324717",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "implementation", "coord": "curse.maven:jade-324717:5529595" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "Jade CurseMaven: 5529595 is the NeoForge 1.21.1 runtime/API build used by the upstream 1.21.1 port"
+    },
+    {
+      "forgePrefix": "curse.maven:jeed-532286",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "runtimeOnly", "coord": "curse.maven:jeed-532286:6550600" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "JEED CurseMaven: 6550600 is the NeoForge 1.21.1 runtime build used by the upstream 1.21.1 port"
+    },
+    {
+      "forgePrefix": "curse.maven:museum-curator-859070",
+      "modrinthSlug": null,
+      "neoforgeCoords": [],
+      "mavenUrl": null,
+      "status": "remove",
+      "notes": "Museum Curator: upstream 1.21.1 port disables this optional runtime integration because no NeoForge 1.21.1 runtime target is declared"
+    },
+    {
+      "forgePrefix": "curse.maven:serene-seasons-291874",
+      "modrinthSlug": null,
+      "packagePrefixes": [
+        "sereneseasons."
+      ],
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "curse.maven:serene-seasons-291874:6182596" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "Serene Seasons CurseMaven: 6182596 is a NeoForge 1.21.1 build"
+    },
+    {
+      "forgePrefix": "curse.maven:patchouli-306770",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "curse.maven:patchouli-306770:6842247" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "Patchouli CurseMaven: 6842247 contains META-INF/neoforge.mods.toml for NeoForge 1.21.1"
     },
     {
       "forgePrefix": "dev.engine-room.flywheel",
@@ -33,7 +207,7 @@
       ],
       "mavenUrl": "https://maven.createmod.net",
       "status": "unavailable",
-      "notes": "Flywheel: NeoForge 1.21.1 exists but typically bundled with Create, exclude for now"
+      "notes": "Flywheel: NeoForge 1.21.1 exists but is typically bundled with Create; standalone coordinate intentionally unavailable"
     },
     {
       "forgePrefix": "net.createmod.ponder",
@@ -51,7 +225,7 @@
       ],
       "mavenUrl": "https://maven.kosmx.dev",
       "status": "unavailable",
-      "notes": "PlayerAnimator 2.0: API breaking changes (IPlayable vs KeyframeAnimation), needs manual migration"
+      "notes": "PlayerAnimator 2.0: API breaking changes (IPlayable vs KeyframeAnimation); blocked until an automated compat adapter/API migration exists"
     },
     {
       "forgePrefix": "squeek.appleskin",
@@ -64,10 +238,12 @@
     {
       "forgePrefix": "vazkii.botania",
       "modrinthSlug": "botania",
-      "neoforgeCoords": [],
-      "mavenUrl": null,
-      "status": "unavailable",
-      "notes": "Botania: no NeoForge 1.21.1 build as of 2025"
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "vazkii.botania:botania-neoforge-1.21.1:452-SNAPSHOT" }
+      ],
+      "mavenUrl": "https://maven.blamejared.com",
+      "status": "available",
+      "notes": "Botania: compile optional compat against the NeoForge 1.21.1 snapshot; runtime compat is tested by an explicit profile"
     },
     {
       "forgePrefix": "org.valkyrienskies",

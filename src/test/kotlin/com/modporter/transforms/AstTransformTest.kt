@@ -247,6 +247,36 @@ class AstTransformTest {
         val transformed = projectDir.resolve("src/main/java/com/example/TestRenderer.java").readText()
 
         assertFalse(transformed.contains("endVertex()"))
+        assertFalse(transformed.contains("endVertex() removed"))
         assertTrue(result.changes.any { it.ruleId == "ast-remove-endvertex" })
+        assertFalse(result.changes.any { it.after.contains("/*") || it.after.contains("*/") })
+    }
+
+    @Test
+    fun `modern Java source syntax is parsed without skipped AST transforms`() {
+        val projectDir = createTestFile("ModernSyntax.java", """
+            package com.example;
+            import java.util.List;
+
+            public record ModernSyntax(int size) {
+                public String describe(Object value) {
+                    if (value instanceof String text) {
+                        return text;
+                    }
+                    return switch (size) {
+                        case 0 -> "empty";
+                        case 1 -> {
+                            yield List.of("one").get(0);
+                        }
+                        default -> "many";
+                    };
+                }
+            }
+        """.trimIndent())
+
+        val pass = AstTransformPass(MappingDatabase.loadDefault())
+        val result = pass.analyze(projectDir)
+
+        assertTrue(result.skipped.isEmpty(), "AST pass must parse modern Java source syntax: ${result.skipped}")
     }
 }

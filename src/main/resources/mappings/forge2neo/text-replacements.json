@@ -216,6 +216,14 @@
       "isRegex": true
     },
     {
+      "id": "cls-BootstapContext",
+      "pattern": "\\bBootstapContext\\b",
+      "replacement": "BootstrapContext",
+      "description": "BootstapContext -> BootstrapContext in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "deferred-ForgeRegistries-ITEMS",
       "pattern": "DeferredRegister\\.create\\(ForgeRegistries\\.ITEMS",
       "replacement": "DeferredRegister.create(Registries.ITEM",
@@ -236,6 +244,14 @@
       "pattern": "DeferredRegister\\.create\\(ForgeRegistries\\.ENTITY_TYPES",
       "replacement": "DeferredRegister.create(Registries.ENTITY_TYPE",
       "description": "DeferredRegister.create(ForgeRegistries.ENTITY_TYPES -> Registries.ENTITY_TYPE",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "deferred-ForgeRegistries-FLUIDS",
+      "pattern": "DeferredRegister\\.create\\(ForgeRegistries\\.FLUIDS",
+      "replacement": "DeferredRegister.create(Registries.FLUID",
+      "description": "DeferredRegister.create(ForgeRegistries.FLUIDS -> Registries.FLUID",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -296,6 +312,62 @@
       "isRegex": true
     },
     {
+      "id": "deferred-ForgeRegistries-POI_TYPES",
+      "pattern": "DeferredRegister\\.create\\(ForgeRegistries\\.POI_TYPES",
+      "replacement": "DeferredRegister.create(Registries.POINT_OF_INTEREST_TYPE",
+      "description": "DeferredRegister.create(ForgeRegistries.POI_TYPES -> Registries.POINT_OF_INTEREST_TYPE",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "deferred-ForgeRegistries-VILLAGER_PROFESSIONS",
+      "pattern": "DeferredRegister\\.create\\(ForgeRegistries\\.VILLAGER_PROFESSIONS",
+      "replacement": "DeferredRegister.create(Registries.VILLAGER_PROFESSION",
+      "description": "DeferredRegister.create(ForgeRegistries.VILLAGER_PROFESSIONS -> Registries.VILLAGER_PROFESSION",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "deferred-ForgeRegistries-FOLIAGE_PLACER_TYPES",
+      "pattern": "DeferredRegister\\.create\\(ForgeRegistries\\.FOLIAGE_PLACER_TYPES",
+      "replacement": "DeferredRegister.create(Registries.FOLIAGE_PLACER_TYPE",
+      "description": "DeferredRegister.create(ForgeRegistries.FOLIAGE_PLACER_TYPES -> Registries.FOLIAGE_PLACER_TYPE",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "deferred-ForgeRegistries-TREE_DECORATOR_TYPES",
+      "pattern": "DeferredRegister\\.create\\(ForgeRegistries\\.TREE_DECORATOR_TYPES",
+      "replacement": "DeferredRegister.create(Registries.TREE_DECORATOR_TYPE",
+      "description": "DeferredRegister.create(ForgeRegistries.TREE_DECORATOR_TYPES -> Registries.TREE_DECORATOR_TYPE",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "deferred-ForgeRegistries-WORLD_CARVERS",
+      "pattern": "DeferredRegister\\.create\\(ForgeRegistries\\.WORLD_CARVERS",
+      "replacement": "DeferredRegister.create(Registries.CARVER",
+      "description": "DeferredRegister.create(ForgeRegistries.WORLD_CARVERS -> Registries.CARVER",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "forgeregistries-keys-FLUID_TYPES",
+      "pattern": "ForgeRegistries\\.Keys\\.FLUID_TYPES",
+      "replacement": "NeoForgeRegistries.Keys.FLUID_TYPES",
+      "description": "ForgeRegistries.Keys.FLUID_TYPES -> NeoForgeRegistries.Keys.FLUID_TYPES",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "forgeregistries-keys-GLOBAL_LOOT_MODIFIER_SERIALIZERS",
+      "pattern": "ForgeRegistries\\.Keys\\.GLOBAL_LOOT_MODIFIER_SERIALIZERS",
+      "replacement": "NeoForgeRegistries.Keys.GLOBAL_LOOT_MODIFIER_SERIALIZERS",
+      "description": "ForgeRegistries.Keys.GLOBAL_LOOT_MODIFIER_SERIALIZERS -> NeoForgeRegistries.Keys.GLOBAL_LOOT_MODIFIER_SERIALIZERS",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "cls-ForgeRegistries-ITEMS",
       "pattern": "ForgeRegistries\\.ITEMS",
       "replacement": "BuiltInRegistries.ITEM",
@@ -316,6 +388,30 @@
       "pattern": "ForgeRegistries\\.ENTITY_TYPES",
       "replacement": "BuiltInRegistries.ENTITY_TYPE",
       "description": "ForgeRegistries.ENTITY_TYPES -> BuiltInRegistries.ENTITY_TYPE",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "cls-ForgeRegistries-FLUIDS",
+      "pattern": "ForgeRegistries\\.FLUIDS",
+      "replacement": "BuiltInRegistries.FLUID",
+      "description": "ForgeRegistries.FLUIDS -> BuiltInRegistries.FLUID",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "cls-ForgeRegistries-POTIONS",
+      "pattern": "ForgeRegistries\\.POTIONS",
+      "replacement": "BuiltInRegistries.POTION",
+      "description": "ForgeRegistries.POTIONS -> BuiltInRegistries.POTION",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "cls-ForgeRegistries-PAINTING_VARIANTS",
+      "pattern": "ForgeRegistries\\.PAINTING_VARIANTS",
+      "replacement": "BuiltInRegistries.PAINTING_VARIANT",
+      "description": "ForgeRegistries.PAINTING_VARIANTS -> BuiltInRegistries.PAINTING_VARIANT",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -464,6 +560,38 @@
       "isRegex": true
     },
     {
+      "id": "cls-RegistryObject-to-DeferredHolder-extends-block",
+      "pattern": "RegistryObject<\\?\\s+extends\\s+Block>",
+      "replacement": "DeferredHolder<Block, ? extends Block>",
+      "description": "RegistryObject<? extends Block> -> DeferredHolder<Block, ? extends Block>",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "cls-RegistryObject-to-DeferredHolder-extends-item",
+      "pattern": "RegistryObject<\\?\\s+extends\\s+Item>",
+      "replacement": "DeferredHolder<Item, ? extends Item>",
+      "description": "RegistryObject<? extends Item> -> DeferredHolder<Item, ? extends Item>",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "cls-RegistryObject-to-DeferredHolder-extends-generic-item",
+      "pattern": "RegistryObject<\\?\\s+extends\\s+V>",
+      "replacement": "DeferredHolder<Item, ? extends V>",
+      "description": "RegistryObject<? extends V> where V extends Item -> DeferredHolder<Item, ? extends V>",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "cls-RegistryObject-to-DeferredHolder-wildcard",
+      "pattern": "RegistryObject<\\?>",
+      "replacement": "DeferredHolder<?, ?>",
+      "description": "RegistryObject<?> -> DeferredHolder<?, ?>",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "cls-RegistryObject-to-DeferredHolder-nested2",
       "pattern": "RegistryObject<(\\w+<[^<>]*<[^<>]*>[^<>]*>)>",
       "replacement": "DeferredHolder<$1, $1>",
@@ -484,6 +612,54 @@
       "pattern": "RegistryObject<(\\w+)>",
       "replacement": "DeferredHolder<$1, $1>",
       "description": "RegistryObject<T> -> DeferredHolder<T, T> (2 type params required)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "deferredholder-block-register-base-generic",
+      "pattern": "DeferredHolder<([A-Za-z_$][\\w$]*),\\s*\\1>(\\s+[A-Za-z_$][\\w$]*\\s*=\\s*BLOCKS\\s*\\.\\s*register)",
+      "replacement": "DeferredHolder<Block, $1>$2",
+      "description": "DeferredRegister<Block>.register returns DeferredHolder<Block, concrete block>",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "deferredholder-item-register-base-generic",
+      "pattern": "DeferredHolder<([A-Za-z_$][\\w$]*),\\s*\\1>(\\s+[A-Za-z_$][\\w$]*\\s*=\\s*ITEMS\\s*\\.\\s*register)",
+      "replacement": "DeferredHolder<Item, $1>$2",
+      "description": "DeferredRegister<Item>.register returns DeferredHolder<Item, concrete item>",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "deferred-block-register-constructor-reference",
+      "pattern": "(BLOCKS\\s*\\.\\s*register\\(\\s*\"[^\"]+\"\\s*,\\s*)([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)?)::new(\\s*\\))",
+      "replacement": "$1() -> new $2()$3",
+      "description": "DeferredRegister<Block>.register constructor references use explicit lambdas for NeoForge overload selection",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "deferredholder-registry-entry-loop-wildcard",
+      "pattern": "for\\s*\\(\\s*DeferredHolder<([A-Za-z_$][\\w$]*),\\s*\\1>\\s+([A-Za-z_$][\\w$]*)\\s*:\\s*([A-Za-z_$][\\w$.]*)\\.getEntries\\(\\)\\s*\\)",
+      "replacement": "for(DeferredHolder<$1, ? extends $1> $2 : $3.getEntries())",
+      "description": "DeferredRegister.getEntries() returns DeferredHolder<base, ? extends base> entries",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "chunkgenerator-deferredregister-mapcodec",
+      "pattern": "DeferredRegister<Codec<\\? extends ChunkGenerator>>",
+      "replacement": "DeferredRegister<MapCodec<? extends ChunkGenerator>>",
+      "description": "Chunk generator registry stores MapCodec values in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "chunkgenerator-deferredholder-mapcodec",
+      "pattern": "DeferredHolder<Codec<([A-Za-z_$][\\w$]*)>,\\s*Codec<\\1>>",
+      "replacement": "DeferredHolder<MapCodec<? extends ChunkGenerator>, MapCodec<$1>>",
+      "description": "Chunk generator DeferredHolder uses MapCodec registry base type in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -766,10 +942,18 @@
       "isRegex": true
     },
     {
-      "id": "cls-NetworkHooks",
-      "pattern": "NetworkHooks\\.openScreen",
-      "replacement": "player.openMenu",
-      "description": "NetworkHooks.openScreen -> player.openMenu (1.21 API change)",
+      "id": "networkhooks-openscreen-pos",
+      "pattern": "NetworkHooks\\.openScreen\\(\\s*([^,;\\r\\n]+?)\\s*,\\s*([^,;\\r\\n]+?)\\s*,\\s*([^\\)]+?)\\s*\\)",
+      "replacement": "($1).openMenu($2, buf -> buf.writeBlockPos($3))",
+      "description": "NetworkHooks.openScreen(player, menu, pos) -> ServerPlayer.openMenu(menu, extra data writer)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "networkhooks-openscreen",
+      "pattern": "NetworkHooks\\.openScreen\\(\\s*([^,;\\r\\n]+?)\\s*,\\s*([^\\)]+?)\\s*\\)",
+      "replacement": "($1).openMenu($2)",
+      "description": "NetworkHooks.openScreen(player, menu) -> ServerPlayer.openMenu(menu)",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -790,6 +974,22 @@
       "isRegex": true
     },
     {
+      "id": "import-advancementrequirements-strategy-outer",
+      "pattern": "import net.minecraft.advancements.AdvancementRequirements.Strategy;\\r?\\n",
+      "replacement": "import net.minecraft.advancements.AdvancementRequirements;\n",
+      "description": "Import AdvancementRequirements outer type when RequirementsStrategy references are qualified",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "cls-AbstractGlassBlock",
+      "pattern": "\\bAbstractGlassBlock\\b",
+      "replacement": "TransparentBlock",
+      "description": "AbstractGlassBlock -> TransparentBlock (1.21)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "cls-AbstractCriterionTriggerInstance",
       "pattern": "\\bAbstractCriterionTriggerInstance\\b",
       "replacement": "SimpleCriterionTrigger.SimpleInstance",
@@ -802,6 +1002,107 @@
       "pattern": "\\bFrameType\\b",
       "replacement": "AdvancementType",
       "description": "FrameType -> AdvancementType (renamed in 1.21)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "jei-forge-types-import",
+      "pattern": "import mezz.jei.api.forge.ForgeTypes;",
+      "replacement": "import mezz.jei.api.neoforge.NeoForgeTypes;",
+      "description": "JEI ForgeTypes -> NeoForgeTypes for NeoForge-specific ingredient types",
+      "fileGlob": "*.java",
+      "isRegex": false
+    },
+    {
+      "id": "jei-forge-types-ref",
+      "pattern": "\\bForgeTypes\\.",
+      "replacement": "NeoForgeTypes.",
+      "description": "JEI ForgeTypes references -> NeoForgeTypes",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "mobtype-import-to-entity-type-tags",
+      "pattern": "import net.minecraft.world.entity.MobType;\\r?\\n",
+      "replacement": "import net.minecraft.tags.EntityTypeTags;\n",
+      "description": "MobType removed in 1.21; use entity type tags for checks",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "mobtype-illager-check",
+      "pattern": "([A-Za-z_][\\w.]*)\\.getMobType\\(\\)\\s*==\\s*MobType\\.ILLAGER",
+      "replacement": "$1.getType().is(EntityTypeTags.ILLAGER)",
+      "description": "MobType.ILLAGER checks -> EntityTypeTags.ILLAGER",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "mobtype-getMobType-override-remove",
+      "pattern": "(?m)^[ \\t]*@Override\\s*\\r?\\n[ \\t]*public\\s+MobType\\s+getMobType\\s*\\(\\s*\\)\\s*\\{\\s*\\r?\\n[ \\t]*return\\s+MobType\\.[A-Z_]+\\s*;\\s*\\r?\\n[ \\t]*\\}\\s*\\r?\\n?",
+      "replacement": "",
+      "description": "MobType override removed in 1.21; entity classification is data-driven",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "empty-handler-import",
+      "pattern": "import net.neoforged.neoforge.items.wrapper.EmptyHandler;",
+      "replacement": "import net.neoforged.neoforge.items.wrapper.EmptyItemHandler;",
+      "description": "EmptyHandler -> EmptyItemHandler in NeoForge 1.21",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "empty-handler-constructor",
+      "pattern": "new EmptyHandler\\(\\)",
+      "replacement": "EmptyItemHandler.INSTANCE",
+      "description": "EmptyHandler construction -> EmptyItemHandler singleton",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "abstract-tree-grower-import",
+      "pattern": "import net.minecraft.world.level.block.grower.AbstractTreeGrower;",
+      "replacement": "import net.minecraft.world.level.block.grower.TreeGrower;",
+      "description": "AbstractTreeGrower -> TreeGrower in 1.21",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "abstract-tree-grower-type",
+      "pattern": "\\bAbstractTreeGrower\\b",
+      "replacement": "TreeGrower",
+      "description": "AbstractTreeGrower type -> TreeGrower",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "block-isvalidspawn-remove-placement-type",
+      "pattern": "isValidSpawn\\((BlockState\\s+\\w+\\s*,\\s*BlockGetter\\s+\\w+\\s*,\\s*BlockPos\\s+\\w+)\\s*,\\s*SpawnPlacements\\.Type\\s+\\w+\\s*,\\s*(EntityType<\\?>\\s+\\w+)\\)",
+      "replacement": "isValidSpawn($1, $2)",
+      "description": "BlockBehaviour.isValidSpawn no longer receives SpawnPlacements.Type",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "spawn-placement-register-event-import",
+      "pattern": "import net.neoforged.neoforge.event.entity.SpawnPlacementRegisterEvent;",
+      "replacement": "import net.neoforged.neoforge.event.entity.RegisterSpawnPlacementsEvent;",
+      "description": "SpawnPlacementRegisterEvent -> RegisterSpawnPlacementsEvent in NeoForge 1.21",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "spawn-placement-register-event-type",
+      "pattern": "\\bSpawnPlacementRegisterEvent\\b",
+      "replacement": "RegisterSpawnPlacementsEvent",
+      "description": "SpawnPlacementRegisterEvent type -> RegisterSpawnPlacementsEvent",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "spawn-placement-type-class",
+      "pattern": "\\bSpawnPlacements\\.Type\\.",
+      "replacement": "SpawnPlacementTypes.",
+      "description": "SpawnPlacements.Type constants moved to SpawnPlacementTypes",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -820,6 +1121,110 @@
       "description": "Block.Properties.of() -> BlockBehaviour.Properties.of() (1.21)",
       "fileGlob": "*.java",
       "isRegex": false
+    },
+    {
+      "id": "properties-copy-unqualified",
+      "pattern": "(?<![\\w.])Properties\\.copy\\(",
+      "replacement": "BlockBehaviour.Properties.ofFullCopy(",
+      "description": "Unqualified BlockBehaviour.Properties.copy() -> ofFullCopy() in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "livingdamageevent-post-import-compat",
+      "pattern": "import net.neoforged.neoforge.event.entity.living.LivingDamageEvent.Post;",
+      "replacement": "import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;\nimport net.neoforged.neoforge.event.entity.living.LivingDamageEvent.Post;",
+      "description": "Allow both LivingDamageEvent.Post and Post references after nested event import migration",
+      "fileGlob": "*.java",
+      "isRegex": false
+    },
+    {
+      "id": "livingdamageevent-post-type-simple",
+      "pattern": "(?<!\\.)\\bLivingDamageEvent\\.Post\\b",
+      "replacement": "Post",
+      "description": "Use imported nested LivingDamageEvent.Post type directly",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "holder-mobeffect-isbeneficial",
+      "pattern": "\\.getEffect\\(\\)\\.isBeneficial\\(\\)",
+      "replacement": ".getEffect().value().isBeneficial()",
+      "description": "MobEffectInstance.getEffect() returns Holder<MobEffect> in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "effectregistry-haseffect-holder",
+      "pattern": "\\.hasEffect\\((EffectRegistry\\.[A-Z0-9_]+)\\.get\\(\\)\\)",
+      "replacement": ".hasEffect($1)",
+      "description": "LivingEntity.hasEffect() now accepts Holder<MobEffect>; DeferredHolder already implements Holder",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "effectregistry-geteffect-holder",
+      "pattern": "\\.getEffect\\((EffectRegistry\\.[A-Z0-9_]+)\\.get\\(\\)\\)",
+      "replacement": ".getEffect($1)",
+      "description": "LivingEntity.getEffect() now accepts Holder<MobEffect>; DeferredHolder already implements Holder",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "effectregistry-mobeffectinstance-holder",
+      "pattern": "new MobEffectInstance\\((EffectRegistry\\.[A-Z0-9_]+)\\.get\\(\\)",
+      "replacement": "new MobEffectInstance($1",
+      "description": "MobEffectInstance constructors accept Holder<MobEffect> in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "mobeffectinstance-geteffect-holder-variable",
+      "pattern": "MobEffect\\s+(\\w+)\\s*=\\s*(\\w+)\\.getEffect\\(\\);",
+      "replacement": "Holder<MobEffect> $1 = $2.getEffect();",
+      "description": "MobEffectInstance.getEffect() returns Holder<MobEffect> in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "mobeffect-helper-param-holder",
+      "pattern": "isHarmfulEffect\\(MobEffect\\s+(\\w+)\\)",
+      "replacement": "isHarmfulEffect(Holder<MobEffect> $1)",
+      "description": "Helpers consuming MobEffectInstance.getEffect() values should accept Holder<MobEffect>",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "mobeffect-holder-category-value",
+      "pattern": "(Holder<MobEffect>\\s+\\w+\\)\\s*\\{\\s*return\\s+)(\\w+)\\.getCategory\\(\\)",
+      "replacement": "$1$2.value().getCategory()",
+      "description": "Holder<MobEffect> requires value() before MobEffect#getCategory",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "builtinregistry-mobeffect-get-holder",
+      "pattern": "MobEffect\\s+(\\w+)\\s*=\\s*BuiltInRegistries\\.MOB_EFFECT\\.get\\((\\w+)\\);",
+      "replacement": "Holder<MobEffect> $1 = BuiltInRegistries.MOB_EFFECT.getHolder(net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.MOB_EFFECT, $2)).orElse(null);",
+      "description": "Registry MobEffect lookup should produce Holder<MobEffect> for MobEffectInstance constructors",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "bucketitem-deferred-fluid-get",
+      "pattern": "new BucketItem\\((FluidRegistry\\.[A-Z0-9_]+),",
+      "replacement": "new BucketItem($1.get(),",
+      "description": "BucketItem constructor still needs the Fluid value, not a DeferredHolder",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "liquidblock-deferred-fluid-get",
+      "pattern": "new LiquidBlock\\((FluidRegistry\\.[A-Z0-9_]+),",
+      "replacement": "new LiquidBlock($1.get(),",
+      "description": "LiquidBlock constructor still needs the FlowingFluid value, not a DeferredHolder",
+      "fileGlob": "*.java",
+      "isRegex": true
     },
     {
       "id": "holder-get-to-value",
@@ -850,6 +1255,94 @@
       "pattern": "Tags\\.Items\\.TOOLS_SHIELDS\\b",
       "replacement": "Tags.Items.TOOLS_SHIELD",
       "description": "Tags.Items.TOOLS_SHIELDS -> Tags.Items.TOOLS_SHIELD (no trailing S in 1.21)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tags-items-cobblestone-plural",
+      "pattern": "Tags\\.Items\\.COBBLESTONE\\b",
+      "replacement": "Tags.Items.COBBLESTONES",
+      "description": "Tags.Items.COBBLESTONE -> COBBLESTONES in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tags-items-gravel-plural",
+      "pattern": "Tags\\.Items\\.GRAVEL\\b",
+      "replacement": "Tags.Items.GRAVELS",
+      "description": "Tags.Items.GRAVEL -> GRAVELS in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tags-items-glass-plural",
+      "pattern": "Tags\\.Items\\.GLASS\\b",
+      "replacement": "Tags.Items.GLASS_BLOCKS",
+      "description": "Tags.Items.GLASS -> GLASS_BLOCKS in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tags-items-string-plural",
+      "pattern": "Tags\\.Items\\.STRING\\b",
+      "replacement": "Tags.Items.STRINGS",
+      "description": "Tags.Items.STRING -> STRINGS in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tags-items-stone-plural",
+      "pattern": "Tags\\.Items\\.STONE\\b",
+      "replacement": "Tags.Items.STONES",
+      "description": "Tags.Items.STONE -> STONES in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tags-items-sand-plural",
+      "pattern": "Tags\\.Items\\.SAND\\b",
+      "replacement": "Tags.Items.SANDS",
+      "description": "Tags.Items.SAND -> SANDS in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tags-blocks-cobblestone-plural",
+      "pattern": "Tags\\.Blocks\\.COBBLESTONE\\b",
+      "replacement": "Tags.Blocks.COBBLESTONES",
+      "description": "Tags.Blocks.COBBLESTONE -> COBBLESTONES in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tags-blocks-gravel-plural",
+      "pattern": "Tags\\.Blocks\\.GRAVEL\\b",
+      "replacement": "Tags.Blocks.GRAVELS",
+      "description": "Tags.Blocks.GRAVEL -> GRAVELS in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tags-blocks-glass-plural",
+      "pattern": "Tags\\.Blocks\\.GLASS\\b",
+      "replacement": "Tags.Blocks.GLASS_BLOCKS",
+      "description": "Tags.Blocks.GLASS -> GLASS_BLOCKS in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tags-blocks-stone-plural",
+      "pattern": "Tags\\.Blocks\\.STONE\\b",
+      "replacement": "Tags.Blocks.STONES",
+      "description": "Tags.Blocks.STONE -> STONES in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tags-blocks-sand-plural",
+      "pattern": "Tags\\.Blocks\\.SAND\\b",
+      "replacement": "Tags.Blocks.SANDS",
+      "description": "Tags.Blocks.SAND -> SANDS in NeoForge 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -900,10 +1393,26 @@
       "isRegex": true
     },
     {
+      "id": "deferred-ForgeRegistries-RECIPE_TYPES-chain",
+      "pattern": "DeferredRegister\\s*\\.\\s*create\\(\\s*ForgeRegistries\\.RECIPE_TYPES",
+      "replacement": "DeferredRegister.create(Registries.RECIPE_TYPE",
+      "description": "DeferredRegister .create(ForgeRegistries.RECIPE_TYPES -> Registries.RECIPE_TYPE across line breaks",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "deferred-ForgeRegistries-FEATURES",
       "pattern": "DeferredRegister\\.create\\(ForgeRegistries\\.FEATURES",
       "replacement": "DeferredRegister.create(Registries.FEATURE",
       "description": "DeferredRegister.create(ForgeRegistries.FEATURES -> Registries.FEATURE",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "deferred-ForgeRegistries-FEATURES-chain",
+      "pattern": "DeferredRegister\\s*\\.\\s*create\\(\\s*ForgeRegistries\\.FEATURES",
+      "replacement": "DeferredRegister.create(Registries.FEATURE",
+      "description": "DeferredRegister .create(ForgeRegistries.FEATURES -> Registries.FEATURE across line breaks",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -924,10 +1433,18 @@
       "isRegex": true
     },
     {
+      "id": "crops-onCropsGrowPre",
+      "pattern": "(?:net\\.neoforged\\.neoforge\\.common\\.)?(?:CommonHooks|EventHooks)\\.onCropsGrowPre",
+      "replacement": "net.neoforged.neoforge.common.CommonHooks.canCropGrow",
+      "description": "CommonHooks.onCropsGrowPre() -> CommonHooks.canCropGrow() in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "crops-onCropsGrowPost",
-      "pattern": "(?:net\\.neoforged\\.neoforge\\.common\\.)?(?:CommonHooks|EventHooks)\\.onCropsGrowPost\\([^)]*\\);",
-      "replacement": "// onCropsGrowPost removed in NeoForge 1.21",
-      "description": "Remove EventHooks.onCropsGrowPost() calls (removed in NeoForge 1.21)",
+      "pattern": "(?:net\\.neoforged\\.neoforge\\.common\\.)?(?:CommonHooks|EventHooks)\\.onCropsGrowPost",
+      "replacement": "net.neoforged.neoforge.common.CommonHooks.fireCropGrowPost",
+      "description": "CommonHooks.onCropsGrowPost() -> CommonHooks.fireCropGrowPost() in NeoForge 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -982,7 +1499,7 @@
     {
       "id": "networkhooks-import-remove",
       "pattern": "import net.neoforged.neoforge.network.NetworkHooks;\\r?\\n",
-      "replacement": "// TODO: NetworkHooks removed in NeoForge 1.21 - use vanilla entity spawn packets\n",
+      "replacement": "",
       "description": "NetworkHooks removed in NeoForge 1.21",
       "fileGlob": "*.java",
       "isRegex": true
@@ -990,23 +1507,23 @@
     {
       "id": "planttype-import-remove",
       "pattern": "import net.neoforged.neoforge.common.PlantType;\\r?\\n",
-      "replacement": "// TODO: PlantType removed in NeoForge 1.21 - use vanilla block mechanics\n",
+      "replacement": "",
       "description": "PlantType removed in NeoForge 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
-      "id": "iplantable-fqn",
-      "pattern": "net.neoforged.neoforge.common.IPlantable",
-      "replacement": "net.neoforged.neoforge.common.SpecialPlantable /* TODO: IPlantable removed - rework plant logic */",
+      "id": "iplantable-import-remove",
+      "pattern": "import net.neoforged.neoforge.common.IPlantable;\\r?\\n",
+      "replacement": "",
       "description": "IPlantable removed in NeoForge 1.21",
       "fileGlob": "*.java",
-      "isRegex": false
+      "isRegex": true
     },
     {
       "id": "deserialization-context-import",
       "pattern": "import net.minecraft.advancements.critereon.DeserializationContext;\\r?\\n",
-      "replacement": "// TODO: DeserializationContext removed in 1.21 - use Codec-based criterion triggers\n",
+      "replacement": "",
       "description": "DeserializationContext removed in 1.21 - criterion triggers now use Codec",
       "fileGlob": "*.java",
       "isRegex": true
@@ -1014,7 +1531,7 @@
     {
       "id": "enchantment-category-import",
       "pattern": "import net.minecraft.world.item.enchantment.EnchantmentCategory;\\r?\\n",
-      "replacement": "// TODO: EnchantmentCategory removed in 1.21 - enchantments are now data-driven\n",
+      "replacement": "",
       "description": "EnchantmentCategory removed in 1.21 - enchantments are data-driven",
       "fileGlob": "*.java",
       "isRegex": true
@@ -1022,7 +1539,7 @@
     {
       "id": "bowlfooditem-import",
       "pattern": "import net.minecraft.world.item.BowlFoodItem;\\r?\\n",
-      "replacement": "// TODO: BowlFoodItem removed in 1.21 - use Item with FoodProperties data component\n",
+      "replacement": "",
       "description": "BowlFoodItem removed in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
@@ -1030,7 +1547,7 @@
     {
       "id": "missing-mappings-event-import",
       "pattern": "import net.neoforged.neoforge.registries.MissingMappingsEvent;\\r?\\n",
-      "replacement": "// TODO: MissingMappingsEvent removed in 1.21 - use DeferredRegister.addAlias() instead\n",
+      "replacement": "",
       "description": "MissingMappingsEvent removed - use DeferredRegister.addAlias()",
       "fileGlob": "*.java",
       "isRegex": true
@@ -1038,7 +1555,7 @@
     {
       "id": "iingredient-serializer-import",
       "pattern": "import net.neoforged.neoforge.common.crafting.IIngredientSerializer;\\r?\\n",
-      "replacement": "// TODO: IIngredientSerializer removed in 1.21 - implement ICustomIngredient instead\n",
+      "replacement": "",
       "description": "IIngredientSerializer removed - use ICustomIngredient + IngredientType",
       "fileGlob": "*.java",
       "isRegex": true
@@ -1046,8 +1563,8 @@
     {
       "id": "lazyoptional-import",
       "pattern": "import net.neoforged.neoforge.common.util.LazyOptional;\\r?\\n",
-      "replacement": "// TODO: LazyOptional removed in NeoForge 1.21 - use @Nullable or Optional directly\n",
-      "description": "LazyOptional removed in NeoForge 1.21 - use nullable or Optional",
+      "replacement": "import net.neoforged.neoforge.common.util.LazyOptional;\n",
+      "description": "Keep LazyOptional import for generated compatibility shim",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -1060,28 +1577,212 @@
       "isRegex": false
     },
     {
+      "id": "recipe-holder-getall-optional-var",
+      "pattern": "Optional<\\? extends Recipe<RecipeWrapper>>\\s+(\\w+)\\s*=",
+      "replacement": "var $1 =",
+      "description": "RecipeManager.getAllRecipesFor() returns RecipeHolder values in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "recipe-holder-lambda-id",
+      "pattern": "\\bnow\\.getId\\(\\)\\.equals\\(",
+      "replacement": "now.id().equals(",
+      "description": "RecipeHolder exposes id() instead of Recipe.getId() from recipe manager results",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "recipe-holder-optional-value",
+      "pattern": "Recipe<RecipeWrapper>\\s+(\\w+)\\s*=\\s*(\\w+)\\.get\\(\\);",
+      "replacement": "Recipe<RecipeWrapper> $1 = $2.get().value();",
+      "description": "Unwrap RecipeHolder.value() after getAllRecipesFor() lookups",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "recipe-manager-getrecipefor-map-value",
+      "pattern": "Optional<([A-Za-z_$][\\w$]*)>\\s+(\\w+)\\s*=\\s*([\\s\\S]*?\\.getRecipeFor\\([\\s\\S]*?)\\s*;",
+      "replacement": "Optional<$1> $2 = $3.map(RecipeHolder::value);",
+      "description": "RecipeManager.getRecipeFor() returns Optional<RecipeHolder<T>> in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "recipe-manager-getrecipesfor-map-values",
+      "pattern": "List<([A-Za-z_$][\\w$]*)>\\s+(\\w+)\\s*=\\s*([\\s\\S]*?\\.getRecipesFor\\([\\s\\S]*?)\\s*;",
+      "replacement": "List<$1> $2 = $3.stream().map(RecipeHolder::value).toList();",
+      "description": "RecipeManager.getRecipesFor() returns List<RecipeHolder<T>> in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "recipe-manager-getall-return-map-values",
+      "pattern": "return\\s+([^;\\r\\n]*\\.getAllRecipesFor\\([^;\\r\\n]+\\))\\s*;",
+      "replacement": "return $1.stream().map(RecipeHolder::value).toList();",
+      "description": "RecipeManager.getAllRecipesFor() return values need RecipeHolder.value() in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "recipe-manager-bykey-holder-value-cast",
+      "pattern": "\\(\\((\\w+Recipe)\\)\\s*(\\w+)\\)\\.getExperience\\(\\)",
+      "replacement": "(($1) $2.value()).getExperience()",
+      "description": "RecipeManager.byKey() returns RecipeHolder, so recipe experience access unwraps value()",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "deferred-holder-menutype-owner-generic",
+      "pattern": "DeferredHolder<MenuType<([A-Za-z_$][\\w$]*)>,\\s*MenuType<\\1>>",
+      "replacement": "DeferredHolder<MenuType<?>, MenuType<$1>>",
+      "description": "DeferredRegister<MenuType<?>> returns DeferredHolder<MenuType<?>, MenuType<T>> in NeoForge",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "jei-recipe-helper-recipeinput-bound",
+      "pattern": "private\\s+static\\s+<C\\s+extends\\s+Container,\\s*T\\s+extends\\s+Recipe<C>>\\s+List<T>\\s+findRecipesByType",
+      "replacement": "private static <C extends net.minecraft.world.item.crafting.RecipeInput, T extends Recipe<C>> List<T> findRecipesByType",
+      "description": "Recipe<T> is bound to RecipeInput in 1.21, not Container",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "smelting-single-recipe-input-import",
+      "pattern": "import net.minecraft.world.SimpleContainer;",
+      "replacement": "import net.minecraft.world.item.crafting.SingleRecipeInput;",
+      "description": "RecipeManager smelting lookups use SingleRecipeInput in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": false
+    },
+    {
+      "id": "smelting-single-recipe-input-local",
+      "pattern": "SimpleContainer\\s+(\\w+)\\s*=\\s*new\\s+SimpleContainer\\(([^;]+)\\);",
+      "replacement": "SingleRecipeInput $1 = new SingleRecipeInput($2);",
+      "description": "SimpleContainer single-stack smelting input -> SingleRecipeInput",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "commonhooks-getburntime-itemstack",
+      "pattern": "CommonHooks\\.getBurnTime\\(([^,;\\r\\n]+),\\s*null\\)",
+      "replacement": "$1.getBurnTime(null)",
+      "description": "CommonHooks.getBurnTime(stack, null) -> ItemStack.getBurnTime(null) in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "abstractcontainerscreen-renderbackground-params",
+      "pattern": "this\\.renderBackground\\(([^,;\\r\\n\\)]+)\\);",
+      "replacement": "this.renderBackground($1, mouseX, mouseY, partialTicks);",
+      "description": "AbstractContainerScreen.renderBackground now takes mouse coordinates and partial tick",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "bucketitem-getfluid-content",
+      "pattern": "\\bbucketItem\\.getFluid\\(\\)",
+      "replacement": "bucketItem.content",
+      "description": "BucketItem exposes its fluid as public content field in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "blocktoolmodificationevent-getitemability",
+      "pattern": "\\.getToolAction\\(\\)",
+      "replacement": ".getItemAbility()",
+      "description": "BlockToolModificationEvent.getToolAction() -> getItemAbility()",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "vertexconsumer-vertex-addvertex-pose",
+      "pattern": "\\bbuilder\\.vertex\\(([^;\\r\\n]+?)\\)",
+      "replacement": "builder.addVertex($1)",
+      "description": "Common VertexConsumer builder.vertex(...) call sites -> addVertex(...) in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "vertexconsumer-overlaycoords-nooverlay",
+      "pattern": "\\.overlayCoords\\(\\s*0\\s*,\\s*10\\s*\\)",
+      "replacement": ".setOverlay(OverlayTexture.NO_OVERLAY)",
+      "description": "VertexConsumer.overlayCoords(0, 10) -> setOverlay(OverlayTexture.NO_OVERLAY) in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "vertexconsumer-overlaycoords-setoverlay",
+      "pattern": "\\.overlayCoords\\(\\s*([^,\\)]+)\\s*\\)",
+      "replacement": ".setOverlay($1)",
+      "description": "VertexConsumer.overlayCoords(packedOverlay) -> setOverlay(packedOverlay) in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "vertexconsumer-uv2-setlight",
+      "pattern": "\\.uv2\\(",
+      "replacement": ".setLight(",
+      "description": "VertexConsumer.uv2(...) -> setLight(...) in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "vertexconsumer-setnormal-drop-matrix",
+      "pattern": "\\.setNormal\\(\\s*normal\\s*,\\s*([^,\\)]+)\\s*,\\s*([^,\\)]+)\\s*,\\s*([^\\)]+)\\)",
+      "replacement": ".setNormal($1, $2, $3)",
+      "description": "VertexConsumer.setNormal(Matrix3f, x, y, z) -> setNormal(x, y, z)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "itemhandlerhelper-copystackwithsize",
+      "pattern": "ItemHandlerHelper\\.copyStackWithSize\\(([^,;\\r\\n]+),\\s*([^\\)]+)\\)",
+      "replacement": "$1.copyWithCount($2)",
+      "description": "ItemHandlerHelper.copyStackWithSize() -> ItemStack.copyWithCount()",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "blockentity-writeitems-provider-signature",
+      "pattern": "private\\s+CompoundTag\\s+writeItems\\s*\\(\\s*((?:net\\.minecraft\\.nbt\\.)?CompoundTag\\s+\\w+)\\s*\\)",
+      "replacement": "private CompoundTag writeItems($1, HolderLookup.Provider registries)",
+      "description": "BlockEntity helper writing update tags needs HolderLookup.Provider for saveAdditional()",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "blockentity-writeitems-provider-call",
+      "pattern": "writeItems\\(new\\s+CompoundTag\\(\\)\\)",
+      "replacement": "writeItems(new CompoundTag(), registries)",
+      "description": "Pass HolderLookup.Provider through update-tag write helper",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "gui-overlay-extendedgui-import",
       "pattern": "import net.neoforged.neoforge.client.gui.overlay.ExtendedGui;\\r?\\n",
-      "replacement": "// TODO: ExtendedGui removed in 1.21 - GUI overlay system reworked\n",
-      "description": "ExtendedGui removed - GUI overlay system reworked in 1.21",
+      "replacement": "import net.minecraft.client.DeltaTracker;\n",
+      "description": "ExtendedGui removed - LayeredDraw.Layer render uses DeltaTracker in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
       "id": "gui-overlay-manager-import",
       "pattern": "import net.neoforged.neoforge.client.gui.overlay.GuiOverlayManager;\\r?\\n",
-      "replacement": "// TODO: GuiOverlayManager removed in 1.21 - use VanillaGuiLayers\nimport net.neoforged.neoforge.client.gui.VanillaGuiLayers;\n",
+      "replacement": "import net.neoforged.neoforge.client.gui.VanillaGuiLayers;\n",
       "description": "GuiOverlayManager removed - use VanillaGuiLayers in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
       "id": "simple-criterion-trigger-simpleinstance",
-      "pattern": "SimpleCriterionTrigger.SimpleInstance",
-      "replacement": "SimpleCriterionTrigger.SimpleInstance /* TODO: SimpleInstance is no longer a class in 1.21 - rework trigger */",
-      "description": "SimpleCriterionTrigger.SimpleInstance changed in 1.21",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: SimpleCriterionTrigger.SimpleInstance is handled by structural criterion-trigger migration",
       "fileGlob": "*.java",
-      "isRegex": false
+      "isRegex": true
     },
     {
       "id": "blockstate-get-to-getValue",
@@ -1140,6 +1841,14 @@
       "isRegex": false
     },
     {
+      "id": "effect-applyEffectTick-return-true",
+      "pattern": "(public boolean applyEffectTick\\([^)]*\\)\\s*\\{(?:(?!\\n\\s*return\\s+)[\\s\\S])*?)(\\n\\s*\\})",
+      "replacement": "$1\n        return true;$2",
+      "description": "Old void MobEffect.applyEffectTick() implementations need true return after signature migration",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "effect-isDurationEffectTick-rename",
       "pattern": "isDurationEffectTick(",
       "replacement": "shouldApplyEffectTickThisTick(",
@@ -1157,17 +1866,105 @@
     },
     {
       "id": "getUseDuration-add-livingentity",
-      "pattern": "public int getUseDuration(ItemStack (\\w+))\\s*\\{",
+      "pattern": "public int getUseDuration\\((?:@(?:[\\w.]+\\.)?\\w+\\s+)?ItemStack\\s+(\\w+)\\)\\s*\\{",
       "replacement": "public int getUseDuration(ItemStack $1, net.minecraft.world.entity.LivingEntity entity) {",
       "description": "Item.getUseDuration() now takes LivingEntity parameter in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
+      "id": "getUseDuration-call-add-livingentity",
+      "pattern": "getUseDuration\\((\\w+)\\)\\s*-\\s*timeLeft",
+      "replacement": "getUseDuration($1, entityLiving) - timeLeft",
+      "description": "Calls to overridden getUseDuration() need the LivingEntity argument in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "entity-setSecondsOnFire-igniteForSeconds",
+      "pattern": "\\.setSecondsOnFire\\(",
+      "replacement": ".igniteForSeconds(",
+      "description": "Entity.setSecondsOnFire() -> igniteForSeconds() in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "toolitem-4arg-super-createattributes",
+      "pattern": "super\\(\\s*(\\w+)\\s*,\\s*([A-Za-z_$][\\w$]*)\\s*,\\s*([A-Za-z_$][\\w$]*)\\s*,\\s*properties\\s*\\);",
+      "replacement": "super($1, properties.attributes(createAttributes($1, $2, $3)));",
+      "description": "SwordItem/ShovelItem-style constructors now take Tier and properties with attributes",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "diggeritem-5arg-super-createattributes",
+      "pattern": "super\\(\\s*([A-Za-z_$][\\w$]*)\\s*,\\s*([A-Za-z_$][\\w$]*)\\s*,\\s*(\\w+)\\s*,\\s*([^,]+),\\s*properties\\s*\\);",
+      "replacement": "super($3, $4, properties.attributes(DiggerItem.createAttributes($3, $1, $2)));",
+      "description": "DiggerItem constructor now takes Tier, mineable tag, and attributed properties",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "simpletier-drop-mining-level",
+      "pattern": "new SimpleTier\\(\\s*\\d+\\s*,\\s*(\\d+)\\s*,\\s*([0-9.]+F?)\\s*,\\s*([0-9.]+F?)\\s*,\\s*(\\d+)\\s*,\\s*([^,]+),\\s*\\(\\)\\s*->\\s*Ingredient\\.EMPTY\\s*\\)",
+      "replacement": "new SimpleTier($5, $1, $2, $3, $4, () -> Ingredient.EMPTY)",
+      "description": "NeoForge SimpleTier constructor starts with incorrect-block tag and no mining-level parameter",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "enchantmenthelper-sweeping-ratio-blocked",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: getSweepingDamageRatio(...) must migrate through the 1.21 enchantment damage pipeline, not a fixed value",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "enchantmenthelper-damagebonus-mobtype-blocked",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: getDamageBonus(... getMobType()) must migrate to EnchantmentHelper.modifyDamage with a real DamageSource",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "player-disableShield-no-arg",
+      "pattern": "\\.disableShield\\(false\\)",
+      "replacement": ".disableShield()",
+      "description": "Player.disableShield() no longer takes a boolean argument",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "itemstack-of-compoundtag-parseoptional-player",
+      "pattern": "ItemStack\\.of\\(([^;]+?\\.getCompound\\([^)]*\\))\\)",
+      "replacement": "ItemStack.parseOptional(player.registryAccess(), $1)",
+      "description": "ItemStack.of(CompoundTag) -> parseOptional(registryAccess, tag) in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "itemstack-of-method-reference-parseoptional",
+      "pattern": "\\.map\\(ItemStack::of\\)",
+      "replacement": ".map(tag -> ItemStack.parseOptional(net.minecraft.core.RegistryAccess.EMPTY, tag))",
+      "description": "ItemStack::of method reference -> parseOptional with HolderLookup.Provider",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "itemstack-hurt-crafting-remainder-damagevalue",
+      "pattern": "if \\((\\w+)\\.hurt\\(1,\\s*net\\.minecraft\\.util\\.RandomSource\\.create\\(\\),\\s*null\\)\\) \\{\\s*return ItemStack\\.EMPTY;\\s*\\}",
+      "replacement": "$1.setDamageValue($1.getDamageValue() + 1);\n        if ($1.getDamageValue() >= $1.getMaxDamage()) {\n            return ItemStack.EMPTY;\n        }",
+      "description": "ItemStack.hurt(RandomSource, null) crafting remainder pattern -> damage value update",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "appendHoverText-level-to-context",
-      "pattern": "public void appendHoverText\\(ItemStack (\\w+), @Nullable Level (\\w+),",
-      "replacement": "public void appendHoverText(ItemStack $1, Item.TooltipContext $2,",
-      "description": "appendHoverText @Nullable Level -> Item.TooltipContext in 1.21",
+      "pattern": "public void appendHoverText\\(([^,]+),\\s*(?:@(?:[\\w.]+\\.)?Nullable\\s+)?(?:net\\.minecraft\\.world\\.level\\.)?Level\\s+(\\w+),",
+      "replacement": "public void appendHoverText($1, Item.TooltipContext $2,",
+      "description": "appendHoverText Level -> Item.TooltipContext in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -1205,7 +2002,7 @@
     },
     {
       "id": "isPathfindable-remove-params",
-      "pattern": "public boolean isPathfindable\\(BlockState (\\w+), BlockGetter (\\w+), BlockPos (\\w+), PathComputationType (\\w+)\\)",
+      "pattern": "public\\s+boolean\\s+isPathfindable\\s*\\(\\s*BlockState\\s+(\\w+)\\s*,\\s*BlockGetter\\s+(\\w+)\\s*,\\s*BlockPos\\s+(\\w+)\\s*,\\s*PathComputationType\\s+(\\w+)\\s*\\)",
       "replacement": "public boolean isPathfindable(BlockState $1, PathComputationType $4)",
       "description": "Block.isPathfindable() removed BlockGetter and BlockPos params in 1.21",
       "fileGlob": "*.java",
@@ -1221,7 +2018,7 @@
     },
     {
       "id": "isValidBonemealTarget-remove-bool",
-      "pattern": "public boolean isValidBonemealTarget\\(LevelReader (\\w+), BlockPos (\\w+), BlockState (\\w+), boolean (\\w+)\\)",
+      "pattern": "public\\s+boolean\\s+isValidBonemealTarget\\s*\\(\\s*LevelReader\\s+(\\w+)\\s*,\\s*BlockPos\\s+(\\w+)\\s*,\\s*BlockState\\s+(\\w+)\\s*,\\s*boolean\\s+(\\w+)\\s*\\)",
       "replacement": "public boolean isValidBonemealTarget(LevelReader $1, BlockPos $2, BlockState $3)",
       "description": "BonemealableBlock.isValidBonemealTarget() removed isClient param in 1.21",
       "fileGlob": "*.java",
@@ -1229,9 +2026,17 @@
     },
     {
       "id": "isValidBonemealTarget-blockgetter",
-      "pattern": "public boolean isValidBonemealTarget\\(BlockGetter (\\w+), BlockPos (\\w+), BlockState (\\w+), boolean (\\w+)\\)",
+      "pattern": "public\\s+boolean\\s+isValidBonemealTarget\\s*\\(\\s*BlockGetter\\s+(\\w+)\\s*,\\s*BlockPos\\s+(\\w+)\\s*,\\s*BlockState\\s+(\\w+)\\s*,\\s*boolean\\s+(\\w+)\\s*\\)",
       "replacement": "public boolean isValidBonemealTarget(LevelReader $1, BlockPos $2, BlockState $3)",
       "description": "BonemealableBlock.isValidBonemealTarget() BlockGetter->LevelReader, removed isClient in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "isValidBonemealTarget-call-remove-bool",
+      "pattern": "\\.isValidBonemealTarget\\(\\s*([^,]+?)\\s*,\\s*([^,]+?)\\s*,\\s*([^,]+?)\\s*,\\s*(true|false)\\s*\\)",
+      "replacement": ".isValidBonemealTarget($1, $2, $3)",
+      "description": "BonemealableBlock.isValidBonemealTarget() call removed isClient param in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -1323,6 +2128,14 @@
       "fileGlob": "*.java"
     },
     {
+      "id": "nbt-stack-getOrCreateTag-putLong",
+      "pattern": "(\\w+)\\.getOrCreateTag\\(\\)\\.putLong\\(([^;]+)\\);",
+      "replacement": "net.minecraft.world.item.component.CustomData.update(net.minecraft.core.component.DataComponents.CUSTOM_DATA, $1, customDataTag -> customDataTag.putLong($2));",
+      "description": "ItemStack.getOrCreateTag().putLong() must write back to CUSTOM_DATA in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "nbt-stack-getOrCreateTag",
       "pattern": ".getOrCreateTag()",
       "replacement": ".getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()",
@@ -1347,47 +2160,47 @@
     {
       "id": "distexecutor-import",
       "pattern": "import net\\.neoforged\\.fml\\.DistExecutor;\\r?\\n",
-      "replacement": "// [forge2neo] $0 // DistExecutor removed in NeoForge\n",
+      "replacement": "",
       "isRegex": true,
-      "description": "Comment out DistExecutor import (removed in NeoForge)",
+      "description": "Remove DistExecutor import; structural pass rewrites active usages to FMLLoader guards",
       "fileGlob": "*.java"
     },
     {
       "id": "gui-renderBackground-remove",
       "pattern": "\\s+renderBackground\\(guiGraphics\\);\\r?\\n",
-      "replacement": " // renderBackground removed in 1.21 - super.render() handles it\n",
+      "replacement": "",
       "description": "Remove renderBackground(guiGraphics) call (handled by super.render() in 1.21)",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
       "id": "gui-selectionlist-y0",
-      "pattern": "(?<![\\w.])y0(?!\\w)",
-      "replacement": "getY()",
+      "pattern": "\\b(this|super)\\.y0\\b",
+      "replacement": "$1.getY()",
       "description": "AbstractSelectionList.y0 field -> getY() in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
       "id": "gui-selectionlist-y1",
-      "pattern": "(?<![\\w.])y1(?!\\w)",
-      "replacement": "getBottom()",
+      "pattern": "\\b(this|super)\\.y1\\b",
+      "replacement": "$1.getBottom()",
       "description": "AbstractSelectionList.y1 field -> getBottom() in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
       "id": "gui-selectionlist-x0",
-      "pattern": "(?<![\\w.])x0(?!\\w)",
-      "replacement": "getX()",
+      "pattern": "\\b(this|super)\\.x0\\b",
+      "replacement": "$1.getX()",
       "description": "AbstractSelectionList.x0 field -> getX() in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
       "id": "gui-selectionlist-x1",
-      "pattern": "(?<![\\w.])x1(?!\\w)",
-      "replacement": "getRight()",
+      "pattern": "\\b(this|super)\\.x1\\b",
+      "replacement": "$1.getRight()",
       "description": "AbstractSelectionList.x1 field -> getRight() in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
@@ -1395,7 +2208,7 @@
     {
       "id": "gui-overlay-event-import",
       "pattern": "import net.neoforged.neoforge.client.event.RenderGuiOverlayEvent;\\r?\\n",
-      "replacement": "// TODO: RenderGuiOverlayEvent removed - implement LayeredDraw.Layer + RegisterGuiLayersEvent\n",
+      "replacement": "import net.neoforged.neoforge.client.event.RenderGuiLayerEvent;\n",
       "description": "Remove RenderGuiOverlayEvent import (overlay system rewritten in 1.21)",
       "fileGlob": "*.java",
       "isRegex": true
@@ -1433,17 +2246,19 @@
     },
     {
       "id": "network-import-simplechannel",
-      "pattern": "import net.minecraftforge.network.simple.SimpleChannel;",
-      "replacement": "// TODO: [forge2neo] SimpleChannel removed in NeoForge - use PayloadRegistrar instead",
-      "description": "SimpleChannel import removed - NeoForge uses PayloadRegistrar",
-      "fileGlob": "*.java"
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: SimpleChannel import is handled by structural payload migration",
+      "fileGlob": "*.java",
+      "isRegex": true
     },
     {
       "id": "network-import-networkregistry",
-      "pattern": "import net.minecraftforge.network.NetworkRegistry;",
-      "replacement": "// TODO: [forge2neo] NetworkRegistry removed in NeoForge - use RegisterPayloadHandlersEvent",
-      "description": "NetworkRegistry import removed - NeoForge uses RegisterPayloadHandlersEvent",
-      "fileGlob": "*.java"
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: NetworkRegistry import is handled by structural payload migration",
+      "fileGlob": "*.java",
+      "isRegex": true
     },
     {
       "id": "network-import-networkevent",
@@ -1455,7 +2270,7 @@
     {
       "id": "network-import-networkdirection",
       "pattern": "import net.minecraftforge.network.NetworkDirection;",
-      "replacement": "// TODO: [forge2neo] NetworkDirection removed - use PacketDistributor methods directly",
+      "replacement": "",
       "description": "NetworkDirection removed in NeoForge",
       "fileGlob": "*.java"
     },
@@ -1492,32 +2307,33 @@
     },
     {
       "id": "network-ctx-setPacketHandled",
-      "pattern": "\\s*\\w+\\.get\\(\\)\\.setPacketHandled\\(true\\);",
-      "replacement": "// TODO: [forge2neo] setPacketHandled() removed - automatic in NeoForge",
+      "pattern": "(?m)^\\s*\\w+\\.get\\(\\)\\.setPacketHandled\\(true\\);\\s*\\r?\\n?",
+      "replacement": "",
       "description": "setPacketHandled(true) removed - NeoForge handles this automatically",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
       "id": "network-simplechannel-field",
-      "pattern": "(\\s*)(public|private|protected)?\\s*(static\\s+)?(final\\s+)?SimpleChannel\\s+\\w+",
-      "replacement": "$1// TODO: [forge2neo] SimpleChannel field removed - use RegisterPayloadHandlersEvent instead",
-      "description": "SimpleChannel field declaration - removed in NeoForge",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: SimpleChannel fields are handled by structural payload migration",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
       "id": "network-newSimpleChannel-assign",
-      "pattern": "= NetworkRegistry.newSimpleChannel(",
-      "replacement": "= null; // TODO: [forge2neo] Replace SimpleChannel with RegisterPayloadHandlersEvent // was NetworkRegistry.newSimpleChannel(",
-      "description": "NetworkRegistry.newSimpleChannel() removed - use RegisterPayloadHandlersEvent",
-      "fileGlob": "*.java"
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: NetworkRegistry.newSimpleChannel() is handled by structural payload migration",
+      "fileGlob": "*.java",
+      "isRegex": true
     },
     {
       "id": "network-registerMessage",
-      "pattern": "(\\s*)\\w+\\.registerMessage\\(",
-      "replacement": "$1// TODO: [forge2neo] registerMessage() removed - register via PayloadRegistrar // was: registerMessage(",
-      "description": "registerMessage() removed - use PayloadRegistrar.playToServer/playToClient",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: SimpleChannel.registerMessage calls must be migrated to PayloadRegistrar with real packet registration",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -1587,7 +2403,7 @@
     {
       "id": "network-stale-network-null-assign",
       "pattern": "\\s*network\\s*=\\s*null;[^\\r\\n]*\\r?\\n",
-      "replacement": "// TODO: [forge2neo] SimpleChannel removed\n",
+      "replacement": "",
       "description": "Remove stale network = null assignment after SimpleChannel removal",
       "fileGlob": "*.java",
       "isRegex": true
@@ -1619,7 +2435,7 @@
     {
       "id": "gui-editbox-tick-remove-override-crlf",
       "pattern": "    @Override\r?\n    public void tick\\(\\) \\{\r?\n        super\\.tick\\(\\);",
-      "replacement": "    public void tick() {\n        // super.tick(); // tick() no longer overridable in EditBox",
+      "replacement": "    public void tick() {",
       "description": "Remove @Override and super.tick() from EditBox subclass tick() method",
       "fileGlob": "*.java",
       "isRegex": true
@@ -1627,52 +2443,179 @@
     {
       "id": "gui-overlay-event-type-fix",
       "pattern": "RenderGuiOverlayEvent.Post",
-      "replacement": "net.neoforged.neoforge.client.event.RenderGuiLayerEvent.Post",
+      "replacement": "RenderGuiLayerEvent.Post",
       "description": "RenderGuiOverlayEvent.Post -> RenderGuiLayerEvent.Post (renamed in 1.21)",
       "fileGlob": "*.java"
     },
     {
+      "id": "gui-overlay-event-pre-type-fix",
+      "pattern": "RenderGuiOverlayEvent.Pre",
+      "replacement": "RenderGuiLayerEvent.Pre",
+      "description": "RenderGuiOverlayEvent.Pre -> RenderGuiLayerEvent.Pre (renamed in 1.21)",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "gui-overlay-id-equals",
+      "pattern": "(\\w+)\\.getOverlay\\(\\)\\.id\\(\\)\\s*==\\s*(VanillaGuiOverlay\\.[A-Z_]+\\.id\\(\\)|[A-Za-z_$][\\w$.]*)",
+      "replacement": "$1.getName().equals($2)",
+      "description": "RenderGuiOverlayEvent#getOverlay().id() equality -> RenderGuiLayerEvent#getName().equals(...)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gui-overlay-id-not-equals",
+      "pattern": "(\\w+)\\.getOverlay\\(\\)\\.id\\(\\)\\s*!=\\s*(VanillaGuiOverlay\\.[A-Z_]+\\.id\\(\\)|[A-Za-z_$][\\w$.]*)",
+      "replacement": "!$1.getName().equals($2)",
+      "description": "RenderGuiOverlayEvent#getOverlay().id() inequality -> !RenderGuiLayerEvent#getName().equals(...)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gui-overlay-id-access",
+      "pattern": "(\\w+)\\.getOverlay\\(\\)\\.id\\(\\)",
+      "replacement": "$1.getName()",
+      "description": "RenderGuiOverlayEvent#getOverlay().id() -> RenderGuiLayerEvent#getName()",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "gui-overlay-event-import-fix",
-      "pattern": "// TODO: RenderGuiOverlayEvent removed - implement LayeredDraw.Layer + RegisterGuiLayersEvent",
-      "replacement": "import net.neoforged.neoforge.client.event.RenderGuiLayerEvent;",
-      "description": "Add RenderGuiLayerEvent import to replace removed RenderGuiOverlayEvent",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: RenderGuiOverlayEvent import is rewritten directly",
       "fileGlob": "*.java"
     },
     {
       "id": "editbox-super-tick-remove",
-      "pattern": "\\s+super\\.tick\\(\\);",
-      "replacement": "\n        // super.tick(); // tick() removed from EditBox in 1.21",
+      "pattern": "(?s)(extends\\s+EditBox\\b.*?)\\s+super\\.tick\\(\\);",
+      "replacement": "$1",
       "description": "Remove super.tick() call in EditBox subclass (tick() removed in 1.21)",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
       "id": "recipe-craftingcontainer-import-inventory",
-      "pattern": "import net.minecraft.world.inventory.CraftingContainer;",
-      "replacement": "import net.minecraft.world.item.crafting.CraftingInput;",
-      "description": "CraftingContainer import from world.inventory -> CraftingInput (recipe system 1.21)",
-      "fileGlob": "*.java"
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: CraftingContainer is still the mutable inventory container in 1.21; structural recipe migration adds CraftingInput only at recipe API boundaries",
+      "fileGlob": "*.java",
+      "isRegex": true
     },
     {
       "id": "recipe-craftingcontainer-import",
-      "pattern": "import net.minecraft.world.item.crafting.CraftingContainer;",
-      "replacement": "import net.minecraft.world.item.crafting.CraftingInput;",
-      "description": "CraftingContainer import -> CraftingInput (recipe system 1.21)",
-      "fileGlob": "*.java"
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: CraftingContainer import migration is context-sensitive and handled structurally",
+      "fileGlob": "*.java",
+      "isRegex": true
     },
     {
       "id": "recipe-craftingcontainer-to-craftinginput",
-      "pattern": "\\bCraftingContainer\\b",
-      "replacement": "CraftingInput",
-      "description": "CraftingContainer -> CraftingInput class name (recipe system 1.21)",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: CraftingContainer -> CraftingInput must not apply to GUI containers or slots; structural recipe migration handles recipe API signatures",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "recipe-ishapedrecipe-import-remove",
+      "pattern": "import net.neoforged.neoforge.common.crafting.IShapedRecipe;",
+      "replacement": "",
+      "description": "IShapedRecipe was removed; vanilla ShapedRecipe exposes width and height in 1.21",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "recipe-ishapedrecipe-craftinginput-implements-remove",
+      "pattern": ",\\s*IShapedRecipe\\s*<\\s*CraftingInput\\s*>",
+      "replacement": "",
+      "description": "Remove removed IShapedRecipe<CraftingInput> interface from CraftingRecipe implementations",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "recipe-ishapedrecipe-to-shapedrecipe",
+      "pattern": "\\bIShapedRecipe\\s*<\\s*[^>]+\\s*>",
+      "replacement": "ShapedRecipe",
+      "description": "IShapedRecipe<T> -> ShapedRecipe",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "recipe-ishapedrecipe-width",
+      "pattern": "\\.getRecipeWidth\\(\\)",
+      "replacement": ".getWidth()",
+      "description": "IShapedRecipe.getRecipeWidth() -> ShapedRecipe.getWidth()",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "recipe-ishapedrecipe-width-declaration",
+      "pattern": "\\bgetRecipeWidth\\s*\\(",
+      "replacement": "getWidth(",
+      "description": "IShapedRecipe getRecipeWidth declaration -> getWidth",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "recipe-ishapedrecipe-height",
+      "pattern": "\\.getRecipeHeight\\(\\)",
+      "replacement": ".getHeight()",
+      "description": "IShapedRecipe.getRecipeHeight() -> ShapedRecipe.getHeight()",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "recipe-ishapedrecipe-height-declaration",
+      "pattern": "\\bgetRecipeHeight\\s*\\(",
+      "replacement": "getHeight(",
+      "description": "IShapedRecipe getRecipeHeight declaration -> getHeight",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "recipe-ishapedrecipe-width-height-override-remove",
+      "pattern": "(?m)^([ \\t]*)@Override\\s*\\r?\\n[ \\t]*public\\s+int\\s+(getWidth|getHeight)\\s*\\(",
+      "replacement": "$1public int $2(",
+      "description": "Remove stale @Override after IShapedRecipe width/height accessors become local helpers",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
       "id": "recipe-getContainerSize-to-size",
-      "pattern": "\\.getContainerSize\\(\\)",
-      "replacement": ".size()",
-      "description": "CraftingInput.getContainerSize() -> size() in 1.21",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: getContainerSize() still exists on Container; structural recipe migration rewrites only CraftingInput receivers",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "registry-iforgeregistry-import-remove",
+      "pattern": "import net.neoforged.neoforge.registries.IForgeRegistry;",
+      "replacement": "",
+      "description": "IForgeRegistry was removed; DeferredRegister.makeRegistry now supplies a vanilla Registry",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "registry-iforgeregistry-to-registry",
+      "pattern": "\\bIForgeRegistry\\s*<",
+      "replacement": "Registry<",
+      "description": "IForgeRegistry<T> -> Registry<T>",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "registryobject-extends-chestblock-param-to-supplier",
+      "pattern": "RegistryObject\\s*<\\s*\\?\\s+extends\\s+ChestBlock\\s*>",
+      "replacement": "Supplier<? extends ChestBlock>",
+      "description": "RegistryObject chest parameters -> Supplier-compatible registry holder parameter",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "registryobject-extends-entitytype-param-to-deferredholder",
+      "pattern": "RegistryObject\\s*<\\s*\\?\\s+extends\\s+EntityType\\s*<\\s*\\?\\s*>\\s*>",
+      "replacement": "DeferredHolder<EntityType<?>, ? extends EntityType<?>>",
+      "description": "RegistryObject entity parameters -> DeferredHolder-compatible registry holder parameter",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -1690,6 +2633,132 @@
       "replacement": "import net.minecraft.core.HolderLookup;",
       "description": "RegistryAccess import -> HolderLookup (recipe system 1.21)",
       "fileGlob": "*.java"
+    },
+    {
+      "id": "chunkstatus-import-package",
+      "pattern": "import net.minecraft.world.level.chunk.ChunkStatus;",
+      "replacement": "import net.minecraft.world.level.chunk.status.ChunkStatus;",
+      "description": "ChunkStatus moved to net.minecraft.world.level.chunk.status in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": false
+    },
+    {
+      "id": "chunkgenerator-codec-field-mapcodec",
+      "pattern": "public\\s+static\\s+final\\s+Codec<([A-Za-z_$][\\w$]*)>\\s+CODEC\\s*=\\s*RecordCodecBuilder\\.create",
+      "replacement": "public static final MapCodec<$1> CODEC = RecordCodecBuilder.mapCodec",
+      "description": "ChunkGenerator codecs are MapCodec-based in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "mapcodec-listof-codec",
+      "pattern": "(\\w+\\.CODEC)\\.listOf\\(\\)",
+      "replacement": "$1.codec().listOf()",
+      "description": "MapCodec needs codec() before listOf()",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "loot-table-reference-import",
+      "pattern": "import net.minecraft.world.level.storage.loot.entries.LootTableReference;",
+      "replacement": "import net.minecraft.world.level.storage.loot.entries.NestedLootTable;",
+      "description": "LootTableReference was renamed to NestedLootTable in 1.21 loot table builders",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "loot-table-reference-call",
+      "pattern": "\\bLootTableReference\\.lootTableReference\\(",
+      "replacement": "NestedLootTable.lootTableReference(",
+      "description": "LootTableReference.lootTableReference() -> NestedLootTable.lootTableReference()",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "loot-random-chance-looting-import",
+      "pattern": "import net.minecraft.world.level.storage.loot.predicates.LootItemRandomChanceWithLootingCondition;",
+      "replacement": "import net.minecraft.world.level.storage.loot.predicates.LootItemRandomChanceWithEnchantedBonusCondition;",
+      "description": "Looting chance condition class moved to enchanted bonus condition in 1.21",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "loot-random-chance-looting-call",
+      "pattern": "\\bLootItemRandomChanceWithLootingCondition\\.randomChanceAndLootingBoost\\(",
+      "replacement": "LootItemRandomChanceWithEnchantedBonusCondition.randomChanceAndLootingBoost(this.registries, ",
+      "description": "Looting chance condition now requires the provider registry lookup in 1.21 datagen",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "loot-copynbt-skullowner-to-copycomponents",
+      "pattern": "CopyNbtFunction\\.copyData\\(\\s*ContextNbtProvider\\.BLOCK_ENTITY\\s*\\)\\.copy\\(\\s*\"SkullOwner\"\\s*,\\s*\"SkullOwner\"\\s*\\)",
+      "replacement": "CopyComponentsFunction.copyComponents(CopyComponentsFunction.Source.BLOCK_ENTITY).include(DataComponents.PROFILE).include(DataComponents.NOTE_BLOCK_SOUND).include(DataComponents.CUSTOM_NAME)",
+      "description": "Player skull owner NBT copy becomes profile-related component copy in 1.21 loot builders",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "chunkgenerator-codec-method-mapcodec",
+      "pattern": "protected\\s+Codec<\\?\\s+extends\\s+ChunkGenerator>\\s+codec\\(\\)",
+      "replacement": "protected MapCodec<? extends ChunkGenerator> codec()",
+      "description": "ChunkGenerator.codec() returns MapCodec in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "chunkgenerator-fillfromnoise-remove-executor",
+      "pattern": "CompletableFuture<ChunkAccess>\\s+fillFromNoise\\(\\s*Executor\\s+\\w+\\s*,\\s*Blender\\s+(\\w+)\\s*,\\s*RandomState\\s+(\\w+)\\s*,\\s*StructureManager\\s+(\\w+)\\s*,\\s*ChunkAccess\\s+(\\w+)\\s*\\)",
+      "replacement": "CompletableFuture<ChunkAccess> fillFromNoise(Blender $1, RandomState $2, StructureManager $3, ChunkAccess $4)",
+      "description": "ChunkGenerator.fillFromNoise removed Executor parameter in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "mobspawn-finalize-event-import",
+      "pattern": "import net.neoforged.neoforge.event.entity.living.MobSpawnEvent;",
+      "replacement": "import net.neoforged.neoforge.event.entity.living.FinalizeSpawnEvent;\nimport net.neoforged.neoforge.event.entity.living.MobSpawnEvent;",
+      "description": "MobSpawnEvent.FinalizeSpawn became standalone FinalizeSpawnEvent in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": false
+    },
+    {
+      "id": "mobspawn-finalize-event-type",
+      "pattern": "MobSpawnEvent\\.FinalizeSpawn",
+      "replacement": "FinalizeSpawnEvent",
+      "description": "MobSpawnEvent.FinalizeSpawn became standalone FinalizeSpawnEvent in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "leveltick-level-accessor",
+      "pattern": "(?<![\\w.])event\\.level\\b",
+      "replacement": "event.getLevel()",
+      "description": "LevelTickEvent.level is private in NeoForge 1.21; use getLevel()",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "saveddata-load-provider",
+      "pattern": "((?:(?:public|private|protected|static|final|abstract)\\s+)*class\\s+(\\w+)\\s+extends\\s+SavedData[\\s\\S]*?public\\s+static\\s+\\2\\s+load\\(\\s*CompoundTag\\s+(\\w+)\\s*)\\)",
+      "replacement": "$1, HolderLookup.Provider registries)",
+      "description": "SavedData load deserializer now receives HolderLookup.Provider in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "saveddata-save-provider",
+      "pattern": "((?:(?:public|private|protected|static|final|abstract)\\s+)*class\\s+\\w+\\s+extends\\s+SavedData[\\s\\S]*?public\\s+CompoundTag\\s+save\\(\\s*CompoundTag\\s+(\\w+)\\s*)\\)",
+      "replacement": "$1, HolderLookup.Provider registries)",
+      "description": "SavedData.save() now receives HolderLookup.Provider in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "saveddata-computeifabsent-factory",
+      "pattern": "computeIfAbsent\\(\\s*([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)?)::load,\\s*\\1::new,\\s*([\\s\\S]*?)\\)",
+      "replacement": "computeIfAbsent(new SavedData.Factory<>($1::new, $1::load), $2)",
+      "description": "DimensionDataStorage.computeIfAbsent now takes a SavedData.Factory and id in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
     },
     {
       "id": "item-isCorrectToolForDrops-add-stack",
@@ -1717,9 +2786,97 @@
     },
     {
       "id": "item-hurtAndBreak-lambda-to-equipmentslot",
-      "pattern": "\\.hurtAndBreak\\((\\d+),\\s*(\\w+),[\\s\\S]*?(?:onEquippedItemBroken|broadcastBreakEvent)\\([^)]*\\)\\s*\\)\\s*\\)",
+      "pattern": "\\.hurtAndBreak\\((\\d+),\\s*(\\w+),\\s*\\w+\\s*->\\s*\\w+\\.(?:onEquippedItemBroken|broadcastBreakEvent)\\(InteractionHand\\.MAIN_HAND\\)\\s*\\)",
       "replacement": ".hurtAndBreak($1, $2, EquipmentSlot.MAINHAND)",
       "description": "hurtAndBreak() lambda callback -> EquipmentSlot in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "item-hurtAndBreak-hand-lambda-to-equipmentslot",
+      "pattern": "\\.hurtAndBreak\\((\\d+),\\s*(\\w+),\\s*\\(?\\w+\\)?\\s*->\\s*\\w+\\.(?:onEquippedItemBroken|broadcastBreakEvent)\\((?:hand|handIn)\\)\\s*\\)",
+      "replacement": ".hurtAndBreak($1, $2, EquipmentSlot.MAINHAND)",
+      "description": "hurtAndBreak() callbacks that still reference removed hand parameter -> EquipmentSlot.MAINHAND",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "item-hurtAndBreak-equipment-slot-lambda-to-slot",
+      "pattern": "\\.hurtAndBreak\\((\\d+),\\s*([^,]+),\\s*\\(?\\w+\\)?\\s*->\\s*\\w+\\.(?:onEquippedItemBroken|broadcastBreakEvent)\\(EquipmentSlot\\.MAINHAND\\)\\s*\\)",
+      "replacement": ".hurtAndBreak($1, $2, EquipmentSlot.MAINHAND)",
+      "description": "hurtAndBreak() lambda already targeting EquipmentSlot -> direct EquipmentSlot overload",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "item-hurtAndBreak-context-hand-lambda-to-slot",
+      "pattern": "\\.hurtAndBreak\\((\\d+),\\s*([^,]+),\\s*\\(?\\w+\\)?\\s*->\\s*\\w+\\.(?:onEquippedItemBroken|broadcastBreakEvent)\\([^)]*\\.getHand\\(\\)\\)\\s*\\)",
+      "replacement": ".hurtAndBreak($1, $2, EquipmentSlot.MAINHAND)",
+      "description": "hurtAndBreak() context hand callback -> direct EquipmentSlot overload",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "usewithoutitem-getiteminhand-mainhand",
+      "pattern": "\\.getItemInHand\\((?:hand|handIn)\\)",
+      "replacement": ".getMainHandItem()",
+      "description": "useWithoutItem() no longer has a hand parameter; keep simple old item checks on the main hand",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "usewithoutitem-swing-mainhand",
+      "pattern": "\\.swing\\((?:hand|handIn)\\)",
+      "replacement": ".swing(InteractionHand.MAIN_HAND)",
+      "description": "useWithoutItem() no longer has a hand parameter; keep old swing calls on the main hand",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "usewithoutitem-helper-hand-arg-mainhand",
+      "pattern": "\\.takePlates\\(([^;\\r\\n]*),\\s*(?:hand|handIn)\\)",
+      "replacement": ".takePlates($1, InteractionHand.MAIN_HAND)",
+      "description": "Plate helper call after useWithoutItem migration needs an explicit hand",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "annotation-duplicate-override-suppresswarnings",
+      "pattern": "@Override\\s*\\r?\\n\\s*(@SuppressWarnings\\(\"deprecation\"\\)\\s*\\r?\\n\\s*)@Override",
+      "replacement": "$1@Override",
+      "description": "Remove duplicate @Override introduced around @SuppressWarnings",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "block-isbed-entity-to-livingentity",
+      "pattern": "isBed\\(BlockState\\s+(\\w+),\\s*BlockGetter\\s+(\\w+),\\s*BlockPos\\s+(\\w+),\\s*@Nullable\\s+Entity\\s+(\\w+)\\)",
+      "replacement": "isBed(BlockState $1, BlockGetter $2, BlockPos $3, @Nullable LivingEntity $4)",
+      "description": "IBlockExtension.isBed sleeper parameter is LivingEntity in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "block-playerwilldestroy-return-blockstate",
+      "pattern": "public\\s+void\\s+playerWillDestroy\\(Level\\s+(\\w+),\\s*BlockPos\\s+(\\w+),\\s*BlockState\\s+(\\w+),\\s*Player\\s+(\\w+)\\)",
+      "replacement": "public BlockState playerWillDestroy(Level $1, BlockPos $2, BlockState $3, Player $4)",
+      "description": "Block.playerWillDestroy returns BlockState in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "block-playerwilldestroy-super-return",
+      "pattern": "(?m)^(\\s*)super\\.playerWillDestroy\\(([^;]+)\\);",
+      "replacement": "$1return super.playerWillDestroy($2);",
+      "description": "Return super.playerWillDestroy result after 1.21 signature change",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "block-getcloneitemstack-levelreader",
+      "pattern": "getCloneItemStack\\(BlockGetter\\s+(\\w+),\\s*BlockPos\\s+(\\w+),\\s*BlockState\\s+(\\w+)\\)",
+      "replacement": "getCloneItemStack(LevelReader $1, BlockPos $2, BlockState $3)",
+      "description": "Block.getCloneItemStack uses LevelReader in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -1733,9 +2890,9 @@
     },
     {
       "id": "event-getPartialTick-to-deltaTracker",
-      "pattern": "event\\.getPartialTick\\(\\)",
-      "replacement": "event.getPartialTick().getGameTimeDeltaPartialTick(false)",
-      "description": "event.getPartialTick() returns DeltaTracker in 1.21, need .getGameTimeDeltaPartialTick(false) for float",
+      "pattern": "event\\.getPartialTick\\(\\)\\.getGameTimeDeltaPartialTick\\(false\\)",
+      "replacement": "event.getDeltaTracker().getGameTimeDeltaPartialTick(false)",
+      "description": "RenderHighlightEvent DeltaTracker access uses getDeltaTracker() in NeoForge 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -1751,15 +2908,15 @@
       "id": "recipe-simplecraftingrecipeserializer-diamond",
       "pattern": "SimpleCraftingRecipeSerializer\\(([^:]+)::new\\)",
       "replacement": "SimpleCraftingRecipeSerializer<>($1::new)",
-      "description": "SimpleCraftingRecipeSerializer add diamond operator for type inference in 1.21",
+      "description": "SimpleCraftingRecipeSerializer add diamond operator for generic type resolution in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
       "id": "entity-getMyRidingOffset-removed",
-      "pattern": "\\w+\\.getMyRidingOffset\\(\\)",
-      "replacement": "0.0 /* TODO: getMyRidingOffset() removed in 1.21 */",
-      "description": "Entity.getMyRidingOffset() removed in 1.21 - replace with TODO and 0",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: Entity.getMyRidingOffset() must be migrated structurally, not replaced with a numeric constant",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -1773,17 +2930,17 @@
     },
     {
       "id": "net-ctx-get-direction-server",
-      "pattern": "ctx\\.get\\(\\)\\.getDirection\\(\\)\\.getReceptionSide\\(\\)\\.isServer\\(\\)",
-      "replacement": "true /* direction check: server-bound guaranteed by handler registration */",
-      "description": "NetworkEvent.Context direction check removed: server-bound is guaranteed by RegisterPayloadHandlersEvent",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: NetworkEvent.Context direction checks must be migrated by payload registration, not replaced with constants",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
       "id": "net-ctx-get-direction-client",
-      "pattern": "ctx\\.get\\(\\)\\.getDirection\\(\\)\\.getReceptionSide\\(\\)\\.isClient\\(\\)",
-      "replacement": "true /* direction check: client-bound guaranteed by handler registration */",
-      "description": "NetworkEvent.Context direction check removed: client-bound is guaranteed by RegisterPayloadHandlersEvent",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: NetworkEvent.Context direction checks must be migrated by payload registration, not replaced with constants",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -1822,7 +2979,7 @@
     {
       "id": "net-handler-assign-null",
       "pattern": "HANDLER = null;",
-      "replacement": "// [forge2neo] HANDLER removed, packets registered via RegisterPayloadHandlersEvent",
+      "replacement": "",
       "description": "Remove HANDLER = null assignment (SimpleChannel removed)",
       "fileGlob": "*.java"
     },
@@ -1883,7 +3040,7 @@
     },
     {
       "id": "container-loadAllItems-provider",
-      "pattern": "ContainerHelper\\.loadAllItems\\((\\w+),\\s*(\\w+)\\)",
+      "pattern": "ContainerHelper\\.loadAllItems\\(([^,\\r\\n]+),\\s*([^;\\r\\n]+)\\)",
       "replacement": "ContainerHelper.loadAllItems($1, $2, net.minecraft.core.RegistryAccess.EMPTY)",
       "description": "ContainerHelper.loadAllItems gained HolderLookup.Provider parameter in 1.21",
       "fileGlob": "*.java",
@@ -1891,7 +3048,7 @@
     },
     {
       "id": "container-saveAllItems-provider",
-      "pattern": "ContainerHelper\\.saveAllItems\\((\\w+),\\s*(\\w+)\\)",
+      "pattern": "ContainerHelper\\.saveAllItems\\(([^,\\r\\n]+),\\s*([^;\\r\\n]+)\\)",
       "replacement": "ContainerHelper.saveAllItems($1, $2, net.minecraft.core.RegistryAccess.EMPTY)",
       "description": "ContainerHelper.saveAllItems gained HolderLookup.Provider parameter in 1.21",
       "fileGlob": "*.java",
@@ -1916,8 +3073,8 @@
     {
       "id": "remove-import-vanishable",
       "pattern": "import net.minecraft.world.item.Vanishable;\\r?\\n",
-      "replacement": "// [forge2neo] $0 // Vanishable removed in NeoForge\n",
-      "description": "Comment out Vanishable import (interface removed in 1.21)",
+      "replacement": "",
+      "description": "Remove Vanishable import (interface removed in 1.21)",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -1938,18 +3095,18 @@
     },
     {
       "id": "tick-event-phase-check-remove",
-      "pattern": "if \\(event\\.side\\.isClient\\(\\).*?\\) return;\\r?\\n[ \\t]*",
-      "replacement": "// [forge2neo] $0 // phase check removed in NeoForge\n",
+      "pattern": "(?!)",
+      "replacement": "",
       "isRegex": true,
-      "description": "Comment out event.side/phase checks (handled by Pre/Post split in 1.21)",
+      "description": "Disabled: event side/phase checks must be removed by structural tick-event migration",
       "fileGlob": "*.java"
     },
     {
       "id": "tick-event-phase-end-check-remove",
       "pattern": "[ \\t]*if \\(event\\.phase != TickEvent\\.Phase\\.END\\) return;\\r?\\n",
-      "replacement": "// [forge2neo] $0 // phase check removed in NeoForge\n",
+      "replacement": "",
       "isRegex": true,
-      "description": "Comment out TickEvent.Phase.END check (use .Post event instead in 1.21)",
+      "description": "Remove TickEvent.Phase.END check after migrating to .Post event in 1.21",
       "fileGlob": "*.java"
     },
     {
@@ -2019,7 +3176,7 @@
     {
       "id": "tick-event-phase-end-return",
       "pattern": "if \\(event\\.phase == TickEvent\\.Phase\\.END\\) \\{\\r?\\n[^\\S\\r\\n]*return;\\r?\\n[^\\S\\r\\n]*\\}",
-      "replacement": "// Phase check removed: NeoForge uses .Pre/.Post subevents",
+      "replacement": "",
       "description": "Remove TickEvent.Phase.END guard (NeoForge uses Pre/Post subevents)",
       "fileGlob": "*.java",
       "isRegex": true
@@ -2027,7 +3184,7 @@
     {
       "id": "tick-event-phase-start-return",
       "pattern": "if \\(event\\.phase == TickEvent\\.Phase\\.START\\) \\{\\r?\\n[^\\S\\r\\n]*return;\\r?\\n[^\\S\\r\\n]*\\}",
-      "replacement": "// Phase check removed: NeoForge uses .Pre/.Post subevents",
+      "replacement": "",
       "description": "Remove TickEvent.Phase.START guard (NeoForge uses Pre/Post subevents)",
       "fileGlob": "*.java",
       "isRegex": true
@@ -2035,7 +3192,7 @@
     {
       "id": "tick-event-phase-check-neq",
       "pattern": "if \\(event\\.phase != TickEvent\\.Phase\\.(START|END)\\)[^{]*\\{\\r?\\n[^\\S\\r\\n]*return;\\r?\\n[^\\S\\r\\n]*\\}",
-      "replacement": "// Phase check removed: NeoForge uses .Pre/.Post subevents",
+      "replacement": "",
       "description": "Remove TickEvent.Phase != check (NeoForge uses Pre/Post subevents)",
       "fileGlob": "*.java",
       "isRegex": true
@@ -2073,15 +3230,15 @@
     {
       "id": "gui-overlay-import-remove",
       "pattern": "import net.neoforged.neoforge.client.gui.overlay.IGuiOverlay;",
-      "replacement": "// [forge2neo] IGuiOverlay removed in 1.21 - use LayeredDraw.Layer instead",
-      "description": "IGuiOverlay removed in 1.21",
+      "replacement": "import net.minecraft.client.gui.LayeredDraw;",
+      "description": "IGuiOverlay removed in 1.21 - use LayeredDraw.Layer",
       "fileGlob": "*.java"
     },
     {
       "id": "gui-overlay-vanilla-import-remove",
       "pattern": "import net.neoforged.neoforge.client.gui.overlay.VanillaGuiOverlay;",
-      "replacement": "// [forge2neo] VanillaGuiOverlay removed in 1.21 - use RegisterGuiLayersEvent",
-      "description": "VanillaGuiOverlay removed in 1.21",
+      "replacement": "import net.neoforged.neoforge.client.gui.VanillaGuiLayers;",
+      "description": "VanillaGuiOverlay removed in 1.21 - use VanillaGuiLayers",
       "fileGlob": "*.java"
     },
     {
@@ -2095,9 +3252,17 @@
     {
       "id": "tesselator-getbuilder-standalone",
       "pattern": "tesselator.getBuilder()",
-      "replacement": "tesselator.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_TEX) // TODO: [forge2neo] verify begin() args",
+      "replacement": "null",
       "description": "Tesselator.getBuilder() removed in 1.21 (standalone case)",
       "fileGlob": "*.java"
+    },
+    {
+      "id": "bufferbuilder-begin-to-tesselator-begin",
+      "pattern": "(?m)^(\\s*)(\\w+)\\.begin\\(([^;]+)\\);",
+      "replacement": "$1$2 = Tesselator.getInstance().begin($3);",
+      "description": "BufferBuilder.begin(...) -> Tesselator.getInstance().begin(...) in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
     },
     {
       "id": "tesselator-end",
@@ -2129,6 +3294,14 @@
       "replacement": "ServerTickEvent.Post $2)",
       "isRegex": true,
       "description": "ServerTickEvent -> ServerTickEvent.Post in method parameters",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "leveltickevent-param",
+      "pattern": "(LevelTickEvent)(?!\\.)\\s+(\\w+)\\)",
+      "replacement": "LevelTickEvent.Post $2)",
+      "isRegex": true,
+      "description": "LevelTickEvent -> LevelTickEvent.Post in method parameters",
       "fileGlob": "*.java"
     },
     {
@@ -2171,10 +3344,43 @@
     },
     {
       "id": "block-behaviour-properties-copy",
-      "pattern": "BlockBehaviour.Properties.copy(",
+      "pattern": "BlockBehaviour\\.Properties\\s*\\.copy\\(",
       "replacement": "BlockBehaviour.Properties.ofFullCopy(",
       "description": "BlockBehaviour.Properties.copy() -> ofFullCopy() in 1.21",
-      "fileGlob": "*.java"
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "stairblock-constructor-state-supplier",
+      "pattern": "new\\s+([A-Za-z_$][\\w$.]*StairBlock)\\(\\s*\\(\\)\\s*->\\s*([^,]+?\\.defaultBlockState\\(\\))\\s*,",
+      "replacement": "new $1($2,",
+      "description": "StairBlock constructor takes BlockState directly in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "doorblock-constructor-order",
+      "pattern": "new\\s+([A-Za-z_$][\\w$.]*DoorBlock)\\(\\s*(BlockBehaviour\\.Properties\\.[^,]+?)\\s*,\\s*((?:net\\.minecraft\\.world\\.level\\.block\\.state\\.properties\\.)?BlockSetType\\.[A-Z_]+)\\s*\\)",
+      "replacement": "new $1($3, $2)",
+      "description": "DoorBlock/TrapDoorBlock constructor takes BlockSetType before Properties in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "liquidblockcontainer-canplaceliquid-player",
+      "pattern": "public\\s+boolean\\s+canPlaceLiquid\\(\\s*BlockGetter\\s+(\\w+)\\s*,\\s*BlockPos\\s+(\\w+)\\s*,\\s*BlockState\\s+(\\w+)\\s*,\\s*Fluid\\s+(\\w+)\\s*\\)",
+      "replacement": "public boolean canPlaceLiquid(net.minecraft.world.entity.player.Player player, BlockGetter $1, BlockPos $2, BlockState $3, Fluid $4)",
+      "description": "LiquidBlockContainer.canPlaceLiquid() added Player parameter in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "anonymous-bushblock-codec",
+      "pattern": "new\\s+((?:net\\.minecraft\\.world\\.level\\.block\\.)?BushBlock)\\((BlockBehaviour\\.Properties[\\s\\S]*?randomTicks\\(\\))\\)",
+      "replacement": "new $1($2) {\n                @Override\n                protected com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.BushBlock> codec() {\n                    return com.mojang.serialization.MapCodec.unit(this);\n                }\n            }",
+      "description": "Anonymous BushBlock subclasses must implement codec() in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
     },
     {
       "id": "blockpos-offset-to-vec3-aabb",
@@ -2201,6 +3407,38 @@
       "isRegex": true
     },
     {
+      "id": "deferredholder-simpleparticletype-generic",
+      "pattern": "DeferredHolder<SimpleParticleType,\\s*SimpleParticleType>",
+      "replacement": "DeferredHolder<ParticleType<?>, SimpleParticleType>",
+      "description": "DeferredRegister<ParticleType<?>>.register returns DeferredHolder<ParticleType<?>, SimpleParticleType>",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "deferredholder-flowingfluid-generic",
+      "pattern": "DeferredHolder<FlowingFluid,\\s*FlowingFluid>",
+      "replacement": "DeferredHolder<Fluid, FlowingFluid>",
+      "description": "DeferredRegister<Fluid>.register returns DeferredHolder<Fluid, FlowingFluid>",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "deferredholder-recipetype-generic",
+      "pattern": "DeferredHolder<RecipeType<([A-Za-z_$][\\w$]*)>,\\s*RecipeType<\\1>>",
+      "replacement": "DeferredHolder<RecipeType<?>, RecipeType<$1>>",
+      "description": "DeferredRegister<RecipeType<?>>.register returns DeferredHolder<RecipeType<?>, RecipeType<T>>",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "deferredholder-recipeserializer-generic",
+      "pattern": "DeferredHolder<AbstractRecipeSerializer<([A-Za-z_$][\\w$]*)>,\\s*AbstractRecipeSerializer<\\1>>",
+      "replacement": "DeferredHolder<RecipeSerializer<?>, AbstractRecipeSerializer<$1>>",
+      "description": "DeferredRegister<RecipeSerializer<?>>.register returns DeferredHolder<RecipeSerializer<?>, serializer>",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "add-import-vec3-for-aabb",
       "pattern": "(import net\\.minecraft\\.world\\.phys\\.AABB;)\\r?\\n(?!import net\\.minecraft\\.world\\.phys\\.Vec3;)",
       "replacement": "$1\nimport net.minecraft.world.phys.Vec3;\n",
@@ -2213,6 +3451,469 @@
       "pattern": "DeferredHolder<BlockEntityType<(\\w+)>,\\s*BlockEntityType<\\1>>",
       "replacement": "DeferredHolder<BlockEntityType<?>, BlockEntityType<$1>>",
       "description": "DeferredHolder<BlockEntityType<X>,BlockEntityType<X>> -> DeferredHolder<BlockEntityType<?>,BlockEntityType<X>> in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gui-overlays-event-import",
+      "pattern": "import net.neoforged.neoforge.client.event.RegisterGuiOverlaysEvent;",
+      "replacement": "import net.neoforged.neoforge.client.event.RegisterGuiLayersEvent;",
+      "description": "RegisterGuiOverlaysEvent -> RegisterGuiLayersEvent in NeoForge 1.21",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "gui-overlays-event-type",
+      "pattern": "\\bRegisterGuiOverlaysEvent\\b",
+      "replacement": "RegisterGuiLayersEvent",
+      "description": "RegisterGuiOverlaysEvent type -> RegisterGuiLayersEvent",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gui-overlay-interface",
+      "pattern": "implements\\s+IGuiOverlay",
+      "replacement": "implements LayeredDraw.Layer",
+      "description": "IGuiOverlay implementation -> LayeredDraw.Layer",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gui-overlay-render-signature",
+      "pattern": "public\\s+void\\s+render\\(\\s*ExtendedGui\\s+\\w+\\s*,\\s*GuiGraphics\\s+(\\w+)\\s*,\\s*float\\s+\\w+\\s*,\\s*int\\s+\\w+\\s*,\\s*int\\s+\\w+\\s*\\)",
+      "replacement": "public void render(GuiGraphics $1, DeltaTracker deltaTracker)",
+      "description": "IGuiOverlay render signature -> LayeredDraw.Layer render signature",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gui-overlay-vanilla-hotbar",
+      "pattern": "VanillaGuiOverlay\\.HOTBAR\\.id\\(\\)",
+      "replacement": "VanillaGuiLayers.HOTBAR",
+      "description": "VanillaGuiOverlay.HOTBAR.id() -> VanillaGuiLayers.HOTBAR",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gui-overlay-vanilla-mount-health",
+      "pattern": "VanillaGuiOverlay\\.MOUNT_HEALTH\\.id\\(\\)",
+      "replacement": "VanillaGuiLayers.VEHICLE_HEALTH",
+      "description": "VanillaGuiOverlay.MOUNT_HEALTH.id() -> VanillaGuiLayers.VEHICLE_HEALTH",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gui-overlay-register-above-id",
+      "pattern": "event\\.registerAbove\\(\\s*VanillaGuiLayers\\.HOTBAR\\s*,\\s*\"([^\"]+)\"\\s*,\\s*new\\s+(\\w+)\\(\\)\\s*\\)",
+      "replacement": "event.registerAbove(VanillaGuiLayers.HOTBAR, $2.OVERLAY_ID, new $2())",
+      "description": "RegisterGuiLayersEvent.registerAbove requires ResourceLocation layer id",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "inventory-size-method",
+      "pattern": "getInventory\\(\\)\\.size\\(\\)",
+      "replacement": "getInventory().getContainerSize()",
+      "description": "Inventory.size() -> getContainerSize() in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "model-render-buffer-color-signature",
+      "pattern": "public\\s+void\\s+renderToBuffer\\(\\s*PoseStack\\s+(\\w+)\\s*,\\s*VertexConsumer\\s+(\\w+)\\s*,\\s*int\\s+(\\w+)\\s*,\\s*int\\s+(\\w+)\\s*,\\s*float\\s+\\w+\\s*,\\s*float\\s+\\w+\\s*,\\s*float\\s+\\w+\\s*,\\s*float\\s+\\w+\\s*\\)",
+      "replacement": "public void renderToBuffer(PoseStack $1, VertexConsumer $2, int $3, int $4, int color)",
+      "description": "Model.renderToBuffer override uses packed ARGB color in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "modelpart-render-color-arg",
+      "pattern": "(\\w+)\\.render\\(([^;]*?packedOverlay)\\s*,\\s*red\\s*,\\s*green\\s*,\\s*blue\\s*,\\s*alpha\\s*\\)",
+      "replacement": "$1.render($2, color)",
+      "description": "ModelPart.render RGBA floats -> packed ARGB color",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "model-render-buffer-float-call",
+      "pattern": "(\\w+)\\.renderToBuffer\\(([^;]*?)\\s*,\\s*([A-Za-z0-9_\\.]+)\\s*,\\s*([A-Za-z0-9_\\.]+)\\s*,\\s*([A-Za-z0-9_\\.]+)\\s*,\\s*([A-Za-z0-9_\\.]+)\\s*\\)",
+      "replacement": "$1.renderToBuffer($2, FastColor.ARGB32.colorFromFloat($6, $3, $4, $5))",
+      "description": "Model.renderToBuffer RGBA floats -> FastColor.ARGB32 packed color",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "entity-define-synched-data-builder-signature",
+      "pattern": "protected\\s+void\\s+defineSynchedData\\s*\\(\\s*\\)",
+      "replacement": "protected void defineSynchedData(SynchedEntityData.Builder builder)",
+      "description": "Entity.defineSynchedData now receives SynchedEntityData.Builder in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "entity-define-synched-data-builder-define",
+      "pattern": "this\\.entityData\\.define\\(",
+      "replacement": "builder.define(",
+      "description": "Synched entity data defaults are defined on builder in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "entity-define-synched-data-getter-builder-define",
+      "pattern": "this\\.getEntityData\\(\\)\\.define\\(",
+      "replacement": "builder.define(",
+      "description": "Synched entity data defaults accessed through getEntityData() are defined on builder in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "entity-define-synched-data-super-builder",
+      "pattern": "super\\.defineSynchedData\\(\\);",
+      "replacement": "super.defineSynchedData(builder);",
+      "description": "Entity.defineSynchedData super call now receives SynchedEntityData.Builder in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "advancement-manager-get-method",
+      "pattern": "getAdvancements\\(\\)\\s*\\.\\s*getAdvancement\\(",
+      "replacement": "getAdvancements().get(",
+      "description": "ServerAdvancementManager.getAdvancement() -> get() returning AdvancementHolder in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "advancement-local-holder-type",
+      "pattern": "\\bAdvancement\\s+(\\w+)\\s*=\\s*([\\s\\S]*?getAdvancements\\(\\)\\s*\\.get\\()",
+      "replacement": "AdvancementHolder $1 = $2",
+      "description": "Advancement manager lookups now return AdvancementHolder in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "chunkaccess-getstatus-persistedstatus",
+      "pattern": "\\.getStatus\\(\\)",
+      "replacement": ".getPersistedStatus()",
+      "description": "ChunkAccess.getStatus() -> getPersistedStatus() in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gametest-mock-survival-player",
+      "pattern": "\\.makeMockSurvivalPlayer\\(\\)",
+      "replacement": ".makeMockPlayer(GameType.SURVIVAL)",
+      "description": "GameTestHelper.makeMockSurvivalPlayer() -> makeMockPlayer(GameType.SURVIVAL)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "serverplayer-constructor-clientinformation-profile",
+      "pattern": "new\\s+ServerPlayer\\(\\s*([^,]+?),\\s*([^,]+?),\\s*(new\\s+GameProfile\\([^\\n]*\\)|[A-Za-z_$][\\w$]*)\\s*\\)",
+      "replacement": "new ServerPlayer($1, $2, $3, ClientInformation.createDefault())",
+      "description": "ServerPlayer constructor gained ClientInformation in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "playerlist-place-new-player-cookie",
+      "pattern": "\\.placeNewPlayer\\(([^,()]+),\\s*([A-Za-z_$][\\w$]*)\\)",
+      "replacement": ".placeNewPlayer($1, $2, CommonListenerCookie.createInitial($2.getGameProfile(), false))",
+      "description": "PlayerList.placeNewPlayer() gained CommonListenerCookie in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "enderchest-createtag-provider",
+      "pattern": "(\\w+)\\.getEnderChestInventory\\(\\)\\.createTag\\(\\)",
+      "replacement": "$1.getEnderChestInventory().createTag($1.registryAccess())",
+      "description": "PlayerEnderChestContainer.createTag() gained HolderLookup.Provider in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "enderchest-fromtag-provider",
+      "pattern": "(\\w+)\\.getEnderChestInventory\\(\\)\\.fromTag\\(([^)]+)\\)",
+      "replacement": "$1.getEnderChestInventory().fromTag($2, $1.registryAccess())",
+      "description": "PlayerEnderChestContainer.fromTag() gained HolderLookup.Provider in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "mobeffectinstance-save-noarg",
+      "pattern": "(\\w+)\\.save\\(new\\s+CompoundTag\\(\\)\\)",
+      "replacement": "$1.save()",
+      "description": "MobEffectInstance.save(CompoundTag) -> save() in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "blockentity-loadstatic-provider-mirrorworld",
+      "pattern": "(ServerLevel\\s+mirrorWorld[\\s\\S]*?BlockEntity\\.loadStatic\\(\\s*([^,]+),\\s*([^,]+),\\s*([^\\)]+)\\s*)\\)",
+      "replacement": "$1, mirrorWorld.registryAccess())",
+      "description": "BlockEntity.loadStatic() gained HolderLookup.Provider in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "blockentity-load-savewithoutmetadata-provider",
+      "pattern": "(\\w+BE)\\.load\\((\\w+BE)\\.saveWithoutMetadata\\(\\)\\)",
+      "replacement": "$1.loadWithComponents($2.saveWithoutMetadata($1.getLevel().registryAccess()), $1.getLevel().registryAccess())",
+      "description": "BlockEntity.load() -> loadWithComponents(), saveWithoutMetadata() gained provider in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "blockentity-loadwithcomponents-provider",
+      "pattern": "(\\w+BE)\\.load\\((\\w+)\\);",
+      "replacement": "$1.loadWithComponents($2, $1.getLevel().registryAccess());",
+      "description": "BlockEntity.load(CompoundTag) -> loadWithComponents(CompoundTag, HolderLookup.Provider) in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "particle-enchantmenttable-nautilus-provider",
+      "pattern": "EnchantmentTableParticle\\.NautilusProvider",
+      "replacement": "FlyTowardsPositionParticle.NautilusProvider",
+      "description": "EnchantmentTableParticle.NautilusProvider moved to FlyTowardsPositionParticle.NautilusProvider",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "particle-enchantmenttable-import",
+      "pattern": "import\\s+net\\.minecraft\\.client\\.particle\\.EnchantmentTableParticle;",
+      "replacement": "import net.minecraft.client.particle.FlyTowardsPositionParticle;",
+      "description": "EnchantmentTableParticle class was renamed/merged in 1.21 particle providers",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "blockentity-loadadditional-provider-signature",
+      "pattern": "(?:public|protected)\\s+void\\s+load\\s*\\(\\s*((?:net\\.minecraft\\.nbt\\.)?CompoundTag\\s+\\w+)\\s*\\)",
+      "replacement": "protected void loadAdditional($1, net.minecraft.core.HolderLookup.Provider registries)",
+      "description": "BlockEntity.load(CompoundTag) override became loadAdditional(CompoundTag, HolderLookup.Provider)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "blockentity-saveadditional-provider-signature",
+      "pattern": "(public|protected)\\s+void\\s+saveAdditional\\s*\\(\\s*((?:net\\.minecraft\\.nbt\\.)?CompoundTag\\s+\\w+)\\s*\\)",
+      "replacement": "$1 void saveAdditional($2, net.minecraft.core.HolderLookup.Provider registries)",
+      "description": "BlockEntity.saveAdditional() gained HolderLookup.Provider in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "blockentity-super-ondatapacket-provider",
+      "pattern": "super\\.onDataPacket\\(\\s*net\\s*,\\s*pkt\\s*\\)",
+      "replacement": "super.onDataPacket(connection, pkt, lookupProvider)",
+      "description": "BlockEntity.onDataPacket() super call gained Connection and HolderLookup.Provider names",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "container-size-method",
+      "pattern": "\\bthis\\.size\\(\\)",
+      "replacement": "this.getContainerSize()",
+      "description": "Container implementations use getContainerSize() instead of size()",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "blockentity-savewithoutmetadata-provider-any",
+      "pattern": "([A-Za-z_$][\\w$]*)\\.saveWithoutMetadata\\(\\)",
+      "replacement": "$1.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY)",
+      "description": "BlockEntity.saveWithoutMetadata() gained HolderLookup.Provider in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "fluidtank-readfromnbt-provider",
+      "pattern": "([A-Za-z_$][\\w$]*)\\.readFromNBT\\((?!\\s*net\\.minecraft\\.core\\.RegistryAccess\\.EMPTY\\s*,)([^;\\r\\n]+)\\)",
+      "replacement": "$1.readFromNBT(net.minecraft.core.RegistryAccess.EMPTY, $2)",
+      "description": "FluidTank.readFromNBT() gained HolderLookup.Provider in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "fluidtank-writetonbt-provider",
+      "pattern": "([A-Za-z_$][\\w$]*)\\.writeToNBT\\((?!\\s*net\\.minecraft\\.core\\.RegistryAccess\\.EMPTY\\s*,)([^;\\r\\n]+)\\)",
+      "replacement": "$1.writeToNBT(net.minecraft.core.RegistryAccess.EMPTY, $2)",
+      "description": "FluidTank.writeToNBT() gained HolderLookup.Provider in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "itemstackhandler-deserializenbt-provider",
+      "pattern": "([A-Za-z_$][\\w$]*)\\.deserializeNBT\\((?!\\s*net\\.minecraft\\.core\\.RegistryAccess\\.EMPTY\\s*,)([^;\\r\\n]+)\\)",
+      "replacement": "$1.deserializeNBT(net.minecraft.core.RegistryAccess.EMPTY, $2)",
+      "description": "ItemStackHandler.deserializeNBT() gained HolderLookup.Provider in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "itemstackhandler-serializenbt-provider",
+      "pattern": "([A-Za-z_$][\\w$]*)\\.serializeNBT\\(\\)",
+      "replacement": "$1.serializeNBT(net.minecraft.core.RegistryAccess.EMPTY)",
+      "description": "ItemStackHandler.serializeNBT() gained HolderLookup.Provider in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "capabilities-fluid-handler-block",
+      "pattern": "Capabilities\\.FLUID_HANDLER",
+      "replacement": "Capabilities.FluidHandler.BLOCK",
+      "description": "NeoForge 1.21 fluid block capability moved under Capabilities.FluidHandler.BLOCK",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "capabilities-item-handler-block",
+      "pattern": "Capabilities\\.ITEM_HANDLER",
+      "replacement": "Capabilities.ItemHandler.BLOCK",
+      "description": "NeoForge 1.21 item block capability moved under Capabilities.ItemHandler.BLOCK",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "enchantments-block-efficiency-key",
+      "pattern": "Enchantments\\.BLOCK_EFFICIENCY",
+      "replacement": "Enchantments.EFFICIENCY",
+      "description": "Enchantments.BLOCK_EFFICIENCY -> EFFICIENCY ResourceKey in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "itemstack-getenchantmentlevel-vanilla-holder",
+      "pattern": "(\\w+)\\.getEnchantmentLevel\\(Enchantments\\.EFFICIENCY\\)",
+      "replacement": "$1.getEnchantmentLevel(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(Enchantments.EFFICIENCY))",
+      "description": "ItemStack.getEnchantmentLevel() now takes Holder<Enchantment>",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "itemstack-enchant-vanilla-holder",
+      "pattern": "(\\w+)\\.enchant\\(Enchantments\\.EFFICIENCY,",
+      "replacement": "$1.enchant(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(Enchantments.EFFICIENCY),",
+      "description": "ItemStack.enchant() now takes Holder<Enchantment>",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "item-canapply-enchantingtable-supports",
+      "pattern": "public\\s+boolean\\s+canApplyAtEnchantingTable\\(\\s*ItemStack\\s+(\\w+)\\s*,\\s*Enchantment\\s+(\\w+)\\s*\\)",
+      "replacement": "public boolean supportsEnchantment(ItemStack $1, net.minecraft.core.Holder<Enchantment> $2)",
+      "description": "Item.canApplyAtEnchantingTable() -> supportsEnchantment(ItemStack, Holder<Enchantment>) in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "item-canapply-call-supports-vanilla-holder",
+      "pattern": "(\\w+)\\.canApplyAtEnchantingTable\\(([^,]+),\\s*Enchantments\\.EFFICIENCY\\)",
+      "replacement": "$1.supportsEnchantment($2, net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(Enchantments.EFFICIENCY))",
+      "description": "Item.canApplyAtEnchantingTable() calls migrate to supportsEnchantment() with Holder",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "holder-enchantment-key-comparison",
+      "pattern": "(\\w+)\\s*==\\s*Enchantments\\.EFFICIENCY",
+      "replacement": "$1.is(Enchantments.EFFICIENCY)",
+      "description": "Holder<Enchantment> should compare vanilla enchantment keys with Holder.is(ResourceKey)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "custom-enchantment-remove-java-register-call",
+      "pattern": "(?m)^\\s*\\w+Enchantments\\.ENCHANTMENTS\\.register\\([^;]+;\\r?\\n",
+      "replacement": "",
+      "description": "Custom enchantments are data-driven in 1.21; remove Java DeferredRegister registration call",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "custom-enchantment-deferred-register-to-holder-helper",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: custom enchantment ResourceKey migration must resolve the mod id from structured source data",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "custom-enchantment-remove-category-fields",
+      "pattern": "\\n\\s*(?:public|protected|private)?\\s*static\\s+final\\s+EnchantmentCategory\\s+\\w+\\s*=\\s*EnchantmentCategory\\.create\\([\\s\\S]*?\\);",
+      "replacement": "",
+      "description": "EnchantmentCategory removed in 1.21 data-driven enchantments",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "custom-enchantment-holder-to-resourcekey",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: custom enchantment ResourceKey migration must resolve the mod id from structured source data",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "custom-enchantment-internal-getlevel-holder",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: context-aware custom enchantment migration rewrites discovered keys",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "custom-enchantment-internal-enchant-holder",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: context-aware custom enchantment migration rewrites discovered keys",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "custom-enchantment-ispermanence-holder",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: context-aware custom enchantment migration rewrites discovered keys",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "custom-enchantment-isrenewal-holder",
+      "pattern": "(?!)",
+      "replacement": "",
+      "description": "Disabled: context-aware custom enchantment migration rewrites discovered keys",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "custom-enchantment-remove-subclasses",
+      "pattern": "\\n\\s*private\\s+static\\s+class\\s+\\w+\\s+extends\\s+Enchantment\\s*\\{(?:[^{}]|\\{(?:[^{}]|\\{[^{}]*\\})*\\})*\\}",
+      "replacement": "",
+      "description": "Remove legacy custom Enchantment subclasses; 1.21 enchantments are data-driven",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "custom-enchantment-getlevel-holder-call",
+      "pattern": "(\\w+)\\.getEnchantmentLevel\\(ModEnchantments\\.(\\w+)\\.get\\(\\)\\)",
+      "replacement": "$1.getEnchantmentLevel(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(ModEnchantments.$2))",
+      "description": "External custom enchantment getEnchantmentLevel() calls resolve ResourceKey to Holder",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "custom-enchantment-enchantmentinstance-holder-call",
+      "pattern": "new\\s+EnchantmentInstance\\(ModEnchantments\\.(\\w+)\\.get\\(\\),",
+      "replacement": "new EnchantmentInstance(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(ModEnchantments.$1),",
+      "description": "EnchantmentInstance now takes Holder<Enchantment>",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "custom-enchantment-canapply-call-supports-holder",
+      "pattern": "(\\w+)\\.canApplyAtEnchantingTable\\(([^,]+),\\s*ModEnchantments\\.(\\w+)\\.get\\(\\)\\)",
+      "replacement": "$1.supportsEnchantment($2, net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(ModEnchantments.$3))",
+      "description": "Custom enchantment canApplyAtEnchantingTable() calls migrate to supportsEnchantment() with Holder",
       "fileGlob": "*.java",
       "isRegex": true
     }

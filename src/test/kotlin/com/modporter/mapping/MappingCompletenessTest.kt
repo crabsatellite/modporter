@@ -1,6 +1,15 @@
 package com.modporter.mapping
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Test
+import java.nio.file.Files
+import java.nio.file.Path
+import kotlin.io.path.extension
+import kotlin.io.path.invariantSeparatorsPathString
+import kotlin.io.path.readText
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -30,12 +39,326 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `text replacements do not generate placeholder comments`() {
+        val db = MappingDatabase.loadDefault()
+        val forbidden = listOf("TODO", "[forge2neo]", "/*", "//")
+        val offenders = db.getTextReplacements().filter { rule ->
+            forbidden.any { marker -> rule.replacement.contains(marker) }
+        }.map { it.id }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Text replacements must perform real migrations or removals, not emit placeholder comments: $offenders"
+        )
+    }
+
+    @Test
     fun `no text replacement pattern equals its replacement`() {
         val db = MappingDatabase.loadDefault()
         db.getTextReplacements().forEach { rule ->
             assertTrue(rule.pattern != rule.replacement,
                 "Rule ${rule.id} has pattern equal to replacement: ${rule.pattern}")
         }
+    }
+
+    @Test
+    fun `dependency mappings do not depend on local machine paths`() {
+        val text = javaClass.getResourceAsStream("/mappings/forge2neo/neoforge-deps.json")
+            ?.bufferedReader()
+            ?.readText()
+            ?: error("neoforge-deps.json missing")
+
+        val forbidden = listOf(
+            "E:/",
+            "E:\\",
+            "files('",
+            "files(\"",
+            "local NeoForge",
+            "local HotBath",
+            "sibling jar"
+        )
+        val offenders = forbidden.filter { text.contains(it, ignoreCase = true) }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Dependency mappings must use reproducible public coordinates or explicit unavailable status, not local paths: $offenders"
+        )
+    }
+
+    @Test
+    fun `dependency mappings use supported status semantics`() {
+        val text = javaClass.getResourceAsStream("/mappings/forge2neo/neoforge-deps.json")
+            ?.bufferedReader()
+            ?.readText()
+            ?: error("neoforge-deps.json missing")
+        val dependencies = Json.parseToJsonElement(text).jsonObject.getValue("dependencies").jsonArray
+        val supported = setOf("available", "unavailable", "check_online", "remove")
+
+        val offenders = dependencies.flatMap { element ->
+            val dep = element.jsonObject
+            val prefix = dep.getValue("forgePrefix").jsonPrimitive.content
+            val status = dep["status"]?.jsonPrimitive?.content ?: "unavailable"
+            val coords = dep["neoforgeCoords"]?.jsonArray.orEmpty()
+            val notes = dep["notes"]?.jsonPrimitive?.content.orEmpty()
+            buildList {
+                if (status !in supported) {
+                    add("$prefix has unsupported status $status")
+                }
+                if (status == "available" && coords.isEmpty()) {
+                    add("$prefix is available without NeoForge coordinates")
+                }
+                if (status == "remove" && coords.isNotEmpty()) {
+                    add("$prefix is remove but still declares NeoForge coordinates")
+                }
+                if (status == "remove" && notes.isBlank()) {
+                    add("$prefix is remove without evidence notes")
+                }
+            }
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Dependency mappings must express supported automated resolution semantics: $offenders"
+        )
+    }
+
+    @Test
+    fun `default production migration code has no mod specific rule remnants`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val scannedRoots = listOf(
+            projectRoot.resolve("src/main/kotlin"),
+            projectRoot.resolve("src/main/resources/mappings/forge2neo")
+        )
+        val excludedFiles = setOf(
+            "src/main/resources/mappings/forge2neo/neoforge-deps.json"
+        )
+        val forbidden = listOf(
+            "twilightforest",
+            "TwilightForest",
+            "build-twilight",
+            "res-twilight",
+            "struct-twilight",
+            "TFCave",
+            "TFDamageTypes",
+            "TFItems",
+            "TFBlocks",
+            "TFAdvancements",
+            "Sakura",
+            "sakura",
+            "HotBath",
+            "hotbath",
+            "ConstructionWand",
+            "constructionwand",
+            "glass_sword",
+            "FermenterRecipe",
+            "DistillerRecipe"
+        )
+
+        val offenders = scannedRoots
+            .filter { Files.exists(it) }
+            .flatMap { root ->
+                Files.walk(root).use { stream ->
+                    stream
+                        .filter { Files.isRegularFile(it) }
+                        .filter { it.extension in setOf("kt", "json", "toml", "properties") }
+                        .filter { file ->
+                            val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                            relative !in excludedFiles
+                        }
+                        .toList()
+                }
+            }
+            .flatMap { file ->
+                val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                val text = file.readText()
+                forbidden
+                    .filter { marker -> text.contains(marker) }
+                    .map { marker -> "$relative contains $marker" }
+            }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Default migration code must use source-shape/API rules, not mod-specific rules: $offenders"
+        )
+    }
+
+    @Test
+    fun `production kotlin sources do not contain TODO placeholder or reflection fallback debt`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val allowedReflectionMigrator = "src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt"
+        val forbidden = listOf(
+            "TODO" to Regex("""\bTODO\b"""),
+            "FIXME" to Regex("""\bFIXME\b"""),
+            "Class.forName" to Regex("""\bClass\.forName\s*\("""),
+            "getDeclaredField" to Regex("""\bgetDeclaredField\s*\("""),
+            "getDeclaredMethod" to Regex("""\bgetDeclaredMethod\s*\("""),
+            "getDeclaredConstructor" to Regex("""\bgetDeclaredConstructor\s*\("""),
+            "getMethod" to Regex("""\.getMethod\s*\("""),
+            "setAccessible" to Regex("""\bsetAccessible\s*\(""")
+        )
+
+        val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) && it.extension == "kt" }
+                .flatMap { file ->
+                    val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                    val text = file.readText()
+                    forbidden
+                        .filter { (marker, pattern) ->
+                            pattern.containsMatchIn(text) &&
+                                !(relative == allowedReflectionMigrator && marker in setOf("getDeclaredField", "getDeclaredMethod", "getDeclaredConstructor", "getMethod", "setAccessible", "Class.forName"))
+                        }
+                        .map { (marker, _) -> "$relative contains $marker" }
+                        .stream()
+                }
+                .toList()
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Production Kotlin sources must not carry TODO placeholders or reflection fallbacks: $offenders"
+        )
+    }
+
+    @Test
+    fun `production registry access migrations do not use nearby variable or fallback inference`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val forbidden = listOf(
+            "nearby registryAccess helper" to Regex("""inferRegistryAccessExpressionNear"""),
+            "windowed registryAccess scan" to Regex("""offset\s*-\s*\d+[\s\S]{0,400}registryAccess\(\)"""),
+            "last declaration registryAccess scan" to Regex("""lastOrNull\(\)[\s\S]{0,400}registryAccess\(\)"""),
+            "registryAccess elvis fallback" to Regex("\\?:\\s*\"[^\"\\r\\n]*registryAccess\\(\\)\"")
+        )
+
+        val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) && it.extension == "kt" }
+                .flatMap { file ->
+                    val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                    val text = file.readText()
+                    forbidden
+                        .filter { (_, pattern) -> pattern.containsMatchIn(text) }
+                        .map { (label, _) -> "$relative contains $label" }
+                        .stream()
+                }
+                .toList()
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Registry access migrations must use structured source-shape resolution, not nearby-variable or fallback inference: $offenders"
+        )
+    }
+
+    @Test
+    fun `production capability migrations do not infer unrelated level variables`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val forbidden = listOf(
+            "capability level inference helper" to Regex("""inferLevelVariableForCapability""")
+        )
+
+        val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) && it.extension == "kt" }
+                .flatMap { file ->
+                    val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                    val text = file.readText()
+                    forbidden
+                        .filter { (_, pattern) -> pattern.containsMatchIn(text) }
+                        .map { (label, _) -> "$relative contains $label" }
+                        .stream()
+                }
+                .toList()
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Capability migrations must derive Level/WorldGenLevel from the Java source relationship being migrated, not from unrelated nearby declarations: $offenders"
+        )
+    }
+
+    @Test
+    fun `production migrations do not synthesize minecraft namespace when mod id is missing`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val quotedMinecraftStringLiteral = "\"\\\"minecraft\\\"\""
+        val forbidden = listOf(
+            "literal minecraft mod id return" to "return $quotedMinecraftStringLiteral",
+            "literal minecraft mod id elvis fallback" to "?: $quotedMinecraftStringLiteral"
+        )
+
+        val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) && it.extension == "kt" }
+                .flatMap { file ->
+                    val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                    val text = file.readText()
+                    forbidden
+                        .filter { (_, marker) -> text.contains(marker) }
+                        .map { (label, _) -> "$relative contains $label" }
+                        .stream()
+                }
+                .toList()
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Migration rules must derive mod ids from source structure, not silently synthesize minecraft as a namespace fallback: $offenders"
+        )
+    }
+
+    @Test
+    fun `default migration surfaces do not retreat to manual handling`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val scannedRoots = listOf(
+            projectRoot.resolve("README.md"),
+            projectRoot.resolve("docs"),
+            projectRoot.resolve("src/main/kotlin"),
+            projectRoot.resolve("src/main/resources/mappings/forge2neo")
+        )
+        val forbidden = listOf(
+            "manual" to Regex("""\bmanual\b""", RegexOption.IGNORE_CASE),
+            "manual review" to Regex("""manual\s+review""", RegexOption.IGNORE_CASE),
+            "manual migration" to Regex("""manual\s+migration""", RegexOption.IGNORE_CASE),
+            "manual intervention" to Regex("""manual\s+intervention""", RegexOption.IGNORE_CASE),
+            "manual follow-up" to Regex("""manual\s+follow[- ]up""", RegexOption.IGNORE_CASE),
+            "follow-up" to Regex("""follow[- ]ups?""", RegexOption.IGNORE_CASE),
+            "by hand" to Regex("""\bby\s+hand\b""", RegexOption.IGNORE_CASE),
+            "hand edit" to Regex("""hand[- ]edit""", RegexOption.IGNORE_CASE),
+            "requires human" to Regex("""requires\s+human""", RegexOption.IGNORE_CASE),
+            "needs human" to Regex("""needs\s+human""", RegexOption.IGNORE_CASE),
+            "human verification" to Regex("""human\s+verification""", RegexOption.IGNORE_CASE),
+            "human review" to Regex("""human\s+review""", RegexOption.IGNORE_CASE),
+            "human-in-the-loop" to Regex("""human[- ]in[- ]the[- ]loop""", RegexOption.IGNORE_CASE),
+            "comment out" to Regex("""comment\s+out""", RegexOption.IGNORE_CASE),
+            "commented out" to Regex("""commented\s+out""", RegexOption.IGNORE_CASE),
+            "placeholder" to Regex("""\bplaceholder\b""", RegexOption.IGNORE_CASE)
+        )
+
+        val files = scannedRoots.flatMap { root ->
+            when {
+                Files.isRegularFile(root) -> listOf(root)
+                Files.exists(root) -> Files.walk(root).use { stream ->
+                    stream
+                        .filter { Files.isRegularFile(it) }
+                        .filter { it.extension in setOf("kt", "json", "toml", "properties", "md") }
+                        .toList()
+                }
+                else -> emptyList()
+            }
+        }
+
+        val offenders = files.flatMap { file ->
+            val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+            val text = file.readText()
+            forbidden
+                .filter { (_, pattern) -> pattern.containsMatchIn(text) }
+                .map { (label, _) -> "$relative contains $label" }
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Default migration surfaces must fail through automated gates instead of retreating to manual handling: $offenders"
+        )
     }
 
     @Test

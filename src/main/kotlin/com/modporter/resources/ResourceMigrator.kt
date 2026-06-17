@@ -2,13 +2,105 @@ package com.modporter.resources
 
 import com.modporter.core.pipeline.*
 import com.modporter.mapping.MappingDatabase
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.*
 import mu.KotlinLogging
+import java.awt.RenderingHints
+import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import javax.imageio.ImageIO
 import kotlin.io.path.*
 
 private val logger = KotlinLogging.logger {}
+private val RESOURCE_JSON = Json {
+    prettyPrint = true
+}
+private val COMMON_TAG_ROOTS = listOf(
+    "bones",
+    "chests",
+    "cobblestone",
+    "crops",
+    "dusts",
+    "dyes",
+    "eggs",
+    "ender_pearls",
+    "end_stones",
+    "feathers",
+    "fences",
+    "gems",
+    "glass",
+    "glass_panes",
+    "gravel",
+    "ingots",
+    "leather",
+    "nether_stars",
+    "nuggets",
+    "ores",
+    "raw_materials",
+    "rods",
+    "sand",
+    "seeds",
+    "storage_blocks",
+    "stone",
+    "string"
+)
+private val COMMON_TAG_NAMESPACE_PATTERN = Regex(
+    """([#"])(?:forge|neoforge):(${COMMON_TAG_ROOTS.joinToString("|") { Regex.escape(it) }})(?=[/"\]\s,}])"""
+)
+private val FLATTENABLE_WORLDGEN_VALUE_PROVIDER_TYPES = setOf(
+    "biased_to_bottom",
+    "trapezoid",
+    "uniform",
+    "very_biased_to_bottom"
+)
+private val TAG_REFERENCE_VALUE_KEYS = setOf(
+    "blockTag",
+    "fluidTag",
+    "itemTag",
+    "tag"
+)
+private val INGREDIENT_LIST_KEYS = setOf(
+    "ingredients",
+    "repair_ingredients"
+)
+private val COMMON_TAG_PATH_RENAMES = mapOf(
+    "cobblestone" to "cobblestones",
+    "glass" to "glass_blocks",
+    "gravel" to "gravels",
+    "sand" to "sands",
+    "stone" to "stones",
+    "tools/bows" to "tools/bow",
+    "tools/brushes" to "tools/brush",
+    "tools/crossbows" to "tools/crossbow",
+    "tools/fishing_rods" to "tools/fishing_rod",
+    "tools/knives" to "tools/knife",
+    "tools/shears" to "tools/shear",
+    "tools/shields" to "tools/shield",
+    "tools/tridents" to "tools/spear",
+    "tools/wrenches" to "tools/wrench"
+)
+private val COMMON_TAG_PATH_PREFIX_RENAMES = mapOf(
+    "cobblestone/" to "cobblestones/",
+    "glass/" to "glass_blocks/",
+    "gravel/" to "gravels/",
+    "sand/" to "sands/"
+)
+private val RESOURCE_ID_RENAMES_121 = mapOf(
+    "minecraft:grass" to "minecraft:short_grass",
+    "minecraft:block/grass" to "minecraft:block/short_grass"
+)
+private val MODEL_EXTENSION_RENAMES_121 = linkedMapOf(
+    "\"forge_data\"" to "\"neoforge_data\"",
+    "\"forge:composite\"" to "\"neoforge:composite\"",
+    "\"forge:elements\"" to "\"neoforge:elements\"",
+    "\"forge:empty\"" to "\"neoforge:empty\"",
+    "\"forge:fluid_container\"" to "\"neoforge:fluid_container\"",
+    "\"forge:item_layers\"" to "\"neoforge:item_layers\"",
+    "\"forge:obj\"" to "\"neoforge:obj\"",
+    "\"forge:separate_transforms\"" to "\"neoforge:separate_transforms\""
+)
 
 /**
  * Pass 5: Resource file migration.
@@ -86,9 +178,13 @@ class ResourceMigrationPass(
                 // Execute all renames after collection
                 if (!dryRun) {
                     for ((source, target) in pendingMoves) {
-                        if (source.exists() && !target.exists()) {
+                        if (source.exists()) {
                             try {
-                                Files.move(source, target)
+                                if (target.exists()) {
+                                    mergeDirectoryContents(source, target, errors)
+                                } else {
+                                    Files.move(source, target)
+                                }
                             } catch (e: Exception) {
                                 errors.add("Failed to rename $source: ${e.message}")
                             }
@@ -113,8 +209,20 @@ class ResourceMigrationPass(
             }
 
             // Transform JSON data files: conditions, recipe format, namespace
-            if (dataDir.exists() && !dryRun) {
-                transformDataJsonFiles(dataDir, changes, errors)
+            if (dataDir.exists()) {
+                normalizeCommonTagFilePaths(resourceDir, changes, errors, dryRun)
+                if (!dryRun) {
+                    transformDataJsonFiles(dataDir, projectDir, changes, errors)
+                }
+                migrateBannerPatternDataResources(dataDir, changes, errors, dryRun)
+            }
+
+            val assetsDir = resourceDir.resolve("assets")
+            if (assetsDir.exists() && !dryRun) {
+                transformAssetJsonFiles(assetsDir, changes, errors)
+                fillMissingSoundSubtitleTranslations(assetsDir, changes, errors)
+                generateMissingItemModels(projectDir, resourceDir, changes, errors)
+                normalizeItemTextureMipDimensions(assetsDir, changes, errors)
             }
 
             // Update pack.mcmeta
@@ -137,7 +245,437 @@ class ResourceMigrationPass(
         // Handle template mods.toml files (used by Groovy template expansion)
         migrateTemplateFiles(projectDir, changes, errors, dryRun)
 
+        migrateCustomEnchantmentData(projectDir, changes, errors)
+        ensureGeneratedScepterRepairRecipeSupport(projectDir, changes, errors, dryRun)
+
         return PassResult(name, changes, errors)
+    }
+
+    private fun ensureGeneratedScepterRepairRecipeSupport(
+        projectDir: Path,
+        changes: MutableList<Change>,
+        errors: MutableList<String>,
+        dryRun: Boolean
+    ) {
+        val namespaces = collectScepterRepairRecipeNamespaces(projectDir)
+        if (namespaces.isEmpty()) return
+
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return
+        val recipeRegistry = findRecipeSerializerRegistrySource(srcDir) ?: return
+        val registryText = recipeRegistry.file.readText()
+        if (Regex("""RECIPE_SERIALIZERS\.register\(\s*"scepter_repair"""").containsMatchIn(registryText)) {
+            return
+        }
+
+        val namespace = namespaces.first()
+        val generatedPackage = "com.modporter.generated.${sanitizeJavaPackageSegment(namespace)}.recipe"
+        val generatedClass = "ModPorterScepterRepairRecipe"
+        val generatedFile = srcDir
+            .resolve(generatedPackage.replace('.', '/'))
+            .resolve("$generatedClass.java")
+        val generatedSource = generatedScepterRepairRecipeSource(
+            packageName = generatedPackage,
+            className = generatedClass,
+            serializerAccess = "${recipeRegistry.qualifiedName}.MODPORTER_SCEPTER_REPAIR_RECIPE"
+        )
+
+        if (!generatedFile.exists() || generatedFile.readText() != generatedSource) {
+            changes.add(Change(
+                file = generatedFile,
+                line = 1,
+                description = "Generate custom damaged-item repair recipe serializer for migrated scepter repair recipes",
+                before = "(missing recipe serializer implementation)",
+                after = "$generatedPackage.$generatedClass",
+                confidence = Confidence.HIGH,
+                ruleId = "res-generate-scepter-repair-recipe-serializer"
+            ))
+            if (!dryRun) {
+                generatedFile.parent.createDirectories()
+                generatedFile.writeText(generatedSource)
+            }
+        }
+
+        var modifiedRegistry = addJavaImportIfMissing(registryText, "$generatedPackage.$generatedClass")
+        modifiedRegistry = addJavaImportIfMissing(modifiedRegistry, "net.neoforged.neoforge.registries.DeferredHolder")
+        if (!Regex("""\bMODPORTER_SCEPTER_REPAIR_RECIPE\b""").containsMatchIn(modifiedRegistry)) {
+            val field = "public static final DeferredHolder<RecipeSerializer<?>, RecipeSerializer<$generatedClass>> MODPORTER_SCEPTER_REPAIR_RECIPE = RECIPE_SERIALIZERS.register(\"scepter_repair\", $generatedClass.Serializer::new);"
+            val anchor = Regex("""(?m)^([ \t]*)public\s+static\s+final\s+DeferredRegister\s*<\s*RecipeSerializer\s*<\s*\?\s*>\s*>\s+RECIPE_SERIALIZERS\s*=.*;\s*$""")
+                .find(modifiedRegistry)
+            modifiedRegistry = if (anchor != null) {
+                val indent = anchor.groupValues[1]
+                val insertAt = anchor.range.last + 1
+                modifiedRegistry.substring(0, insertAt) +
+                    System.lineSeparator() +
+                    indent +
+                    field +
+                    modifiedRegistry.substring(insertAt)
+            } else {
+                errors.add("Failed to register generated scepter repair serializer: no RecipeSerializer DeferredRegister field found in ${recipeRegistry.file}")
+                return
+            }
+        }
+
+        if (modifiedRegistry != registryText) {
+            changes.add(Change(
+                file = recipeRegistry.file,
+                line = 1,
+                description = "Register generated damaged-item repair recipe serializer for migrated scepter repair recipes",
+                before = "resources reference $namespace:scepter_repair without a registered serializer",
+                after = "RECIPE_SERIALIZERS.register(\"scepter_repair\", $generatedClass.Serializer::new)",
+                confidence = Confidence.HIGH,
+                ruleId = "res-register-scepter-repair-recipe-serializer"
+            ))
+            if (!dryRun) {
+                recipeRegistry.file.writeText(modifiedRegistry)
+            }
+        }
+    }
+
+    private data class RecipeRegistrySource(
+        val file: Path,
+        val packageName: String,
+        val className: String,
+        val qualifiedName: String
+    )
+
+    private fun collectScepterRepairRecipeNamespaces(projectDir: Path): Set<String> {
+        val namespaces = linkedSetOf<String>()
+        val typePattern = Regex(""""type"\s*:\s*"([A-Za-z0-9_.-]+):scepter_repair"""")
+        findResourceDirs(projectDir).forEach { resourceDir ->
+            val dataDir = resourceDir.resolve("data")
+            if (!dataDir.exists()) return@forEach
+            Files.walk(dataDir).use { resources ->
+                resources
+                    .filter { Files.isRegularFile(it) && it.toString().endsWith(".json") }
+                    .forEach { file ->
+                        typePattern.findAll(file.readText()).forEach { match ->
+                            namespaces.add(match.groupValues[1])
+                        }
+                    }
+            }
+        }
+        return namespaces
+    }
+
+    private fun findRecipeSerializerRegistrySource(srcDir: Path): RecipeRegistrySource? {
+        val candidates = mutableListOf<RecipeRegistrySource>()
+        Files.walk(srcDir).use { sources ->
+            sources
+                .filter { Files.isRegularFile(it) && it.toString().endsWith(".java") }
+                .forEach { file ->
+                val text = file.readText()
+                if (!text.contains("DeferredRegister") ||
+                    !text.contains("RecipeSerializer") ||
+                    !text.contains("RECIPE_SERIALIZERS")) {
+                    return@forEach
+                }
+                val packageName = javaPackageName(text) ?: return@forEach
+                val className = javaTopLevelClassName(text) ?: return@forEach
+                candidates.add(RecipeRegistrySource(file, packageName, className, "$packageName.$className"))
+            }
+        }
+        return candidates.firstOrNull { it.file.readText().contains("RECIPE_SERIALIZERS.register(") }
+            ?: candidates.firstOrNull()
+    }
+
+    private fun javaPackageName(source: String): String? =
+        Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+
+    private fun javaTopLevelClassName(source: String): String? =
+        Regex("""(?m)^\s*public\s+(?:final\s+)?class\s+([A-Za-z_$][\w$]*)\b""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?: Regex("""(?m)^\s*class\s+([A-Za-z_$][\w$]*)\b""")
+                .find(source)
+                ?.groupValues
+                ?.get(1)
+
+    private fun addJavaImportIfMissing(source: String, importName: String): String {
+        if (source.contains("import $importName;")) return source
+        val importLine = "import $importName;${System.lineSeparator()}"
+        val lastImport = Regex("""(?m)^import\s+[^;]+;""").findAll(source).lastOrNull()
+        if (lastImport != null) {
+            val insertPos = lastImport.range.last + 1
+            return source.substring(0, insertPos) +
+                System.lineSeparator() +
+                importLine +
+                source.substring(insertPos)
+        }
+        val packageDecl = Regex("""(?m)^package\s+[^;]+;""").find(source)
+        if (packageDecl != null) {
+            val insertPos = packageDecl.range.last + 1
+            return source.substring(0, insertPos) +
+                System.lineSeparator() +
+                System.lineSeparator() +
+                importLine +
+                source.substring(insertPos)
+        }
+        return importLine + source
+    }
+
+    private fun sanitizeJavaPackageSegment(value: String): String {
+        val sanitized = value.replace(Regex("""[^A-Za-z0-9_]"""), "_").lowercase()
+        return if (sanitized.firstOrNull()?.isDigit() == true) "mod_$sanitized" else sanitized.ifBlank { "mod" }
+    }
+
+    private fun generatedScepterRepairRecipeSource(
+        packageName: String,
+        className: String,
+        serializerAccess: String
+    ): String = """
+package $packageName;
+
+import com.mojang.serialization.Codec;
+import com.mojang.serialization.MapCodec;
+import com.mojang.serialization.codecs.RecordCodecBuilder;
+import java.util.List;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.core.NonNullList;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.ByteBufCodecs;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.crafting.CraftingBookCategory;
+import net.minecraft.world.item.crafting.CraftingInput;
+import net.minecraft.world.item.crafting.CustomRecipe;
+import net.minecraft.world.item.crafting.Ingredient;
+import net.minecraft.world.item.crafting.RecipeSerializer;
+import net.minecraft.world.level.Level;
+
+public class $className extends CustomRecipe {
+    private final Item scepter;
+    private final List<Ingredient> repairItems;
+    private final int durability;
+
+    public $className(Item scepter, List<Ingredient> repairItems, int repairDurability, CraftingBookCategory category) {
+        super(category);
+        this.scepter = scepter;
+        this.repairItems = repairItems;
+        this.durability = repairDurability;
+    }
+
+    @Override
+    public boolean matches(CraftingInput input, Level level) {
+        ItemStack scepterStack = null;
+        if (this.repairItems.size() == 1) {
+            int ingredients = 0;
+            for (int i = 0; i < input.size(); ++i) {
+                ItemStack stack = input.getItem(i);
+                if (!stack.isEmpty()) {
+                    if (stack.is(this.scepter) && stack.getDamageValue() > 0) {
+                        if (scepterStack != null) return false;
+                        scepterStack = stack;
+                    } else if (this.repairItems.getFirst().test(stack)) {
+                        ingredients++;
+                    } else {
+                        return false;
+                    }
+                }
+            }
+            int repairedDamage = ingredients * this.getRepairDurability();
+            return scepterStack != null && ingredients > 0 && scepterStack.getDamageValue() - repairedDamage > 0;
+        }
+
+        for (int i = 0; i < input.size(); ++i) {
+            ItemStack stack = input.getItem(i);
+            if (!stack.isEmpty() && stack.is(this.scepter) && stack.getDamageValue() > 0) {
+                if (scepterStack != null) return false;
+                scepterStack = stack;
+            }
+        }
+        return scepterStack != null &&
+            this.repairItems.size() == input.ingredientCount() - 1 &&
+            input.stackedContents().canCraft(this, null);
+    }
+
+    @Override
+    public ItemStack assemble(CraftingInput input, HolderLookup.Provider registries) {
+        ItemStack scepterStack = null;
+        int ingredients = 0;
+        for (int i = 0; i < input.size(); ++i) {
+            ItemStack stack = input.getItem(i);
+            if (!stack.isEmpty()) {
+                if (stack.is(this.scepter) && stack.getDamageValue() > 0) {
+                    scepterStack = stack;
+                } else if (this.repairItems.size() == 1 && this.repairItems.getFirst().test(stack)) {
+                    ingredients++;
+                }
+            }
+        }
+
+        if (scepterStack == null) {
+            return ItemStack.EMPTY;
+        }
+
+        ItemStack copy = new ItemStack(this.scepter);
+        copy.applyComponents(scepterStack.getComponents());
+        int repairAmount = ingredients > 0 ? this.getRepairDurability() * ingredients : this.durability;
+        copy.setDamageValue(Math.max(0, scepterStack.getDamageValue() - repairAmount));
+        return copy;
+    }
+
+    public Item getScepter() {
+        return this.scepter;
+    }
+
+    public List<Ingredient> getRepairItems() {
+        return this.repairItems;
+    }
+
+    public int getRepairDurability() {
+        return this.durability;
+    }
+
+    @Override
+    public NonNullList<Ingredient> getIngredients() {
+        return NonNullList.copyOf(this.repairItems);
+    }
+
+    @Override
+    public boolean canCraftInDimensions(int width, int height) {
+        return this.repairItems.size() + 1 <= width * height;
+    }
+
+    @Override
+    public RecipeSerializer<?> getSerializer() {
+        return $serializerAccess.get();
+    }
+
+    public static class Serializer implements RecipeSerializer<$className> {
+        public static final MapCodec<$className> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+            BuiltInRegistries.ITEM.byNameCodec().fieldOf("scepter").forGetter(recipe -> recipe.scepter),
+            Ingredient.CODEC_NONEMPTY.listOf().fieldOf("repair_ingredients").forGetter(recipe -> recipe.repairItems),
+            Codec.INT.fieldOf("durability").forGetter(recipe -> recipe.durability),
+            CraftingBookCategory.CODEC.optionalFieldOf("category", CraftingBookCategory.MISC).forGetter(CustomRecipe::category)
+        ).apply(instance, $className::new));
+
+        public static final StreamCodec<RegistryFriendlyByteBuf, $className> STREAM_CODEC = StreamCodec.composite(
+            ByteBufCodecs.registry(Registries.ITEM), recipe -> recipe.scepter,
+            Ingredient.CONTENTS_STREAM_CODEC.apply(ByteBufCodecs.list()), recipe -> recipe.repairItems,
+            ByteBufCodecs.INT, recipe -> recipe.durability,
+            CraftingBookCategory.STREAM_CODEC, CustomRecipe::category,
+            $className::new
+        );
+
+        @Override
+        public MapCodec<$className> codec() {
+            return CODEC;
+        }
+
+        @Override
+        public StreamCodec<RegistryFriendlyByteBuf, $className> streamCodec() {
+            return STREAM_CODEC;
+        }
+    }
+}
+""".trimIndent() + System.lineSeparator()
+
+    private fun mergeDirectoryContents(source: Path, target: Path, errors: MutableList<String>) {
+        target.createDirectories()
+        Files.walk(source)
+            .filter { Files.isRegularFile(it) }
+            .forEach { file ->
+                val relative = source.relativize(file)
+                val destination = target.resolve(relative)
+                try {
+                    destination.parent.createDirectories()
+                    if (destination.exists() && destination.readBytes().contentEquals(file.readBytes())) {
+                        Files.deleteIfExists(file)
+                    } else {
+                        Files.move(file, destination, StandardCopyOption.REPLACE_EXISTING)
+                    }
+                } catch (e: Exception) {
+                    errors.add("Failed to merge $file into $destination: ${e.message}")
+                }
+            }
+        Files.walk(source)
+            .sorted(Comparator.reverseOrder())
+            .filter { Files.isDirectory(it) }
+            .forEach { dir ->
+                try {
+                    Files.deleteIfExists(dir)
+                } catch (e: Exception) {
+                    errors.add("Failed to remove merged directory $dir: ${e.message}")
+                }
+            }
+    }
+
+    private fun normalizeCommonTagFilePaths(
+        resourceDir: Path,
+        changes: MutableList<Change>,
+        errors: MutableList<String>,
+        dryRun: Boolean
+    ) {
+        val commonTagsDir = resourceDir.resolve("data/c/tags")
+        if (!commonTagsDir.exists()) return
+        val tagFiles = Files.walk(commonTagsDir)
+            .filter { Files.isRegularFile(it) && it.toString().endsWith(".json") }
+            .toList()
+        for (file in tagFiles) {
+            val relative = commonTagsDir.relativize(file).toString().replace('\\', '/')
+            val segments = relative.split('/')
+            if (segments.size < 2) continue
+            val registry = segments.first()
+            val tagPath = segments.drop(1).joinToString("/").removeSuffix(".json")
+            val normalizedTagPath = normalizeCommonTagPath(tagPath)
+            if (normalizedTagPath == tagPath) continue
+            val target = commonTagsDir.resolve(registry).resolve("$normalizedTagPath.json")
+            changes.add(Change(
+                file = file,
+                line = 0,
+                description = "Common tag path: $tagPath -> $normalizedTagPath",
+                before = "c:$tagPath",
+                after = "c:$normalizedTagPath",
+                confidence = Confidence.HIGH,
+                ruleId = "res-common-tag-path"
+            ))
+            if (dryRun) continue
+            try {
+                target.parent.createDirectories()
+                if (target.exists()) {
+                    val merged = mergeTagJson(target.readText(), file.readText())
+                    if (merged != null) {
+                        target.writeText(merged)
+                        Files.deleteIfExists(file)
+                    } else {
+                        Files.move(file, target, StandardCopyOption.REPLACE_EXISTING)
+                    }
+                } else {
+                    Files.move(file, target)
+                }
+            } catch (e: Exception) {
+                errors.add("Failed to normalize common tag $file -> $target: ${e.message}")
+            }
+        }
+    }
+
+    private fun mergeTagJson(existingContent: String, incomingContent: String): String? {
+        val existing = parseResourceJson(existingContent) as? JsonObject ?: return null
+        val incoming = parseResourceJson(incomingContent) as? JsonObject ?: return null
+        val values = linkedMapOf<String, JsonElement>()
+        fun collect(root: JsonObject) {
+            val array = root["values"] as? JsonArray ?: return
+            for (value in array) values.putIfAbsent(value.toString(), value)
+        }
+        collect(existing)
+        collect(incoming)
+        val merged = linkedMapOf<String, JsonElement>()
+        for ((key, value) in existing) {
+            if (key != "values") merged[key] = value
+        }
+        if (existing["replace"] == null && incoming["replace"] != null) {
+            merged["replace"] = incoming["replace"]!!
+        }
+        merged["values"] = JsonArray(values.values.toList())
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), JsonObject(merged)) + "\n"
     }
 
     private fun findResourceDirs(projectDir: Path): List<Path> {
@@ -177,7 +715,7 @@ class ResourceMigrationPass(
                 Files.move(modsToml, target, StandardCopyOption.REPLACE_EXISTING)
                 // Fix template variable references BEFORE transformModsToml
                 // (so that ${forge_version_range} becomes ${neoforge_version_range}
-                // instead of being hardcoded by updateDependencyVersionRanges)
+                // instead of being resolved as a fixed version range)
                 transformTemplateVariables(target)
                 transformModsToml(target)
             }
@@ -223,15 +761,10 @@ class ResourceMigrationPass(
             """modId="neoforge""""
         )
 
-        // 3. Replace mandatory=true/false with type="required"/"optional"
-        content = content.replace(
-            Regex("""mandatory\s*=\s*true"""),
-            """type="required""""
-        )
-        content = content.replace(
-            Regex("""mandatory\s*=\s*false"""),
-            """type="optional""""
-        )
+        // 3. Replace mandatory=true/false with type="required"/"optional".
+        // Some Forge mods already carry a NeoForge-style type field; in that case mandatory
+        // must be removed instead of converted, otherwise the TOML table has duplicate keys.
+        content = migrateMandatoryFields(content)
 
         // 4. Update NeoForge dependency versionRange
         // 5. Update Minecraft dependency versionRange
@@ -258,6 +791,168 @@ class ResourceMigrationPass(
         content = content.replace(Regex("""\n{3,}"""), "\n\n")
 
         file.writeText(content)
+    }
+
+    private fun migrateCustomEnchantmentData(projectDir: Path, changes: MutableList<Change>, errors: MutableList<String>) {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return
+
+        val javaSources = srcDir.toFile().walkTopDown()
+            .filter { it.isFile && it.extension == "java" }
+            .map { it.toPath() to it.readText() }
+            .toList()
+        if (javaSources.isEmpty()) return
+
+        val modIds = detectJavaModIds(javaSources)
+        val enchantmentKeys = linkedSetOf<CustomEnchantmentKey>()
+        val keyPattern = Regex(
+            """(?:net\.minecraft\.resources\.)?ResourceKey<Enchantment>\s+(\w+)\s*=\s*[\s\S]*?(?:net\.minecraft\.resources\.)?ResourceLocation\.fromNamespaceAndPath\(\s*([^,]+?)\s*,\s*"([^"]+)"\s*\)"""
+        )
+
+        for ((_, content) in javaSources) {
+            keyPattern.findAll(content).forEach { match ->
+                val modId = resolveModIdExpression(match.groupValues[2], modIds) ?: return@forEach
+                enchantmentKeys.add(CustomEnchantmentKey(modId, match.groupValues[3]))
+            }
+        }
+
+        if (enchantmentKeys.isEmpty()) return
+
+        for (key in enchantmentKeys) {
+            if (customEnchantmentDataExists(projectDir, key)) continue
+
+            changes.add(Change(
+                file = projectDir.resolve("src/generated/resources/data/${key.modId}/enchantment/${key.name}.json"),
+                line = 0,
+                description = "Require source-derived data-driven custom enchantment '${key.modId}:${key.name}'",
+                before = "(missing)",
+                after = "data/${key.modId}/enchantment/${key.name}.json",
+                confidence = Confidence.HIGH,
+                ruleId = "res-custom-enchantment-data"
+            ))
+            errors.add("Missing source-derived data-driven custom enchantment JSON for '${key.modId}:${key.name}'")
+        }
+    }
+
+    private fun customEnchantmentDataExists(projectDir: Path, key: CustomEnchantmentKey): Boolean =
+        listOf(
+            projectDir.resolve("src/main/resources"),
+            projectDir.resolve("src/generated/resources")
+        ).any { root -> root.resolve("data/${key.modId}/enchantment/${key.name}.json").exists() }
+
+    private fun migrateBannerPatternDataResources(
+        dataDir: Path,
+        changes: MutableList<Change>,
+        errors: MutableList<String>,
+        dryRun: Boolean
+    ) {
+        try {
+            Files.walk(dataDir)
+                .filter { Files.isRegularFile(it) && it.toString().replace("\\", "/").contains("/tags/banner_pattern/pattern_item/") }
+                .filter { it.toString().endsWith(".json") }
+                .forEach { tagFile ->
+                    val root = parseResourceJson(tagFile.readText()) as? JsonObject ?: return@forEach
+                    val values = root["values"] as? JsonArray ?: return@forEach
+                    for (value in values) {
+                        val id = (value as? JsonPrimitive)
+                            ?.takeIf { it.isString }
+                            ?.content
+                            ?.takeUnless { it.startsWith("#") }
+                            ?: continue
+                        val namespace = id.substringBefore(':', missingDelimiterValue = "")
+                        val path = id.substringAfter(':', missingDelimiterValue = "")
+                        if (namespace.isBlank() || path.isBlank()) continue
+
+                        val target = dataDir.resolve("$namespace/banner_pattern/$path.json")
+                        if (target.exists()) continue
+
+                        val content = bannerPatternJson(namespace, path)
+                        changes.add(Change(
+                            file = target,
+                            line = 1,
+                            description = "Create data-driven banner pattern '$id' referenced by pattern item tags",
+                            before = "(missing)",
+                            after = "data/$namespace/banner_pattern/$path.json",
+                            confidence = Confidence.HIGH,
+                            ruleId = "res-banner-pattern-data-resource"
+                        ))
+                        if (!dryRun) {
+                            target.parent.createDirectories()
+                            target.writeText(content)
+                        }
+                    }
+                }
+        } catch (e: Exception) {
+            errors.add("Failed to migrate banner pattern data resources: ${e.message}")
+        }
+    }
+
+    private fun bannerPatternJson(namespace: String, path: String): String = """
+{
+  "asset_id": "$namespace:$path",
+  "translation_key": "block.minecraft.banner.$namespace.$path"
+}
+""".trimIndent() + "\n"
+
+    private fun detectJavaModIds(javaSources: List<Pair<Path, String>>): Map<String, String> {
+        val ids = mutableMapOf<String, String>()
+        for ((file, content) in javaSources) {
+            val className = file.fileName.toString().removeSuffix(".java")
+            Regex("static\\s+final\\s+String\\s+(MODID|MOD_ID)\\s*=\\s*\"([^\"]+)\"")
+                .findAll(content)
+                .forEach { match ->
+                    ids[match.groupValues[1]] = match.groupValues[2]
+                    ids["$className.${match.groupValues[1]}"] = match.groupValues[2]
+                }
+            Regex("@Mod\\s*\\(\\s*\"([^\"]+)\"").find(content)?.let { match ->
+                ids[className] = match.groupValues[1]
+            }
+        }
+        return ids
+    }
+
+    private fun resolveModIdExpression(expression: String, modIds: Map<String, String>): String? {
+        val trimmed = expression.trim()
+        if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+            return trimmed.trim('"')
+        }
+        return modIds[trimmed]
+            ?: modIds[trimmed.substringAfterLast('.')]
+    }
+
+    private data class CustomEnchantmentKey(val modId: String, val name: String)
+
+    private fun migrateMandatoryFields(content: String): String {
+        val output = mutableListOf<String>()
+        val block = mutableListOf<String>()
+
+        fun flushBlock() {
+            if (block.isEmpty()) return
+            val hasType = block.any { Regex("""^\s*type\s*=""").containsMatchIn(it) }
+            for (line in block) {
+                val mandatory = Regex("""^(\s*)mandatory\s*=\s*(true|false).*$""").find(line)
+                if (mandatory == null) {
+                    output.add(line)
+                    continue
+                }
+
+                if (!hasType) {
+                    val value = if (mandatory.groupValues[2] == "true") "required" else "optional"
+                    output.add("${mandatory.groupValues[1]}type=\"$value\"")
+                }
+            }
+            block.clear()
+        }
+
+        for (line in content.lines()) {
+            if (line.trimStart().startsWith("[[")) {
+                flushBlock()
+            }
+            block.add(line)
+        }
+        flushBlock()
+
+        return output.joinToString("\n")
     }
 
     /**
@@ -300,6 +995,18 @@ class ResourceMigrationPass(
                         lines[i] = line.replace(
                             Regex("""versionRange\s*=\s*"\[1\.20[^"]*""""),
                             """versionRange="[1.21.1,1.22)""""
+                        )
+                    }
+                    "mysterious_mountain_lib" -> {
+                        lines[i] = line.replace(
+                            Regex("""versionRange\s*=\s*"[^"]*""""),
+                            """versionRange="[1.0.0,)""""
+                        )
+                    }
+                    "terrablender" -> {
+                        lines[i] = line.replace(
+                            Regex("""versionRange\s*=\s*"[^"]*""""),
+                            """versionRange="[4.0.0,)""""
                         )
                     }
                 }
@@ -374,39 +1081,115 @@ class ResourceMigrationPass(
      * - Forge conditions: "conditions" → "neoforge:conditions"
      * - Condition types: "forge:" prefix → "neoforge:" prefix
      */
-    internal fun transformDataJsonFiles(dataDir: Path, changes: MutableList<Change>, errors: MutableList<String>) {
+    internal fun transformDataJsonFiles(
+        dataDir: Path,
+        projectDir: Path,
+        changes: MutableList<Change>,
+        errors: MutableList<String>
+    ) {
+        val codeAwardedAdvancements = detectCodeAwardedAdvancements(projectDir)
         Files.walk(dataDir)
             .filter { it.toString().endsWith(".json") && Files.isRegularFile(it) }
             .forEach { file ->
                 try {
                     var content = file.readText()
                     var modified = false
+                    val filePath = file.toString().replace("\\", "/")
+                    val isRecipeFile = filePath.contains("/recipe/")
+                    val isLootTableFile = filePath.contains("/loot_table/") || filePath.contains("/loot_tables/")
+                    val isLootModifierFile = filePath.contains("/loot_modifiers/") &&
+                        !filePath.endsWith("/global_loot_modifiers.json")
+                    val isAdvancementFile = filePath.contains("/advancement/")
+                    val isWorldgenFile = filePath.contains("/worldgen/")
+                    val isDimensionTypeFile = filePath.contains("/dimension_type/")
 
                     // Recipe result: "item" → "id" in result objects
                     // Match "result": {"item": "..." pattern and change to "result": {"id": "..."
-                    if (content.contains("\"result\"") && content.contains("\"type\"")) {
-                        val newContent = content.replace(
-                            Regex("""("result"\s*:\s*\{[^}]*)"item"(\s*:)"""),
-                            """$1"id"$2"""
-                        )
+                    // Forge recipe/loot conditions → NeoForge conditions
+                    // Only rename "conditions" in non-advancement files (advancements use "conditions" for triggers)
+                    if (isRecipeFile && content.contains("\"result\"")) {
+                        val newContent = migrateRecipeResultEntries(content)
                         if (newContent != content) {
                             content = newContent
                             modified = true
                             changes.add(Change(
                                 file = file, line = 0,
-                                description = "Recipe result: \"item\" -> \"id\"",
-                                before = "\"item\":", after = "\"id\":",
+                                description = "Minecraft recipe result entries: \"item\" -> \"id\"",
+                                before = "\"result\": {\"item\": \"mod:item\"}",
+                                after = "\"result\": {\"id\": \"mod:item\"}",
                                 confidence = Confidence.HIGH,
-                                ruleId = "res-recipe-result-id"
+                                ruleId = "res-recipe-result-entry-id"
                             ))
                         }
                     }
 
-                    // Forge recipe/loot conditions → NeoForge conditions
-                    // Only rename "conditions" in non-advancement files (advancements use "conditions" for triggers)
-                    val filePath = file.toString().replace("\\", "/")
-                    val isAdvancementFile = filePath.contains("/advancement/")
-                    if (!isAdvancementFile && content.contains("\"conditions\"")) {
+                    if (isRecipeFile && content.contains("\"farmersdelight:cutting\"")) {
+                        val newContent = migrateFarmersDelightCuttingRecipe(content)
+                        if (newContent != content) {
+                            content = newContent
+                            modified = true
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Farmers Delight cutting result: item id/count -> item stack object",
+                                before = "\"item\": \"mod:item\", \"count\": 2",
+                                after = "\"item\": {\"id\": \"mod:item\", \"count\": 2}",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-recipe-farmersdelight-cutting-result-stack"
+                            ))
+                        }
+                    }
+
+                    if (isLootTableFile && content.contains("\"neoforge:conditions\"")) {
+                        val newContent = content.replace("\"neoforge:conditions\"", "\"conditions\"")
+                        if (newContent != content) {
+                            content = newContent
+                            modified = true
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Loot table: restore vanilla \"conditions\" key",
+                                before = "\"neoforge:conditions\"", after = "\"conditions\"",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-loot-table-conditions-key"
+                            ))
+                        }
+                    }
+
+                    if (isLootTableFile &&
+                        content.contains("\"minecraft:loot_table\"") &&
+                        content.contains("\"name\"")
+                    ) {
+                        val newContent = migrateLootTableEntryNames(content)
+                        if (newContent != content) {
+                            content = newContent
+                            modified = true
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Loot table entry: \"name\" -> \"value\" for nested loot table references",
+                                before = "\"type\": \"minecraft:loot_table\", \"name\": \"mod:table\"",
+                                after = "\"type\": \"minecraft:loot_table\", \"value\": \"mod:table\"",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-loot-table-entry-name-to-value"
+                            ))
+                        }
+                    }
+
+                    if (isLootTableFile && content.contains("\"minecraft:random_chance_with_looting\"")) {
+                        val newContent = migrateRandomChanceWithLootingConditions(content)
+                        if (newContent != content) {
+                            content = newContent
+                            modified = true
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Loot condition: random_chance_with_looting -> random_chance_with_enchanted_bonus",
+                                before = "\"condition\": \"minecraft:random_chance_with_looting\"",
+                                after = "\"condition\": \"minecraft:random_chance_with_enchanted_bonus\"",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-loot-random-chance-with-looting-121"
+                            ))
+                        }
+                    }
+
+                    if (!isAdvancementFile && !isLootTableFile && !isLootModifierFile && content.contains("\"conditions\"")) {
                         val newContent = content
                             .replace("\"conditions\"", "\"neoforge:conditions\"")
                             .replace("\"forge:", "\"neoforge:")
@@ -424,16 +1207,34 @@ class ResourceMigrationPass(
                     }
 
                     // Advancement trigger: "neoforge:conditions" → "conditions", "tag" → "items" with # prefix
+                    if (isLootModifierFile &&
+                        (content.contains("\"neoforge:conditions\"") || content.contains("\"condition\""))
+                    ) {
+                        val newContent = migrateGlobalLootModifierJson(content)
+                        if (newContent != content) {
+                            content = newContent
+                            modified = true
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Global loot modifier conditions: NeoForge wrapper -> loot condition codec",
+                                before = "\"neoforge:conditions\": [{\"condition\": \"...\"}]",
+                                after = "\"conditions\": [{\"type\": \"...\"}]",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-glm-loot-conditions-121"
+                            ))
+                        }
+                    }
+
                     if (isAdvancementFile) {
-                        // Fix over-renamed conditions (from package rename pass): "neoforge:conditions" back to "conditions"
+                        // Fix over-renamed trigger conditions while preserving top-level NeoForge load conditions.
                         if (content.contains("\"neoforge:conditions\"")) {
-                            val newContent = content.replace("\"neoforge:conditions\"", "\"conditions\"")
+                            val newContent = migrateAdvancementConditionKeys(content)
                             if (newContent != content) {
                                 content = newContent
                                 modified = true
                                 changes.add(Change(
                                     file = file, line = 0,
-                                    description = "Advancement trigger: restore \"conditions\" key",
+                                    description = "Advancement trigger: restore nested \"conditions\" key",
                                     before = "\"neoforge:conditions\"", after = "\"conditions\"",
                                     confidence = Confidence.HIGH,
                                     ruleId = "res-advancement-conditions-fix"
@@ -441,6 +1242,21 @@ class ResourceMigrationPass(
                             }
                         }
                         // Tag syntax in item predicates: "tag": "xxx" → "items": "#xxx"
+                        if (content.contains("\"advancements\"") && content.contains("\"advancement\"")) {
+                            val newContent = unwrapSingleConditionalAdvancement(content)
+                            if (newContent != content) {
+                                content = newContent
+                                modified = true
+                                changes.add(Change(
+                                    file = file, line = 0,
+                                    description = "Advancement: unwrap single conditional advancement",
+                                    before = "\"advancements\": [{\"advancement\": {...}, \"conditions\": [...]}]",
+                                    after = "advancement with top-level \"neoforge:conditions\"",
+                                    confidence = Confidence.HIGH,
+                                    ruleId = "res-advancement-unwrap-single-conditional"
+                                ))
+                            }
+                        }
                         val tagPattern = Regex(""""tag"\s*:\s*"([^"]+)"""")
                         if (tagPattern.containsMatchIn(content)) {
                             val newContent = tagPattern.replace(content) { match ->
@@ -458,6 +1274,61 @@ class ResourceMigrationPass(
                                 ))
                             }
                         }
+                        val iconItemPattern = Regex("""("icon"\s*:\s*\{[^}]*)"item"(\s*:)""")
+                        if (iconItemPattern.containsMatchIn(content)) {
+                            val newContent = iconItemPattern.replace(content, """$1"id"$2""")
+                            if (newContent != content) {
+                                content = newContent
+                                modified = true
+                                changes.add(Change(
+                                    file = file, line = 0,
+                                    description = "Advancement display icon: \"item\" -> \"id\"",
+                                    before = "\"icon\": {\"item\": \"...\"}",
+                                    after = "\"icon\": {\"id\": \"...\"}",
+                                    confidence = Confidence.HIGH,
+                                    ruleId = "res-advancement-icon-id"
+                                ))
+                            }
+                        }
+                        val topLevelIdPattern = Regex("""^\s*\{\s*"id"\s*:\s*"[^"]+"\s*,\s*""")
+                        if (topLevelIdPattern.containsMatchIn(content)) {
+                            val newContent = topLevelIdPattern.replace(content, "{\n  ")
+                            if (newContent != content) {
+                                content = newContent
+                                modified = true
+                                changes.add(Change(
+                                    file = file, line = 0,
+                                    description = "Remove legacy top-level advancement id field",
+                                    before = "\"id\": \"mod:advancement\"",
+                                    after = "(advancement id comes from file path)",
+                                    confidence = Confidence.HIGH,
+                                    ruleId = "res-advancement-remove-top-level-id"
+                                ))
+                            }
+                        }
+                        val advancementId = advancementIdFromPath(dataDir, file)
+                        val criteria = codeAwardedAdvancements[advancementId].orEmpty()
+                        if (criteria.isNotEmpty()) {
+                            val triggerPattern = Regex(""""trigger"\s*:\s*"${Regex.escape(advancementId)}"""")
+                            val hasAwardedCriterion = criteria.any { criterion ->
+                                Regex(""""${Regex.escape(criterion)}"\s*:""").containsMatchIn(content)
+                            }
+                            if (hasAwardedCriterion && triggerPattern.containsMatchIn(content)) {
+                                val newContent = triggerPattern.replace(content, """"trigger": "minecraft:impossible"""")
+                                if (newContent != content) {
+                                    content = newContent
+                                    modified = true
+                                    changes.add(Change(
+                                        file = file, line = 0,
+                                        description = "Code-awarded advancement trigger -> minecraft:impossible",
+                                        before = "\"trigger\": \"$advancementId\"",
+                                        after = "\"trigger\": \"minecraft:impossible\"",
+                                        confidence = Confidence.HIGH,
+                                        ruleId = "res-advancement-code-awarded-trigger"
+                                    ))
+                                }
+                            }
+                        }
                     }
 
                     // forge: namespace in condition types (without touching conditions key)
@@ -472,6 +1343,128 @@ class ResourceMigrationPass(
                                 before = "\"forge:", after = "\"neoforge:",
                                 confidence = Confidence.HIGH,
                                 ruleId = "res-forge-namespace-json"
+                            ))
+                        }
+                    }
+
+                    val commonTagContent = normalizeCommonTagNamespaces(content)
+                    if (commonTagContent != content) {
+                        content = commonTagContent
+                        modified = true
+                        changes.add(Change(
+                            file = file, line = 0,
+                            description = "Common item tag namespace: forge/neoforge -> c",
+                            before = "forge:ingots or neoforge:ingots",
+                            after = "c:ingots",
+                            confidence = Confidence.HIGH,
+                            ruleId = "res-common-tag-namespace"
+                        ))
+                    }
+
+                    val tagReferenceContent = normalizeTagReferenceNamespaces(content)
+                    if (tagReferenceContent != content) {
+                        content = tagReferenceContent
+                        modified = true
+                        changes.add(Change(
+                            file = file, line = 0,
+                            description = "Tag references: forge/neoforge -> c namespace",
+                            before = "forge:tag or neoforge:tag",
+                            after = "c:tag",
+                            confidence = Confidence.HIGH,
+                            ruleId = "res-tag-reference-c-namespace"
+                        ))
+                    }
+
+                    val resourceIdContent = renameLegacyResourceIds(content)
+                    if (resourceIdContent != content) {
+                        content = resourceIdContent
+                        modified = true
+                        changes.add(Change(
+                            file = file, line = 0,
+                            description = "Legacy vanilla resource ids -> 1.21.1 ids",
+                            before = "minecraft:grass",
+                            after = "minecraft:short_grass",
+                            confidence = Confidence.HIGH,
+                            ruleId = "res-legacy-resource-id-renames-121"
+                        ))
+                    }
+
+                    if (isRecipeFile && content.contains("partial_nbt")) {
+                        val newContent = migratePartialNbtIngredients(content)
+                        if (newContent != content) {
+                            content = newContent
+                            modified = true
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Recipe ingredient: partial NBT -> NeoForge data component ingredient",
+                                before = "\"type\": \"forge:partial_nbt\"",
+                                after = "\"type\": \"neoforge:components\"",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-recipe-partial-nbt-component-ingredient"
+                            ))
+                        }
+                    }
+
+                    if (isRecipeFile && content.contains("_scepter") && content.contains("\"minecraft:crafting_shapeless\"")) {
+                        val newContent = migrateDamagedScepterRepairRecipe(content)
+                        if (newContent != content) {
+                            content = newContent
+                            modified = true
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Damaged scepter repair recipe: shapeless damaged-item ingredient -> namespaced custom repair recipe",
+                                before = "\"type\": \"minecraft:crafting_shapeless\"",
+                                after = "\"type\": \"<namespace>:scepter_repair\"",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-damaged-scepter-repair-recipe-121"
+                            ))
+                        }
+                    }
+
+                    if (isRecipeFile && content.contains(":uncrafting\"")) {
+                        val newContent = migrateUncraftingRecipeInputWrappers(content)
+                        if (newContent != content) {
+                            content = newContent
+                            modified = true
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Uncrafting recipe: legacy input wrapper -> 1.21 input_count field",
+                                before = "\"input\": {\"ingredient\": {\"item\": \"...\"}}",
+                                after = "\"input\": {\"item\": \"...\"}, \"input_count\": ...",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-uncrafting-recipe-input-count-121"
+                            ))
+                        }
+                    }
+
+                    if (isRecipeFile && content.contains("\"neoforge:conditional\"")) {
+                        val newContent = unwrapSingleConditionalRecipe(content)
+                        if (newContent != content) {
+                            content = newContent
+                            modified = true
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Recipe: unwrap single neoforge conditional recipe",
+                                before = "\"type\": \"neoforge:conditional\"",
+                                after = "inner recipe with top-level \"neoforge:conditions\"",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-recipe-unwrap-single-conditional"
+                            ))
+                        }
+                    }
+
+                    if (isRecipeFile && content.contains("\"farmersdelight:cutting\"")) {
+                        val newContent = migrateFarmersDelightCuttingRecipe(content)
+                        if (newContent != content) {
+                            content = newContent
+                            modified = true
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Farmers Delight cutting result: item id/count -> item stack object",
+                                before = "\"item\": \"mod:item\", \"count\": 2",
+                                after = "\"item\": {\"id\": \"mod:item\", \"count\": 2}",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-recipe-farmersdelight-cutting-result-stack"
                             ))
                         }
                     }
@@ -496,6 +1489,57 @@ class ResourceMigrationPass(
                         }
                     }
 
+                    if (isLootTableFile && content.contains("\"minecraft:looting_enchant\"")) {
+                        val newContent = migrateLootTableFunctionNames(content)
+                        if (newContent != content) {
+                            content = newContent
+                            modified = true
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Loot function: looting_enchant -> enchanted_count_increase",
+                                before = "\"function\": \"minecraft:looting_enchant\"",
+                                after = "\"function\": \"minecraft:enchanted_count_increase\", \"enchantment\": \"minecraft:looting\"",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-loot-looting-enchant-function"
+                            ))
+                        }
+                    }
+
+                    if ((isWorldgenFile || isDimensionTypeFile) &&
+                        content.contains("\"value\"") &&
+                        (content.contains("\"min_inclusive\"") || content.contains("\"max_inclusive\""))
+                    ) {
+                        val newContent = flattenWorldgenProviderValueObjects(content)
+                        if (newContent != content) {
+                            content = newContent
+                            modified = true
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Worldgen provider: flatten legacy value min/max object",
+                                before = "\"value\": {\"min_inclusive\": ..., \"max_inclusive\": ...}",
+                                after = "\"min_inclusive\": ..., \"max_inclusive\": ...",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-worldgen-provider-value-flatten"
+                            ))
+                        }
+                    }
+
+                    if (isWorldgenFile && content.contains(":no_structure\"")) {
+                        val newContent = flattenNoStructurePlacementModifiers(content)
+                        if (newContent != content) {
+                            content = newContent
+                            modified = true
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "no_structure placement modifier: flatten legacy value object",
+                                before = "\"type\": \"<namespace>:no_structure\", \"value\": {...}",
+                                after = "\"type\": \"<namespace>:no_structure\", \"additional_clearance\": ...",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-no-structure-placement-flatten"
+                            ))
+                        }
+                    }
+
                     if (modified) {
                         file.writeText(content)
                     }
@@ -503,6 +1547,1282 @@ class ResourceMigrationPass(
                     errors.add("Failed to transform ${file.fileName}: ${e.message}")
                 }
             }
+    }
+
+    private fun migrateRecipeResultEntries(content: String): String {
+        val root = parseResourceJson(content) ?: return content
+        val result = migrateRecipeResultEntries(root, currentRecipeType = null)
+        if (!result.changed) return content
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), result.element) + "\n"
+    }
+
+    private fun migrateRecipeResultEntries(element: JsonElement, currentRecipeType: String?): JsonElementMigration {
+        return when (element) {
+            is JsonArray -> {
+                var changed = false
+                val values = element.map { child ->
+                    val result = migrateRecipeResultEntries(child, currentRecipeType)
+                    changed = changed || result.changed
+                    result.element
+                }
+                JsonElementMigration(JsonArray(values), changed)
+            }
+            is JsonObject -> {
+                var changed = false
+                val objectType = (element["type"] as? JsonPrimitive)
+                    ?.takeIf { it.isString }
+                    ?.content
+                val recipeType = objectType ?: currentRecipeType
+                val entries = linkedMapOf<String, JsonElement>()
+                for ((key, value) in element) {
+                    val result = if (key == "result") {
+                        if (shouldMigrateRecipeResultForType(recipeType)) {
+                            migrateRecipeResultValue(value)
+                        } else {
+                            JsonElementMigration(value, changed = false)
+                        }
+                    } else {
+                        migrateRecipeResultEntries(value, recipeType)
+                    }
+                    changed = changed || result.changed
+                    entries[key] = result.element
+                }
+                JsonElementMigration(JsonObject(entries), changed)
+            }
+            else -> JsonElementMigration(element, changed = false)
+        }
+    }
+
+    private fun shouldMigrateRecipeResultForType(type: String?): Boolean =
+        type?.startsWith("minecraft:") == true
+
+    private fun migrateRecipeResultValue(element: JsonElement): JsonElementMigration {
+        return when (element) {
+            is JsonArray -> {
+                var changed = false
+                val values = element.map { child ->
+                    val result = migrateRecipeResultValue(child)
+                    changed = changed || result.changed
+                    result.element
+                }
+                JsonElementMigration(JsonArray(values), changed)
+            }
+            is JsonObject -> {
+                val hasId = "id" in element
+                if (!element.containsKey("item") || hasId) {
+                    return JsonElementMigration(element, changed = false)
+                }
+                val entries = linkedMapOf<String, JsonElement>()
+                for ((key, value) in element) {
+                    if (key == "item") {
+                        entries["id"] = value
+                    } else {
+                        entries[key] = value
+                    }
+                }
+                JsonElementMigration(JsonObject(entries), changed = true)
+            }
+            is JsonPrimitive -> {
+                if (!element.isString) return JsonElementMigration(element, changed = false)
+                val entries = linkedMapOf<String, JsonElement>()
+                entries["id"] = element
+                JsonElementMigration(JsonObject(entries), changed = true)
+            }
+            else -> JsonElementMigration(element, changed = false)
+        }
+    }
+
+    private fun migrateFarmersDelightCuttingRecipe(content: String): String {
+        val root = parseResourceJson(content) as? JsonObject ?: return content
+        val type = (root["type"] as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+        if (type != "farmersdelight:cutting") return content
+
+        val result = root["result"] as? JsonArray ?: return content
+        var changed = false
+        val migratedResult = result.map { entry ->
+            val entryObject = entry as? JsonObject ?: return@map entry
+            val item = (entryObject["item"] as? JsonPrimitive)
+                ?.takeIf { it.isString }
+                ?: return@map entry
+            val stack = linkedMapOf<String, JsonElement>()
+            stack["id"] = item
+            val count = entryObject["count"]
+            if (count != null) {
+                stack["count"] = count
+            }
+
+            val migratedEntry = linkedMapOf<String, JsonElement>()
+            for ((key, value) in entryObject) {
+                when (key) {
+                    "item" -> migratedEntry["item"] = JsonObject(stack)
+                    "count" -> Unit
+                    else -> migratedEntry[key] = value
+                }
+            }
+            changed = true
+            JsonObject(migratedEntry)
+        }
+        if (!changed) return content
+
+        val entries = linkedMapOf<String, JsonElement>()
+        for ((key, value) in root) {
+            if (key == "result") {
+                entries[key] = JsonArray(migratedResult)
+            } else {
+                entries[key] = value
+            }
+        }
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), JsonObject(entries)) + "\n"
+    }
+
+    private fun migratePartialNbtIngredients(content: String): String {
+        val root = parseResourceJson(content) ?: return content
+        val result = migratePartialNbtIngredients(root, currentKey = null, arrayMayBeIngredient = false)
+        if (!result.changed) return content
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), result.element) + "\n"
+    }
+
+    private fun migratePartialNbtIngredients(
+        element: JsonElement,
+        currentKey: String?,
+        arrayMayBeIngredient: Boolean
+    ): JsonElementMigration {
+        return when (element) {
+            is JsonArray -> {
+                var changed = false
+                val childMayBeIngredient = arrayMayBeIngredient || currentKey in INGREDIENT_LIST_KEYS
+                val values = element.map { child ->
+                    val result = migratePartialNbtIngredients(child, currentKey = null, arrayMayBeIngredient = childMayBeIngredient)
+                    changed = changed || result.changed
+                    result.element
+                }
+                val migratedArray = JsonArray(values)
+                if (arrayMayBeIngredient && values.any { it.isNeoForgeCustomIngredient() }) {
+                    val compound = linkedMapOf<String, JsonElement>()
+                    compound["type"] = JsonPrimitive("neoforge:compound")
+                    compound["children"] = migratedArray
+                    JsonElementMigration(JsonObject(compound), changed = true)
+                } else {
+                    JsonElementMigration(migratedArray, changed)
+                }
+            }
+            is JsonObject -> {
+                migratePartialNbtIngredientObject(element)?.let {
+                    return JsonElementMigration(it, changed = true)
+                }
+
+                var changed = false
+                val entries = linkedMapOf<String, JsonElement>()
+                for ((key, value) in element) {
+                    val result = migratePartialNbtIngredients(value, currentKey = key, arrayMayBeIngredient = false)
+                    entries[key] = result.element
+                    changed = changed || result.changed
+                }
+                JsonElementMigration(JsonObject(entries), changed)
+            }
+            else -> JsonElementMigration(element, changed = false)
+        }
+    }
+
+    private fun migratePartialNbtIngredientObject(element: JsonObject): JsonObject? {
+        val type = (element["type"] as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+            ?: return null
+        if (type != "forge:partial_nbt" && type != "neoforge:partial_nbt") return null
+
+        val item = (element["item"] as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+            ?: return null
+        val nbt = (element["nbt"] as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+            ?: return null
+        val components = partialNbtToComponents(nbt) ?: return null
+
+        val migrated = linkedMapOf<String, JsonElement>()
+        migrated["type"] = JsonPrimitive("neoforge:components")
+        migrated["components"] = components
+        migrated["items"] = JsonPrimitive(item)
+        return JsonObject(migrated)
+    }
+
+    private fun partialNbtToComponents(nbt: String): JsonObject? {
+        val trimmed = nbt.trim()
+        if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null
+
+        val body = trimmed.substring(1, trimmed.length - 1).trim()
+        if (body.isEmpty()) return JsonObject(emptyMap())
+
+        val components = linkedMapOf<String, JsonElement>()
+        val customData = linkedMapOf<String, JsonElement>()
+        for (entry in splitTopLevelSnbtEntries(body)) {
+            val colon = entry.indexOf(':')
+            if (colon <= 0) continue
+            val key = entry.substring(0, colon).trim().trim('"')
+            val value = entry.substring(colon + 1).trim()
+            when (key) {
+                "Damage" -> {
+                    val damage = parseSnbtInt(value) ?: continue
+                    components["minecraft:damage"] = JsonPrimitive(damage)
+                }
+                "Potion" -> {
+                    components["minecraft:potion_contents"] = JsonObject(mapOf(
+                        "potion" to JsonPrimitive(unquoteSnbtString(value))
+                    ))
+                }
+                else -> {
+                    customData[key] = parseSnbtJsonPrimitive(value)
+                }
+            }
+        }
+        if (customData.isNotEmpty()) {
+            components["minecraft:custom_data"] = JsonObject(customData)
+        }
+        return JsonObject(components)
+    }
+
+    private fun splitTopLevelSnbtEntries(body: String): List<String> {
+        val entries = mutableListOf<String>()
+        var start = 0
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (index in body.indices) {
+            val char = body[index]
+            if (escaped) {
+                escaped = false
+                continue
+            }
+            when {
+                char == '\\' && inString -> escaped = true
+                char == '"' -> inString = !inString
+                !inString && (char == '{' || char == '[') -> depth++
+                !inString && (char == '}' || char == ']') -> depth--
+                !inString && depth == 0 && char == ',' -> {
+                    entries.add(body.substring(start, index).trim())
+                    start = index + 1
+                }
+            }
+        }
+        entries.add(body.substring(start).trim())
+        return entries.filter { it.isNotEmpty() }
+    }
+
+    private fun parseSnbtInt(value: String): Int? =
+        value.trim().trimEnd('b', 'B', 's', 'S', 'l', 'L').toIntOrNull()
+
+    private fun parseSnbtJsonPrimitive(value: String): JsonElement {
+        val normalized = value.trim()
+        parseSnbtInt(normalized)?.let { return JsonPrimitive(it) }
+        normalized.trimEnd('f', 'F', 'd', 'D').toDoubleOrNull()?.let { return JsonPrimitive(it) }
+        return when (normalized.lowercase()) {
+            "true" -> JsonPrimitive(true)
+            "false" -> JsonPrimitive(false)
+            else -> JsonPrimitive(unquoteSnbtString(normalized))
+        }
+    }
+
+    private fun unquoteSnbtString(value: String): String {
+        val trimmed = value.trim()
+        return if (trimmed.length >= 2 && trimmed.first() == '"' && trimmed.last() == '"') {
+            trimmed.substring(1, trimmed.length - 1).replace("\\\"", "\"")
+        } else {
+            trimmed
+        }
+    }
+
+    private fun JsonElement.isNeoForgeCustomIngredient(): Boolean {
+        val objectValue = this as? JsonObject ?: return false
+        val ingredientType = ((objectValue["type"] ?: objectValue["neoforge:ingredient_type"]) as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+            ?: return false
+        return ingredientType.startsWith("neoforge:")
+    }
+
+    private fun migrateDamagedScepterRepairRecipe(content: String): String {
+        val root = parseResourceJson(content) as? JsonObject ?: return content
+        val type = (root["type"] as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+        if (type != "minecraft:crafting_shapeless") return content
+
+        val resultId = recipeResultId(root) ?: return content
+        if (!resultId.contains(":") || !resultId.endsWith("_scepter")) return content
+        val namespace = resultId.substringBefore(':')
+
+        val ingredients = root["ingredients"] as? JsonArray ?: return content
+        val repairIngredients = mutableListOf<JsonElement>()
+        var foundScepterIngredient = false
+        for (ingredient in ingredients) {
+            if (isDamagedScepterIngredient(ingredient, resultId)) {
+                foundScepterIngredient = true
+            } else {
+                repairIngredients.add(ingredient)
+            }
+        }
+        if (!foundScepterIngredient || repairIngredients.isEmpty()) return content
+
+        val entries = linkedMapOf<String, JsonElement>()
+        entries["type"] = JsonPrimitive("$namespace:scepter_repair")
+        entries["durability"] = JsonPrimitive(9)
+        entries["repair_ingredients"] = JsonArray(repairIngredients)
+        entries["scepter"] = JsonPrimitive(resultId)
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), JsonObject(entries)) + "\n"
+    }
+
+    private fun recipeResultId(root: JsonObject): String? {
+        val result = root["result"] ?: return null
+        return when (result) {
+            is JsonPrimitive -> result.takeIf { it.isString }?.content
+            is JsonObject -> {
+                val id = result["id"] ?: result["item"]
+                (id as? JsonPrimitive)?.takeIf { it.isString }?.content
+            }
+            else -> null
+        }
+    }
+
+    private fun isDamagedScepterIngredient(element: JsonElement, scepterId: String): Boolean {
+        val objectValue = element as? JsonObject ?: return false
+        val type = (objectValue["type"] as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+        if (type != "neoforge:components") return false
+        val item = (objectValue["items"] as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+        if (item != scepterId) return false
+        val components = objectValue["components"] as? JsonObject ?: return false
+        return components.containsKey("minecraft:damage")
+    }
+
+    private fun migrateUncraftingRecipeInputWrappers(content: String): String {
+        val root = parseResourceJson(content) as? JsonObject ?: return content
+        val type = (root["type"] as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+        if (type?.endsWith(":uncrafting") != true) return content
+
+        var changed = false
+        var pendingInputCount: JsonElement? = null
+        val entries = linkedMapOf<String, JsonElement>()
+        for ((key, value) in root) {
+            when (key) {
+                "input" -> {
+                    val input = value as? JsonObject
+                    val ingredient = input?.get("ingredient")
+                    if (ingredient != null) {
+                        entries["input"] = unwrapIngredientWrapper(ingredient)
+                        pendingInputCount = input["count"]
+                        changed = true
+                    } else {
+                        entries[key] = value
+                    }
+                    if (pendingInputCount != null) {
+                        entries["input_count"] = pendingInputCount!!
+                    }
+                }
+                "key" -> {
+                    val keyObject = value as? JsonObject
+                    if (keyObject == null) {
+                        entries[key] = value
+                    } else {
+                        val migratedKey = linkedMapOf<String, JsonElement>()
+                        for ((symbol, ingredient) in keyObject) {
+                            val simplified = unwrapIngredientWrapper(ingredient)
+                            migratedKey[symbol] = simplified
+                            changed = changed || simplified != ingredient
+                        }
+                        entries[key] = JsonObject(migratedKey)
+                    }
+                }
+                else -> entries[key] = value
+            }
+        }
+        if (!changed) return content
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), JsonObject(entries)) + "\n"
+    }
+
+    private fun unwrapIngredientWrapper(element: JsonElement): JsonElement {
+        val objectValue = element as? JsonObject ?: return element
+        val nested = objectValue["ingredient"]
+        if (nested != null && objectValue.keys.all { it == "ingredient" }) {
+            return unwrapIngredientWrapper(nested)
+        }
+        return element
+    }
+
+    private fun migrateGlobalLootModifierJson(content: String): String {
+        val root = parseResourceJson(content) as? JsonObject ?: return content
+        if (!root.containsKey("type")) return content
+
+        val conditions = root["neoforge:conditions"] ?: root["conditions"] ?: return content
+        val migratedConditions = migrateGlobalLootConditions(conditions)
+        val hadNeoForgeConditions = root.containsKey("neoforge:conditions")
+        if (!hadNeoForgeConditions && !migratedConditions.changed) return content
+
+        val entries = linkedMapOf<String, JsonElement>()
+        var wroteConditions = false
+        for ((key, value) in root) {
+            when (key) {
+                "neoforge:conditions" -> {
+                    if (!wroteConditions) {
+                        entries["conditions"] = migratedConditions.element
+                        wroteConditions = true
+                    }
+                }
+                "conditions" -> {
+                    entries["conditions"] = migratedConditions.element
+                    wroteConditions = true
+                }
+                else -> entries[key] = value
+            }
+        }
+        if (!wroteConditions) {
+            entries["conditions"] = migratedConditions.element
+        }
+
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), JsonObject(entries)) + "\n"
+    }
+
+    private fun migrateGlobalLootConditions(element: JsonElement): JsonElementMigration {
+        return when (element) {
+            is JsonArray -> {
+                var changed = false
+                val values = element.map { child ->
+                    val result = migrateGlobalLootConditions(child)
+                    changed = changed || result.changed
+                    result.element
+                }
+                JsonElementMigration(JsonArray(values), changed)
+            }
+            is JsonObject -> {
+                var changed = false
+                val entries = linkedMapOf<String, JsonElement>()
+                for ((key, value) in element) {
+                    val result = migrateGlobalLootConditions(value)
+                    if (key == "condition") {
+                        val condition = normalizeGlobalLootConditionType(result.element)
+                        entries[key] = condition
+                        changed = changed || result.changed || condition != result.element
+                    } else {
+                        entries[key] = result.element
+                        changed = changed || result.changed
+                    }
+                }
+                JsonElementMigration(JsonObject(entries), changed)
+            }
+            else -> JsonElementMigration(element, changed = false)
+        }
+    }
+
+    private fun normalizeGlobalLootConditionType(element: JsonElement): JsonElement {
+        val value = (element as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+            ?: return element
+        return JsonPrimitive(if (":" in value) value else "minecraft:$value")
+    }
+
+    private fun normalizeTagReferenceNamespaces(content: String): String {
+        val root = parseResourceJson(content) ?: return content
+        val result = normalizeTagReferenceNamespaces(root, currentKey = null)
+        if (!result.changed) return content
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), result.element) + "\n"
+    }
+
+    private fun normalizeTagReferenceNamespaces(element: JsonElement, currentKey: String?): JsonElementMigration {
+        return when (element) {
+            is JsonArray -> {
+                var changed = false
+                val values = element.map { child ->
+                    val result = normalizeTagReferenceNamespaces(child, currentKey)
+                    changed = changed || result.changed
+                    result.element
+                }
+                JsonElementMigration(JsonArray(values), changed)
+            }
+            is JsonObject -> {
+                var changed = false
+                val type = (element["type"] as? JsonPrimitive)
+                    ?.takeIf { it.isString }
+                    ?.content
+                val entries = linkedMapOf<String, JsonElement>()
+                for ((key, value) in element) {
+                    val childKey = if (key == "name" && type == "minecraft:tag") "tag" else key
+                    val result = normalizeTagReferenceNamespaces(value, childKey)
+                    changed = changed || result.changed
+                    entries[key] = result.element
+                }
+                JsonElementMigration(JsonObject(entries), changed)
+            }
+            is JsonPrimitive -> {
+                if (!element.isString) return JsonElementMigration(element, changed = false)
+                val value = element.content
+                val normalized = normalizeTagReferenceString(currentKey, value)
+                if (normalized == value) {
+                    JsonElementMigration(element, changed = false)
+                } else {
+                    JsonElementMigration(JsonPrimitive(normalized), changed = true)
+                }
+            }
+            else -> JsonElementMigration(element, changed = false)
+        }
+    }
+
+    private fun normalizeTagReferenceString(currentKey: String?, value: String): String {
+        return when {
+            value.startsWith("#forge:") -> "#c:${normalizeCommonTagPath(value.removePrefix("#forge:"))}"
+            value.startsWith("#neoforge:") -> "#c:${normalizeCommonTagPath(value.removePrefix("#neoforge:"))}"
+            value.startsWith("#c:") -> "#c:${normalizeCommonTagPath(value.removePrefix("#c:"))}"
+            currentKey != null && currentKey in TAG_REFERENCE_VALUE_KEYS && value.startsWith("forge:") ->
+                "c:${normalizeCommonTagPath(value.removePrefix("forge:"))}"
+            currentKey != null && currentKey in TAG_REFERENCE_VALUE_KEYS && value.startsWith("neoforge:") ->
+                "c:${normalizeCommonTagPath(value.removePrefix("neoforge:"))}"
+            currentKey != null && currentKey in TAG_REFERENCE_VALUE_KEYS && value.startsWith("c:") ->
+                "c:${normalizeCommonTagPath(value.removePrefix("c:"))}"
+            else -> value
+        }
+    }
+
+    private fun normalizeCommonTagPath(path: String): String {
+        COMMON_TAG_PATH_RENAMES[path]?.let { return it }
+        for ((from, to) in COMMON_TAG_PATH_PREFIX_RENAMES) {
+            if (path.startsWith(from)) return to + path.removePrefix(from)
+        }
+        return path
+    }
+
+    private fun renameLegacyResourceIds(content: String): String {
+        if (RESOURCE_ID_RENAMES_121.keys.none { content.contains("\"$it\"") }) return content
+        val root = parseResourceJson(content) ?: return content
+        val result = renameLegacyResourceIds(root)
+        if (!result.changed) return content
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), result.element) + "\n"
+    }
+
+    private fun renameLegacyResourceIds(element: JsonElement): JsonElementMigration {
+        return when (element) {
+            is JsonArray -> {
+                var changed = false
+                val values = element.map { child ->
+                    val result = renameLegacyResourceIds(child)
+                    changed = changed || result.changed
+                    result.element
+                }
+                JsonElementMigration(JsonArray(values), changed)
+            }
+            is JsonObject -> {
+                var changed = false
+                val entries = linkedMapOf<String, JsonElement>()
+                for ((key, value) in element) {
+                    val result = renameLegacyResourceIds(value)
+                    changed = changed || result.changed
+                    entries[key] = result.element
+                }
+                JsonElementMigration(JsonObject(entries), changed)
+            }
+            is JsonPrimitive -> {
+                if (!element.isString) return JsonElementMigration(element, changed = false)
+                val renamed = RESOURCE_ID_RENAMES_121[element.content] ?: return JsonElementMigration(element, changed = false)
+                JsonElementMigration(JsonPrimitive(renamed), changed = true)
+            }
+            else -> JsonElementMigration(element, changed = false)
+        }
+    }
+
+    private fun migrateAdvancementConditionKeys(content: String): String {
+        val root = parseResourceJson(content) ?: return content
+        val result = migrateAdvancementConditionKeys(root, depth = 0)
+        if (!result.changed) return content
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), result.element) + "\n"
+    }
+
+    private fun migrateAdvancementConditionKeys(element: JsonElement, depth: Int): JsonElementMigration {
+        return when (element) {
+            is JsonArray -> {
+                var changed = false
+                val values = element.map { child ->
+                    val result = migrateAdvancementConditionKeys(child, depth + 1)
+                    changed = changed || result.changed
+                    result.element
+                }
+                JsonElementMigration(JsonArray(values), changed)
+            }
+            is JsonObject -> {
+                var changed = false
+                val entries = linkedMapOf<String, JsonElement>()
+                for ((key, value) in element) {
+                    val result = migrateAdvancementConditionKeys(value, depth + 1)
+                    val migratedKey = if (key == "neoforge:conditions" && depth > 0) {
+                        changed = true
+                        "conditions"
+                    } else {
+                        key
+                    }
+                    entries[migratedKey] = result.element
+                    changed = changed || result.changed
+                }
+                JsonElementMigration(JsonObject(entries), changed)
+            }
+            else -> JsonElementMigration(element, changed = false)
+        }
+    }
+
+    private fun unwrapSingleConditionalAdvancement(content: String): String {
+        val root = parseResourceJson(content) as? JsonObject ?: return content
+        val advancements = root["advancements"] as? JsonArray ?: return content
+        if (advancements.size != 1) return content
+
+        val conditionalEntry = advancements.single() as? JsonObject ?: return content
+        val advancement = conditionalEntry["advancement"] as? JsonObject ?: return content
+        val conditions = conditionalEntry["neoforge:conditions"] ?: conditionalEntry["conditions"]
+
+        val unwrapped = linkedMapOf<String, JsonElement>()
+        if (conditions != null) {
+            unwrapped["neoforge:conditions"] = conditions
+        }
+        for ((key, value) in advancement) {
+            if ((key == "neoforge:conditions" || key == "conditions") && conditions != null) continue
+            unwrapped[key] = value
+        }
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), JsonObject(unwrapped)) + "\n"
+    }
+
+    private fun unwrapSingleConditionalRecipe(content: String): String {
+        val root = parseResourceJson(content) as? JsonObject ?: return content
+        val type = (root["type"] as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+        if (type != "neoforge:conditional") return content
+
+        val recipes = root["recipes"] as? JsonArray ?: return content
+        if (recipes.size != 1) return content
+
+        val conditionalEntry = recipes.single() as? JsonObject ?: return content
+        val recipe = conditionalEntry["recipe"] as? JsonObject ?: return content
+        val conditions = conditionalEntry["neoforge:conditions"] ?: conditionalEntry["conditions"]
+
+        val unwrapped = linkedMapOf<String, JsonElement>()
+        if (conditions != null) {
+            unwrapped["neoforge:conditions"] = conditions
+        }
+        for ((key, value) in recipe) {
+            if (key == "neoforge:conditions" && conditions != null) continue
+            unwrapped[key] = value
+        }
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), JsonObject(unwrapped)) + "\n"
+    }
+
+    private fun migrateLootTableEntryNames(content: String): String {
+        val root = parseResourceJson(content) ?: return content
+        val result = migrateLootTableEntryNames(root)
+        if (!result.changed) return content
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), result.element) + "\n"
+    }
+
+    private fun migrateLootTableEntryNames(element: JsonElement): JsonElementMigration {
+        return when (element) {
+            is JsonArray -> {
+                var changed = false
+                val values = element.map { child ->
+                    val result = migrateLootTableEntryNames(child)
+                    changed = changed || result.changed
+                    result.element
+                }
+                JsonElementMigration(JsonArray(values), changed)
+            }
+            is JsonObject -> {
+                var changed = false
+                val migratedEntries = linkedMapOf<String, JsonElement>()
+                for ((key, value) in element) {
+                    val result = migrateLootTableEntryNames(value)
+                    changed = changed || result.changed
+                    migratedEntries[key] = result.element
+                }
+
+                val type = (migratedEntries["type"] as? JsonPrimitive)
+                    ?.takeIf { it.isString }
+                    ?.content
+                if (type != "minecraft:loot_table" ||
+                    "name" !in migratedEntries ||
+                    "value" in migratedEntries
+                ) {
+                    return JsonElementMigration(JsonObject(migratedEntries), changed)
+                }
+
+                val rewritten = linkedMapOf<String, JsonElement>()
+                for ((key, value) in migratedEntries) {
+                    rewritten[if (key == "name") "value" else key] = value
+                }
+                JsonElementMigration(JsonObject(rewritten), changed = true)
+            }
+            else -> JsonElementMigration(element, changed = false)
+        }
+    }
+
+    private fun migrateRandomChanceWithLootingConditions(content: String): String {
+        val root = parseResourceJson(content) ?: return content
+        val result = migrateRandomChanceWithLootingConditions(root)
+        if (!result.changed) return content
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), result.element) + "\n"
+    }
+
+    private fun migrateRandomChanceWithLootingConditions(element: JsonElement): JsonElementMigration {
+        return when (element) {
+            is JsonArray -> {
+                var changed = false
+                val values = element.map { child ->
+                    val result = migrateRandomChanceWithLootingConditions(child)
+                    changed = changed || result.changed
+                    result.element
+                }
+                JsonElementMigration(JsonArray(values), changed)
+            }
+            is JsonObject -> {
+                var changed = false
+                val migratedEntries = linkedMapOf<String, JsonElement>()
+                for ((key, value) in element) {
+                    val result = migrateRandomChanceWithLootingConditions(value)
+                    changed = changed || result.changed
+                    migratedEntries[key] = result.element
+                }
+
+                val condition = (migratedEntries["condition"] as? JsonPrimitive)
+                    ?.takeIf { it.isString }
+                    ?.content
+                if (condition != "minecraft:random_chance_with_looting") {
+                    return JsonElementMigration(JsonObject(migratedEntries), changed)
+                }
+
+                val chance = jsonNumber(migratedEntries["chance"]) ?: return JsonElementMigration(JsonObject(migratedEntries), changed)
+                val multiplier = jsonNumber(migratedEntries["looting_multiplier"]) ?: 0.0
+                val enchantedChance = JsonObject(linkedMapOf(
+                    "type" to JsonPrimitive("minecraft:linear"),
+                    "base" to JsonPrimitive(chance + multiplier),
+                    "per_level_above_first" to JsonPrimitive(multiplier)
+                ))
+
+                val rewritten = linkedMapOf<String, JsonElement>()
+                for ((key, value) in migratedEntries) {
+                    when (key) {
+                        "condition" -> {
+                            rewritten["condition"] = JsonPrimitive("minecraft:random_chance_with_enchanted_bonus")
+                            rewritten["enchanted_chance"] = enchantedChance
+                            rewritten["enchantment"] = JsonPrimitive("minecraft:looting")
+                            rewritten["unenchanted_chance"] = JsonPrimitive(chance)
+                        }
+                        "chance", "looting_multiplier" -> Unit
+                        else -> rewritten[key] = value
+                    }
+                }
+                JsonElementMigration(JsonObject(rewritten), changed = true)
+            }
+            else -> JsonElementMigration(element, changed = false)
+        }
+    }
+
+    private fun jsonNumber(element: JsonElement?): Double? =
+        (element as? JsonPrimitive)?.content?.toDoubleOrNull()
+
+    private fun migrateLootTableFunctionNames(content: String): String {
+        val root = parseResourceJson(content) ?: return content
+        val result = migrateLootTableFunctionNames(root)
+        if (!result.changed) return content
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), result.element) + "\n"
+    }
+
+    private fun migrateLootTableFunctionNames(element: JsonElement): JsonElementMigration {
+        return when (element) {
+            is JsonArray -> {
+                var changed = false
+                val values = element.map { child ->
+                    val result = migrateLootTableFunctionNames(child)
+                    changed = changed || result.changed
+                    result.element
+                }
+                JsonElementMigration(JsonArray(values), changed)
+            }
+            is JsonObject -> {
+                var changed = false
+                val migratedEntries = linkedMapOf<String, JsonElement>()
+                for ((key, value) in element) {
+                    val result = migrateLootTableFunctionNames(value)
+                    changed = changed || result.changed
+                    migratedEntries[key] = result.element
+                }
+
+                val functionValue = (migratedEntries["function"] as? JsonPrimitive)
+                    ?.takeIf { it.isString }
+                    ?.content
+                if (functionValue != "minecraft:looting_enchant") {
+                    return JsonElementMigration(JsonObject(migratedEntries), changed)
+                }
+
+                val hasEnchantment = migratedEntries.containsKey("enchantment")
+                val rewritten = linkedMapOf<String, JsonElement>()
+                var insertedEnchantment = false
+                for ((key, value) in migratedEntries) {
+                    if (key == "function") {
+                        rewritten[key] = JsonPrimitive("minecraft:enchanted_count_increase")
+                    } else {
+                        rewritten[key] = value
+                    }
+                    if (key == "count" && !hasEnchantment) {
+                        rewritten["enchantment"] = JsonPrimitive("minecraft:looting")
+                        insertedEnchantment = true
+                    }
+                }
+                if (!hasEnchantment && !insertedEnchantment) {
+                    rewritten["enchantment"] = JsonPrimitive("minecraft:looting")
+                }
+                JsonElementMigration(JsonObject(rewritten), changed = true)
+            }
+            else -> JsonElementMigration(element, changed = false)
+        }
+    }
+
+    private fun flattenWorldgenProviderValueObjects(content: String): String {
+        val root = parseResourceJson(content) ?: return content
+        val result = flattenWorldgenProviderValueObjects(root)
+        if (!result.changed) return content
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), result.element) + "\n"
+    }
+
+    private fun flattenNoStructurePlacementModifiers(content: String): String {
+        val root = parseResourceJson(content) ?: return content
+        val result = flattenNoStructurePlacementModifiers(root)
+        if (!result.changed) return content
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), result.element) + "\n"
+    }
+
+    private fun parseResourceJson(content: String): JsonElement? =
+        try {
+            RESOURCE_JSON.parseToJsonElement(content)
+        } catch (_: SerializationException) {
+            null
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+
+    private fun flattenWorldgenProviderValueObjects(element: JsonElement): JsonElementMigration {
+        return when (element) {
+            is JsonArray -> {
+                var changed = false
+                val values = element.map { child ->
+                    val result = flattenWorldgenProviderValueObjects(child)
+                    changed = changed || result.changed
+                    result.element
+                }
+                JsonElementMigration(JsonArray(values), changed)
+            }
+            is JsonObject -> {
+                var changed = false
+                val migratedEntries = linkedMapOf<String, JsonElement>()
+                for ((key, value) in element) {
+                    val result = flattenWorldgenProviderValueObjects(value)
+                    changed = changed || result.changed
+                    migratedEntries[key] = result.element
+                }
+
+                val type = (migratedEntries["type"] as? JsonPrimitive)
+                    ?.takeIf { it.isString }
+                    ?.content
+                val valueObject = migratedEntries["value"] as? JsonObject
+                if (type != null &&
+                    isFlattenableWorldgenValueProviderType(type) &&
+                    valueObject != null &&
+                    hasInclusiveBounds(valueObject) &&
+                    valueObject.keys.none { migratedEntries.containsKey(it) }
+                ) {
+                    val flattened = linkedMapOf<String, JsonElement>()
+                    for ((key, value) in migratedEntries) {
+                        if (key == "value") {
+                            for ((valueKey, valueValue) in valueObject) {
+                                flattened[valueKey] = valueValue
+                            }
+                        } else {
+                            flattened[key] = value
+                        }
+                    }
+                    JsonElementMigration(JsonObject(flattened), true)
+                } else {
+                    JsonElementMigration(JsonObject(migratedEntries), changed)
+                }
+            }
+            else -> JsonElementMigration(element, changed = false)
+        }
+    }
+
+    private fun isFlattenableWorldgenValueProviderType(type: String): Boolean {
+        val vanillaType = type.removePrefix("minecraft:")
+        return vanillaType in FLATTENABLE_WORLDGEN_VALUE_PROVIDER_TYPES
+    }
+
+    private fun hasInclusiveBounds(valueObject: JsonObject): Boolean =
+        "min_inclusive" in valueObject || "max_inclusive" in valueObject
+
+    private fun flattenNoStructurePlacementModifiers(element: JsonElement): JsonElementMigration {
+        return when (element) {
+            is JsonArray -> {
+                var changed = false
+                val values = element.map { child ->
+                    val result = flattenNoStructurePlacementModifiers(child)
+                    changed = changed || result.changed
+                    result.element
+                }
+                JsonElementMigration(JsonArray(values), changed)
+            }
+            is JsonObject -> {
+                var changed = false
+                val migratedEntries = linkedMapOf<String, JsonElement>()
+                for ((key, value) in element) {
+                    val result = flattenNoStructurePlacementModifiers(value)
+                    changed = changed || result.changed
+                    migratedEntries[key] = result.element
+                }
+
+                val type = (migratedEntries["type"] as? JsonPrimitive)
+                    ?.takeIf { it.isString }
+                    ?.content
+                if (type?.endsWith(":no_structure") != true) {
+                    return JsonElementMigration(JsonObject(migratedEntries), changed)
+                }
+
+                val valueObject = migratedEntries["value"] as? JsonObject
+                val flattened = linkedMapOf<String, JsonElement>()
+                for ((key, value) in migratedEntries) {
+                    if (key == "value" && valueObject != null) {
+                        for ((valueKey, valueValue) in valueObject) {
+                            flattened.putIfAbsent(valueKey, valueValue)
+                        }
+                    } else if (key != "value") {
+                        flattened[key] = value
+                    }
+                }
+                if ("occupies_vegetation" !in flattened) {
+                    flattened["occupies_vegetation"] = JsonPrimitive(false)
+                }
+                if ("structures_allowed" !in flattened) {
+                    flattened["structures_allowed"] = JsonArray(emptyList())
+                }
+                JsonElementMigration(JsonObject(flattened), changed || valueObject != null ||
+                    "occupies_vegetation" !in migratedEntries ||
+                    "structures_allowed" !in migratedEntries)
+            }
+            else -> JsonElementMigration(element, changed = false)
+        }
+    }
+
+    private data class JsonElementMigration(val element: JsonElement, val changed: Boolean)
+
+    private fun transformAssetJsonFiles(assetsDir: Path, changes: MutableList<Change>, errors: MutableList<String>) {
+        Files.walk(assetsDir)
+            .filter { it.toString().endsWith(".json") && Files.isRegularFile(it) }
+            .forEach { file ->
+                try {
+                    val content = file.readText()
+                    var newContent = content
+                    val applied = mutableListOf<Pair<String, String>>()
+                    for ((from, to) in MODEL_EXTENSION_RENAMES_121) {
+                        if (newContent.contains(from)) {
+                            newContent = newContent.replace(from, to)
+                            applied.add(from to to)
+                        }
+                    }
+                    val resourceIdContent = renameLegacyResourceIds(newContent)
+                    val resourceIdsChanged = resourceIdContent != newContent
+                    if (resourceIdsChanged) {
+                        newContent = resourceIdContent
+                    }
+                    if (newContent != content) {
+                        file.writeText(newContent)
+                        if (applied.isNotEmpty()) {
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Model extension namespace: Forge -> NeoForge",
+                                before = applied.joinToString(", ") { it.first },
+                                after = applied.joinToString(", ") { it.second },
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-model-extension-neoforge-namespace"
+                            ))
+                        }
+                        if (resourceIdsChanged) {
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Legacy vanilla asset resource ids -> 1.21.1 ids",
+                                before = "minecraft:block/grass",
+                                after = "minecraft:block/short_grass",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-legacy-resource-id-renames-121"
+                            ))
+                        }
+                    }
+                } catch (e: Exception) {
+                    errors.add("Failed to transform asset ${file.fileName}: ${e.message}")
+                }
+            }
+    }
+
+    private fun fillMissingSoundSubtitleTranslations(
+        assetsDir: Path,
+        changes: MutableList<Change>,
+        errors: MutableList<String>
+    ) {
+        try {
+            Files.list(assetsDir).use { namespaces ->
+                namespaces
+                    .filter { Files.isDirectory(it) }
+                    .forEach { namespaceDir ->
+                        val soundsFile = namespaceDir.resolve("sounds.json")
+                        if (!soundsFile.exists()) return@forEach
+
+                        val subtitles = soundSubtitleKeys(soundsFile)
+                        if (subtitles.isEmpty()) return@forEach
+
+                        val langFile = namespaceDir.resolve("lang/en_us.json")
+                        val existing = if (langFile.exists()) {
+                            parseResourceJson(langFile.readText()) as? JsonObject ?: return@forEach
+                        } else {
+                            JsonObject(emptyMap())
+                        }
+
+                        val entries = linkedMapOf<String, JsonElement>()
+                        for ((key, value) in existing) {
+                            entries[key] = value
+                        }
+
+                        val missing = subtitles.filter { it !in entries }.sorted()
+                        if (missing.isEmpty()) return@forEach
+
+                        for (subtitle in missing) {
+                            entries[subtitle] = JsonPrimitive(humanizeSubtitleKey(subtitle))
+                        }
+
+                        langFile.parent.createDirectories()
+                        langFile.writeText(RESOURCE_JSON.encodeToString(JsonElement.serializer(), JsonObject(entries)) + "\n")
+                        changes.add(Change(
+                            file = langFile,
+                            line = 0,
+                            description = "Add missing sound subtitle translations",
+                            before = "(missing subtitle keys)",
+                            after = missing.joinToString(", "),
+                            confidence = Confidence.HIGH,
+                            ruleId = "res-sound-subtitle-lang"
+                        ))
+                    }
+            }
+        } catch (e: Exception) {
+            errors.add("Failed to fill sound subtitle translations: ${e.message}")
+        }
+    }
+
+    private fun soundSubtitleKeys(soundsFile: Path): Set<String> {
+        val root = parseResourceJson(soundsFile.readText()) as? JsonObject ?: return emptySet()
+        return root.values
+            .mapNotNull { sound ->
+                (sound as? JsonObject)
+                    ?.get("subtitle")
+                    ?.jsonPrimitive
+                    ?.takeIf { it.isString }
+                    ?.content
+            }
+            .toSet()
+    }
+
+    private fun humanizeSubtitleKey(key: String): String {
+        val tail = key.substringAfterLast('.').substringAfterLast(':').ifBlank { key }
+        return tail
+            .split('_', '-')
+            .filter { it.isNotBlank() }
+            .joinToString(" ") { part ->
+                part.replaceFirstChar { char ->
+                    if (char.isLowerCase()) char.titlecase() else char.toString()
+                }
+            }
+            .ifBlank { key }
+    }
+
+    private fun generateMissingItemModels(
+        projectDir: Path,
+        resourceDir: Path,
+        changes: MutableList<Change>,
+        errors: MutableList<String>
+    ) {
+        try {
+            val itemRegistrations = detectRegisteredItems(projectDir)
+            if (itemRegistrations.isEmpty()) return
+
+            val assetsRoot = resourceDir.resolve("assets")
+            if (!assetsRoot.exists()) return
+            val resourceRoots = findResourceDirs(projectDir)
+
+            Files.list(assetsRoot).use { namespaces ->
+                namespaces
+                    .filter { Files.isDirectory(it) }
+                    .forEach { namespaceDir ->
+                        val modId = namespaceDir.fileName.toString()
+                        val modelDir = namespaceDir.resolve("models/item")
+                        val textureDir = namespaceDir.resolve("textures/item")
+                        if (!textureDir.exists()) return@forEach
+
+                        for (item in itemRegistrations) {
+                            val modelFile = modelDir.resolve("${item.id}.json")
+                            val modelRelativePath = "assets/$modId/models/item/${item.id}.json"
+                            if (resourceRoots.any { it.resolve(modelRelativePath).exists() }) continue
+
+                            val texture = when {
+                                textureDir.resolve("${item.id}.png").exists() -> item.id
+                                item.id == "descriptive_item" &&
+                                    item.className.endsWith("DescriptiveItem") &&
+                                    textureDir.resolve("bath_herb.png").exists() -> "bath_herb"
+                                else -> null
+                            } ?: continue
+
+                            modelFile.parent.createDirectories()
+                            modelFile.writeText(itemModelJson(modId, texture))
+                            changes.add(Change(
+                                file = modelFile,
+                                line = 0,
+                                description = "Create missing item model for registered item '${item.id}'",
+                                before = "(missing model)",
+                                after = modelRelativePath,
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-create-missing-item-model"
+                            ))
+                        }
+                    }
+            }
+        } catch (e: Exception) {
+            errors.add("Failed to generate missing item models: ${e.message}")
+        }
+    }
+
+    private fun detectRegisteredItems(projectDir: Path): List<RegisteredItem> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val items = linkedMapOf<String, RegisteredItem>()
+        val registerPattern = Regex("""ITEMS\.register\(\s*"([^"]+)"\s*,\s*\(\)\s*->\s*new\s+([\w$.]+)""")
+        Files.walk(srcDir).use { sources ->
+            sources
+                .filter { Files.isRegularFile(it) && it.toString().endsWith(".java") }
+                .forEach { file ->
+                    registerPattern.findAll(file.readText()).forEach { match ->
+                        val id = match.groupValues[1]
+                        items.putIfAbsent(id, RegisteredItem(id, match.groupValues[2]))
+                    }
+                }
+        }
+        return items.values.toList()
+    }
+
+    private fun itemModelJson(modId: String, texture: String): String = """
+{
+  "parent": "minecraft:item/generated",
+  "textures": {
+    "layer0": "$modId:item/$texture"
+  }
+}
+""".trimIndent() + "\n"
+
+    private data class RegisteredItem(val id: String, val className: String)
+
+    private fun normalizeItemTextureMipDimensions(
+        assetsDir: Path,
+        changes: MutableList<Change>,
+        errors: MutableList<String>
+    ) {
+        try {
+            Files.walk(assetsDir)
+                .filter { Files.isRegularFile(it) && it.toString().replace('\\', '/').contains("/textures/item/") }
+                .filter { it.fileName.toString().endsWith(".png", ignoreCase = true) }
+                .forEach { file ->
+                    val image = ImageIO.read(file.toFile()) ?: return@forEach
+                    val targetWidth = nextMultipleOf16(image.width)
+                    val targetHeight = nextMultipleOf16(image.height)
+                    if (targetWidth == image.width && targetHeight == image.height) return@forEach
+
+                    val resized = BufferedImage(targetWidth, targetHeight, BufferedImage.TYPE_INT_ARGB)
+                    val graphics = resized.createGraphics()
+                    try {
+                        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+                        graphics.setRenderingHint(RenderingHints.KEY_ALPHA_INTERPOLATION, RenderingHints.VALUE_ALPHA_INTERPOLATION_QUALITY)
+                        graphics.drawImage(image, 0, 0, targetWidth, targetHeight, null)
+                    } finally {
+                        graphics.dispose()
+                    }
+                    ImageIO.write(resized, "png", file.toFile())
+                    changes.add(Change(
+                        file = file,
+                        line = 0,
+                        description = "Resize item texture to a 16x mipmap-compatible dimension",
+                        before = "${image.width}x${image.height}",
+                        after = "${targetWidth}x${targetHeight}",
+                        confidence = Confidence.HIGH,
+                        ruleId = "res-item-texture-mip-dimensions"
+                    ))
+                }
+        } catch (e: Exception) {
+            errors.add("Failed to normalize item texture mip dimensions: ${e.message}")
+        }
+    }
+
+    private fun nextMultipleOf16(value: Int): Int =
+        if (value <= 0) 16 else ((value + 15) / 16) * 16
+
+    private fun normalizeCommonTagNamespaces(content: String): String =
+        COMMON_TAG_NAMESPACE_PATTERN.replace(content) { match ->
+            "${match.groupValues[1]}c:${match.groupValues[2]}"
+        }
+
+    private fun detectCodeAwardedAdvancements(projectDir: Path): Map<String, Set<String>> {
+        val sourceDirs = listOf(
+            projectDir.resolve("src/main/java"),
+            projectDir.resolve("src/main/kotlin")
+        ).filter { it.exists() }
+        if (sourceDirs.isEmpty()) return emptyMap()
+
+        val result = linkedMapOf<String, MutableSet<String>>()
+        val constantPattern = Regex("""static\s+final\s+String\s+(\w+)\s*=\s*"([^"]+)"""")
+        val callPattern = Regex("""tryAwardAdvancement\s*\(\s*[^,]+,\s*([^,]+),\s*"([^"]+)"""")
+
+        for (sourceDir in sourceDirs) {
+            Files.walk(sourceDir)
+                .filter { Files.isRegularFile(it) && (it.toString().endsWith(".java") || it.toString().endsWith(".kt")) }
+                .forEach { file ->
+                    val content = file.readText()
+                    val constants = constantPattern.findAll(content)
+                        .associate { it.groupValues[1] to it.groupValues[2] }
+
+                    callPattern.findAll(content).forEach { match ->
+                        val rawId = match.groupValues[1].trim()
+                        val advancementId = when {
+                            rawId.startsWith("\"") && rawId.endsWith("\"") -> rawId.trim('"')
+                            else -> constants[rawId] ?: constants[rawId.substringAfterLast('.')]
+                        } ?: return@forEach
+                        val criterion = match.groupValues[2]
+                        result.getOrPut(advancementId) { linkedSetOf() }.add(criterion)
+                    }
+                }
+        }
+
+        return result.mapValues { it.value.toSet() }
+    }
+
+    private fun advancementIdFromPath(dataDir: Path, file: Path): String {
+        val relative = dataDir.relativize(file).toString().replace('\\', '/')
+        val parts = relative.split('/')
+        if (parts.size >= 3 && parts[1] == "advancement") {
+            val name = parts.drop(2).joinToString("/").removeSuffix(".json")
+            return "${parts[0]}:$name"
+        }
+        return file.fileName.toString().removeSuffix(".json")
     }
 
     private fun updatePackFormat(file: Path) {

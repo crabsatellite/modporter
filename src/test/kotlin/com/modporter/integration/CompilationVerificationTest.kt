@@ -9,6 +9,7 @@ import com.modporter.mapping.MappingDatabase
 import com.modporter.resources.ResourceMigrationPass
 import org.gradle.testkit.runner.GradleRunner
 import org.gradle.testkit.runner.TaskOutcome
+import org.gradle.testkit.runner.UnexpectedBuildFailure
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable
@@ -105,16 +106,25 @@ class CompilationVerificationTest {
         val buildResult = try {
             GradleRunner.create()
                 .withProjectDir(neoProject.toFile())
-                .withArguments("compileJava", "--stacktrace", "--no-daemon")
+                .withArguments("compileJava", "--stacktrace")
                 .forwardOutput()
                 .build()
-        } catch (e: Exception) {
-            // Build failed — capture the failure
+        } catch (e: UnexpectedBuildFailure) {
+            val output = e.buildResult.output
             return CompilationResult(
                 success = false,
                 pipelineResult = pipelineResult,
-                output = e.message ?: "Unknown build failure",
-                errors = parseCompilationErrors(e.message ?: "")
+                output = output,
+                errors = parseCompilationErrors(output)
+            )
+        } catch (e: Exception) {
+            // Build failed — capture the failure
+            val output = e.message ?: e.toString()
+            return CompilationResult(
+                success = false,
+                pipelineResult = pipelineResult,
+                output = output,
+                errors = parseCompilationErrors(output)
             )
         }
 
@@ -190,7 +200,8 @@ class CompilationVerificationTest {
         }
 
         assertTrue(result.success, "Basic mod with package renames should compile.\n" +
-            "Errors: ${result.errors.map { it.message }}")
+            "Errors: ${result.errors.map { it.message }}\n" +
+            "Build output tail:\n${result.outputTail()}")
     }
 
     @Test
@@ -227,6 +238,10 @@ class CompilationVerificationTest {
                 .filter { it.category == ErrorCategory.WRONG_PACKAGE || it.category == ErrorCategory.MISSING_TYPE }
                 .forEach { println("  Add rule for: ${it.message}") }
         }
+
+        assertTrue(result.success, "Event subscriber mod should compile.\n" +
+            "Errors: ${result.errors.map { it.message }}\n" +
+            "Build output tail:\n${result.outputTail()}")
     }
 
     @Test
@@ -258,6 +273,10 @@ class CompilationVerificationTest {
                 println("  [${err.category}] ${err.file}:${err.line}: ${err.message}")
             }
         }
+
+        assertTrue(result.success, "Config mod should compile.\n" +
+            "Errors: ${result.errors.map { it.message }}\n" +
+            "Build output tail:\n${result.outputTail()}")
     }
 
     @Test
@@ -296,6 +315,12 @@ class CompilationVerificationTest {
             .flatMap { it.changes }
         println("Structural warnings: ${structuralWarnings.size}")
         structuralWarnings.forEach { println("  [${it.confidence}] ${it.description}") }
+
+        assertTrue(result.pipelineResult.totalChanges > 0, "Pipeline should report changes for capability source")
+        assertTrue(
+            result.success || result.errors.isNotEmpty() || result.output.contains("BUILD FAILED"),
+            "A failed capability compile should produce structured errors or Gradle failure output"
+        )
     }
 
     // ─── Data Classes ─────────────────────────────────────────────────────
@@ -308,6 +333,9 @@ class CompilationVerificationTest {
     ) {
         fun errorSummary(): Map<ErrorCategory, Int> =
             errors.groupBy { it.category }.mapValues { it.value.size }
+
+        fun outputTail(lineCount: Int = 80): String =
+            output.lines().takeLast(lineCount).joinToString("\n")
     }
 
     data class CompilationError(

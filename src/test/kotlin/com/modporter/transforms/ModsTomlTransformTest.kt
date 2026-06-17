@@ -107,6 +107,20 @@ class ModsTomlTransformTest {
     }
 
     @Test
+    fun `removes mandatory when dependency already has type`() {
+        val result = transformToml("""
+            [[dependencies.mymod]]
+            modId="jei"
+            type="optional"
+            mandatory=false
+        """.trimIndent())
+
+        assertTrue(result.contains("""type="optional""""), "Existing type field is preserved")
+        assertFalse(result.contains("mandatory"), "mandatory field should be removed")
+        assertTrue(Regex("""type\s*=""").findAll(result).count() == 1, "No duplicate type keys")
+    }
+
+    @Test
     fun `updates minecraft dependency versionRange`() {
         val result = transformToml("""
             [[dependencies.mymod]]
@@ -117,6 +131,28 @@ class ModsTomlTransformTest {
 
         assertTrue(result.contains("[1.21.1,1.22)"), "MC versionRange should be [1.21.1,1.22)")
         assertFalse(result.contains("[1.20.1"), "Old MC version range should be gone")
+    }
+
+    @Test
+    fun `updates known 121 dependency version ranges`() {
+        val result = transformToml("""
+            [[dependencies.sakura]]
+            modId="mysterious_mountain_lib"
+            type="required"
+            versionRange="[1.5.18-1.20.1,)"
+
+            [[dependencies.sakura]]
+            modId="terrablender"
+            type="optional"
+            versionRange="[3.0.0,)"
+        """.trimIndent())
+
+        assertTrue(result.contains("""modId="mysterious_mountain_lib""""))
+        assertTrue(result.contains("""versionRange="[1.0.0,)""""))
+        assertTrue(result.contains("""modId="terrablender""""))
+        assertTrue(result.contains("""versionRange="[4.0.0,)""""))
+        assertFalse(result.contains("1.5.18-1.20.1"))
+        assertFalse(result.contains("[3.0.0,)"))
     }
 
     @Test
@@ -243,5 +279,40 @@ class ModsTomlTransformTest {
         """.trimIndent())
 
         assertFalse(result.contains("\n\n\n"), "Should not have triple+ blank lines")
+    }
+
+    @Test
+    fun `custom enchantment resource keys hard gate missing source derived data`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.enchantment.Enchantment;
+
+            public final class ModEnchantments {
+                public static final net.minecraft.resources.ResourceKey<Enchantment> PERMANENCE =
+                    net.minecraft.resources.ResourceKey.create(Registries.ENCHANTMENT,
+                        ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "permanence"));
+            }
+        """.trimIndent())
+
+        val result = pass.apply(tempDir)
+        val generated = tempDir.resolve("src/generated/resources/data/example/enchantment/permanence.json")
+
+        assertTrue(result.changes.any { it.ruleId == "res-custom-enchantment-data" })
+        assertTrue(result.errors.any {
+            it.contains("Missing source-derived data-driven custom enchantment JSON for 'example:permanence'")
+        })
+        assertFalse(generated.exists(), "Resource migration must not create default custom enchantment JSON")
     }
 }
