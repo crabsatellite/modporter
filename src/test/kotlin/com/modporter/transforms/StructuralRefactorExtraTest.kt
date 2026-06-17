@@ -10355,6 +10355,7 @@ class StructuralRefactorExtraTest {
         srcDir.resolve("DispenserSurface.java").writeText("""
             package com.example;
 
+            import net.minecraft.core.BlockPos;
             import net.minecraft.core.Position;
             import net.minecraft.core.dispenser.BlockSource;
             import net.minecraft.core.dispenser.ProjectileDispenseBehavior;
@@ -10365,6 +10366,7 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.item.ItemStack;
             import net.minecraft.world.level.Level;
             import net.minecraft.world.level.block.DispenserBlock;
+            import net.minecraft.world.level.block.entity.DispenserBlockEntity;
 
             public class DispenserSurface {
                 private boolean success;
@@ -10375,6 +10377,9 @@ class StructuralRefactorExtraTest {
                     if (this.isSuccess() && stack.hurt(1, level.getRandom(), null)) {
                         stack.setCount(0);
                     }
+                    BlockPos pos = source.getPos().relative(source.getBlockState().getValue(DispenserBlock.FACING));
+                    source.getLevel().levelEvent(1000, pos, 0);
+                    source.<DispenserBlockEntity>getEntity().addItem(stack.copy());
                     source.level().playSound(null, source.x(), source.y(), source.z(), sound(), SoundSource.NEUTRAL, 1.0F, 1.0F);
                     Object behavior = new ProjectileDispenseBehavior() {
                         @Override
@@ -10552,6 +10557,13 @@ class StructuralRefactorExtraTest {
         assertTrue(dispenser.contains("if (this.isSuccess())"))
         assertTrue(dispenser.contains("stack.hurtAndBreak(1, level, null, item -> {"))
         assertTrue(dispenser.contains("source.center().x()"))
+        assertTrue(dispenser.contains("source.pos().relative(source.state().getValue(DispenserBlock.FACING))"))
+        assertTrue(dispenser.contains("source.level().levelEvent(1000, pos, 0)"))
+        assertTrue(dispenser.contains("source.blockEntity().addItem(stack.copy())"))
+        assertFalse(dispenser.contains("source.getPos()"))
+        assertFalse(dispenser.contains("source.getBlockState()"))
+        assertFalse(dispenser.contains("source.getLevel()"))
+        assertFalse(dispenser.contains("getEntity()"))
         assertTrue(dispenser.contains("import net.minecraft.core.Direction;"))
         assertTrue(dispenser.contains("new DefaultDispenseItemBehavior()"))
         assertTrue(dispenser.contains("Projectile projectile = new DemoProjectile(level, pos);"))

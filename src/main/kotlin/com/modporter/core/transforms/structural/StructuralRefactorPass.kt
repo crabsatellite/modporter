@@ -12541,7 +12541,15 @@ $indent}"""
     }
 
     private fun migrateLegacyBlockSourceCoordinateAccessors(source: String): String {
-        if (!source.contains("BlockSource") || (!source.contains(".x()") && !source.contains(".y()") && !source.contains(".z()"))) {
+        if (!source.contains("BlockSource") ||
+            (!source.contains(".x()") &&
+                !source.contains(".y()") &&
+                !source.contains(".z()") &&
+                !source.contains(".getPos()") &&
+                !source.contains(".getBlockState()") &&
+                !source.contains(".getLevel()") &&
+                !source.contains("getEntity()"))
+        ) {
             return source
         }
         val blockSourceVars = Regex("""\bBlockSource\s+([A-Za-z_$][\w$]*)\b""")
@@ -12553,6 +12561,14 @@ $indent}"""
         for (variable in blockSourceVars) {
             result = Regex("""\b${Regex.escape(variable)}\.(x|y|z)\(\)""")
                 .replace(result) { match -> "$variable.center().${match.groupValues[1]}()" }
+            result = Regex("""\b${Regex.escape(variable)}\.getPos\(\)""")
+                .replace(result, "$variable.pos()")
+            result = Regex("""\b${Regex.escape(variable)}\.getBlockState\(\)""")
+                .replace(result, "$variable.state()")
+            result = Regex("""\b${Regex.escape(variable)}\.getLevel\(\)""")
+                .replace(result, "$variable.level()")
+            result = Regex("""\b${Regex.escape(variable)}\s*\.\s*(?:<[^>]+>\s*)?getEntity\(\)""")
+                .replace(result, "$variable.blockEntity()")
         }
         return result
     }
