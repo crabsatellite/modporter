@@ -9473,6 +9473,7 @@ ${entries.joinToString(",\n")}
         result = migrateFoodComponentAccess(result)
         result = migrateSupplierValueCalls(result)
         result = migrateUnboundLevelRegistryAccessCalls(result)
+        result = migrateCacheableFunctionOptionalBoundaries(result)
         result = migrateRecipeHolderAccess(result)
         result = migrateRecipeManagerByKeyHolderAccessSource(result)
         result = migrateRecipeHolderIdAndLocalMmlibApi(result)
@@ -19471,6 +19472,32 @@ ${modifierLines.joinToString("\n")}
         result = result.replace(".getNutrition()", ".nutrition()")
         if (result.contains("DataComponents.FOOD")) {
             result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
+        }
+        return result
+    }
+
+    private fun migrateCacheableFunctionOptionalBoundaries(source: String): String {
+        if (!source.contains("CacheableFunction") ||
+            (!source.contains("getFunction()") && !source.contains("BlockStateRecipeUtil.executeFunction("))) {
+            return source
+        }
+
+        var result = source
+        var changed = false
+        result = Regex("""\bCacheableFunction\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\r\n]*\.getFunction\(\))\s*;""")
+            .replace(result) { match ->
+                changed = true
+                "Optional<CacheableFunction> ${match.groupValues[1]} = ${match.groupValues[2].trim()};"
+            }
+        if (result.contains("BlockStateRecipeUtil.executeFunction(")) {
+            result = Regex("""@Nullable\s+CacheableFunction\s+([A-Za-z_$][\w$]*)""")
+                .replace(result) { match ->
+                    changed = true
+                    "Optional<CacheableFunction> ${match.groupValues[1]}"
+                }
+        }
+        if (changed) {
+            result = addImportIfMissing(result, "java.util.Optional")
         }
         return result
     }

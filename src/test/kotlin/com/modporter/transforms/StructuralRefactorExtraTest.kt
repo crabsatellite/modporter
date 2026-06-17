@@ -5849,6 +5849,48 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates cacheable function recipe boundaries to optionals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("FunctionRecipeBoundaries.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateRecipeUtil;
+            import com.aetherteam.nitrogen.recipe.recipes.AbstractBlockStateRecipe;
+            import net.minecraft.commands.CacheableFunction;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            import javax.annotation.Nullable;
+
+            public interface FunctionRecipeBoundaries {
+                default boolean convert(Level level, BlockPos pos, BlockState newState, @Nullable CacheableFunction function) {
+                    level.setBlockAndUpdate(pos, newState);
+                    BlockStateRecipeUtil.executeFunction(level, pos, function);
+                    return true;
+                }
+
+                default int freeze(Level level, BlockPos pos, AbstractBlockStateRecipe recipe) {
+                    CacheableFunction function = recipe.getFunction();
+                    BlockStateRecipeUtil.executeFunction(level, pos, function);
+                    return 1;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("FunctionRecipeBoundaries.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("import java.util.Optional;"), transformed)
+        assertTrue(transformed.contains("Optional<CacheableFunction> function)"), transformed)
+        assertTrue(transformed.contains("Optional<CacheableFunction> function = recipe.getFunction();"), transformed)
+        assertFalse(transformed.contains("@Nullable CacheableFunction function"), transformed)
+        assertFalse(transformed.contains("CacheableFunction function = recipe.getFunction();"), transformed)
+    }
+
+    @Test
     fun `migrates legacy item tag enchantment and mob spawn equipment APIs`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
