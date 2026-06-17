@@ -10746,6 +10746,7 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.level.Level;
             import net.minecraft.world.level.block.Block;
             import net.minecraft.core.registries.BuiltInRegistries;
+            import net.neoforged.neoforge.common.NeoForgeMod;
 
             public class HolderAndItemSurface {
                 private final Holder<Widget> widget = null;
@@ -10771,6 +10772,10 @@ class StructuralRefactorExtraTest {
 
                 public Object deferred(RegistryThing thing) {
                     return thing.VALUE.getHolder().get();
+                }
+
+                public Object vanillaFluidTypes() {
+                    return java.util.List.of(NeoForgeMod.EMPTY_TYPE.get(), NeoForgeMod.WATER_TYPE.get(), NeoForgeMod.LAVA_TYPE.get(), NeoForgeMod.MILK_TYPE.get());
                 }
 
                 public Object sword(Tier tier) {
@@ -10942,6 +10947,10 @@ class StructuralRefactorExtraTest {
         assertTrue(holderAndItem.contains("replacements.put(ore.value(), ground.value())"))
         assertTrue(holderAndItem.contains("replacements.put(ore.value(), ore.value())"))
         assertTrue(holderAndItem.contains("thing.VALUE.getDelegate()"))
+        assertTrue(holderAndItem.contains("NeoForgeMod.EMPTY_TYPE.value()"))
+        assertTrue(holderAndItem.contains("NeoForgeMod.WATER_TYPE.value()"))
+        assertTrue(holderAndItem.contains("NeoForgeMod.LAVA_TYPE.value()"))
+        assertTrue(holderAndItem.contains("NeoForgeMod.MILK_TYPE.get()"))
         assertTrue(holderAndItem.contains("new SwordItem(tier, new Item.Properties().attributes(SwordItem.createAttributes(tier, 3, -2.4F)))"))
         assertTrue(holderAndItem.contains("new Item(new Item.Properties().food(new FoodProperties.Builder().nutrition(1).build()))"))
         assertTrue(recipeAndMenu.contains("super(category);"))
