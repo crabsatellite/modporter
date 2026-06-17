@@ -1172,6 +1172,14 @@ ${indent}}
         Regex("""(?m)^[ \t]*import\s+${Regex.escape(importName)};\s*\r?\n""")
             .replace(source, "")
 
+    private fun annotationStartBefore(source: String, declarationIndex: Int): Int {
+        val lineStart = source.lastIndexOf('\n', declarationIndex).let { if (it < 0) 0 else it + 1 }
+        val annotations = Regex("""(?m)(?:^[ \t]*@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*\r?\n)+[ \t]*$""")
+            .findAll(source.substring(0, lineStart))
+            .lastOrNull()
+        return annotations?.range?.first ?: lineStart
+    }
+
     private fun lineNumberAt(source: String, offset: Int): Int =
         source.take(offset).count { it == '\n' } + 1
 
@@ -18162,26 +18170,33 @@ protected EntityDimensions getDefaultDimensions(Pose $poseName) {
             return source
         }
         var result = source
+        val convertedHelpers = linkedSetOf<String>()
         if (result.contains("MenuScreens.register(")) {
-            result = Regex("""public\s+static\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{""")
+            result = Regex("""(?m)^([ \t]*)public\s+static\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{""")
                 .replace(result) { match ->
                     val methodStart = match.range.first
                     val openBrace = result.indexOf('{', match.range.last)
                     val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
                     if (closeBrace >= 0 && result.substring(openBrace + 1, closeBrace).contains("MenuScreens.register(")) {
-                        "public static void ${match.groupValues[1]}(RegisterMenuScreensEvent event) {"
+                        val indent = match.groupValues[1]
+                        val methodName = match.groupValues[2]
+                        val annotationStart = annotationStartBefore(result, methodStart)
+                        val hasSubscribeEvent = result.substring(annotationStart, methodStart).contains("@SubscribeEvent")
+                        convertedHelpers += methodName
+                        val annotation = if (hasSubscribeEvent) "" else "${indent}@SubscribeEvent\n"
+                        "${annotation}${indent}public static void $methodName(RegisterMenuScreensEvent event) {"
                     } else {
                         result.substring(methodStart, match.range.last + 1)
                     }
             }
             result = result.replace("MenuScreens.register(", "event.register(")
         }
+        for (helper in convertedHelpers) {
+            result = Regex("""(?m)^[ \t]*(?:this\.)?${Regex.escape(helper)}\(\);\s*\r?\n""")
+                .replace(result, "")
+        }
         if (result.contains("FMLClientSetupEvent") && result.contains("event.register(")) {
-            result = result.replace("FMLClientSetupEvent event", "RegisterMenuScreensEvent event")
-            result = result.replace("final FMLClientSetupEvent event", "final RegisterMenuScreensEvent event")
-            result = Regex("""(?m)^([ \t]*)event\.enqueueWork\(\(\)\s*->\s*\{\s*\r?\n""").replace(result, "")
-            result = Regex("""(?m)^[ \t]*\}\);\s*\r?\n""").replaceFirst(result, "")
-            result = removeImport(result, "net.neoforged.fml.event.lifecycle.FMLClientSetupEvent")
+            result = migrateFmlClientSetupMenuRegistrationMethods(result)
         }
         if (result.contains(".renderScreens();") && result.contains("FMLClientSetupEvent")) {
             val helpers = Regex("""(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.renderScreens\(\);\s*$""")
@@ -18210,6 +18225,42 @@ $methodBody
         }
         if (!result.contains("MenuScreens.")) {
             result = removeImport(result, "net.minecraft.client.gui.screens.MenuScreens")
+        }
+        return result
+    }
+
+    private fun migrateFmlClientSetupMenuRegistrationMethods(source: String): String {
+        var result = source
+        var cursor = 0
+        var changed = false
+        val signaturePattern = Regex(
+            """(?m)^([ \t]*(?:(?:@\w+(?:\([^)]*\))?)\s*)*public\s+static\s+void\s+[A-Za-z_$][\w$]*\s*\(\s*(?:final\s+)?FMLClientSetupEvent\s+event\s*\)\s*\{)"""
+        )
+        while (true) {
+            val match = signaturePattern.find(result, cursor) ?: break
+            val openBrace = result.indexOf('{', match.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            if (!body.contains("event.register(")) {
+                cursor = closeBrace + 1
+                continue
+            }
+            var migratedBody = Regex("""(?m)^([ \t]*)event\.enqueueWork\(\(\)\s*->\s*\{\s*\r?\n""")
+                .replace(body, "")
+            migratedBody = Regex("""(?m)^[ \t]*\}\);\s*\r?\n""").replaceFirst(migratedBody, "")
+            val migratedSignature = match.value.replace("FMLClientSetupEvent", "RegisterMenuScreensEvent")
+            result = result.substring(0, match.range.first) + migratedSignature + migratedBody + result.substring(closeBrace)
+            cursor = match.range.first + migratedSignature.length + migratedBody.length + 1
+            changed = true
+        }
+        if (!changed) return source
+        result = addImportIfMissing(result, "net.neoforged.neoforge.client.event.RegisterMenuScreensEvent")
+        if (!Regex("""\bFMLClientSetupEvent\b""").containsMatchIn(removeImport(result, "net.neoforged.fml.event.lifecycle.FMLClientSetupEvent"))) {
+            result = removeImport(result, "net.neoforged.fml.event.lifecycle.FMLClientSetupEvent")
         }
         return result
     }
@@ -25277,27 +25328,14 @@ public class ${builder.className} implements RecipeBuilder {
             .toList()
 
         for (file in javaFiles) {
-            var content = file.readText()
+            val content = file.readText()
             if (!content.contains("FMLClientSetupEvent") ||
                 (!content.contains("MenuScreens.register(") && !content.contains("event.register("))) {
                 continue
             }
-            val original = content
-            content = content.replace(
-                "import net.minecraft.client.gui.screens.MenuScreens;",
-                "import net.neoforged.neoforge.client.event.RegisterMenuScreensEvent;"
-            )
-            if (!content.contains("import net.neoforged.neoforge.client.event.RegisterMenuScreensEvent;")) {
-                content = addImportIfMissing(content, "net.neoforged.neoforge.client.event.RegisterMenuScreensEvent")
-            }
-            content = content.replace(Regex("""(?m)^[ \t]*import net\.neoforged\.fml\.event\.lifecycle\.FMLClientSetupEvent;\r?\n"""), "")
-            content = content.replace("FMLClientSetupEvent event", "RegisterMenuScreensEvent event")
-            content = content.replace("final FMLClientSetupEvent event", "final RegisterMenuScreensEvent event")
-            content = content.replace("MenuScreens.register(", "event.register(")
-            content = Regex("""(?m)^[ \t]*event\.enqueueWork\(\(\)\s*->\s*\{\s*\r?\n""").replace(content, "")
-            content = Regex("""(?m)^[ \t]*\}\);\s*\r?\n""").replaceFirst(content, "")
+            val migrated = migrateLegacyMenuScreensRegistration(content)
 
-            if (content != original) {
+            if (migrated != content) {
                 changes.add(Change(
                     file = file,
                     line = 0,
@@ -25308,7 +25346,7 @@ public class ${builder.className} implements RecipeBuilder {
                     ruleId = "struct-register-menu-screens-event"
                 ))
                 if (!dryRun) {
-                    file.writeText(content)
+                    file.writeText(migrated)
                 }
             }
         }

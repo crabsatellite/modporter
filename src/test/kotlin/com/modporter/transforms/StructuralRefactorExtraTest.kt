@@ -3411,6 +3411,47 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `mixed client setup keeps lifecycle event when extracting menu screen helper`() {
+        val projectDir = createFile("ClientSetup.java", """
+            package com.example;
+
+            import net.minecraft.client.gui.screens.MenuScreens;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+
+            public class ClientSetup {
+                @SubscribeEvent
+                public static void clientSetup(FMLClientSetupEvent event) {
+                    initializeRenderers();
+                    event.enqueueWork(() -> {
+                        registerGuiFactories();
+                        registerItemModelProperties();
+                    });
+                    registerLoreOverrides();
+                }
+
+                public static void registerGuiFactories() {
+                    MenuScreens.register(ContainerRegistry.STONE_MORTAR.get(), StoneMortarScreen::new);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/ClientSetup.java").readText()
+
+        assertTrue(migrated.contains("import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;"))
+        assertTrue(migrated.contains("import net.neoforged.neoforge.client.event.RegisterMenuScreensEvent;"))
+        assertTrue(migrated.contains("public static void clientSetup(FMLClientSetupEvent event)"))
+        assertTrue(migrated.contains("initializeRenderers();"))
+        assertTrue(migrated.contains("registerItemModelProperties();"))
+        assertTrue(migrated.contains("registerLoreOverrides();"))
+        assertTrue(migrated.contains("@SubscribeEvent\n    public static void registerGuiFactories(RegisterMenuScreensEvent event)"))
+        assertTrue(migrated.contains("event.register(ContainerRegistry.STONE_MORTAR.get(), StoneMortarScreen::new);"))
+        assertTrue(!migrated.contains("registerGuiFactories();"))
+        assertTrue(!migrated.contains("MenuScreens.register"))
+    }
+
+    @Test
     fun `useItemOn maps helper InteractionResult to ItemInteractionResult`() {
         val projectDir = createFile("NabeBlock.java", """
             package com.example;
