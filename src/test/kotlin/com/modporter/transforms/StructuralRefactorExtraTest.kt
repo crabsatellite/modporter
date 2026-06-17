@@ -10440,8 +10440,11 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.level.block.FenceGateBlock;
             import net.minecraft.world.level.block.PressurePlateBlock;
             import net.minecraft.world.level.block.StairBlock;
+            import net.minecraft.world.level.block.TorchBlock;
             import net.minecraft.world.level.block.TrapDoorBlock;
+            import net.minecraft.world.level.block.WallTorchBlock;
             import net.minecraft.world.level.block.state.BlockBehaviour;
+            import net.minecraft.core.particles.ParticleTypes;
 
             public class BlockRegistrySurface {
                 public Object stair() {
@@ -10466,6 +10469,14 @@ class StructuralRefactorExtraTest {
 
                 public Object trapdoor() {
                     return new TrapDoorBlock(BlockBehaviour.Properties.of().noOcclusion(), ModBlockSets.WOOD_SET);
+                }
+
+                public Object torch() {
+                    return new TorchBlock(BlockBehaviour.Properties.ofFullCopy(Blocks.TORCH), ParticleTypes.SMOKE);
+                }
+
+                public Object wallTorch() {
+                    return new WallTorchBlock(BlockBehaviour.Properties.ofFullCopy(Blocks.WALL_TORCH), ModParticleTypes.SPARKLE.get());
                 }
             }
         """.trimIndent())
@@ -10885,6 +10896,8 @@ class StructuralRefactorExtraTest {
         assertTrue(blocks.contains("new PressurePlateBlock(ModBlockSets.WOOD_SET, BlockBehaviour.Properties.of().strength(0.5F))"))
         assertTrue(blocks.contains("new DoorBlock(ModBlockSets.WOOD_SET, BlockBehaviour.Properties.of().noOcclusion())"))
         assertTrue(blocks.contains("new TrapDoorBlock(ModBlockSets.WOOD_SET, BlockBehaviour.Properties.of().noOcclusion())"))
+        assertTrue(blocks.contains("new TorchBlock(ParticleTypes.SMOKE, BlockBehaviour.Properties.ofFullCopy(Blocks.TORCH))"))
+        assertTrue(blocks.contains("new WallTorchBlock(ModParticleTypes.SPARKLE.get(), BlockBehaviour.Properties.ofFullCopy(Blocks.WALL_TORCH))"))
         assertTrue(banner.contains("new BannerPattern(ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, \"ex\"), \"ex\")"))
         assertTrue(registry.contains("makeRegistry(builder -> {})"))
         assertTrue(registry.contains("REGISTRY.byNameCodec()"))

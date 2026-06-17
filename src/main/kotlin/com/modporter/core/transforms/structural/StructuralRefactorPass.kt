@@ -14829,7 +14829,9 @@ ${indent}if ($handlerVar != null) $statement"""
             !source.contains("new FenceGateBlock(") &&
             !source.contains("new PressurePlateBlock(") &&
             !source.contains("new DoorBlock(") &&
-            !source.contains("new TrapDoorBlock(")
+            !source.contains("new TrapDoorBlock(") &&
+            !source.contains("new TorchBlock(") &&
+            !source.contains("new WallTorchBlock(")
         ) {
             return source
         }
@@ -14866,6 +14868,18 @@ ${indent}if ($handlerVar != null) $statement"""
             if (args.size != 2 || !looksLikeBlockPropertiesExpression(args[0])) return@rewriteJavaNew null
             "new TrapDoorBlock(${args[1].trim()}, ${args[0].trim()})"
         }
+        result = rewriteJavaNew(result, "TorchBlock") { args ->
+            if (args.size != 2 || !looksLikeBlockPropertiesExpression(args[0]) || !looksLikeParticleOptionsExpression(args[1])) {
+                return@rewriteJavaNew null
+            }
+            "new TorchBlock(${args[1].trim()}, ${args[0].trim()})"
+        }
+        result = rewriteJavaNew(result, "WallTorchBlock") { args ->
+            if (args.size != 2 || !looksLikeBlockPropertiesExpression(args[0]) || !looksLikeParticleOptionsExpression(args[1])) {
+                return@rewriteJavaNew null
+            }
+            "new WallTorchBlock(${args[1].trim()}, ${args[0].trim()})"
+        }
         return result
     }
 
@@ -14882,6 +14896,12 @@ ${indent}if ($handlerVar != null) $statement"""
             trimmed.contains(".sound(") ||
             trimmed.contains(".noCollission()") ||
             trimmed.contains(".noOcclusion()")
+    }
+
+    private fun looksLikeParticleOptionsExpression(expression: String): Boolean {
+        val trimmed = expression.trim()
+        return Regex("""\b(?:ParticleTypes|[A-Za-z_$][\w$]*ParticleTypes)\.[A-Z][A-Z0-9_]*(?:\.get\(\))?\b""").containsMatchIn(trimmed) ||
+            Regex("""\b(?:ParticleOptions|SimpleParticleType|ParticleType\s*<[^>]+>)\s+[A-Za-z_$][\w$]*\b""").containsMatchIn(trimmed)
     }
 
     private fun migrateLegacyBannerPatternConstructors(source: String): String {
