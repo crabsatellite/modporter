@@ -9934,6 +9934,7 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyBlockAndEntityCapabilityAccessors(result)
         result = migrateLegacyITeleporterDimensionTransitions(result)
         result = migrateLegacyCanChangeDimensionsCallSites(result)
+        result = migrateLegacyPortalWaitTimeCalls(result)
         result = migrateLegacyAnimalFoodPredicateOverrides(result)
         result = migrateLegacyMushroomBlockConstructorOrder(result)
         result = migrateLegacyVanillaBlockConstructors121(result)
@@ -15894,6 +15895,13 @@ ${indent}if ($handlerVar != null) $statement"""
         val replacement = "if ($serverLevel == null || !$entity.canChangeDimensions($entity.level(), $serverLevel))\n\t\t\treturn;"
         return result.substring(0, nullGuard.range.first) + replacement + result.substring(nullGuard.range.last + 1)
     }
+
+    private fun migrateLegacyPortalWaitTimeCalls(source: String): String =
+        if (source.contains(".getPortalWaitTime()")) {
+            source.replace(".getPortalWaitTime()", ".getDimensionChangingDelay()")
+        } else {
+            source
+        }
 
     private fun migrateLegacyAnimalFoodPredicateOverrides(source: String): String {
         if ((!source.contains("extends Animal") && !source.contains("extends TamableAnimal")) ||

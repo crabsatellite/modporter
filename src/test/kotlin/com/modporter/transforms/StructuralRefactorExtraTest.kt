@@ -10733,6 +10733,30 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy portal wait time accessor`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PortalSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.Entity;
+
+            public class PortalSurface {
+                public boolean ready(Entity entity, int waitTime) {
+                    return waitTime >= entity.getPortalWaitTime();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val surface = srcDir.resolve("PortalSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(surface.contains("return waitTime >= entity.getDimensionChangingDelay();"), surface)
+        assertFalse(surface.contains("getPortalWaitTime()"), surface)
+    }
+
+    @Test
     fun `does not synthesize legacy ITeleporter default portal position without source evidence`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
