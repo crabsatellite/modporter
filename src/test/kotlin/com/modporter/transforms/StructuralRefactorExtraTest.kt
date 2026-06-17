@@ -10406,6 +10406,109 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates advancement holder predicates registry iteration and parent traversal`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val registerDir = srcDir.resolve("registers")
+        val mixinDir = srcDir.resolve("mixin")
+        registerDir.createDirectories()
+        mixinDir.createDirectories()
+        registerDir.resolve("AdvancementSoundOverride.java").writeText("""
+            package com.example.registers;
+
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.sounds.SoundEvent;
+
+            import java.util.function.Predicate;
+            import java.util.function.Supplier;
+
+            public record AdvancementSoundOverride(int priority, Predicate<Advancement> predicate, Supplier<SoundEvent> sound) {
+                public boolean matches(Advancement advancement) {
+                    return this.predicate.test(advancement);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("AdvancementSoundOverrides.java").writeText("""
+            package com.example;
+
+            import com.example.registers.AdvancementSoundOverride;
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.core.Registry;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.sounds.SoundEvent;
+            import net.minecraftforge.registries.DeferredRegister;
+            import net.minecraftforge.registries.IForgeRegistry;
+            import net.minecraftforge.registries.RegistryBuilder;
+            import net.minecraftforge.registries.RegistryObject;
+            import java.util.Map;
+            import java.util.function.Supplier;
+
+            public class AdvancementSoundOverrides {
+                public static final ResourceKey<Registry<AdvancementSoundOverride>> ADVANCEMENT_SOUND_OVERRIDE_REGISTRY_KEY = ResourceKey.createRegistryKey(new ResourceLocation("example", "advancement_sound_override"));
+                public static final DeferredRegister<AdvancementSoundOverride> ADVANCEMENT_SOUND_OVERRIDES = DeferredRegister.create(ADVANCEMENT_SOUND_OVERRIDE_REGISTRY_KEY, "example");
+                public static final Supplier<IForgeRegistry<AdvancementSoundOverride>> ADVANCEMENT_SOUND_OVERRIDE_REGISTRY = ADVANCEMENT_SOUND_OVERRIDES.makeRegistry(() -> new RegistryBuilder<AdvancementSoundOverride>().hasTags());
+                public static final RegistryObject<AdvancementSoundOverride> BRONZE = ADVANCEMENT_SOUND_OVERRIDES.register("bronze", () -> new AdvancementSoundOverride(10, advancement -> advancement.getId().getPath().equals("bronze"), () -> null));
+
+                public static SoundEvent retrieveOverride(Advancement advancement) {
+                    for (AdvancementSoundOverride override : AdvancementSoundOverrides.ADVANCEMENT_SOUND_OVERRIDE_REGISTRY.get().getEntries().stream().map(Map.Entry::getValue).toList()) {
+                        if (override.matches(advancement)) {
+                            return override.sound().get();
+                        }
+                    }
+                    return null;
+                }
+
+                public static boolean checkRoot(Advancement holder, ResourceLocation root) {
+                    for (Advancement advancement = holder; advancement != null; advancement = advancement.getParent()) {
+                        if (advancement.getId().equals(root)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            }
+        """.trimIndent())
+        mixinDir.resolve("AdvancementToastMixin.java").writeText("""
+            package com.example.mixin;
+
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.client.gui.components.toasts.AdvancementToast;
+            import org.spongepowered.asm.mixin.Final;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.Shadow;
+
+            @Mixin(AdvancementToast.class)
+            public class AdvancementToastMixin {
+                @Final
+                @Shadow
+                private Advancement advancement;
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val overrideRecord = registerDir.resolve("AdvancementSoundOverride.java").readText()
+        val overrides = srcDir.resolve("AdvancementSoundOverrides.java").readText()
+        val mixin = mixinDir.resolve("AdvancementToastMixin.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(overrideRecord.contains("import net.minecraft.advancements.AdvancementHolder;"))
+        assertTrue(overrideRecord.contains("Predicate<AdvancementHolder> predicate"))
+        assertTrue(overrideRecord.contains("matches(AdvancementHolder advancement)"))
+        assertTrue(overrides.contains("retrieveOverride(AdvancementHolder advancement)"))
+        assertTrue(overrides.contains("advancement -> advancement.id().getPath().equals(\"bronze\")"))
+        assertTrue(overrides.contains("ADVANCEMENT_SOUND_OVERRIDES.getEntries().stream().map(DeferredHolder::value).toList()"))
+        assertFalse(overrides.contains("ADVANCEMENT_SOUND_OVERRIDE_REGISTRY.get().getEntries()"))
+        assertFalse(overrides.contains("Map.Entry::getValue"))
+        assertTrue(overrides.contains("LocalPlayer player = Minecraft.getInstance().player;"))
+        assertTrue(overrides.contains("for (AdvancementHolder current = holder; current != null && current.value().parent().isPresent(); current = player.connection.getAdvancements().get(current.value().parent().get()))"))
+        assertTrue(overrides.contains("if (current.id().equals(root))"))
+        assertFalse(overrides.contains("advancement.getId()"))
+        assertFalse(overrides.contains("getParent()"))
+        assertTrue(mixin.contains("import net.minecraft.advancements.AdvancementHolder;"))
+        assertTrue(mixin.contains("private AdvancementHolder advancement;"))
+    }
+
+    @Test
     fun `migrates holder sound event constants only in play sound sound argument slots`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

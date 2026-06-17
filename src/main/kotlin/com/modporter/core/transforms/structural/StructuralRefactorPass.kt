@@ -12030,6 +12030,15 @@ ${entries.joinToString(",\n")}
             result = result.replace("$managerVariable.getAdvancement(", "$managerVariable.get(")
         }
 
+        result = result.replace("Predicate<Advancement>", "Predicate<AdvancementHolder>")
+        result = result.replace("{@link Advancement}", "{@link AdvancementHolder}")
+        result = result.replace("matches(Advancement ", "matches(AdvancementHolder ")
+        result = result.replace("retrieveOverride(Advancement ", "retrieveOverride(AdvancementHolder ")
+        result = result.replace("checkRoot(Advancement ", "checkRoot(AdvancementHolder ")
+        if (result.contains("AdvancementToast.class")) {
+            result = Regex("""\bprivate\s+Advancement\s+advancement\s*;""")
+                .replace(result, "private AdvancementHolder advancement;")
+        }
         result = Regex("""\b(public|private|protected)\s+static\s+Advancement\s+getAdvancement\s*\(""")
             .replace(result, "$1 static AdvancementHolder getAdvancement(")
         result = Regex(
@@ -12047,9 +12056,23 @@ ${entries.joinToString(",\n")}
             .findAll(result)
             .map { it.groupValues[1] }
             .toSet()
+        val holderLambdaVariables = if (result.contains("Predicate<AdvancementHolder>") || result.contains("new AdvancementSoundOverride")) {
+            Regex("""\b([A-Za-z_$][\w$]*)\s*->[^;\r\n]*\b\1\.getId\(\)""")
+                .findAll(result)
+                .map { it.groupValues[1] }
+                .toSet()
+        } else {
+            emptySet()
+        }
         for (variable in holderVariables) {
             result = result.replace("$variable.getDisplay()", "$variable.value().display().orElse(null)")
+            result = result.replace("$variable.getId()", "$variable.id()")
         }
+        for (variable in holderLambdaVariables) {
+            result = result.replace("$variable.getId()", "$variable.id()")
+        }
+        result = migrateLegacyAdvancementParentLoop(result)
+        result = migrateLegacyDeferredRegistryEntryStream(result)
 
         result = Regex("""([A-Za-z_$][\w$]*)\.FALLBACK\s*:\s*new\s+([A-Za-z_$][\w$]*Packet)\(""")
             .replace(result) { match ->
@@ -12060,9 +12083,88 @@ ${entries.joinToString(",\n")}
 
         if (result != source && result.contains("AdvancementHolder")) {
             result = addImportIfMissing(result, "net.minecraft.advancements.AdvancementHolder")
+            if (result.contains("Minecraft.getInstance().player")) {
+                result = addImportIfMissing(result, "net.minecraft.client.Minecraft")
+                result = addImportIfMissing(result, "net.minecraft.client.player.LocalPlayer")
+            }
+            if (result.contains("DeferredHolder::value")) {
+                result = addImportIfMissing(result, "net.neoforged.neoforge.registries.DeferredHolder")
+            }
             val withoutAdvancementImport = removeImport(result, "net.minecraft.advancements.Advancement")
             if (!Regex("""\bAdvancement\b""").containsMatchIn(withoutAdvancementImport)) {
                 result = withoutAdvancementImport
+            }
+        }
+        return result
+    }
+
+    private fun migrateLegacyAdvancementParentLoop(source: String): String {
+        if (!source.contains(".getParent()") || !source.contains("AdvancementHolder")) return source
+        var result = source
+        var cursor = 0
+        val loopHeader = Regex("""for\s*\(\s*Advancement\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*;\s*([A-Za-z_$][\w$]*)\s*!=\s*null\s*;\s*([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\.getParent\(\)\s*\)\s*\{""")
+        while (true) {
+            val match = loopHeader.find(result, cursor) ?: break
+            val loopVariable = match.groupValues[1]
+            if (match.groupValues[3] != loopVariable || match.groupValues[4] != loopVariable || match.groupValues[5] != loopVariable) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val holder = match.groupValues[2]
+            val openBrace = match.range.last
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace <= openBrace) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val loopBody = result.substring(openBrace + 1, closeBrace)
+            val bodyMatch = Regex("""if\s*\(\s*${Regex.escape(loopVariable)}\.(?:getId\(\)|id\(\))\.equals\(([^)]+)\)\s*\)\s*\{\s*return\s+true\s*;\s*}""")
+                .find(loopBody)
+            if (bodyMatch == null) {
+                cursor = closeBrace + 1
+                continue
+            }
+            val indent = leadingIndentAt(result, match.range.first)
+            val root = bodyMatch.groupValues[1].trim()
+            val inner = "$indent    "
+            val replacement = """
+${indent}LocalPlayer player = Minecraft.getInstance().player;
+${indent}if (player != null) {
+${inner}for (AdvancementHolder current = $holder; current != null && current.value().parent().isPresent(); current = player.connection.getAdvancements().get(current.value().parent().get())) {
+${inner}    if (current.id().equals($root)) {
+${inner}        return true;
+${inner}    }
+${inner}}
+${indent}}
+""".trim('\n')
+            result = result.substring(0, match.range.first) + replacement + result.substring(closeBrace + 1)
+            cursor = match.range.first + replacement.length
+        }
+        return result
+    }
+
+    private fun migrateLegacyDeferredRegistryEntryStream(source: String): String {
+        if (!source.contains(".getEntries().stream().map(Map.Entry::getValue)")) return source
+        val deferredRegisters = Regex("""\bDeferredRegister\s*<\s*([A-Za-z_$][\w$]*)\s*>\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] to it.groupValues[2] }
+            .toList()
+        if (deferredRegisters.isEmpty()) return source
+        var result = source
+        for ((type, deferredRegister) in deferredRegisters) {
+            val registries = linkedSetOf<String>()
+            registries += Regex("""\bRegistry\s*<\s*${Regex.escape(type)}\s*>\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(result)
+                .map { it.groupValues[1] }
+            registries += Regex("""\bIForgeRegistry\s*<\s*${Regex.escape(type)}\s*>\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(result)
+                .map { it.groupValues[1] }
+            registries += Regex("""\bSupplier\s*<\s*(?:IForgeRegistry|Registry)\s*<\s*${Regex.escape(type)}\s*>\s*>\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(result)
+                .map { it.groupValues[1] }
+            for (registry in registries) {
+                result = Regex("""(?:[A-Za-z_$][\w$]*\.)?${Regex.escape(registry)}(?:\.get\(\))?\.getEntries\(\)\.stream\(\)\.map\(Map\.Entry::getValue\)""")
+                    .replace(result, "$deferredRegister.getEntries().stream().map(DeferredHolder::value)")
             }
         }
         return result
