@@ -20271,6 +20271,12 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
     private fun migrateLegacyHolderValueCalls(source: String): String {
         if (!source.contains(".get()")) return source
         var result = source.replace(".generatorSettings().get()", ".generatorSettings().value()")
+        if (result.contains("forMusic(") ||
+            result.contains("forBossMusic(") ||
+            result.contains("net.minecraft.sounds.Music") ||
+            Regex("""\bMusic\s+[A-Za-z_$][\w$]*""").containsMatchIn(result)) {
+            result = result.replace(".getEvent().get()", ".getEvent().value()")
+        }
         result = Regex("""\b((?:net\.neoforged\.neoforge\.common\.)?NeoForgeMod\.(?:EMPTY_TYPE|WATER_TYPE|LAVA_TYPE))\.get\(\)""")
             .replace(result) { match -> "${match.groupValues[1]}.value()" }
         val holderVariables = Regex(

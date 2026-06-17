@@ -10757,6 +10757,35 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy holder get calls in music sound event chains`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("MusicHolderSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.resources.sounds.SimpleSoundInstance;
+            import net.minecraft.core.Holder;
+            import net.minecraft.sounds.SoundEvent;
+
+            public class MusicHolderSurface {
+                public Object sound(Manager manager, Holder<SoundEvent> holder) {
+                    SoundEvent direct = holder.get();
+                    return SimpleSoundInstance.forMusic(manager.getSituationalMusic().getEvent().get());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val surface = srcDir.resolve("MusicHolderSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(surface.contains("SoundEvent direct = holder.value();"), surface)
+        assertTrue(surface.contains("SimpleSoundInstance.forMusic(manager.getSituationalMusic().getEvent().value())"), surface)
+        assertFalse(surface.contains(".getEvent().get()"), surface)
+        assertFalse(surface.contains("holder.get()"), surface)
+    }
+
+    @Test
     fun `does not synthesize legacy ITeleporter default portal position without source evidence`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
