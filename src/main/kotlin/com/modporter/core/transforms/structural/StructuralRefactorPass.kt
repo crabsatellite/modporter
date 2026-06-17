@@ -284,6 +284,13 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            val cumulusChanges = migrateCumulusMenuApi(projectDir, dryRun)
+            changes.addAll(cumulusChanges)
+        } catch (e: Exception) {
+            errors.add("Cumulus menu API migration error: ${e.message}")
+        }
+
+        try {
             val registerAdditionalModelChanges = migrateRegisterAdditionalModelResourceLocations(projectDir, dryRun)
             changes.addAll(registerAdditionalModelChanges)
         } catch (e: Exception) {
@@ -11410,6 +11417,371 @@ ${entries.joinToString(",\n")}
         }
         return result
     }
+
+    private data class CumulusMenuOwner(
+        val simpleName: String,
+        val qualifiedName: String,
+        val registerFieldName: String,
+        val menuFields: Set<String>
+    )
+
+    private data class CumulusMenuDefinitionMigration(
+        val source: String,
+        val owner: CumulusMenuOwner?
+    )
+
+    private data class CumulusMenuRegistration(
+        val start: Int,
+        val end: Int,
+        val prefix: String,
+        val fieldName: String,
+        val id: String,
+        val args: List<String>
+    )
+
+    private fun migrateCumulusMenuApi(projectDir: Path, dryRun: Boolean): List<Change> {
+        val javaFiles = Files.walk(projectDir)
+            .filter { it.extension == "java" }
+            .filter { !projectDir.relativize(it).toString().replace('\\', '/').let { rel ->
+                rel.startsWith("build/") || rel.contains("/build/") ||
+                    rel.startsWith("src/references/") || rel.contains("/src/references/")
+            }}
+            .toList()
+
+        val changes = mutableListOf<Change>()
+        val stagedSources = linkedMapOf<Path, String>()
+        val owners = mutableListOf<CumulusMenuOwner>()
+
+        for (file in javaFiles) {
+            val original = file.readText()
+            val migration = migrateCumulusMenuDefinitionSource(projectDir, original)
+            migration.owner?.let { owners += it }
+            if (migration.source != original) {
+                stagedSources[file] = migration.source
+                changes += Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate Cumulus menu DeferredRegister to entrypoint callback",
+                    before = "DeferredRegister<Menu> + MENUS.register(...)",
+                    after = "@CumulusEntrypoint MenuInitializer#registerMenus",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-cumulus-menu-api-121"
+                )
+            }
+        }
+
+        if (owners.isNotEmpty()) {
+            for (file in javaFiles) {
+                val base = stagedSources[file] ?: file.readText()
+                val migrated = migrateCumulusMenuReferences(base, owners)
+                if (migrated != base) {
+                    stagedSources[file] = migrated
+                    changes += Change(
+                        file = file,
+                        line = 1,
+                        description = "Update Cumulus menu record access and registration call sites",
+                        before = "Menu DeferredHolder get()/getMusic()/MENUS.register(bus)",
+                        after = "Menu record accessors and entrypoint-owned registration",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-cumulus-menu-api-121"
+                    )
+                }
+            }
+        }
+
+        if (!dryRun) {
+            stagedSources.forEach { (file, source) -> file.writeText(source) }
+        }
+        return changes
+    }
+
+    private fun migrateCumulusMenuDefinitionSource(projectDir: Path, source: String): CumulusMenuDefinitionMigration {
+        if (!source.contains("Cumulus.MENU_REGISTRY_KEY") ||
+            !source.contains("DeferredRegister<Menu>") ||
+            !source.contains(".register(") ||
+            !source.contains("com.aetherteam.cumulus.api.Menu")) {
+            return CumulusMenuDefinitionMigration(source, null)
+        }
+
+        val className = javaTopLevelTypeName(source) ?: return CumulusMenuDefinitionMigration(source, null)
+        val registerPattern = Regex(
+            """(?ms)^[ \t]*(?:public|protected|private)\s+static\s+final\s+DeferredRegister\s*<\s*Menu\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*DeferredRegister\.create\(\s*Cumulus\.MENU_REGISTRY_KEY\s*,\s*([^)]+?)\s*\)\s*;\s*\r?\n?"""
+        )
+        val registerMatch = registerPattern.find(source) ?: return CumulusMenuDefinitionMigration(source, null)
+        val registerField = registerMatch.groupValues[1]
+        val modIdExpression = registerMatch.groupValues[2].trim()
+        val registrations = findCumulusMenuRegistrations(source, registerField)
+        if (registrations.isEmpty()) return CumulusMenuDefinitionMigration(source, null)
+
+        val hasLegacyBackground = registrations.any { registration ->
+            registration.args.any { it.contains(".background(") }
+        } || source.contains("Menu.Background")
+        val panoramaExpression = if (hasLegacyBackground) {
+            cumulusPanoramaExpression(projectDir, modIdExpression) ?: return CumulusMenuDefinitionMigration(source, null)
+        } else {
+            null
+        }
+        val booleanSuppliers = Regex("""\bBooleanSupplier\s+([A-Za-z_$][\w$]*)\s*=""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+
+        var result = source
+        var needsCubeMapImport = false
+        for (registration in registrations.asReversed()) {
+            val migratedArgs = migrateCumulusMenuConstructorArgs(
+                registration.args,
+                booleanSuppliers,
+                panoramaExpression
+            ) ?: return CumulusMenuDefinitionMigration(source, null)
+            if (migratedArgs.any { it.contains("new CubeMap(") }) {
+                needsCubeMapImport = true
+            }
+            val replacement = "${registration.prefix}Menu ${registration.fieldName} = new Menu(${migratedArgs.joinToString(", ") { it.trim() }});\n"
+            result = result.substring(0, registration.start) + replacement + result.substring(registration.end)
+        }
+
+        result = registerPattern.replace(result, "")
+        result = removeUnusedCumulusBooleanSupplierFields(result, booleanSuppliers)
+        result = removeCumulusMenuBackgroundFields(result)
+        result = addCumulusMenuInitializerClassShape(result, className)
+        result = insertCumulusRegisterMenusMethod(result, modIdExpression, registrations)
+        result = removeImport(result, "com.aetherteam.cumulus.Cumulus")
+        result = removeImport(result, "java.util.function.BooleanSupplier")
+        result = removeImport(result, "net.neoforged.neoforge.registries.DeferredRegister")
+        result = removeImport(result, "net.neoforged.neoforge.registries.DeferredHolder")
+        result = addImportIfMissing(result, "com.aetherteam.cumulus.api.CumulusEntrypoint")
+        result = addImportIfMissing(result, "com.aetherteam.cumulus.api.MenuInitializer")
+        result = addImportIfMissing(result, "com.aetherteam.cumulus.api.MenuRegisterCallback")
+        result = addImportIfMissing(result, "net.minecraft.resources.ResourceLocation")
+        if (needsCubeMapImport) {
+            result = addImportIfMissing(result, "net.minecraft.client.renderer.CubeMap")
+        }
+        result = cleanupRedundantBlankLines(result)
+
+        val packageName = packageNameOf(result)
+        val owner = CumulusMenuOwner(
+            simpleName = className,
+            qualifiedName = if (packageName.isBlank()) className else "$packageName.$className",
+            registerFieldName = registerField,
+            menuFields = registrations.map { it.fieldName }.toSet()
+        )
+        return CumulusMenuDefinitionMigration(result, owner)
+    }
+
+    private fun findCumulusMenuRegistrations(source: String, registerField: String): List<CumulusMenuRegistration> {
+        val id = """[A-Za-z_$][\w$]*"""
+        val prefixPattern = Regex(
+            """(?m)^([ \t]*(?:public|protected|private)\s+static\s+final\s+)DeferredHolder\s*<\s*Menu\s*,\s*Menu\s*>\s+($id)\s*=\s*${Regex.escape(registerField)}\.register\(\s*"([^"]+)"\s*,\s*\(\)\s*->\s*new\s+Menu\s*\("""
+        )
+        val registrations = mutableListOf<CumulusMenuRegistration>()
+        var cursor = 0
+        while (true) {
+            val match = prefixPattern.find(source, cursor) ?: break
+            val openParen = match.range.last
+            val closeMenu = findMatchingParen(source, openParen)
+            if (closeMenu < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            var end = closeMenu + 1
+            while (end < source.length && source[end].isWhitespace()) end++
+            if (end >= source.length || source[end] != ')') {
+                cursor = closeMenu + 1
+                continue
+            }
+            end++
+            while (end < source.length && source[end].isWhitespace()) end++
+            if (end >= source.length || source[end] != ';') {
+                cursor = closeMenu + 1
+                continue
+            }
+            end++
+            if (end < source.length && source[end] == '\r') end++
+            if (end < source.length && source[end] == '\n') end++
+            registrations += CumulusMenuRegistration(
+                start = match.range.first,
+                end = end,
+                prefix = match.groupValues[1],
+                fieldName = match.groupValues[2],
+                id = match.groupValues[3],
+                args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeMenu))
+            )
+            cursor = end
+        }
+        return registrations
+    }
+
+    private fun migrateCumulusMenuConstructorArgs(
+        args: List<String>,
+        booleanSuppliers: Set<String>,
+        panoramaExpression: String?
+    ): List<String>? {
+        val migrated = args.toMutableList()
+        if (migrated.size >= 4 && migrated[3].trim() in booleanSuppliers) {
+            migrated.removeAt(3)
+        }
+        for (index in migrated.indices) {
+            if (!migrated[index].contains(".background(")) continue
+            val panorama = panoramaExpression ?: return null
+            migrated[index] = Regex("""\.background\(\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\s*\)""")
+                .replace(migrated[index], ".panorama($panorama)")
+        }
+        return migrated
+    }
+
+    private fun cumulusPanoramaExpression(projectDir: Path, modIdExpression: String): String? {
+        val namespace = resolveLiteralModIdExpression(modIdExpression)
+            ?: projectMetadataModId(projectDir)
+            ?: singleAssetNamespace(projectDir)
+            ?: return null
+        val relative = Path.of("assets", namespace, "textures", "gui", "title", "panorama", "panorama_0.png")
+        val hasPanorama = listOf(
+            projectDir.resolve("src/main/resources"),
+            projectDir.resolve("src/generated/resources")
+        ).any { it.resolve(relative).exists() }
+        if (!hasPanorama) return null
+        return """new CubeMap(ResourceLocation.fromNamespaceAndPath($modIdExpression, "textures/gui/title/panorama/panorama"))"""
+    }
+
+    private fun resolveLiteralModIdExpression(expression: String): String? {
+        val trimmed = expression.trim()
+        return if (Regex(""""(?:\\.|[^"\\])*"""").matches(trimmed)) trimmed.trim('"') else null
+    }
+
+    private fun projectMetadataModId(projectDir: Path): String? {
+        val gradleProperties = projectDir.resolve("gradle.properties")
+        if (gradleProperties.exists()) {
+            Regex("""(?m)^\s*(?:mod_id|modid)\s*=\s*([A-Za-z0-9_.-]+)\s*$""")
+                .find(gradleProperties.readText())
+                ?.groupValues
+                ?.get(1)
+                ?.let { return it }
+        }
+        return listOf(
+            projectDir.resolve("src/main/resources/META-INF/neoforge.mods.toml"),
+            projectDir.resolve("src/main/resources/META-INF/mods.toml")
+        ).asSequence()
+            .filter { it.exists() }
+            .mapNotNull { file ->
+                Regex("(?m)^\\s*modId\\s*=\\s*\"([^\"]+)\"")
+                    .find(file.readText())
+                    ?.groupValues
+                    ?.get(1)
+            }
+            .firstOrNull()
+    }
+
+    private fun singleAssetNamespace(projectDir: Path): String? {
+        val namespaces = linkedSetOf<String>()
+        for (root in listOf(
+            projectDir.resolve("src/main/resources/assets"),
+            projectDir.resolve("src/generated/resources/assets")
+        )) {
+            if (!root.exists()) continue
+            Files.list(root).use { children ->
+                children.filter { it.isDirectory() }
+                    .forEach { namespaces += it.fileName.toString() }
+            }
+        }
+        return namespaces.singleOrNull()
+    }
+
+    private fun removeUnusedCumulusBooleanSupplierFields(source: String, booleanSuppliers: Set<String>): String {
+        var result = source
+        for (name in booleanSuppliers) {
+            val declaration = Regex(
+                """(?ms)^[ \t]*(?:public|protected|private)\s+static\s+final\s+BooleanSupplier\s+${Regex.escape(name)}\s*=\s*.*?;\s*\r?\n?"""
+            ).find(result) ?: continue
+            val withoutDeclaration = result.substring(0, declaration.range.first) +
+                result.substring(declaration.range.last + 1)
+            if (!Regex("""\b${Regex.escape(name)}\b""").containsMatchIn(withoutDeclaration)) {
+                result = withoutDeclaration
+            }
+        }
+        return result
+    }
+
+    private fun removeCumulusMenuBackgroundFields(source: String): String =
+        Regex(
+            """(?ms)^[ \t]*(?:public|protected|private)\s+static\s+final\s+Menu\.Background\s+[A-Za-z_$][\w$]*\s*=\s*new\s+Menu\.Background\(\).*?;\s*\r?\n?"""
+        ).replace(source, "")
+
+    private fun addCumulusMenuInitializerClassShape(source: String, className: String): String {
+        var result = Regex("""\bimplements\s+MenuInitializer(?:\s+implements\s+MenuInitializer)+\b""")
+            .replace(source, "implements MenuInitializer")
+        if (!Regex("""@CumulusEntrypoint\b""").containsMatchIn(result)) {
+            val classMatch = Regex("""(?m)^([ \t]*)(public\s+(?:final\s+)?class\s+${Regex.escape(className)}\b)""")
+                .find(result)
+            if (classMatch != null) {
+                result = result.substring(0, classMatch.range.first) +
+                    "${classMatch.groupValues[1]}@CumulusEntrypoint\n" +
+                    result.substring(classMatch.range.first)
+            }
+        }
+        val classHeader = Regex("""(?m)(public\s+(?:final\s+)?class\s+${Regex.escape(className)}\b)([^{]*)\{""")
+            .find(result)
+            ?: return result
+        if (classHeader.groupValues[2].contains(Regex("""\bMenuInitializer\b"""))) return result
+        val tailRange = classHeader.groups[2]!!.range
+        val tail = classHeader.groupValues[2]
+        val migratedTail = if (tail.contains(Regex("""\bimplements\b"""))) {
+            tail.trimEnd() + ", MenuInitializer "
+        } else {
+            tail.trimEnd() + " implements MenuInitializer "
+        }
+        return result.substring(0, tailRange.first) + migratedTail + result.substring(tailRange.last + 1)
+    }
+
+    private fun insertCumulusRegisterMenusMethod(
+        source: String,
+        modIdExpression: String,
+        registrations: List<CumulusMenuRegistration>
+    ): String {
+        if (Regex("""\bvoid\s+registerMenus\s*\(\s*MenuRegisterCallback\b""").containsMatchIn(source)) return source
+        val body = registrations.joinToString("\n") { registration ->
+            """        menuRegisterCallback.registerMenu(ResourceLocation.fromNamespaceAndPath($modIdExpression, "${registration.id}"), ${registration.fieldName});"""
+        }
+        val method = """
+
+    @Override
+    public void registerMenus(MenuRegisterCallback menuRegisterCallback) {
+$body
+    }
+""".trimEnd()
+        return insertBeforeLastClassBrace(source, method)
+    }
+
+    private fun migrateCumulusMenuReferences(source: String, owners: List<CumulusMenuOwner>): String {
+        var result = source
+        for (owner in owners) {
+            val ownerNames = listOf(owner.simpleName, owner.qualifiedName).distinct()
+            for (ownerName in ownerNames) {
+                val escapedOwner = Regex.escape(ownerName)
+                result = Regex("""(?m)^[ \t]*$escapedOwner\.${Regex.escape(owner.registerFieldName)}\.register\([^;\r\n]*\);\s*\r?\n""")
+                    .replace(result, "")
+                for (field in owner.menuFields) {
+                    val escapedField = Regex.escape(field)
+                    result = Regex("""\b$escapedOwner\.$escapedField\.get\(\)\.getMusic\(\)""")
+                        .replace(result, "$ownerName.$field.music()")
+                    result = Regex("""\b$escapedOwner\.$escapedField\.get\(\)\.toString\(\)""")
+                        .replace(result, "$ownerName.$field.toString()")
+                    result = Regex("""\b$escapedOwner\.$escapedField\.get\(\)""")
+                        .replace(result, "$ownerName.$field")
+                }
+            }
+        }
+        result = Regex("""\bMenus\.MINECRAFT\.get\(\)\.getMusic\(\)""")
+            .replace(result, "Menus.MINECRAFT.music()")
+        result = Regex("""\bMenus\.MINECRAFT\.get\(\)\.toString\(\)""")
+            .replace(result, "Menus.MINECRAFT.toString()")
+        result = Regex("""\bMenus\.MINECRAFT\.get\(\)""")
+            .replace(result, "Menus.MINECRAFT")
+        return result
+    }
+
+    private fun cleanupRedundantBlankLines(source: String): String =
+        Regex("""\n{3,}""").replace(source, "\n\n")
 
     private fun migrateRegisterAdditionalModelResourceLocations(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()

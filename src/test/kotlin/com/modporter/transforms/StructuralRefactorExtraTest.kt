@@ -13982,6 +13982,103 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates Cumulus menu registry classes to entrypoint callbacks from source shape`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        tempDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        val panoramaDir = tempDir.resolve("src/main/resources/assets/example/textures/gui/title/panorama")
+        panoramaDir.createDirectories()
+        panoramaDir.resolve("panorama_0.png").writeText("png")
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(IEventBus modEventBus) {
+                    ExampleMenus.MENUS.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMenus.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.cumulus.Cumulus;
+            import com.aetherteam.cumulus.api.Menu;
+            import com.aetherteam.cumulus.api.Menus;
+            import java.util.function.BooleanSupplier;
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.sounds.Musics;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ExampleMenus {
+                public static final DeferredRegister<Menu> MENUS = DeferredRegister.create(Cumulus.MENU_REGISTRY_KEY, ExampleMod.MODID);
+
+                private static final Component CUSTOM_NAME = Component.literal("Custom");
+                private static final ResourceLocation CUSTOM_REGULAR_BACKGROUND = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "textures/gui/title/options_background.png");
+                private static final Menu.Background CUSTOM_BACKGROUND = new Menu.Background()
+                        .regularBackground(CUSTOM_REGULAR_BACKGROUND);
+                private static final BooleanSupplier CUSTOM_CONDITION = () -> true;
+
+                public static final DeferredHolder<Menu, Menu> CUSTOM = MENUS.register("custom", () -> new Menu(Menus.MINECRAFT_ICON, CUSTOM_NAME, new TitleScreen(), CUSTOM_CONDITION, new Menu.Properties().music(Musics.MENU).background(CUSTOM_BACKGROUND)));
+                public static final DeferredHolder<Menu, Menu> SIMPLE = MENUS.register("simple", () -> new Menu(Menus.MINECRAFT_ICON, Component.literal("Simple"), new TitleScreen(), CUSTOM_CONDITION));
+            }
+        """.trimIndent())
+        srcDir.resolve("MenuUse.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.cumulus.api.Menus;
+
+            public class MenuUse {
+                public Object customMusic() {
+                    return ExampleMenus.CUSTOM.get().getMusic();
+                }
+
+                public Object vanillaMusic() {
+                    return Menus.MINECRAFT.get().getMusic();
+                }
+
+                public String selected() {
+                    return ExampleMenus.CUSTOM.get().toString();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val second = StructuralRefactorPass().apply(tempDir)
+        val menus = srcDir.resolve("ExampleMenus.java").readText()
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+        val use = srcDir.resolve("MenuUse.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-cumulus-menu-api-121" })
+        assertFalse(second.changes.any { it.ruleId == "struct-cumulus-menu-api-121" })
+        assertTrue(menus.contains("@CumulusEntrypoint"), menus)
+        assertTrue(menus.contains("public class ExampleMenus implements MenuInitializer"), menus)
+        assertFalse(menus.contains("implements MenuInitializer  implements MenuInitializer"), menus)
+        assertTrue(menus.contains("public static final Menu CUSTOM = new Menu("), menus)
+        assertTrue(menus.contains("new Menu.Properties().music(Musics.MENU).panorama(new CubeMap(ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, \"textures/gui/title/panorama/panorama\")))"), menus)
+        assertTrue(menus.contains("public static final Menu SIMPLE = new Menu(Menus.MINECRAFT_ICON, Component.literal(\"Simple\"), new TitleScreen());"), menus)
+        assertTrue(menus.contains("public void registerMenus(MenuRegisterCallback menuRegisterCallback)"), menus)
+        assertTrue(menus.contains("menuRegisterCallback.registerMenu(ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, \"custom\"), CUSTOM);"), menus)
+        assertTrue(menus.contains("menuRegisterCallback.registerMenu(ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, \"simple\"), SIMPLE);"), menus)
+        assertFalse(menus.contains("DeferredRegister"), menus)
+        assertFalse(menus.contains("DeferredHolder"), menus)
+        assertFalse(menus.contains("BooleanSupplier"), menus)
+        assertFalse(menus.contains("Menu.Background"), menus)
+        assertFalse(menus.contains("CUSTOM_CONDITION"), menus)
+        assertFalse(mod.contains("ExampleMenus.MENUS.register"), mod)
+        assertTrue(use.contains("return ExampleMenus.CUSTOM.music();"), use)
+        assertTrue(use.contains("return Menus.MINECRAFT.music();"), use)
+        assertTrue(use.contains("return ExampleMenus.CUSTOM.toString();"), use)
+    }
+
+    @Test
     fun `migrates strict warning surfaces by source shape without mod specific rules`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
