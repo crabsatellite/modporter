@@ -11744,6 +11744,7 @@ ${entries.joinToString(",\n")}
         if (!source.contains("RenderSystem.getModelViewStack()") &&
             !source.contains(".getPartialTick()") &&
             !source.contains(".getFrameTime()") &&
+            !source.contains(".getDeltaFrameTime()") &&
             !source.contains(".vertex(") &&
             !source.contains(".color(") &&
             !source.contains(".setNormal(") &&
@@ -13211,12 +13212,17 @@ $body
     }
 
     private fun migratePartialTickAccessors(source: String): String {
-        if (!source.contains("getPartialTick()") && !source.contains("getFrameTime()")) return source
+        if (!source.contains("getPartialTick()") &&
+            !source.contains("getFrameTime()") &&
+            !source.contains("getDeltaFrameTime()")) return source
         var result = source.replace(
             "Minecraft.getInstance().getPartialTick()",
             "Minecraft.getInstance().getTimer().getGameTimeDeltaPartialTick(false)"
         ).replace(
             "Minecraft.getInstance().getFrameTime()",
+            "Minecraft.getInstance().getTimer().getGameTimeDeltaPartialTick(false)"
+        ).replace(
+            "Minecraft.getInstance().getDeltaFrameTime()",
             "Minecraft.getInstance().getTimer().getGameTimeDeltaPartialTick(false)"
         )
 
@@ -13231,6 +13237,10 @@ $body
             )
             result = result.replace(
                 "$variable.getFrameTime()",
+                "$variable.getTimer().getGameTimeDeltaPartialTick(false)"
+            )
+            result = result.replace(
+                "$variable.getDeltaFrameTime()",
                 "$variable.getTimer().getGameTimeDeltaPartialTick(false)"
             )
         }

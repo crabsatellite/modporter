@@ -9241,6 +9241,7 @@ class StructuralRefactorExtraTest {
                     PoseStack stack = RenderSystem.getModelViewStack();
                     float partialTick = minecraft.getPartialTick();
                     float frameTime = minecraft.getFrameTime();
+                    float deltaFrame = minecraft.getDeltaFrameTime();
                     BufferBuilder bufferbuilder = Tesselator.getInstance().begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.PARTICLE);
                     bufferbuilder.vertex(x, y, z).setUv(0.0F, partialTick).color(1.0F, 1.0F, 1.0F, partialTick).setLight(u, v);
                     BufferUploader.drawWithShader(buffer.buildOrThrow());
@@ -10975,6 +10976,7 @@ class StructuralRefactorExtraTest {
         assertTrue(clientRendering.contains("stack.mulPose(RenderSystem.getModelViewMatrix());"))
         assertTrue(clientRendering.contains("minecraft.getTimer().getGameTimeDeltaPartialTick(false)"))
         assertTrue(clientRendering.contains("float frameTime = minecraft.getTimer().getGameTimeDeltaPartialTick(false);"))
+        assertTrue(clientRendering.contains("float deltaFrame = minecraft.getTimer().getGameTimeDeltaPartialTick(false);"))
         assertTrue(clientRendering.contains("double partialTick = event.getPartialTick().getGameTimeDeltaPartialTick(false);"))
         assertTrue(clientRendering.contains("double partialTick = event.getDeltaTracker().getGameTimeDeltaPartialTick(false);"))
         assertTrue(clientRendering.contains("public void fog(ViewportEvent.ComputeFogColor event)"))
