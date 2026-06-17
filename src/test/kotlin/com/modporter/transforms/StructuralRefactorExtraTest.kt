@@ -10519,6 +10519,9 @@ class StructuralRefactorExtraTest {
                     BlockPos pos = source.getPos().relative(source.getBlockState().getValue(DispenserBlock.FACING));
                     source.getLevel().levelEvent(1000, pos, 0);
                     source.<DispenserBlockEntity>getEntity().addItem(stack.copy());
+                    if (source.<DispenserBlockEntity>getEntity().addItem(stack.copy()) < 0) {
+                        this.success = false;
+                    }
                     source.level().playSound(null, source.x(), source.y(), source.z(), sound(), SoundSource.NEUTRAL, 1.0F, 1.0F);
                     Object behavior = new ProjectileDispenseBehavior() {
                         @Override
@@ -10535,6 +10538,43 @@ class StructuralRefactorExtraTest {
 
                 private SoundEvent sound() {
                     return null;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CustomProjectileBehavior.java").writeText("""
+            package com.example;
+
+            import net.minecraft.Util;
+            import net.minecraft.core.Position;
+            import net.minecraft.core.dispenser.BlockSource;
+            import net.minecraft.core.dispenser.ProjectileDispenseBehavior;
+            import net.minecraft.world.entity.projectile.Projectile;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.DispenserBlock;
+
+            public class CustomProjectileBehavior extends ProjectileDispenseBehavior {
+                @Override
+                public ItemStack execute(BlockSource blockSource, ItemStack stack) {
+                    Projectile projectile = this.getProjectile(blockSource.level(), DispenserBlock.getDispensePosition(blockSource), stack);
+                    if (projectile != null) {
+                        this.spawn(projectile, this.getPower(), this.getUncertainty());
+                        stack.shrink(1);
+                    }
+                    return stack;
+                }
+
+                @Override
+                protected Projectile getProjectile(Level level, Position position, ItemStack stack) {
+                    return Util.make(new DemoProjectile(level, position), (projectile) -> projectile.setNoGravity(true));
+                }
+
+                @Override
+                protected float getUncertainty() {
+                    return 3.0F;
+                }
+
+                private void spawn(Projectile projectile, float power, float uncertainty) {
                 }
             }
         """.trimIndent())
@@ -10683,6 +10723,7 @@ class StructuralRefactorExtraTest {
 
         val result = StructuralRefactorPass().apply(tempDir)
         val dispenser = srcDir.resolve("DispenserSurface.java").readText()
+        val customProjectileBehavior = srcDir.resolve("CustomProjectileBehavior.java").readText()
         val arrow = srcDir.resolve("ArrowSurface.java").readText()
         val chestBoat = srcDir.resolve("ChestBoatSurface.java").readText()
         val projectile = srcDir.resolve("ProjectileSurface.java").readText()
@@ -10698,16 +10739,24 @@ class StructuralRefactorExtraTest {
         assertTrue(dispenser.contains("source.center().x()"))
         assertTrue(dispenser.contains("source.pos().relative(source.state().getValue(DispenserBlock.FACING))"))
         assertTrue(dispenser.contains("source.level().levelEvent(1000, pos, 0)"))
-        assertTrue(dispenser.contains("source.blockEntity().addItem(stack.copy())"))
         assertFalse(dispenser.contains("source.getPos()"))
         assertFalse(dispenser.contains("source.getBlockState()"))
         assertFalse(dispenser.contains("source.getLevel()"))
         assertFalse(dispenser.contains("getEntity()"))
+        assertTrue(dispenser.contains("source.blockEntity().insertItem(stack.copy())"))
+        assertTrue(dispenser.contains("if (!source.blockEntity().insertItem(stack.copy()).isEmpty())"))
         assertTrue(dispenser.contains("import net.minecraft.core.Direction;"))
         assertTrue(dispenser.contains("new DefaultDispenseItemBehavior()"))
-        assertTrue(dispenser.contains("Projectile projectile = new DemoProjectile(level, pos);"))
+        assertTrue(dispenser.contains("protected ItemStack execute(BlockSource source, ItemStack stack)"))
+        assertTrue(dispenser.contains("Projectile projectile = this.getProjectile(level, pos, stack);"))
+        assertTrue(dispenser.contains("protected Projectile getProjectile(Level level, Position pos, ItemStack stack)"))
         assertTrue(dispenser.contains("projectile.shoot(direction.getStepX(), direction.getStepY(), direction.getStepZ(), 1.1F, 6.0F);"))
         assertTrue(!dispenser.contains("ProjectileDispenseBehavior"))
+        assertTrue(customProjectileBehavior.contains("extends DefaultDispenseItemBehavior"))
+        assertTrue(customProjectileBehavior.contains("this.spawn(projectile, 1.1F, this.getUncertainty());"))
+        assertFalse(customProjectileBehavior.contains("extends ProjectileDispenseBehavior"))
+        assertFalse(customProjectileBehavior.contains("@Override\n    protected Projectile getProjectile"))
+        assertFalse(customProjectileBehavior.contains("@Override\n    protected float getUncertainty"))
         assertTrue(arrow.contains("protected ItemStack getDefaultPickupItem()"))
         assertTrue(chestBoat.contains("private ResourceKey<LootTable> lootTable;"))
         assertTrue(chestBoat.contains("addChestVehicleSaveData(tag, this.registryAccess())"))

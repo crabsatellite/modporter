@@ -12571,43 +12571,148 @@ $indent}"""
                 .replace(result, "$variable.level()")
             result = Regex("""\b${Regex.escape(variable)}\s*\.\s*(?:<[^>]+>\s*)?getEntity\(\)""")
                 .replace(result, "$variable.blockEntity()")
+            result = Regex("""\b${Regex.escape(variable)}\.blockEntity\(\)\.addItem\(([^;\r\n]+)\)\s*<\s*0""")
+                .replace(result) { match -> "!$variable.blockEntity().insertItem(${match.groupValues[1].trim()}).isEmpty()" }
+            result = Regex("""\b${Regex.escape(variable)}\.blockEntity\(\)\.addItem\(""")
+                .replace(result, "$variable.blockEntity().insertItem(")
         }
         return result
     }
 
     private fun migrateLegacyProjectileDispenseBehaviorSource(source: String): String {
-        if (!source.contains("new ProjectileDispenseBehavior()")) return source
+        if (!source.contains("ProjectileDispenseBehavior")) return source
+        var result = source
         var changed = false
-        var result = Regex(
-            """(?s)new\s+ProjectileDispenseBehavior\s*\(\s*\)\s*\{\s*@Override\s*protected\s+Projectile\s+getProjectile\s*\(\s*Level\s+([A-Za-z_$][\w$]*)\s*,\s*Position\s+([A-Za-z_$][\w$]*)\s*,\s*ItemStack\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*return\s+(.+?)\s*;\s*\}\s*\}"""
-        ).replace(source) { match ->
+        var synthesizedExecute = false
+
+        var cursor = 0
+        val anonymousPattern = Regex("""new\s+ProjectileDispenseBehavior\s*\(\s*\)\s*\{""")
+        while (true) {
+            val match = anonymousPattern.find(result, cursor) ?: break
+            val openBrace = match.range.last
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace <= openBrace) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            val migratedBody = migrateLegacyProjectileDispenseBody(body)
+            synthesizedExecute = synthesizedExecute || migratedBody.contains("Projectile projectile = this.getProjectile(") && !body.contains("ItemStack execute(")
+            result = result.substring(0, match.range.first) +
+                "new DefaultDispenseItemBehavior() {" +
+                migratedBody +
+                result.substring(closeBrace)
+            cursor = match.range.first + "new DefaultDispenseItemBehavior() {".length + migratedBody.length + 1
             changed = true
-            val level = match.groupValues[1]
-            val position = match.groupValues[2]
-            val stack = match.groupValues[3]
-            val projectileExpression = match.groupValues[4].trim()
-            """new DefaultDispenseItemBehavior() {
-			@Override
-			protected ItemStack execute(BlockSource source, ItemStack $stack) {
-				Level $level = source.level();
-				Direction direction = source.state().getValue(DispenserBlock.FACING);
-				Position $position = DispenserBlock.getDispensePosition(source);
-				Projectile projectile = $projectileExpression;
-				projectile.shoot(direction.getStepX(), direction.getStepY(), direction.getStepZ(), 1.1F, 6.0F);
-				$level.addFreshEntity(projectile);
-				$stack.shrink(1);
-				return $stack;
-			}
-		}"""
         }
+
+        if (Regex("""extends\s+ProjectileDispenseBehavior\b""").containsMatchIn(result) &&
+            (result.contains("getProjectile(") || result.contains("getPower()") || result.contains("getUncertainty()"))
+        ) {
+            result = Regex("""extends\s+ProjectileDispenseBehavior\b""").replace(result, "extends DefaultDispenseItemBehavior")
+            val migrated = migrateLegacyProjectileDispenseBody(result)
+            synthesizedExecute = synthesizedExecute || migrated.contains("Projectile projectile = this.getProjectile(") && !result.contains("ItemStack execute(")
+            result = migrated
+            changed = true
+        }
+
         if (!changed) return source
-        result = addImportIfMissing(result, "net.minecraft.core.Direction")
+        if (synthesizedExecute) {
+            result = addImportIfMissing(result, "net.minecraft.core.Direction")
+            result = addImportIfMissing(result, "net.minecraft.core.dispenser.BlockSource")
+            result = addImportIfMissing(result, "net.minecraft.world.level.block.DispenserBlock")
+        }
         result = addImportIfMissing(result, "net.minecraft.core.dispenser.DefaultDispenseItemBehavior")
         val withoutProjectileImport = removeImport(result, "net.minecraft.core.dispenser.ProjectileDispenseBehavior")
         if (!withoutProjectileImport.contains("ProjectileDispenseBehavior")) {
             result = withoutProjectileImport
         }
         return result
+    }
+
+    private fun migrateLegacyProjectileDispenseBody(source: String): String {
+        val hasPowerMethod = legacyProjectileHookMethodExists(source, "getPower")
+        val hasUncertaintyMethod = legacyProjectileHookMethodExists(source, "getUncertainty")
+        val powerArgument = if (hasPowerMethod) "this.getPower()" else "1.1F"
+        val uncertaintyArgument = if (hasUncertaintyMethod) "this.getUncertainty()" else "6.0F"
+        var result = source
+        if (!hasPowerMethod) {
+            result = result.replace("this.getPower()", powerArgument)
+        }
+        if (!hasUncertaintyMethod) {
+            result = result.replace("this.getUncertainty()", uncertaintyArgument)
+        }
+        if (!legacyProjectileExecuteMethodExists(result)) {
+            legacyProjectileGetProjectileMethod(result)?.let { method ->
+                val execute = buildLegacyProjectileDispenseExecute(
+                    indent = leadingIndentAt(result, method.start),
+                    level = method.level,
+                    position = method.position,
+                    stack = method.stack,
+                    powerArgument = powerArgument,
+                    uncertaintyArgument = uncertaintyArgument
+                )
+                result = result.substring(0, method.start) + execute + "\n" + result.substring(method.start)
+            }
+        }
+        return removeOverrideFromLegacyProjectileHooks(result)
+    }
+
+    private data class LegacyProjectileMethod(val start: Int, val level: String, val position: String, val stack: String)
+
+    private fun legacyProjectileGetProjectileMethod(source: String): LegacyProjectileMethod? {
+        val pattern = Regex(
+            """(?m)(?:[ \t]*@[\w.]+(?:\([^)]*\))?\s*\r?\n)*[ \t]*(?:public|protected|private)\s+Projectile\s+getProjectile\s*\(\s*Level\s+([A-Za-z_$][\w$]*)\s*,\s*Position\s+([A-Za-z_$][\w$]*)\s*,\s*ItemStack\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
+        )
+        val match = pattern.find(source) ?: return null
+        return LegacyProjectileMethod(
+            start = match.range.first,
+            level = match.groupValues[1],
+            position = match.groupValues[2],
+            stack = match.groupValues[3]
+        )
+    }
+
+    private fun legacyProjectileExecuteMethodExists(source: String): Boolean =
+        Regex("""\bItemStack\s+execute\s*\(\s*BlockSource\s+[A-Za-z_$][\w$]*\s*,\s*ItemStack\s+[A-Za-z_$][\w$]*\s*\)""")
+            .containsMatchIn(source)
+
+    private fun legacyProjectileHookMethodExists(source: String, methodName: String): Boolean =
+        Regex("""\b(?:public|protected|private)\s+(?:float|Projectile)\s+${Regex.escape(methodName)}\s*\(""")
+            .containsMatchIn(source)
+
+    private fun buildLegacyProjectileDispenseExecute(
+        indent: String,
+        level: String,
+        position: String,
+        stack: String,
+        powerArgument: String,
+        uncertaintyArgument: String
+    ): String {
+        val inner = "$indent    "
+        return """
+${indent}@Override
+${indent}protected ItemStack execute(BlockSource source, ItemStack $stack) {
+${inner}Level $level = source.level();
+${inner}Direction direction = source.state().getValue(DispenserBlock.FACING);
+${inner}Position $position = DispenserBlock.getDispensePosition(source);
+${inner}Projectile projectile = this.getProjectile($level, $position, $stack);
+${inner}projectile.shoot(direction.getStepX(), direction.getStepY(), direction.getStepZ(), $powerArgument, $uncertaintyArgument);
+${inner}$level.addFreshEntity(projectile);
+${inner}$stack.shrink(1);
+${inner}return $stack;
+${indent}}
+""".trim('\n')
+    }
+
+    private fun removeOverrideFromLegacyProjectileHooks(source: String): String =
+        Regex(
+            """(?m)^[ \t]*@Override\s*\r?\n(?=[ \t]*(?:@[\w.]+(?:\([^)]*\))?\s*\r?\n)*[ \t]*(?:public|protected|private)\s+(?:float|Projectile)\s+(?:getProjectile|getPower|getUncertainty)\s*\()"""
+        ).replace(source, "")
+
+    private fun leadingIndentAt(source: String, offset: Int): String {
+        val lineStart = source.lastIndexOf('\n', (offset - 1).coerceAtLeast(0)).let { if (it < 0) 0 else it + 1 }
+        return source.substring(lineStart, offset).takeWhile { it == ' ' || it == '\t' }
     }
 
     private fun migrateLegacyAbstractArrowPickupItemSource(source: String): String {
