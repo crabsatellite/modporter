@@ -53,6 +53,19 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `text replacements do not rewrite untyped getTag calls`() {
+        val db = MappingDatabase.loadDefault()
+        val offenders = db.getTextReplacements()
+            .filter { rule -> rule.pattern == ".getTag()" || rule.pattern.contains("""\.getTag\(\)""") }
+            .map { it.id }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Bare getTag() replacements are not type-safe; use structural ItemStack rules instead: $offenders"
+        )
+    }
+
+    @Test
     fun `no text replacement pattern equals its replacement`() {
         val db = MappingDatabase.loadDefault()
         db.getTextReplacements().forEach { rule ->

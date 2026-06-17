@@ -6634,8 +6634,24 @@ public class AbstractRecipeSerializer<T extends AbstractRecipe> implements Recip
             .filter { !srcDir.relativize(it).toString().replace('\\', '/').startsWith("net/neoforged/neoforge/") }
             .forEach { javaFile ->
                 val text = javaFile.readText()
-                val relocatedLazyOptional = relocateLazyOptionalImports(text, compatPackage)
-                if (relocatedLazyOptional != text) {
+                val staleLazyOptionalRemoved = removeStaleLazyOptionalImports(text)
+                if (staleLazyOptionalRemoved != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Remove stale LazyOptional compatibility import after structural capability migration",
+                        before = "unused LazyOptional import",
+                        after = "(removed)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-remove-stale-lazyoptional-import"
+                    ))
+                    if (!dryRun) {
+                        javaFile.writeText(staleLazyOptionalRemoved)
+                    }
+                }
+                val textForCapabilities = staleLazyOptionalRemoved
+                val relocatedLazyOptionalSource = relocateLazyOptionalImports(textForCapabilities, compatPackage)
+                if (relocatedLazyOptionalSource != textForCapabilities) {
                     needsLazyOptional = true
                     changes.add(Change(
                         file = javaFile,
@@ -6647,12 +6663,12 @@ public class AbstractRecipeSerializer<T extends AbstractRecipe> implements Recip
                         ruleId = "build-relocate-lazyoptional-import"
                     ))
                     if (!dryRun) {
-                        javaFile.writeText(relocatedLazyOptional)
+                        javaFile.writeText(relocatedLazyOptionalSource)
                     }
-                } else if (text.contains("LazyOptional")) {
+                } else if (sourceWithoutJavaImports(textForCapabilities).contains("LazyOptional")) {
                     needsLazyOptional = true
                 }
-                val capabilitySource = if (relocatedLazyOptional != text) relocatedLazyOptional else text
+                val capabilitySource = if (relocatedLazyOptionalSource != textForCapabilities) relocatedLazyOptionalSource else textForCapabilities
                 val relocatedCapability = relocateCapabilityImports(capabilitySource, compatPackage)
                 if (relocatedCapability != capabilitySource) {
                     needsCapability = true
@@ -6849,6 +6865,17 @@ public class AbstractRecipeSerializer<T extends AbstractRecipe> implements Recip
             .replace("net.minecraftforge.common.util.LazyOptional", "$compatPackage.LazyOptional")
             .replace("net.neoforged.neoforge.common.util.LazyOptional", "$compatPackage.LazyOptional")
             .replace("com.modporter.compat.LazyOptional", "$compatPackage.LazyOptional")
+
+    private fun removeStaleLazyOptionalImports(text: String): String {
+        if (!text.contains("LazyOptional")) return text
+        val withoutImports = sourceWithoutJavaImports(text)
+        if (withoutImports.contains("LazyOptional")) return text
+        return Regex("""(?m)^[ \t]*import\s+(?:[\w.]+\.)?LazyOptional\s*;\s*\r?\n""")
+            .replace(text, "")
+    }
+
+    private fun sourceWithoutJavaImports(text: String): String =
+        Regex("""(?m)^[ \t]*import\s+[^\r\n]+;\s*\r?\n""").replace(text, "")
 
     private fun relocateCapabilityImports(text: String, compatPackage: String): String =
         text

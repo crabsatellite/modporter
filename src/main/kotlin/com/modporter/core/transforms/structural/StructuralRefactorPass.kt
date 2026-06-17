@@ -5602,7 +5602,8 @@ public class DelegatingPackResources extends AbstractPackResources {
 
     private data class BlockEntityCapabilityProviderSpec(
         val capabilityExpression: String,
-        val providerExpression: String
+        val providerExpression: String,
+        val consumedLazyOptionalFields: Set<String> = emptySet()
     )
 
     private data class JavaIfBlock(val condition: String, val body: String)
@@ -5633,18 +5634,18 @@ public class DelegatingPackResources extends AbstractPackResources {
                 ?.groupValues
                 ?.get(1)
                 ?: continue
-            val registryRef = Regex(
-                """super\s*\(\s*($id(?:\.$id)*)\.([A-Z0-9_]+)\.get\(\)"""
-            ).find(original) ?: continue
-            val registryOwner = registryRef.groupValues[1]
-            val registryField = registryRef.groupValues[2]
+            val registryRef = blockEntityRegistryRefFromConstructors(original) ?: continue
+            val registryOwner = registryRef.substringBeforeLast('.')
+            val registryField = registryRef.substringAfterLast('.')
             val getCapabilityMethod = javaDeclaredMethodText(original, "getCapability") ?: continue
-            val providers = extractBlockEntityLegacyCapabilityProviders(getCapabilityMethod)
+            val providers = extractBlockEntityLegacyCapabilityProviders(getCapabilityMethod, original)
             if (providers.isEmpty()) continue
 
             var modified = original
+            val consumedFields = providers.flatMap { it.consumedLazyOptionalFields }.toSet()
             modified = removeMethodByName(modified, "getCapability")
             modified = migrateLegacyCapabilityReviveCapsSource(modified)
+            modified = removeLegacyCapabilityCacheState(modified, consumedFields)
             modified = cleanupLegacyCapabilityOverrideImports(modified)
             modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
 
@@ -5719,18 +5720,45 @@ public class DelegatingPackResources extends AbstractPackResources {
         return changes
     }
 
-    private fun extractBlockEntityLegacyCapabilityProviders(methodText: String): List<BlockEntityCapabilityProviderSpec> {
-        val removedGuard = methodText.contains("!this.isRemoved()") || methodText.contains("!isRemoved()")
+    private fun blockEntityRegistryRefFromConstructors(source: String): String? {
+        val id = """[A-Za-z_$][\w$]*"""
+        val registryReference = """($id(?:\.$id)*)\.([A-Z0-9_]+)\.get\(\)"""
+        Regex("""super\s*\(\s*$registryReference""")
+            .find(source)
+            ?.let { return "${it.groupValues[1]}.${it.groupValues[2]}" }
+        Regex("""\bthis\s*\(\s*$registryReference""")
+            .find(source)
+            ?.let { return "${it.groupValues[1]}.${it.groupValues[2]}" }
+        return null
+    }
+
+    private fun extractBlockEntityLegacyCapabilityProviders(
+        methodText: String,
+        source: String
+    ): List<BlockEntityCapabilityProviderSpec> {
+        val removedGuard = Regex("""!\s*(?:this\.)?isRemoved\s*\(\s*\)""").containsMatchIn(methodText) ||
+            Regex("""!\s*(?:this\.)?remove\b""").containsMatchIn(methodText)
+        val sideParameter = getCapabilityDirectionParameterName(methodText)
         return listOf("Capabilities.ItemHandler.BLOCK", "Capabilities.FluidHandler.BLOCK")
             .mapNotNull { capability ->
                 val block = findIfBlockContainingToken(methodText, capability) ?: return@mapNotNull null
-                val provider = extractBlockEntityCapabilityProviderExpression(block.body) ?: return@mapNotNull null
-                val guardedProvider = if (removedGuard || block.condition.contains("!this.isRemoved()") || block.condition.contains("!isRemoved()")) {
-                    "blockEntity.isRemoved() ? null : $provider"
+                val provider = extractBlockEntityCapabilityProviderExpression(
+                    branchBody = block.body,
+                    source = source,
+                    sideParameter = sideParameter
+                ) ?: return@mapNotNull null
+                val providerGuard = blockEntityCapabilityProviderGuard(
+                    condition = block.condition,
+                    capabilityExpression = capability,
+                    sideParameter = sideParameter
+                )
+                val guards = (if (removedGuard) listOf("!blockEntity.isRemoved()") else emptyList()) + providerGuard
+                val guardedProvider = if (guards.isNotEmpty()) {
+                    "(${guards.distinct().joinToString(" && ")}) ? ${provider.expression} : null"
                 } else {
-                    provider
+                    provider.expression
                 }
-                BlockEntityCapabilityProviderSpec(capability, guardedProvider)
+                BlockEntityCapabilityProviderSpec(capability, guardedProvider, provider.consumedLazyOptionalFields)
             }
     }
 
@@ -5768,38 +5796,237 @@ public class DelegatingPackResources extends AbstractPackResources {
         return null
     }
 
-    private fun extractBlockEntityCapabilityProviderExpression(branchBody: String): String? {
+    private data class LegacyCapabilityProvider(
+        val expression: String,
+        val consumedLazyOptionalFields: Set<String> = emptySet()
+    )
+
+    private fun getCapabilityDirectionParameterName(methodText: String): String {
+        val signatureEnd = methodText.indexOf('{').takeIf { it >= 0 } ?: return "side"
+        val signature = methodText.substring(0, signatureEnd)
+        val paramsStart = signature.indexOf('(')
+        val paramsEnd = signature.lastIndexOf(')')
+        if (paramsStart < 0 || paramsEnd <= paramsStart) return "side"
+        val params = splitTopLevelJavaArgs(signature.substring(paramsStart + 1, paramsEnd))
+        return params.asReversed().firstNotNullOfOrNull { param ->
+            Regex("""\bDirection\s+([A-Za-z_$][\w$]*)\b""").find(param)?.groupValues?.get(1)
+        } ?: "side"
+    }
+
+    private fun blockEntityCapabilityProviderGuard(
+        condition: String,
+        capabilityExpression: String,
+        sideParameter: String
+    ): List<String> {
+        return condition.split("&&")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .filterNot { part ->
+                part.contains(capabilityExpression) ||
+                    Regex("""\b(?:cap|capability)\b""").containsMatchIn(part) &&
+                    part.contains("Capabilities.")
+            }
+            .mapNotNull { part ->
+                var migrated = part
+                    .replace(Regex("""!\s*this\.remove\b"""), "!blockEntity.isRemoved()")
+                    .replace(Regex("""!\s*remove\b"""), "!blockEntity.isRemoved()")
+                    .replace(Regex("""this\.remove\b"""), "blockEntity.isRemoved()")
+                    .replace(Regex("""\bthis\.isRemoved\s*\(\s*\)"""), "blockEntity.isRemoved()")
+                if (sideParameter != "side") {
+                    migrated = Regex("""\b${Regex.escape(sideParameter)}\b""").replace(migrated, "side")
+                }
+                migrated = migrated.replace("this.", "blockEntity.")
+                if (migrated.contains("Capabilities.")) null else migrated
+            }
+    }
+
+    private fun extractBlockEntityCapabilityProviderExpression(
+        branchBody: String,
+        source: String,
+        sideParameter: String
+    ): LegacyCapabilityProvider? {
+        parseLegacyCapabilityReturnChain(branchBody, source, sideParameter)
+            ?.let { return it }
+
         val sideBranch = Regex(
             """(?s)if\s*\((.*?)\)\s*\{\s*return\s+([^;]+);\s*}\s*else\s*\{\s*return\s+([^;]+);\s*}"""
         ).find(branchBody)
         if (sideBranch != null) {
-            val condition = sideBranch.groupValues[1].trim().replace("this.", "blockEntity.")
-            val whenTrue = legacyCapabilityReturnToProvider(sideBranch.groupValues[2]) ?: return null
-            val whenFalse = legacyCapabilityReturnToProvider(sideBranch.groupValues[3]) ?: return null
-            return "($condition ? $whenTrue : $whenFalse)"
+            var condition = sideBranch.groupValues[1].trim().replace("this.", "blockEntity.")
+            if (sideParameter != "side") {
+                condition = Regex("""\b${Regex.escape(sideParameter)}\b""").replace(condition, "side")
+            }
+            val whenTrue = legacyCapabilityReturnToProvider(sideBranch.groupValues[2], branchBody, source) ?: return null
+            val whenFalse = legacyCapabilityReturnToProvider(sideBranch.groupValues[3], branchBody, source) ?: return null
+            return LegacyCapabilityProvider(
+                expression = "($condition ? ${whenTrue.expression} : ${whenFalse.expression})",
+                consumedLazyOptionalFields = whenTrue.consumedLazyOptionalFields + whenFalse.consumedLazyOptionalFields
+            )
         }
 
         val directReturn = Regex("""return\s+([^;]+);""").find(branchBody) ?: return null
-        return legacyCapabilityReturnToProvider(directReturn.groupValues[1])
+        return legacyCapabilityReturnToProvider(directReturn.groupValues[1], branchBody, source)
     }
 
-    private fun legacyCapabilityReturnToProvider(returnExpression: String): String? {
+    private fun parseLegacyCapabilityReturnChain(
+        branchBody: String,
+        source: String,
+        sideParameter: String
+    ): LegacyCapabilityProvider? {
+        val returns = Regex("""return\s+([^;]+);""").findAll(branchBody).toList()
+        if (returns.size < 2) return null
+        val firstIf = Regex("""(?s)^\s*if\s*\((.*?)\)\s*\{""").find(branchBody) ?: return null
+        val openBrace = branchBody.indexOf('{', firstIf.range.last)
+        if (openBrace < 0) return null
+        val closeBrace = findMatchingBrace(branchBody, openBrace)
+        if (closeBrace < 0) return null
+        val condition = firstIf.groupValues[1].trim()
+        val ifBody = branchBody.substring(openBrace + 1, closeBrace)
+        val trueReturn = Regex("""return\s+([^;]+);""").find(ifBody)?.groupValues?.get(1) ?: return null
+        val elseIndex = branchBody.indexOf("else", closeBrace + 1)
+        if (elseIndex < 0) return null
+        val elseTail = branchBody.substring(elseIndex + "else".length).trimStart()
+        val falseProvider = if (elseTail.startsWith("if")) {
+            val nested = parseLegacyCapabilityReturnChain(elseTail.removePrefix("if").let { "if$it" }, source, sideParameter)
+                ?: return null
+            nested
+        } else {
+            val elseOpen = branchBody.indexOf('{', elseIndex)
+            if (elseOpen < 0) return null
+            val elseClose = findMatchingBrace(branchBody, elseOpen)
+            if (elseClose < 0) return null
+            val elseBody = branchBody.substring(elseOpen + 1, elseClose)
+            val falseReturn = Regex("""return\s+([^;]+);""").find(elseBody)?.groupValues?.get(1) ?: return null
+            legacyCapabilityReturnToProvider(falseReturn, branchBody, source) ?: return null
+        }
+        val trueProvider = legacyCapabilityReturnToProvider(trueReturn, branchBody, source) ?: return null
+        var migratedCondition = condition.replace("this.", "blockEntity.")
+        if (sideParameter != "side") {
+            migratedCondition = Regex("""\b${Regex.escape(sideParameter)}\b""").replace(migratedCondition, "side")
+        }
+        return LegacyCapabilityProvider(
+            expression = "($migratedCondition ? ${trueProvider.expression} : ${falseProvider.expression})",
+            consumedLazyOptionalFields = trueProvider.consumedLazyOptionalFields + falseProvider.consumedLazyOptionalFields
+        )
+    }
+
+    private fun legacyCapabilityReturnToProvider(
+        returnExpression: String,
+        branchBody: String,
+        source: String
+    ): LegacyCapabilityProvider? {
         val expression = returnExpression.trim()
-        if (expression == "LazyOptional.empty()" || expression.endsWith(".empty()")) return "null"
+        if (expression == "LazyOptional.empty()" || expression.endsWith(".empty()")) return LegacyCapabilityProvider("null")
         Regex("""^(?:this\.)?([A-Za-z_$][\w$]*)\.cast\(\)$""")
             .find(expression)
-            ?.let { return "blockEntity.${it.groupValues[1]}.orElse(null)" }
+            ?.let { match ->
+                val field = match.groupValues[1]
+                val directProvider = legacyLazyOptionalFieldProvider(field, null, branchBody, source)
+                if (directProvider != null) return directProvider
+                return LegacyCapabilityProvider("blockEntity.$field.orElse(null)", setOf(field))
+            }
+        Regex("""^(?:this\.)?([A-Za-z_$][\w$]*)\s*\[\s*(\d+)\s*]\.cast\(\)$""")
+            .find(expression)
+            ?.let { match ->
+                val field = match.groupValues[1]
+                val index = match.groupValues[2].toIntOrNull()
+                val indexedProvider = legacyLazyOptionalFieldProvider(field, index, branchBody, source)
+                if (indexedProvider != null) return indexedProvider
+                return LegacyCapabilityProvider("blockEntity.$field[$index].orElse(null)", setOf(field))
+            }
         Regex("""^(?:this\.)?([A-Za-z_$][\w$]*)\.orElse\(\s*null\s*\)$""")
             .find(expression)
-            ?.let { return "blockEntity.${it.groupValues[1]}.orElse(null)" }
+            ?.let { match ->
+                val field = match.groupValues[1]
+                val directProvider = legacyLazyOptionalFieldProvider(field, null, branchBody, source)
+                if (directProvider != null) return directProvider
+                return LegacyCapabilityProvider("blockEntity.$field.orElse(null)", setOf(field))
+            }
         Regex("""^LazyOptional\.of\(\s*\(\)\s*->\s*(.*?)\s*\)\.cast\(\)$""")
             .find(expression)
-            ?.let { return it.groupValues[1].trim().replace("this.", "blockEntity.") }
+            ?.let { return LegacyCapabilityProvider(it.groupValues[1].trim().replace("this.", "blockEntity.")) }
         return if (expression.startsWith("this.")) {
-            expression.replaceFirst("this.", "blockEntity.")
+            LegacyCapabilityProvider(expression.replaceFirst("this.", "blockEntity."))
         } else {
             null
         }
+    }
+
+    private fun legacyLazyOptionalFieldProvider(
+        fieldName: String,
+        index: Int?,
+        branchBody: String,
+        source: String
+    ): LegacyCapabilityProvider? {
+        val assignmentPattern = if (index == null) {
+            Regex("""(?:this\.)?${Regex.escape(fieldName)}\s*=\s*LazyOptional\.of\(\s*(.*?)\s*\)\s*;""", RegexOption.DOT_MATCHES_ALL)
+        } else {
+            null
+        }
+        val initializer = assignmentPattern
+            ?.find(branchBody)
+            ?.groupValues
+            ?.get(1)
+            ?: assignmentPattern
+                ?.find(source)
+                ?.groupValues
+                ?.get(1)
+        if (initializer != null) {
+            legacyLazyOptionalInitializerToProvider(initializer)
+                ?.let { return LegacyCapabilityProvider(it, setOf(fieldName)) }
+        }
+
+        if (index != null) {
+            val sidedWrapper = sidedInvWrapperProviderForIndex(fieldName, index, source)
+            if (sidedWrapper != null) {
+                return LegacyCapabilityProvider(sidedWrapper, setOf(fieldName))
+            }
+        }
+
+        Regex(
+            """(?:private|protected|public)\s+(?:final\s+)?LazyOptional<[^;]+>\s+${Regex.escape(fieldName)}\s*=\s*LazyOptional\.of\(\s*(.*?)\s*\)\s*;""",
+            RegexOption.DOT_MATCHES_ALL
+        ).find(source)?.groupValues?.get(1)?.let { initializerExpression ->
+            legacyLazyOptionalInitializerToProvider(initializerExpression)
+                ?.let { return LegacyCapabilityProvider(it, setOf(fieldName)) }
+        }
+        return null
+    }
+
+    private fun legacyLazyOptionalInitializerToProvider(initializer: String): String? {
+        val trimmed = initializer.trim()
+        Regex("""^this::([A-Za-z_$][\w$]*)$""")
+            .find(trimmed)
+            ?.let { return "blockEntity.${it.groupValues[1]}()" }
+        Regex("""^\(\s*\)\s*->\s*(.*?)$""", RegexOption.DOT_MATCHES_ALL)
+            .find(trimmed)
+            ?.let { match ->
+                return legacyInstanceProviderExpression(match.groupValues[1].trim())
+            }
+        return null
+    }
+
+    private fun legacyInstanceProviderExpression(expression: String): String {
+        val migrated = expression.replace("this.", "blockEntity.")
+        if (migrated.contains("blockEntity.")) return migrated
+        if (Regex("""^[A-Za-z_$][\w$]*\s*\([^;{}]*\)$""").matches(migrated)) {
+            return "blockEntity.$migrated"
+        }
+        if (Regex("""^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$""").matches(migrated) &&
+            !migrated.substringBefore('.').first().isUpperCase()) {
+            return "blockEntity.$migrated"
+        }
+        return migrated
+    }
+
+    private fun sidedInvWrapperProviderForIndex(fieldName: String, index: Int, source: String): String? {
+        val initializer = Regex(
+            """${Regex.escape(fieldName)}\s*=\s*SidedInvWrapper\.create\(\s*this\s*,\s*([^;]+?)\s*\)""",
+            RegexOption.DOT_MATCHES_ALL
+        ).find(source)?.groupValues?.get(1) ?: return null
+        val sides = splitTopLevelJavaArgs(initializer).map { it.trim() }
+        val side = sides.getOrNull(index) ?: return null
+        return "new SidedInvWrapper(blockEntity, $side)"
     }
 
     private fun renderBlockEntityCapabilityRegistrationMethod(
@@ -5839,6 +6066,11 @@ $registrations
             result = removeImport(result, "com.modporter.compat.Capability")
             result = Regex("""(?m)^[ \t]*import\s+[\w.]+\.compat\.Capability;\s*\r?\n""").replace(result, "")
         }
+        val withoutImports = Regex("""(?m)^[ \t]*import\s+[^\r\n]+;\s*\r?\n""").replace(result, "")
+        if (!withoutImports.contains("LazyOptional")) {
+            result = removeImport(result, "com.modporter.compat.LazyOptional")
+            result = Regex("""(?m)^[ \t]*import\s+[\w.]+\.compat\.LazyOptional;\s*\r?\n""").replace(result, "")
+        }
         if (!result.contains("@Nullable")) {
             result = removeImport(result, "org.jetbrains.annotations.Nullable")
             result = removeImport(result, "javax.annotation.Nullable")
@@ -5850,6 +6082,117 @@ $registrations
             result = removeImport(result, "org.jetbrains.annotations.NotNull")
         }
         return result
+    }
+
+    private fun removeLegacyCapabilityCacheState(source: String, fields: Set<String>): String {
+        if (fields.isEmpty()) return source
+        var result = source
+        result = removeLegacyCapabilityCacheOnlyMethods(result, fields)
+        result = removeLegacyCapabilityCacheBlocks(result, fields)
+        for (field in fields) {
+            result = removeLazyOptionalFieldDeclaration(result, field)
+        }
+        return result
+    }
+
+    private fun removeLegacyCapabilityCacheOnlyMethods(source: String, fields: Set<String>): String {
+        var result = source
+        val methodNames = listOf("invalidateCaps", "invalidateCapabilities", "reviveCaps", "clearRemoved")
+        var changed: Boolean
+        do {
+            changed = false
+            for (methodName in methodNames) {
+                val methodText = javaDeclaredMethodText(result, methodName) ?: continue
+                if (fields.none { methodText.contains(it) }) continue
+                if (!isLegacyCapabilityCacheOnlyMethod(methodText, fields)) continue
+                result = result.replace(methodText, "")
+                changed = true
+                break
+            }
+        } while (changed)
+        return result
+    }
+
+    private fun isLegacyCapabilityCacheOnlyMethod(methodText: String, fields: Set<String>): Boolean {
+        val openBrace = methodText.indexOf('{')
+        val closeBrace = methodText.lastIndexOf('}')
+        if (openBrace < 0 || closeBrace <= openBrace) return false
+        var body = methodText.substring(openBrace + 1, closeBrace)
+        body = removeLegacyCapabilityCacheBlocks(body, fields)
+        body = Regex("""(?m)^[ \t]*super\.(?:invalidateCaps|invalidateCapabilities|reviveCaps|clearRemoved)\s*\(\s*\)\s*;\s*\r?$""")
+            .replace(body, "")
+        for (field in fields) {
+            val fieldRef = Regex.escape(field)
+            body = Regex("""(?m)^[ \t]*(?:this\.)?$fieldRef\s*=\s*(?:LazyOptional\.of|SidedInvWrapper\.create)\([^;]*;\s*\r?$""")
+                .replace(body, "")
+            body = Regex("""(?m)^[ \t]*(?:this\.)?$fieldRef\s*=\s*null\s*;\s*\r?$""")
+                .replace(body, "")
+        }
+        body = Regex("""(?m)^[ \t]*LazyOptional<[^;]+>\s+[A-Za-z_$][\w$]*\s*:\s*[^;]+;\s*\r?$""").replace(body, "")
+        return body.isBlank()
+    }
+
+    private fun removeLegacyCapabilityCacheBlocks(source: String, fields: Set<String>): String {
+        var result = source
+        var searchStart = 0
+        while (searchStart < result.length) {
+            val match = Regex("""\b(?:if|for)\s*\(""").find(result, searchStart) ?: break
+            val openParen = result.indexOf('(', match.range.first)
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                searchStart = match.range.last + 1
+                continue
+            }
+            val openBrace = result.indexOf('{', closeParen)
+            if (openBrace < 0) {
+                searchStart = closeParen + 1
+                continue
+            }
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace < 0) {
+                searchStart = openBrace + 1
+                continue
+            }
+            val blockText = result.substring(match.range.first, closeBrace + 1)
+            val referencesField = fields.any { Regex("""\b${Regex.escape(it)}\b""").containsMatchIn(blockText) }
+            val cacheOnly = referencesField &&
+                (blockText.contains("LazyOptional") ||
+                    blockText.contains(".invalidate()") ||
+                    blockText.contains("SidedInvWrapper.create") ||
+                    blockText.contains("= null"))
+            if (!cacheOnly) {
+                searchStart = closeBrace + 1
+                continue
+            }
+            val lineStart = result.lastIndexOf('\n', match.range.first).let { if (it < 0) 0 else it + 1 }
+            var end = closeBrace + 1
+            if (end < result.length && result[end] == '\r') end++
+            if (end < result.length && result[end] == '\n') end++
+            result = result.removeRange(lineStart, end)
+            searchStart = lineStart
+        }
+        return result
+    }
+
+    private fun removeLazyOptionalFieldDeclaration(source: String, fieldName: String): String {
+        val lines = source.splitToSequence("\n").toMutableList()
+        var index = 0
+        while (index < lines.size) {
+            val line = lines[index]
+            if (!line.contains("LazyOptional") ||
+                !Regex("""\b${Regex.escape(fieldName)}\b""").containsMatchIn(line) ||
+                !line.trimEnd().endsWith(";")) {
+                index++
+                continue
+            }
+            var start = index
+            while (start > 0 && Regex("""^[ \t]*@[A-Za-z0-9_.]+(?:\([^)]*\))?[ \t]*\r?$""").matches(lines[start - 1])) {
+                start--
+            }
+            repeat(index - start + 1) { lines.removeAt(start) }
+            index = start
+        }
+        return lines.joinToString("\n")
     }
 
     private fun migrateDirtinessCapabilityToAttachment(projectDir: Path, dryRun: Boolean): List<Change> {
@@ -9471,6 +9814,7 @@ ${entries.joinToString(",\n")}
         result = migrateSkullOwnerResolvableProfileSource(result)
         result = migrateResolvableProfileGameProfileBoundaries(result)
         result = migrateLegacySkullOwnerVerifyComponentsSource(result)
+        result = migrateLegacyItemStackTagReads(result)
         result = migrateLegacyItemStackTagWrites(result)
         result = migrateLegacyItemEnchantmentComponents(result)
         result = migrateLegacyItemMaxDamageCalls(result)
@@ -13083,7 +13427,8 @@ ${indent}}"""
         if (!source.contains(".getRecipeFor(")) return source
 
         var changedInput = false
-        var result = migrateMethodCalls(source, ".getRecipeFor") { args ->
+        var result = migrateCachedCheckSingleStackRecipeHolderBoundaries(source)
+        result = migrateMethodCalls(result, ".getRecipeFor") { args ->
             if (args.size >= 3) {
                 val recipeType = args[0].trim()
                 val migratedInput = when {
@@ -13105,6 +13450,20 @@ ${indent}}"""
                 listOf(args[0], migratedInput) + args.drop(2)
             } else {
                 args
+            }
+        }
+        result = rewriteJavaInvocationArguments(result, "getRecipeFor") { args ->
+            if (args.size == 2 && result.contains("RecipeManager.CachedCheck<SingleRecipeInput,")) {
+                val input = args[0].trim()
+                if (!input.startsWith("new SingleRecipeInput(") &&
+                    Regex("""^(?:this|[A-Za-z_$][\w$]*)$""").matches(input)) {
+                    changedInput = true
+                    listOf("new SingleRecipeInput($input.getItem(0))", args[1])
+                } else {
+                    null
+                }
+            } else {
+                null
             }
         }
 
@@ -13133,6 +13492,39 @@ ${indent}}"""
             needsRecipeHolder = true
             "${match.groupValues[1]}.map(RecipeHolder::value).map(AbstractCookingRecipe::getCookingTime)"
         }
+        Regex("""RecipeManager\.CachedCheck\s*<\s*SingleRecipeInput\s*,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>""")
+            .findAll(result)
+            .map { it.groupValues[1].substringAfterLast('.') }
+            .toSet()
+            .forEach { recipeType ->
+                result = Regex(
+                    """(?s)(\.getRecipeFor\([^;\r\n]*?\))\.map\(${Regex.escape(recipeType)}::([A-Za-z_$][\w$]*)\)"""
+                ).replace(result) { match ->
+                    needsRecipeHolder = true
+                    "${match.groupValues[1]}.map(RecipeHolder::value).map($recipeType::${match.groupValues[2]})"
+                }
+                result = Regex(
+                    """RecipeHolder<${Regex.escape(recipeType)}>\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\r\n]*?\.getRecipeFor\([^;\r\n]*?\))\.map\(RecipeHolder::value\)\.orElse\(null\)\s*;"""
+                ).replace(result) { match ->
+                    needsRecipeHolder = true
+                    "RecipeHolder<$recipeType> ${match.groupValues[1]} = ${match.groupValues[2]}.orElse(null);"
+                }
+                val holderVariables = Regex("""RecipeHolder\s*<\s*${Regex.escape(recipeType)}\s*>\s+([A-Za-z_$][\w$]*)\b""")
+                    .findAll(result)
+                    .map { it.groupValues[1] }
+                    .toSet()
+                for (holderVar in holderVariables) {
+                    result = Regex(
+                        """\b${Regex.escape(holderVar)}\s*=\s*([^;\r\n]*?\.getRecipeFor\([^;\r\n]*?\))\.map\(RecipeHolder::value\)\.orElse\(null\)\s*;"""
+                    ).replace(result) { match ->
+                        "$holderVar = ${match.groupValues[1]}.orElse(null);"
+                    }
+                    result = Regex("""\b${Regex.escape(holderVar)}\.getId\s*\(\s*\)""")
+                        .replace(result, "$holderVar.id()")
+                    result = Regex("""\b${Regex.escape(holderVar)}\.(get[A-Z][A-Za-z0-9_$]*)\s*\(""")
+                        .replace(result, "$holderVar.value().$1(")
+                }
+            }
         result = Regex("""\.map\(\s*([A-Za-z_$][\w$]*)\s*->\s*\1\.getResultItem\(""")
             .replace(result) { match ->
                 if (result.contains(".getRecipeFor(")) {
@@ -13144,6 +13536,61 @@ ${indent}}"""
 
         if (needsRecipeHolder) {
             result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeHolder")
+        }
+        if (result.contains("RecipeHolder<")) {
+            result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeHolder")
+        }
+        return result
+    }
+
+    private fun migrateCachedCheckSingleStackRecipeHolderBoundaries(source: String): String {
+        if (!source.contains("RecipeManager.CachedCheck<Container,")) return source
+        val recipeTypes = Regex("""RecipeManager\.CachedCheck\s*<\s*Container\s*,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>""")
+            .findAll(source)
+            .map { it.groupValues[1].substringAfterLast('.') }
+            .toSet()
+        if (recipeTypes.isEmpty()) return source
+
+        var result = source
+        var changed = false
+        for (recipeType in recipeTypes) {
+            result = Regex("""RecipeManager\.CachedCheck\s*<\s*Container\s*,\s*${Regex.escape(recipeType)}\s*>""")
+                .replace(result) {
+                    changed = true
+                    "RecipeManager.CachedCheck<SingleRecipeInput, $recipeType>"
+                }
+            result = Regex("""((?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*)*)\b${Regex.escape(recipeType)}\s+([A-Za-z_$][\w$]*)\b""")
+                .replace(result) { match ->
+                    val variable = match.groupValues[2]
+                    if (variable.first().isUpperCase()) {
+                        match.value
+                    } else {
+                        changed = true
+                        "${match.groupValues[1]}RecipeHolder<$recipeType> $variable"
+                    }
+                }
+            result = Regex("""setRecipeUsed\s*\(\s*((?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*)*)Recipe<\?>\s+([A-Za-z_$][\w$]*)\s*\)""")
+                .replace(result) { match ->
+                    changed = true
+                    "setRecipeUsed(${match.groupValues[1]}RecipeHolder<?> ${match.groupValues[2]})"
+                }
+            result = Regex("""\bRecipe<\?>\s+getRecipeUsed\s*\(""")
+                .replace(result) {
+                    changed = true
+                    "RecipeHolder<?> getRecipeUsed("
+                }
+        }
+        if (changed) {
+            result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeHolder")
+            result = addImportIfMissing(result, "net.minecraft.world.item.crafting.SingleRecipeInput")
+            val withoutContainerImport = removeImport(result, "net.minecraft.world.Container")
+            if (!Regex("""\bContainer\b""").containsMatchIn(withoutContainerImport)) {
+                result = withoutContainerImport
+            }
+            val withoutRecipeImport = removeImport(result, "net.minecraft.world.item.crafting.Recipe")
+            if (!Regex("""\bRecipe\s*<""").containsMatchIn(withoutRecipeImport)) {
+                result = withoutRecipeImport
+            }
         }
         return result
     }
@@ -13482,6 +13929,28 @@ ${indent}}
                 val stack = match.groupValues[2]
                 val tag = match.groupValues[3].trim()
                 "$indent$stack.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.of($tag));"
+        }
+        return result
+    }
+
+    private fun migrateLegacyItemStackTagReads(source: String): String {
+        if (!source.contains(".getTag()") &&
+            !source.contains(".getOrCreateTag()") &&
+            !source.contains(".hasTag()")) {
+            return source
+        }
+        val itemStackVariables = Regex("""\b(?:net\.minecraft\.world\.item\.)?ItemStack\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (itemStackVariables.isEmpty()) return source
+        var result = source
+        for (stack in itemStackVariables) {
+            val receiver = Regex.escape(stack)
+            result = Regex("""\b$receiver\.hasTag\s*\(\s*\)""")
+                .replace(result, "$stack.has(net.minecraft.core.component.DataComponents.CUSTOM_DATA)")
+            result = Regex("""\b$receiver\.get(?:OrCreate)?Tag\s*\(\s*\)""")
+                .replace(result, "$stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()")
         }
         return result
     }

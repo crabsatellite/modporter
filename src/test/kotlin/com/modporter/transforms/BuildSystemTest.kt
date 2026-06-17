@@ -2275,6 +2275,38 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `removes stale LazyOptional imports without generating compatibility shim`() {
+        val projectDir = tempDir.resolve("p13-stale-lazyoptional")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=examplemod\n")
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        srcDir.resolve("OnlyImport.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.examplemod.compat.LazyOptional;
+
+            public class OnlyImport {
+                public int value() {
+                    return 1;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("OnlyImport.java").readText()
+        val shim = projectDir.resolve("src/main/java/com/modporter/generated/examplemod/compat/LazyOptional.java")
+
+        assertTrue(result.changes.any { it.ruleId == "build-remove-stale-lazyoptional-import" })
+        assertFalse(source.contains("LazyOptional"), source)
+        assertFalse(shim.exists())
+    }
+
+    @Test
     fun `rewrites legacy abstract tree grower call sites`() {
         val projectDir = tempDir.resolve("p14")
         val treeDir = projectDir.resolve("src/main/java/com/example/tree")

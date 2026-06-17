@@ -5051,17 +5051,226 @@ class StructuralRefactorExtraTest {
         assertTrue(result.changes.any { it.ruleId == "struct-blockentity-capability-provider" })
         assertTrue(result.changes.any { it.ruleId == "struct-blockentity-capability-provider-listener" })
         assertTrue(blockEntity.contains("event.registerBlockEntity(\n                Capabilities.ItemHandler.BLOCK,\n                BlockEntityRegistry.COOKING.get(),"))
-        assertTrue(blockEntity.contains("side == null || side.equals(Direction.UP) ? blockEntity.inputHandler.orElse(null) : blockEntity.outputHandler.orElse(null)"))
+        assertTrue(blockEntity.contains("side == null || side.equals(Direction.UP) ? blockEntity.createInput() : blockEntity.createOutput()"), blockEntity)
         assertTrue(blockEntity.contains("event.registerBlockEntity(\n                Capabilities.FluidHandler.BLOCK,\n                BlockEntityRegistry.COOKING.get(),"))
-        assertTrue(blockEntity.contains("blockEntity.fluidTank.orElse(null)"))
-        assertTrue(blockEntity.contains("blockEntity.isRemoved() ? null"))
-        assertTrue(blockEntity.contains("public void clearRemoved()"))
-        assertTrue(blockEntity.contains("super.clearRemoved();"))
+        assertTrue(blockEntity.contains("blockEntity.createTank()"), blockEntity)
+        assertTrue(blockEntity.contains("(!blockEntity.isRemoved()) ?"), blockEntity)
         assertFalse(blockEntity.contains("getCapability("))
         assertFalse(blockEntity.contains("super.getCapability"))
         assertFalse(blockEntity.contains("reviveCaps"))
+        assertFalse(blockEntity.contains("clearRemoved"))
+        assertFalse(blockEntity.contains("LazyOptional"), blockEntity)
         assertFalse(blockEntity.contains("import com.modporter.generated.example.compat.Capability;"))
         assertTrue(mod.contains("modEventBus.addListener(CookingBlockEntity::registerCapabilities);"))
+    }
+
+    @Test
+    fun `migrates lazy initialized block entity item capability from delegating constructor registry`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntityRegistry.BLOCK_ENTITIES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/TreasureBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import javax.annotation.Nullable;
+
+            public class TreasureBlockEntity extends RandomizableContainerBlockEntity {
+                @Nullable
+                private LazyOptional<IItemHandler> chestHandler;
+
+                public TreasureBlockEntity(BlockPos pos, BlockState state) {
+                    this(BlockEntityRegistry.TREASURE.get(), pos, state);
+                }
+
+                protected TreasureBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+
+                @Override
+                public <T> LazyOptional<T> getCapability(Capability<T> capability, Direction side) {
+                    if (!this.remove && capability == Capabilities.ItemHandler.BLOCK) {
+                        if (this.chestHandler == null) {
+                            this.chestHandler = LazyOptional.of(this::createHandler);
+                        }
+                        return this.chestHandler.cast();
+                    }
+                    return super.getCapability(capability, side);
+                }
+
+                private IItemHandler createHandler() {
+                    return null;
+                }
+
+                public void invalidateCaps() {
+                    super.invalidateCapabilities();
+                    if (this.chestHandler != null) {
+                        this.chestHandler.invalidate();
+                        this.chestHandler = null;
+                    }
+                }
+
+                @Override
+                public void setBlockState(BlockState state) {
+                    super.setBlockState(state);
+                    if (this.chestHandler != null) {
+                        LazyOptional<?> oldHandler = this.chestHandler;
+                        this.chestHandler = null;
+                        oldHandler.invalidate();
+                    }
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockEntityRegistry {
+                public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = null;
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<TreasureBlockEntity>> TREASURE = null;
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val blockEntity = tempDir.resolve("src/main/java/com/example/TreasureBlockEntity.java").readText()
+        val mod = tempDir.resolve("src/main/java/com/example/ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-blockentity-capability-provider" })
+        assertTrue(blockEntity.contains("event.registerBlockEntity(\n                Capabilities.ItemHandler.BLOCK,\n                BlockEntityRegistry.TREASURE.get(),"))
+        assertTrue(blockEntity.contains("(!blockEntity.isRemoved()) ? blockEntity.createHandler() : null"), blockEntity)
+        assertFalse(blockEntity.contains("getCapability("), blockEntity)
+        assertFalse(blockEntity.contains("LazyOptional"), blockEntity)
+        assertFalse(blockEntity.contains("chestHandler"), blockEntity)
+        assertFalse(blockEntity.contains("invalidateCaps"), blockEntity)
+        assertFalse(blockEntity.contains("oldHandler"), blockEntity)
+        assertTrue(mod.contains("modEventBus.addListener(TreasureBlockEntity::registerCapabilities);"))
+    }
+
+    @Test
+    fun `migrates sided inventory wrapper arrays to direct block entity capability providers`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntityRegistry.BLOCK_ENTITIES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/IncubatorBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.entity.BaseContainerBlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import net.neoforged.neoforge.items.wrapper.SidedInvWrapper;
+            import javax.annotation.Nullable;
+
+            public class IncubatorBlockEntity extends BaseContainerBlockEntity {
+                private LazyOptional<? extends IItemHandler>[] handlers = SidedInvWrapper.create(this, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST);
+
+                public IncubatorBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntityRegistry.INCUBATOR.get(), pos, state);
+                }
+
+                @Override
+                public <T> LazyOptional<T> getCapability(Capability<T> capability, @Nullable Direction direction) {
+                    if (!this.remove && direction != null && capability == Capabilities.ItemHandler.BLOCK) {
+                        if (direction == Direction.NORTH) {
+                            return handlers[0].cast();
+                        } else if (direction == Direction.SOUTH) {
+                            return handlers[1].cast();
+                        } else if (direction == Direction.EAST) {
+                            return handlers[2].cast();
+                        } else {
+                            return handlers[3].cast();
+                        }
+                    }
+                    return super.getCapability(capability, direction);
+                }
+
+                public void invalidateCaps() {
+                    super.invalidateCapabilities();
+                    for (LazyOptional<? extends IItemHandler> handler : this.handlers) {
+                        handler.invalidate();
+                    }
+                }
+
+                @Override
+                public void reviveCaps() {
+                    super.reviveCaps();
+                    this.handlers = SidedInvWrapper.create(this, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockEntityRegistry {
+                public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = null;
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<IncubatorBlockEntity>> INCUBATOR = null;
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val blockEntity = tempDir.resolve("src/main/java/com/example/IncubatorBlockEntity.java").readText()
+        val mod = tempDir.resolve("src/main/java/com/example/ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-blockentity-capability-provider" })
+        assertTrue(blockEntity.contains("(!blockEntity.isRemoved() && side != null) ?"), blockEntity)
+        assertTrue(blockEntity.contains("side == Direction.NORTH ? new SidedInvWrapper(blockEntity, Direction.NORTH)"), blockEntity)
+        assertTrue(blockEntity.contains("side == Direction.SOUTH ? new SidedInvWrapper(blockEntity, Direction.SOUTH)"), blockEntity)
+        assertTrue(blockEntity.contains("side == Direction.EAST ? new SidedInvWrapper(blockEntity, Direction.EAST)"), blockEntity)
+        assertTrue(blockEntity.contains("new SidedInvWrapper(blockEntity, Direction.WEST)"), blockEntity)
+        assertFalse(blockEntity.contains("getCapability("), blockEntity)
+        assertFalse(blockEntity.contains("LazyOptional"), blockEntity)
+        assertFalse(blockEntity.contains("handlers"), blockEntity)
+        assertFalse(blockEntity.contains("reviveCaps"), blockEntity)
+        assertTrue(mod.contains("modEventBus.addListener(IncubatorBlockEntity::registerCapabilities);"))
     }
 
     @Test
@@ -6139,6 +6348,117 @@ class StructuralRefactorExtraTest {
         assertTrue(behavior.contains("RecipeBookMenu<?, ?>"), behavior)
         assertTrue(screen.contains("T extends RecipeBookMenu<?, ?>"), screen)
         assertFalse(screen.contains("import net.minecraft.world.Container;"), screen)
+    }
+
+    @Test
+    fun `migrates cached check container recipes to single stack recipe holders`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("IncubatorBlockEntity.java").writeText("""
+            package com.example;
+
+            import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.inventory.RecipeCraftingHolder;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeManager;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+            import javax.annotation.Nullable;
+            import java.util.List;
+
+            public class IncubatorBlockEntity implements Container, RecipeCraftingHolder {
+                private final Object2IntOpenHashMap<ResourceLocation> recipesUsed = new Object2IntOpenHashMap<>();
+                private final RecipeManager.CachedCheck<Container, IncubationRecipe> quickCheck;
+                private NonNullList<ItemStack> items = NonNullList.withSize(2, ItemStack.EMPTY);
+
+                public IncubatorBlockEntity(RecipeType<IncubationRecipe> recipeType) {
+                    this.quickCheck = RecipeManager.createCheck(recipeType);
+                }
+
+                public static void serverTick(Level level, IncubatorBlockEntity blockEntity) {
+                    IncubationRecipe recipe;
+                    if (!blockEntity.items.get(0).isEmpty()) {
+                        recipe = blockEntity.quickCheck.getRecipeFor(blockEntity, level).orElse(null);
+                    } else {
+                        recipe = null;
+                    }
+                    if (blockEntity.canIncubate(recipe, blockEntity.items)) {
+                        if (blockEntity.incubate(recipe, blockEntity.items)) {
+                            blockEntity.setRecipeUsed(recipe);
+                        }
+                    }
+                }
+
+                private boolean incubate(@Nullable IncubationRecipe recipe, NonNullList<ItemStack> stacks) {
+                    return recipe != null && recipe.getEntity() != null && recipe.getTag() != null;
+                }
+
+                private boolean canIncubate(@Nullable IncubationRecipe recipe, NonNullList<ItemStack> stacks) {
+                    return !stacks.get(0).isEmpty() && recipe != null;
+                }
+
+                private static int getTotalIncubationTime(Level level, IncubatorBlockEntity blockEntity) {
+                    return blockEntity.quickCheck.getRecipeFor(blockEntity, level).map(IncubationRecipe::getIncubationTime).orElse(5700);
+                }
+
+                @Override
+                public void setRecipeUsed(@Nullable Recipe<?> recipe) {
+                    if (recipe != null) {
+                        ResourceLocation resourcelocation = recipe.getId();
+                        this.recipesUsed.addTo(resourcelocation, 1);
+                    }
+                }
+
+                @Nullable
+                @Override
+                public Recipe<?> getRecipeUsed() {
+                    return null;
+                }
+
+                @Override
+                public void awardUsedRecipes(Player player, List<ItemStack> items) {}
+            }
+        """.trimIndent())
+        srcDir.resolve("ItemStackTags.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public class ItemStackTags {
+                CompoundTag stackTag(ItemStack stack, IncubationRecipe recipe) {
+                    CompoundTag fromStack = stack.getTag();
+                    CompoundTag fromRecipe = recipe.getTag();
+                    return fromRecipe == null ? fromStack : fromRecipe;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val blockEntity = srcDir.resolve("IncubatorBlockEntity.java").readText()
+        val tags = srcDir.resolve("ItemStackTags.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(blockEntity.contains("RecipeManager.CachedCheck<SingleRecipeInput, IncubationRecipe> quickCheck"), blockEntity)
+        assertTrue(blockEntity.contains("RecipeHolder<IncubationRecipe> recipe;"), blockEntity)
+        assertTrue(blockEntity.contains("quickCheck.getRecipeFor(new SingleRecipeInput(blockEntity.getItem(0)), level).orElse(null)"), blockEntity)
+        assertTrue(blockEntity.contains("private boolean incubate(@Nullable RecipeHolder<IncubationRecipe> recipe"), blockEntity)
+        assertTrue(blockEntity.contains("recipe.value().getEntity()"), blockEntity)
+        assertTrue(blockEntity.contains("recipe.value().getTag()"), blockEntity)
+        assertTrue(blockEntity.contains("map(RecipeHolder::value).map(IncubationRecipe::getIncubationTime)"), blockEntity)
+        assertTrue(blockEntity.contains("setRecipeUsed(@Nullable RecipeHolder<?> recipe)"), blockEntity)
+        assertTrue(blockEntity.contains("ResourceLocation resourcelocation = recipe.id();"), blockEntity)
+        assertTrue(blockEntity.contains("public RecipeHolder<?> getRecipeUsed()"), blockEntity)
+        assertTrue(blockEntity.contains("import net.minecraft.world.item.crafting.RecipeHolder;"), blockEntity)
+        assertTrue(blockEntity.contains("import net.minecraft.world.item.crafting.SingleRecipeInput;"), blockEntity)
+        assertFalse(blockEntity.contains("CachedCheck<Container"), blockEntity)
+        assertTrue(tags.contains("stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()"), tags)
+        assertTrue(tags.contains("CompoundTag fromRecipe = recipe.getTag();"), tags)
     }
 
     @Test

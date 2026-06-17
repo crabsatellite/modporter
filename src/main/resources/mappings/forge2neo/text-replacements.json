@@ -2144,13 +2144,6 @@
       "fileGlob": "*.java"
     },
     {
-      "id": "nbt-stack-getTag",
-      "pattern": ".getTag()",
-      "replacement": ".getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()",
-      "description": "ItemStack.getTag() -> DataComponents.CUSTOM_DATA access in 1.21",
-      "fileGlob": "*.java"
-    },
-    {
       "id": "nbt-stack-setTag",
       "pattern": "\\.setTag\\(([^()]*(?:\\([^()]*\\))*[^()]*)\\)",
       "replacement": ".set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.of($1))",
