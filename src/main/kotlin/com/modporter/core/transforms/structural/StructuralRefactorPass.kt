@@ -175,6 +175,15 @@ class StructuralRefactorPass : Pass {
             errors.add("Custom entity capability migration error: ${e.message}")
         }
 
+        // Migrate third-party Nitrogen's old capability sync surface to the
+        // attachment/payload surface exposed by its 1.21.1 NeoForge build.
+        try {
+            val nitrogenChanges = migrateNitrogenAttachmentApi(projectDir, dryRun)
+            changes.addAll(nitrogenChanges)
+        } catch (e: Exception) {
+            errors.add("Nitrogen attachment API migration error: ${e.message}")
+        }
+
         // Migrate block-entity fluid handlers from legacy getCapability()
         // overrides to RegisterCapabilitiesEvent block-entity registrations.
         try {
@@ -444,6 +453,15 @@ class StructuralRefactorPass : Pass {
             changes.addAll(emptyClassChanges)
         } catch (e: Exception) {
             errors.add("Empty subscriber class removal error: ${e.message}")
+        }
+
+        // Final structural normalization: attachment registration methods are
+        // ordinary mod-constructor registration helpers, not event handlers.
+        try {
+            val attachmentRegistrationChanges = cleanupAttachmentRegistrationEventAnnotations(projectDir, dryRun)
+            changes.addAll(attachmentRegistrationChanges)
+        } catch (e: Exception) {
+            errors.add("Attachment registration cleanup error: ${e.message}")
         }
 
         return PassResult(name, changes, errors, skipped)
@@ -3527,6 +3545,44 @@ $itemArguments
         return result
     }
 
+    private fun cleanupAttachmentRegistrationEventAnnotations(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val changes = mutableListOf<Change>()
+        Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+            .forEach { file ->
+                val original = file.readText()
+                if (!original.contains("registerAttachments(IEventBus") || !original.contains("@SubscribeEvent")) {
+                    return@forEach
+                }
+                var modified = Regex("""(?m)^([ \t]*)@SubscribeEvent[ \t]*(?:\r?\n[ \t]*)+((?:public|protected|private)\s+static\s+void\s+registerAttachments\s*\(\s*IEventBus\b)""")
+                    .replace(original) { match -> match.groupValues[1] + match.groupValues[2] }
+                if (modified != original) {
+                    if (!modified.contains("@SubscribeEvent")) {
+                        modified = Regex("""(?m)^[ \t]*@(?:Mod\.)?EventBusSubscriber\b[^\r\n]*\r?\n""").replace(modified, "")
+                        modified = removeImport(modified, "net.neoforged.fml.common.EventBusSubscriber")
+                    }
+                    modified = removeUnusedSimpleImports(modified, listOf(
+                        "net.neoforged.bus.api.SubscribeEvent",
+                        "net.neoforged.fml.common.Mod"
+                    ))
+                    if (!dryRun) file.writeText(modified)
+                    changes.add(Change(
+                        file = file,
+                        line = 1,
+                        description = "Remove event-subscriber wiring from attachment registration helper",
+                        before = "@SubscribeEvent public static void registerAttachments(IEventBus)",
+                        after = "public static void registerAttachments(IEventBus)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-attachment-registration-event-cleanup"
+                    ))
+                }
+            }
+        return changes
+    }
+
     private fun inferModEventBusName(source: String): String =
         Regex("""public\s+\w+\s*\([^)]*\bIEventBus\s+([A-Za-z_$][\w$]*)""")
             .find(source)
@@ -3545,7 +3601,10 @@ $itemArguments
         val entityKind: String,
         val setsEntity: Boolean,
         val constructorArgFromEntity: Boolean = false,
-        val entityVariableName: String = entityKind.replaceFirstChar { it.lowercase() }
+        val entityVariableName: String = entityKind.replaceFirstChar { it.lowercase() },
+        val idPath: String? = null,
+        val modIdExpression: String? = null,
+        val serializable: Boolean = false
     )
 
     private data class LegacyLevelCapability(
@@ -3564,6 +3623,8 @@ $itemArguments
             .toList()
         val compatPackage = detectGeneratedCompatPackage(projectDir)
         val changes = mutableListOf<Change>()
+        val entityCapabilityNames = linkedSetOf<String>()
+        val entityAttachmentNames = linkedSetOf<String>()
 
         val capabilityFiles = javaFiles.filter { file ->
             val text = file.readText()
@@ -3574,6 +3635,7 @@ $itemArguments
 
         val implementationByInterface = findCapabilityImplementations(javaFiles)
         val entityKindByInterface = findCapabilityEntityKinds(javaFiles)
+        val serializableCapabilityTypes = findSerializableCapabilityTypes(javaFiles)
         val levelCapabilityNames = capabilityFiles
             .flatMap { extractAttachLevelCapabilitySpecs(it.readText(), implementationByInterface).map { spec -> spec.fieldName } }
             .toSet()
@@ -3589,40 +3651,57 @@ $itemArguments
                 val apiType = match.groupValues[1]
                 val fieldName = match.groupValues[2]
                 val attachSpec = attachEntitySpecs[fieldName]
+                val implementationType = attachSpec?.implementationType ?: implementationByInterface[apiType]
                 LegacyEntityCapability(
                     fieldName = fieldName,
                     apiType = apiType,
-                    implementationType = attachSpec?.implementationType ?: implementationByInterface[apiType],
+                    implementationType = implementationType,
                     entityKind = attachSpec?.entityKind ?: entityKindByInterface[apiType] ?: "LivingEntity",
                     setsEntity = attachSpec == null && entityKindByInterface.containsKey(apiType),
                     constructorArgFromEntity = attachSpec != null,
                     entityVariableName = attachSpec?.entityVariableName
-                        ?: (entityKindByInterface[apiType] ?: "LivingEntity").replaceFirstChar { it.lowercase() }
+                        ?: (entityKindByInterface[apiType] ?: "LivingEntity").replaceFirstChar { it.lowercase() },
+                    idPath = attachSpec?.idPath,
+                    modIdExpression = attachSpec?.modIdExpression,
+                    serializable = attachSpec != null &&
+                        (apiType in serializableCapabilityTypes ||
+                            (implementationType != null && implementationType in serializableCapabilityTypes))
                 )
             }.toList()
 
             val entityCapabilities = declarations.filter {
-                it.implementationType != null && !levelCapabilitySpecs.containsKey(it.fieldName)
+                it.implementationType != null && !it.serializable && !levelCapabilitySpecs.containsKey(it.fieldName)
+            }
+            val entityAttachmentCapabilities = declarations.filter {
+                it.implementationType != null && it.serializable && it.idPath != null &&
+                    it.modIdExpression != null && !levelCapabilitySpecs.containsKey(it.fieldName)
             }
             val levelCapabilities = levelCapabilitySpecs.values.toList()
-            if (entityCapabilities.isEmpty() && levelCapabilities.isEmpty()) continue
+            val attachmentCapabilitiesPresent = entityAttachmentCapabilities.isNotEmpty() || levelCapabilities.isNotEmpty()
+            entityCapabilityNames.addAll(entityCapabilities.map { it.fieldName })
+            entityAttachmentNames.addAll(entityAttachmentCapabilities.map { it.fieldName })
+            if (entityCapabilities.isEmpty() && entityAttachmentCapabilities.isEmpty() && levelCapabilities.isEmpty()) continue
 
             var modified = original
             for (capability in declarations) {
                 val levelCapability = levelCapabilitySpecs[capability.fieldName]
-                val replacement = if (levelCapability != null) {
-                    "public static final Supplier<AttachmentType<${levelCapability.apiType}>> ${levelCapability.fieldName} = ATTACHMENT_TYPES.register(\"${levelCapability.idPath}\", () -> AttachmentType.serializable(holder -> new ${levelCapability.implementationType}((Level) holder)).build());"
-                } else {
-                    "public static final EntityCapability<${capability.apiType}, Direction> ${capability.fieldName} = EntityCapability.createSided(${capability.apiType}.ID, ${capability.apiType}.class);"
+                val replacement = when {
+                    levelCapability != null ->
+                        "public static final Supplier<AttachmentType<${levelCapability.apiType}>> ${levelCapability.fieldName} = ATTACHMENT_TYPES.register(\"${levelCapability.idPath}\", () -> AttachmentType.serializable(holder -> new ${levelCapability.implementationType}((Level) holder)).build());"
+                    capability in entityAttachmentCapabilities ->
+                        "public static final Supplier<AttachmentType<${capability.apiType}>> ${capability.fieldName} = ATTACHMENT_TYPES.register(\"${capability.idPath}\", () -> AttachmentType.serializable(holder -> new ${capability.implementationType}((${capability.entityKind}) holder)).build());"
+                    else ->
+                        "public static final EntityCapability<${capability.apiType}, Direction> ${capability.fieldName} = EntityCapability.createSided(${capability.apiType}.ID, ${capability.apiType}.class);"
                 }
                 modified = Regex(
                     """public\s+static\s+final\s+Capability<\s*${Regex.escape(capability.apiType)}\s*>\s+${Regex.escape(capability.fieldName)}\s*=\s*CapabilityManager\.get\s*\(\s*new\s+CapabilityToken<>\s*\(\s*\)\s*\{\s*}\s*\)\s*;"""
                 ).replace(modified, replacement)
             }
-            if (levelCapabilities.isNotEmpty() && !modified.contains("DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES")) {
+            if (attachmentCapabilitiesPresent && !modified.contains("DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES")) {
                 val firstField = Regex("""(?m)^[ \t]*public\s+static\s+final\s+(?:Supplier<AttachmentType<[^>]+>>|EntityCapability<[^;]+>)\s+[A-Za-z_$][\w$]*\s*=""")
                     .find(modified)
-                val modRef = levelCapabilities.first().modIdExpression
+                val modRef = levelCapabilities.firstOrNull()?.modIdExpression
+                    ?: entityAttachmentCapabilities.firstNotNullOf { it.modIdExpression }
                 val registerField = """
 	public static final DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES = DeferredRegister.create(NeoForgeRegistries.ATTACHMENT_TYPES, $modRef);
 
@@ -3633,8 +3712,12 @@ $itemArguments
             }
 
             modified = removeAttachCapabilitiesEventMethods(modified)
-            modified = replaceRegisterCapabilitiesMethod(modified, entityCapabilities)
-            if (levelCapabilities.isNotEmpty() && !modified.contains("registerAttachments(IEventBus")) {
+            modified = if (entityCapabilities.isNotEmpty()) {
+                replaceRegisterCapabilitiesMethod(modified, entityCapabilities)
+            } else {
+                removeRegisterCapabilitiesEventMethod(modified)
+            }
+            if (attachmentCapabilitiesPresent && !modified.contains("registerAttachments(IEventBus")) {
                 modified = insertBeforeLastClassBrace(modified, """
 
 	public static void registerAttachments(IEventBus modEventBus) {
@@ -3688,6 +3771,27 @@ $itemArguments
             if (entityCapabilities.isNotEmpty()) {
                 modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
             }
+            if (attachmentCapabilitiesPresent) {
+                modified = addImportIfMissing(modified, "java.util.function.Supplier")
+                modified = addImportIfMissing(modified, "net.neoforged.bus.api.IEventBus")
+                modified = addImportIfMissing(modified, "net.neoforged.neoforge.attachment.AttachmentType")
+                modified = addImportIfMissing(modified, "net.neoforged.neoforge.registries.DeferredRegister")
+                modified = addImportIfMissing(modified, "net.neoforged.neoforge.registries.NeoForgeRegistries")
+                for (entityKind in entityAttachmentCapabilities.map { it.entityKind }.toSet()) {
+                    entityKindImport(entityKind)?.let { modified = addImportIfMissing(modified, it) }
+                }
+            }
+            modified = removeUnusedImportsBySimpleNamePattern(
+                modified,
+                Regex("""Capability|CapabilityManager|CapabilityToken|CapabilityProvider|RegisterCapabilitiesEvent""")
+            )
+            modified = Regex("""(?m)^([ \t]*)@SubscribeEvent[ \t]*(?:\r?\n[ \t]*)+((?:public|protected|private)\s+static\s+void\s+registerAttachments\s*\()""")
+                .replace(modified) { match -> match.groupValues[1] + match.groupValues[2] }
+            if (!modified.contains("@SubscribeEvent")) {
+                modified = Regex("""(?m)^[ \t]*@(?:Mod\.)?EventBusSubscriber\b[^\r\n]*\r?\n""").replace(modified, "")
+                modified = removeImport(modified, "net.neoforged.fml.common.EventBusSubscriber")
+            }
+            modified = removeUnusedSimpleImports(modified, listOf("net.neoforged.bus.api.SubscribeEvent"))
 
             if (modified != original) {
                 if (!dryRun) capabilityFile.writeText(modified)
@@ -3707,8 +3811,11 @@ $itemArguments
         for (javaFile in javaFiles) {
             var text = javaFile.readText()
             val original = text
-            if (capabilityListNames.any { text.contains("$it.") } && text.contains(".getCapability(")) {
-                text = rewriteLegacyEntityCapabilityQueries(text, capabilityListNames, compatPackage)
+            if (entityAttachmentNames.isNotEmpty() && capabilityListNames.any { text.contains("$it.") }) {
+                text = rewriteLegacyAttachmentCapabilityQueries(text, capabilityListNames, entityAttachmentNames, compatPackage)
+            }
+            if (entityCapabilityNames.isNotEmpty() && capabilityListNames.any { text.contains("$it.") } && text.contains(".getCapability(")) {
+                text = rewriteLegacyEntityCapabilityQueries(text, capabilityListNames, entityCapabilityNames, compatPackage)
             }
             if (levelCapabilityNames.isNotEmpty() && capabilityListNames.any { text.contains("$it.") }) {
                 text = rewriteLegacyLevelCapabilityQueries(text, capabilityListNames, levelCapabilityNames, compatPackage)
@@ -3799,11 +3906,31 @@ $itemArguments
         return result
     }
 
+    private fun findSerializableCapabilityTypes(javaFiles: List<Path>): Set<String> {
+        val result = linkedSetOf<String>()
+        for (file in javaFiles) {
+            val text = file.readText()
+            val typeName = Regex("""\b(?:interface|class)\s+([A-Za-z_$][\w$]*)\b""")
+                .find(text)
+                ?.groupValues
+                ?.get(1)
+                ?: continue
+            if (text.contains("INBTSerializable") ||
+                text.contains("INBTSynchable") ||
+                (text.contains("serializeNBT(") && text.contains("deserializeNBT("))) {
+                result.add(typeName)
+            }
+        }
+        return result
+    }
+
     private data class AttachEntityCapabilitySpec(
         val fieldName: String,
         val implementationType: String,
         val entityKind: String,
-        val entityVariableName: String
+        val entityVariableName: String,
+        val idPath: String,
+        val modIdExpression: String
     )
 
     private fun extractAttachEntityCapabilitySpecs(source: String): Map<String, AttachEntityCapabilitySpec> {
@@ -3826,16 +3953,18 @@ $itemArguments
             }
             val body = source.substring(openBrace + 1, closeBrace)
             val providerPattern = Regex(
-                """event\.addCapability\s*\([^;]*?new\s+CapabilityProvider\s*\(\s*(?:[A-Za-z_$][\w$]*\.)?([A-Z_$][A-Z0-9_$]*)\s*,\s*new\s+([A-Za-z_$][\w$]*)\s*\(\s*${Regex.escape(entityVariable)}\s*\)\s*\)""",
+                """event\.addCapability\s*\(\s*ResourceLocation\.fromNamespaceAndPath\s*\(\s*([^,]+?)\s*,\s*"([^"]+)"\s*\)\s*,\s*new\s+CapabilityProvider\s*\(\s*(?:[A-Za-z_$][\w$]*\.)?([A-Z_$][A-Z0-9_$]*)\s*,\s*new\s+([A-Za-z_$][\w$]*)\s*\(\s*${Regex.escape(entityVariable)}\s*\)\s*\)""",
                 RegexOption.DOT_MATCHES_ALL
             )
             providerPattern.findAll(body).forEach { provider ->
-                val fieldName = provider.groupValues[1]
+                val fieldName = provider.groupValues[3]
                 specs[fieldName] = AttachEntityCapabilitySpec(
                     fieldName = fieldName,
-                    implementationType = provider.groupValues[2],
+                    implementationType = provider.groupValues[4],
                     entityKind = entityKind,
-                    entityVariableName = entityVariable
+                    entityVariableName = entityVariable,
+                    idPath = provider.groupValues[2],
+                    modIdExpression = provider.groupValues[1].trim()
                 )
             }
             cursor = match.range.last + 1
@@ -3883,6 +4012,21 @@ $itemArguments
             result = removeMethodByName(result, methodName)
         }
         return result
+    }
+
+    private fun removeRegisterCapabilitiesEventMethod(source: String): String {
+        val methodMatch = Regex(
+            """(?:public|protected|private)\s+static\s+void\s+[A-Za-z_$][\w$]*\s*\(\s*RegisterCapabilitiesEvent\s+[A-Za-z_$][\w$]*\s*\)"""
+        ).find(source) ?: return source
+        val start = source.lastIndexOf('\n', methodMatch.range.first).let { if (it < 0) 0 else it + 1 }
+        val openBrace = source.indexOf('{', methodMatch.range.first)
+        if (openBrace < 0) return source
+        val closeBrace = findMatchingBrace(source, openBrace)
+        if (closeBrace <= openBrace) return source
+        var end = closeBrace + 1
+        if (end < source.length && source[end] == '\r') end++
+        if (end < source.length && source[end] == '\n') end++
+        return source.removeRange(start, end)
     }
 
     private fun entityKindImport(entityKind: String): String? = when (entityKind) {
@@ -3980,13 +4124,13 @@ $helpers
         val fieldAlternation = levelCapabilityNames.joinToString("|") { Regex.escape(it) }
         if (ownerAlternation.isBlank() || fieldAlternation.isBlank()) return source
         val alreadyWrappedPattern = Regex(
-            """((?:[A-Za-z_$][\w$]*\.)*LazyOptional\.ofNullable\(\s*)((?<![A-Za-z0-9_$])[A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($ownerAlternation)\.($fieldAlternation))\s*,\s*null\s*\)(\s*\))"""
+            """((?:[A-Za-z_$][\w$]*\.)*LazyOptional\.ofNullable\(\s*)((?<![A-Za-z0-9_$])[A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($ownerAlternation)\.($fieldAlternation))\s*(?:,\s*null\s*)?\)(\s*\))"""
         )
         result = alreadyWrappedPattern.replace(result) { match ->
             "${match.groupValues[1]}${match.groupValues[2]}.getData(${match.groupValues[3]}.get())${match.groupValues[6]}"
         }
         val directPattern = Regex(
-            """(?<![A-Za-z0-9_$])([A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($ownerAlternation)\.($fieldAlternation))\s*,\s*null\s*\)"""
+            """(?<![A-Za-z0-9_$])([A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($ownerAlternation)\.($fieldAlternation))\s*(?:,\s*null\s*)?\)"""
         )
         result = directPattern.replace(result) { match ->
             "${match.groupValues[1]}.getData(${match.groupValues[2]}.get())"
@@ -3997,18 +4141,21 @@ $helpers
     private fun rewriteLegacyEntityCapabilityQueries(
         source: String,
         capabilityListNames: Set<String>,
+        entityCapabilityNames: Set<String>,
         compatPackage: String
     ): String {
         var result = source
         val listAlternation = capabilityListNames.joinToString("|") { Regex.escape(it) }
+        val fieldAlternation = entityCapabilityNames.joinToString("|") { Regex.escape(it) }
+        if (listAlternation.isBlank() || fieldAlternation.isBlank()) return source
         val wrappedPattern = Regex(
-            """((?:[A-Za-z_$][\w$]*\.)*LazyOptional\.ofNullable\(\s*)([A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($listAlternation)\.[A-Za-z_$][\w$]*)\s*\)(\s*\))"""
+            """((?:[A-Za-z_$][\w$]*\.)*LazyOptional\.ofNullable\(\s*)([A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($listAlternation)\.($fieldAlternation))\s*\)(\s*\))"""
         )
         result = wrappedPattern.replace(result) { match ->
-            "${match.groupValues[1]}${match.groupValues[2]}.getCapability(${match.groupValues[3]}, null)${match.groupValues[5]}"
+            "${match.groupValues[1]}${match.groupValues[2]}.getCapability(${match.groupValues[3]}, null)${match.groupValues[6]}"
         }
         val queryPattern = Regex(
-            """(?<!ofNullable\()(?<![A-Za-z0-9_$])([A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($listAlternation)\.[A-Za-z_$][\w$]*)\s*\)"""
+            """(?<!ofNullable\()(?<![A-Za-z0-9_$])([A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($listAlternation)\.($fieldAlternation))\s*\)"""
         )
         result = queryPattern.replace(result) { match ->
             val receiver = match.groupValues[1]
@@ -4017,6 +4164,212 @@ $helpers
         }
         return result
     }
+
+    private fun rewriteLegacyAttachmentCapabilityQueries(
+        source: String,
+        capabilityListNames: Set<String>,
+        attachmentCapabilityNames: Set<String>,
+        compatPackage: String
+    ): String {
+        var result = source
+        val ownerAlternation = capabilityListNames.joinToString("|") { Regex.escape(it) }
+        val fieldAlternation = attachmentCapabilityNames.joinToString("|") { Regex.escape(it) }
+        if (ownerAlternation.isBlank() || fieldAlternation.isBlank()) return source
+        val alreadyWrappedPattern = Regex(
+            """((?:[A-Za-z_$][\w$]*\.)*LazyOptional\.ofNullable\(\s*)([A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($ownerAlternation)\.($fieldAlternation))\s*(?:,\s*null\s*)?\)(\s*\))"""
+        )
+        result = alreadyWrappedPattern.replace(result) { match ->
+            "${match.groupValues[1]}${match.groupValues[2]}.getData(${match.groupValues[3]}.get())${match.groupValues[6]}"
+        }
+        val directPattern = Regex(
+            """(?<![A-Za-z0-9_$])([A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($ownerAlternation)\.($fieldAlternation))\s*(?:,\s*null\s*)?\)"""
+        )
+        result = directPattern.replace(result) { match ->
+            "$compatPackage.LazyOptional.ofNullable(${match.groupValues[1]}.getData(${match.groupValues[2]}.get()))"
+        }
+        return result
+    }
+
+    private fun migrateNitrogenAttachmentApi(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        val changes = mutableListOf<Change>()
+
+        val entitySyncPackets = javaFiles.mapNotNull { javaFile ->
+            val text = javaFile.readText()
+            Regex("""\b(?:class|record)\s+([A-Za-z_$][\w$]*)[\s\S]*?\bextends\s+SyncEntityPacket\s*<""")
+                .find(text)
+                ?.groupValues
+                ?.get(1)
+        }.toSet()
+
+        for (javaFile in javaFiles) {
+            val original = javaFile.readText()
+            if (!original.contains("com.aetherteam.nitrogen.capability.INBTSynchable") &&
+                !original.contains("getSyncPacket(") &&
+                !original.contains("setSynched(") &&
+                !original.contains("forceSync(")) {
+                continue
+            }
+
+            var modified = original
+            modified = modified.replace(
+                "com.aetherteam.nitrogen.capability.INBTSynchable",
+                "com.aetherteam.nitrogen.attachment.INBTSynchable"
+            )
+            if (modified.contains("getSyncPacket(")) {
+                modified = modified.replace(
+                    "import com.aetherteam.nitrogen.network.BasePacket;",
+                    "import com.aetherteam.nitrogen.network.packet.SyncPacket;"
+                )
+                modified = modified.replace(
+                    "com.aetherteam.nitrogen.network.BasePacket",
+                    "com.aetherteam.nitrogen.network.packet.SyncPacket"
+                )
+                if (modified.contains("SyncPacket")) {
+                    modified = Regex("""\bBasePacket\b""").replace(modified, "SyncPacket")
+                }
+            }
+
+            val synchableGeneric = Regex("""\bINBTSynchable\s*<\s*([^>]+)\s*>""")
+            if (synchableGeneric.containsMatchIn(modified)) {
+                modified = synchableGeneric.replace(modified) { match ->
+                    "INBTSynchable, INBTSerializable<${match.groupValues[1].trim()}>"
+                }
+                modified = addImportIfMissing(modified, "net.neoforged.neoforge.common.util.INBTSerializable")
+            }
+
+            if (modified.contains("extends SyncEntityPacket<") || modified.contains("extends SyncLevelPacket<")) {
+                modified = modified.replace(
+                    "import net.minecraft.network.FriendlyByteBuf;",
+                    "import net.minecraft.network.RegistryFriendlyByteBuf;"
+                )
+                modified = Regex("""\bFriendlyByteBuf\s+([A-Za-z_$][\w$]*)""")
+                    .replace(modified, "RegistryFriendlyByteBuf $1")
+            }
+
+            modified = rewriteNitrogenGetSyncPacketSignature(modified, entitySyncPackets)
+            val ownerEntityId = inferNitrogenOwnerEntityId(modified)
+            modified = rewriteNitrogenSyncCalls(modified, "setSynched", ownerEntityId)
+            modified = rewriteNitrogenSyncCalls(modified, "forceSync", ownerEntityId)
+
+            if (modified.contains("getPacketChannel(")) {
+                modified = removeMethodByName(modified, "getPacketChannel")
+            }
+
+            modified = removeUnusedSimpleImports(modified, listOf(
+                "net.minecraftforge.network.simple.SimpleChannel",
+                "net.neoforged.neoforge.network.simple.SimpleChannel"
+            ))
+            modified = removeUnusedImportsBySimpleNamePattern(modified, Regex("""[A-Za-z_$][\w$]*PacketHandler"""))
+
+            if (modified != original) {
+                if (!dryRun) javaFile.writeText(modified)
+                changes.add(Change(
+                    file = javaFile,
+                    line = 1,
+                    description = "Migrate Nitrogen sync capability API to attachment INBTSynchable surface",
+                    before = "com.aetherteam.nitrogen.capability.INBTSynchable/BasePacket",
+                    after = "com.aetherteam.nitrogen.attachment.INBTSynchable/SyncPacket",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-nitrogen-attachment-api"
+                ))
+            }
+        }
+
+        return changes
+    }
+
+    private fun rewriteNitrogenGetSyncPacketSignature(source: String, entitySyncPackets: Set<String>): String {
+        var result = Regex(
+            """(public\s+SyncPacket\s+getSyncPacket\s*\()\s*String\s+key\s*,\s*Type\s+type\s*,\s*Object\s+value\s*\)"""
+        ).replace(source) { match ->
+            "${match.groupValues[1]}int entityID, String key, Type type, Object value)"
+        }
+        for (packetName in entitySyncPackets) {
+            result = Regex("""new\s+${Regex.escape(packetName)}\s*\(\s*key\s*,\s*type\s*,\s*value\s*\)""")
+                .replace(result, "new $packetName(entityID, key, type, value)")
+        }
+        return result
+    }
+
+    private fun inferNitrogenOwnerEntityId(source: String): String? {
+        val entityTypes = "(?:Player|ServerPlayer|Entity|LivingEntity|Mob|ItemEntity|LightningBolt|AbstractArrow|Projectile)"
+        val accessors = Regex("""\bpublic\s+$entityTypes\s+(get[A-Za-z_$][\w$]*)\s*\(\s*\)""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .distinct()
+            .toList()
+        if (accessors.size == 1) {
+            return "this.${accessors.single()}().getId()"
+        }
+        val fields = Regex("""\bprivate\s+(?:final\s+)?$entityTypes\s+([A-Za-z_$][\w$]*)\s*;""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .distinct()
+            .toList()
+        if (fields.size == 1) {
+            return "this.${fields.single()}.getId()"
+        }
+        return null
+    }
+
+    private fun rewriteNitrogenSyncCalls(source: String, methodName: String, ownerEntityId: String?): String {
+        var result = source
+        var cursor = 0
+        val pattern = Regex("""(?:(?:this|[A-Za-z_$][\w$]*)\.)?${Regex.escape(methodName)}\s*\(""")
+        while (true) {
+            val match = pattern.find(result, cursor) ?: break
+            val lineStart = result.lastIndexOf('\n', match.range.first).let { if (it < 0) 0 else it + 1 }
+            val linePrefix = result.substring(lineStart, match.range.first)
+            if (Regex("""\b(?:public|protected|private|abstract|default)\b""").containsMatchIn(linePrefix)) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val openParen = result.indexOf('(', match.range.first)
+            val closeParen = if (openParen >= 0) findMatchingParen(result, openParen) else -1
+            if (openParen < 0 || closeParen <= openParen) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen)).toMutableList()
+            if (args.isEmpty() || !args[0].contains("Direction.")) {
+                cursor = closeParen + 1
+                continue
+            }
+            val idExpression = nitrogenSyncIdExpression(args, ownerEntityId)
+            if (idExpression == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            if (args[0].contains("Direction.DIMENSION") && args.isNotEmpty()) {
+                val lastIndex = args.lastIndex
+                args[lastIndex] = stripDimensionAccessor(args[lastIndex])
+            }
+            val replacementArgs = (listOf(idExpression) + args).joinToString(", ")
+            result = result.substring(0, openParen + 1) + replacementArgs + result.substring(closeParen)
+            cursor = openParen + replacementArgs.length + 2
+        }
+        return result
+    }
+
+    private fun nitrogenSyncIdExpression(args: List<String>, ownerEntityId: String?): String? {
+        val direction = args.firstOrNull() ?: return null
+        return when {
+            direction.contains("Direction.DIMENSION") -> "-1"
+            direction.contains("Direction.PLAYER") && args.size >= 2 -> {
+                val target = args.last().trim()
+                if (target.isBlank()) null else "${stripDimensionAccessor(target)}.getId()"
+            }
+            else -> ownerEntityId
+        }
+    }
+
+    private fun stripDimensionAccessor(expression: String): String =
+        expression.trim().removeSuffix(".dimension()")
 
     private fun detectGeneratedCompatPackage(projectDir: Path): String {
         val modId = detectModId(projectDir) ?: projectDir.fileName.toString()

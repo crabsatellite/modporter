@@ -1724,7 +1724,7 @@ class StructuralRefactorExtraTest {
 
             public interface LevelData {
                 static LazyOptional<LevelData> get(Level level) {
-                    return LazyOptional.ofNullable(level.getCapability(ExampleCapabilities.LEVEL_DATA, null));
+                    return LazyOptional.ofNullable(level.getCapability(ExampleCapabilities.LEVEL_DATA));
                 }
             }
         """.trimIndent())
@@ -1770,6 +1770,7 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.entity.LivingEntity;
             import net.minecraft.world.entity.player.Player;
             import net.minecraft.world.level.Level;
+            import net.neoforged.bus.api.SubscribeEvent;
             import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
             import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
 
@@ -1777,6 +1778,7 @@ class StructuralRefactorExtraTest {
                 public static final Capability<PlayerData> PLAYER_DATA = CapabilityManager.get(new CapabilityToken<>() {});
                 public static final Capability<LevelData> LEVEL_DATA = CapabilityManager.get(new CapabilityToken<>() {});
 
+                @SubscribeEvent
                 public static void register(RegisterCapabilitiesEvent event) {
                     event.register(PlayerData.class);
                     event.register(LevelData.class);
@@ -1812,10 +1814,225 @@ class StructuralRefactorExtraTest {
         assertTrue(capabilities.contains("if (!(entity instanceof Player player)) return null;"), capabilities)
         assertFalse(capabilities.contains("AttachCapabilitiesEvent"))
         assertFalse(capabilities.contains("CapabilityProvider"))
+        assertFalse(Regex("""@SubscribeEvent\s+public static void registerAttachments""").containsMatchIn(capabilities.replace("\r\n", "\n")), capabilities)
         assertFalse(capabilities.contains("event.register(PlayerData.class)"))
         assertTrue(playerData.contains("player.getCapability(ExampleCapabilities.PLAYER_DATA, null)"), playerData)
         assertTrue(levelData.contains("level.getData(ExampleCapabilities.LEVEL_DATA.get())"), levelData)
         assertTrue(mod.contains("ExampleCapabilities.registerAttachments(modEventBus);"), mod)
+    }
+
+    @Test
+    fun `serializable attached entity capabilities migrate to attachments and Nitrogen sync API`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val capabilityDir = srcDir.resolve("capability")
+        val networkDir = srcDir.resolve("network/packet")
+        capabilityDir.createDirectories()
+        networkDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "examplemod";
+
+                public ExampleMod(IEventBus modEventBus) {
+                }
+            }
+        """.trimIndent())
+        capabilityDir.resolve("SynchedData.java").writeText("""
+            package com.example.capability;
+
+            import com.aetherteam.nitrogen.capability.INBTSynchable;
+            import com.modporter.generated.examplemod.compat.LazyOptional;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.player.Player;
+
+            public interface SynchedData extends INBTSynchable<CompoundTag> {
+                static LazyOptional<SynchedData> get(Player player) {
+                    return LazyOptional.ofNullable(player.getCapability(ExampleCapabilities.PLAYER_DATA));
+                }
+            }
+        """.trimIndent())
+        capabilityDir.resolve("SynchedDataCapability.java").writeText("""
+            package com.example.capability;
+
+            import com.aetherteam.nitrogen.capability.INBTSynchable;
+            import com.aetherteam.nitrogen.network.BasePacket;
+            import com.example.network.ExamplePacketHandler;
+            import com.example.network.packet.SynchedDataSyncPacket;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraftforge.network.simple.SimpleChannel;
+            import org.apache.commons.lang3.tuple.Triple;
+            import java.util.Map;
+            import java.util.function.Consumer;
+            import java.util.function.Supplier;
+
+            public class SynchedDataCapability implements SynchedData {
+                private final Player player;
+                private final Map<String, Triple<Type, Consumer<Object>, Supplier<Object>>> functions = Map.of();
+
+                public SynchedDataCapability(Player player) {
+                    this.player = player;
+                }
+
+                public Player getPlayer() {
+                    return this.player;
+                }
+
+                public void update(boolean value) {
+                    this.setSynched(INBTSynchable.Direction.CLIENT, "setValue", value);
+                }
+
+                public CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider) {
+                    return new CompoundTag();
+                }
+
+                public void deserializeNBT(net.minecraft.core.HolderLookup.Provider provider, CompoundTag tag) {
+                }
+
+                public Map<String, Triple<Type, Consumer<Object>, Supplier<Object>>> getSynchableFunctions() {
+                    return this.functions;
+                }
+
+                public BasePacket getSyncPacket(String key, Type type, Object value) {
+                    return new SynchedDataSyncPacket(key, type, value);
+                }
+
+                public SimpleChannel getPacketChannel() {
+                    return ExamplePacketHandler.INSTANCE;
+                }
+            }
+        """.trimIndent())
+        capabilityDir.resolve("ExampleCapabilities.java").writeText("""
+            package com.example.capability;
+
+            import com.example.ExampleMod;
+            import com.example.compat.Capability;
+            import com.example.compat.CapabilityManager;
+            import com.example.compat.CapabilityProvider;
+            import com.example.compat.CapabilityToken;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.player.Player;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
+            import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
+
+            @EventBusSubscriber(modid = ExampleMod.MOD_ID)
+            public class ExampleCapabilities {
+                public static final Capability<SynchedData> PLAYER_DATA = CapabilityManager.get(new CapabilityToken<>() {});
+
+                @SubscribeEvent
+                public static void register(RegisterCapabilitiesEvent event) {
+                    event.register(SynchedData.class);
+                }
+
+                public static void attachEntityCapabilities(AttachCapabilitiesEvent<Entity> event) {
+                    if (event.getObject() instanceof Player player) {
+                        event.addCapability(ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, "player_data"), new CapabilityProvider(ExampleCapabilities.PLAYER_DATA, new SynchedDataCapability(player)));
+                    }
+                }
+            }
+        """.trimIndent())
+        networkDir.resolve("SynchedDataSyncPacket.java").writeText("""
+            package com.example.network.packet;
+
+            import com.aetherteam.nitrogen.capability.INBTSynchable;
+            import com.aetherteam.nitrogen.network.packet.SyncEntityPacket;
+            import com.example.capability.SynchedData;
+            import net.minecraft.network.FriendlyByteBuf;
+            import oshi.util.tuples.Quartet;
+
+            public class SynchedDataSyncPacket extends SyncEntityPacket<SynchedData> {
+                public SynchedDataSyncPacket(Quartet<Integer, String, INBTSynchable.Type, Object> values) {
+                    super(values);
+                }
+
+                public SynchedDataSyncPacket(int playerID, String key, INBTSynchable.Type type, Object value) {
+                    super(playerID, key, type, value);
+                }
+
+                public static SynchedDataSyncPacket decode(FriendlyByteBuf buf) {
+                    return new SynchedDataSyncPacket(SyncEntityPacket.decodeEntityValues(buf));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val capabilities = capabilityDir.resolve("ExampleCapabilities.java").readText()
+        val api = capabilityDir.resolve("SynchedData.java").readText()
+        val impl = capabilityDir.resolve("SynchedDataCapability.java").readText()
+        val packet = networkDir.resolve("SynchedDataSyncPacket.java").readText()
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-custom-entity-capabilities" })
+        assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-attachment-api" })
+        assertTrue(capabilities.contains("Supplier<AttachmentType<SynchedData>> PLAYER_DATA"), capabilities)
+        assertTrue(capabilities.contains("AttachmentType.serializable(holder -> new SynchedDataCapability((Player) holder)).build()"), capabilities)
+        assertFalse(capabilities.contains("EntityCapability<SynchedData"), capabilities)
+        assertFalse(capabilities.contains("RegisterCapabilitiesEvent"), capabilities)
+        assertFalse(capabilities.contains("@SubscribeEvent"), capabilities)
+        assertFalse(capabilities.contains("@EventBusSubscriber"), capabilities)
+        assertTrue(api.contains("import com.aetherteam.nitrogen.attachment.INBTSynchable;"), api)
+        assertTrue(api.contains("import net.neoforged.neoforge.common.util.INBTSerializable;"), api)
+        assertTrue(api.contains("extends INBTSynchable, INBTSerializable<CompoundTag>"), api)
+        assertTrue(api.contains("player.getData(ExampleCapabilities.PLAYER_DATA.get())"), api)
+        assertTrue(impl.contains("public SyncPacket getSyncPacket(int entityID, String key, Type type, Object value)"), impl)
+        assertTrue(impl.contains("new SynchedDataSyncPacket(entityID, key, type, value)"), impl)
+        assertTrue(impl.contains("this.setSynched(this.getPlayer().getId(), INBTSynchable.Direction.CLIENT, \"setValue\", value);"), impl)
+        assertFalse(impl.contains("getPacketChannel"), impl)
+        assertFalse(impl.contains("BasePacket"), impl)
+        assertTrue(packet.contains("import com.aetherteam.nitrogen.attachment.INBTSynchable;"), packet)
+        assertTrue(packet.contains("RegistryFriendlyByteBuf buf"), packet)
+        assertTrue(mod.contains("ExampleCapabilities.registerAttachments(modEventBus);"), mod)
+    }
+
+    @Test
+    fun `attachment registration helper is not treated as subscribe event`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val capabilityDir = srcDir.resolve("capability")
+        capabilityDir.createDirectories()
+
+        capabilityDir.resolve("ExampleCapabilities.java").writeText("""
+            package com.example.capability;
+
+            import com.example.ExampleMod;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.attachment.AttachmentType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+            import net.neoforged.neoforge.registries.NeoForgeRegistries;
+
+            @EventBusSubscriber(modid = ExampleMod.MOD_ID)
+            public class ExampleCapabilities {
+                public static final DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES = DeferredRegister.create(NeoForgeRegistries.ATTACHMENT_TYPES, ExampleMod.MOD_ID);
+
+                @SubscribeEvent
+
+                public static void registerAttachments(IEventBus modEventBus) {
+                    ATTACHMENT_TYPES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val capabilities = capabilityDir.resolve("ExampleCapabilities.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-attachment-registration-event-cleanup" })
+        assertTrue(capabilities.contains("public static void registerAttachments(IEventBus modEventBus)"), capabilities)
+        assertFalse(capabilities.contains("@SubscribeEvent"), capabilities)
+        assertFalse(capabilities.contains("@EventBusSubscriber"), capabilities)
+        assertFalse(capabilities.contains("net.neoforged.bus.api.SubscribeEvent"), capabilities)
+        assertFalse(capabilities.contains("net.neoforged.fml.common.EventBusSubscriber"), capabilities)
+        assertFalse(capabilities.contains("net.neoforged.fml.common.Mod"), capabilities)
     }
 
     @Test
