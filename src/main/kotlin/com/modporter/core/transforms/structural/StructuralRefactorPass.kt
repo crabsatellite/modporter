@@ -9500,6 +9500,7 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyLootAndRegistryAccess(result)
         result = migrateLegacyLootTableKeyFields(result)
         result = migrateLegacyDataAndComponentAccess(result)
+        result = migrateLegacyHolderSoundEventPlaySoundArguments(result)
         result = migrateLegacySpawnEggItemTypeCalls(result)
         result = migrateLegacyTriStateEventResults(result)
         result = migrateLegacySleepingTimeCheckEventSource(result)
@@ -18183,6 +18184,56 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
         if (needsLevelReader) result = addImportIfMissing(result, "net.minecraft.world.level.LevelReader")
         return result
     }
+
+    private fun migrateLegacyHolderSoundEventPlaySoundArguments(source: String): String {
+        if (!source.contains(".playSound(") || !source.contains("SoundEvents.")) return source
+        return migrateMethodCalls(source, ".playSound") { args ->
+            val migratedArgs = args.toMutableList()
+            val candidateSoundIndices = when (args.size) {
+                3 -> listOf(0)
+                4 -> listOf(2)
+                6 -> listOf(2, 4)
+                8 -> listOf(4)
+                else -> emptyList()
+            }
+            for (index in candidateSoundIndices) {
+                if (index !in migratedArgs.indices) continue
+                migratedArgs[index] = unwrapVanillaHolderSoundEventArgument(migratedArgs[index])
+            }
+            migratedArgs
+        }
+    }
+
+    private fun unwrapVanillaHolderSoundEventArgument(argument: String): String {
+        val trimmed = argument.trim()
+        if (trimmed.endsWith(".value()")) return argument
+        val sound = Regex("""^SoundEvents\.([A-Z0-9_]+)$""").find(trimmed)?.groupValues?.get(1) ?: return argument
+        return if (isVanillaHolderSoundEvent(sound)) "${trimmed}.value()" else argument
+    }
+
+    private fun isVanillaHolderSoundEvent(name: String): Boolean =
+        name == "AMBIENT_CAVE" ||
+            name.startsWith("AMBIENT_BASALT_DELTAS_") ||
+            name.startsWith("AMBIENT_CRIMSON_FOREST_") ||
+            name.startsWith("AMBIENT_NETHER_WASTES_") ||
+            name.startsWith("AMBIENT_SOUL_SAND_VALLEY_") ||
+            name.startsWith("AMBIENT_WARPED_FOREST_") ||
+            name.startsWith("ARMOR_EQUIP_") ||
+            name == "BREEZE_WIND_CHARGE_BURST" ||
+            name.startsWith("CROSSBOW_LOADING_") ||
+            name.startsWith("CROSSBOW_QUICK_CHARGE_") ||
+            name == "GENERIC_EXPLODE" ||
+            name == "LLAMA_SWAG" ||
+            name.startsWith("MUSIC_") ||
+            name.startsWith("NOTE_BLOCK_") ||
+            name == "RAID_HORN" ||
+            name == "RESPAWN_ANCHOR_DEPLETE" ||
+            name == "SOUL_ESCAPE" ||
+            name.startsWith("TRIDENT_RIPTIDE_") ||
+            name == "TRIDENT_THROW" ||
+            name == "TRIDENT_THUNDER" ||
+            name == "UI_BUTTON_CLICK" ||
+            name == "WIND_CHARGE_BURST"
 
     private fun migrateCraftingInputSizeCallsForDeclaredScopes(source: String): String {
         if (!source.contains("CraftingInput") ||

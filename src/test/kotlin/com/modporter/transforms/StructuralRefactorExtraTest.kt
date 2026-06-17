@@ -10349,6 +10349,40 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates holder sound event constants only in play sound sound argument slots`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("SoundSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.sounds.SoundEvents;
+            import net.minecraft.sounds.SoundSource;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.Level;
+
+            public class SoundSurface {
+                void play(Level level, Player player, Entity entity, BlockPos pos, double x, double y, double z) {
+                    level.playSound(null, pos, SoundEvents.ARMOR_EQUIP_GENERIC, SoundSource.BLOCKS, 1.0F, 1.0F);
+                    level.playSound(player, x, y, z, SoundEvents.TRIDENT_THROW, SoundSource.PLAYERS, 1.0F, 1.0F);
+                    entity.playSound(SoundEvents.GENERIC_EXPLODE, 1.0F, 1.0F);
+                    level.playSound(null, pos, SoundEvents.FIRE_EXTINGUISH, SoundSource.BLOCKS, 1.0F, 1.0F);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("SoundSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("level.playSound(null, pos, SoundEvents.ARMOR_EQUIP_GENERIC.value(), SoundSource.BLOCKS, 1.0F, 1.0F);"))
+        assertTrue(migrated.contains("level.playSound(player, x, y, z, SoundEvents.TRIDENT_THROW.value(), SoundSource.PLAYERS, 1.0F, 1.0F);"))
+        assertTrue(migrated.contains("entity.playSound(SoundEvents.GENERIC_EXPLODE.value(), 1.0F, 1.0F);"))
+        assertTrue(migrated.contains("level.playSound(null, pos, SoundEvents.FIRE_EXTINGUISH, SoundSource.BLOCKS, 1.0F, 1.0F);"))
+    }
+
+    @Test
     fun `migrates legacy sleeping time check event result API by event parameter type`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
