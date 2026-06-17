@@ -1634,12 +1634,12 @@ class TextReplacementTest {
 
         val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
 
-        assertTrue(transformed.contains("import net.minecraft.world.item.crafting.SingleRecipeInput;"))
         assertTrue(transformed.contains("import net.minecraft.world.item.crafting.RecipeHolder;"))
+        assertFalse(transformed.contains("import net.minecraft.world.item.crafting.SingleRecipeInput;"))
         assertFalse(transformed.contains("import net.neoforged.neoforge.network.NetworkHooks;"))
         assertTrue(transformed.contains("DeferredHolder<MenuType<?>, MenuType<StoneMortarContainer>> STONE_MORTAR"))
         assertTrue(transformed.contains("private static <C extends net.minecraft.world.item.crafting.RecipeInput, T extends Recipe<C>> List<T> findRecipesByType"))
-        assertTrue(transformed.contains("SingleRecipeInput container = new SingleRecipeInput(stack.copy());"))
+        assertTrue(transformed.contains("SimpleContainer container = new SimpleContainer(stack.copy());"))
         assertTrue(transformed.contains(".getRecipeFor(RecipeType.SMELTING, container, level).map(RecipeHolder::value);"))
         assertTrue(transformed.contains(".getRecipesFor(RecipeTypeRegistry.COOKING_RECIPE_TYPE.get(), wrapper, level).stream().map(RecipeHolder::value).toList();"))
         assertTrue(transformed.contains("var recipeOpt = level.getRecipeManager()"))
@@ -1770,6 +1770,35 @@ class TextReplacementTest {
         assertTrue(transformed.contains("import net.minecraft.world.SimpleContainer;"))
         assertTrue(transformed.contains("extends SimpleContainer"))
         assertFalse(transformed.contains("import net.minecraft.world.item.crafting.SingleRecipeInput;"))
+    }
+
+    @Test
+    fun `simple container slot backing store is not rewritten as recipe input by text rules`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.SimpleContainer;
+            import net.minecraft.world.inventory.Slot;
+
+            public class CreativeDestroySlot {
+                private static final SimpleContainer DESTROY_ITEM_CONTAINER = new SimpleContainer(1);
+
+                void addSlot() {
+                    new Slot(DESTROY_ITEM_CONTAINER, 0, 172, 142);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.world.SimpleContainer;"))
+        assertTrue(transformed.contains("private static final SimpleContainer DESTROY_ITEM_CONTAINER = new SimpleContainer(1);"))
+        assertTrue(transformed.contains("new Slot(DESTROY_ITEM_CONTAINER, 0, 172, 142);"))
+        assertFalse(transformed.contains("SingleRecipeInput"))
     }
 
     @Test

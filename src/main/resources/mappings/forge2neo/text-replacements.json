@@ -1658,14 +1658,6 @@
       "isRegex": true
     },
     {
-      "id": "smelting-single-recipe-input-local",
-      "pattern": "SimpleContainer\\s+(\\w+)\\s*=\\s*new\\s+SimpleContainer\\(([^;]+)\\);",
-      "replacement": "SingleRecipeInput $1 = new SingleRecipeInput($2);",
-      "description": "SimpleContainer single-stack smelting input -> SingleRecipeInput",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "commonhooks-getburntime-itemstack",
       "pattern": "CommonHooks\\.getBurnTime\\(([^,;\\r\\n]+),\\s*null\\)",
       "replacement": "$1.getBurnTime(null)",
