@@ -1465,6 +1465,8 @@ $fieldLines
             """.trimIndent()
         }
 
+        inferEntityTypeAndIntLootFunctionCodecField(serializer, className)?.let { return it }
+
         if (!serializer.contains("GsonHelper.getAsItem") ||
             !serializer.contains("\"default\"") ||
             !serializer.contains("success")) {
@@ -1486,6 +1488,47 @@ $fieldLines
 		BuiltInRegistries.ITEM.byNameCodec().optionalFieldOf("item").forGetter(o -> o.$successMember ? java.util.Optional.of(o.$itemMember) : java.util.Optional.empty()),
 		BuiltInRegistries.ITEM.byNameCodec().fieldOf("default").forGetter(o -> o.$defaultMember)
 	)).apply(instance, (conditions, item, oldItem) -> new $className(conditions, item.orElse(oldItem), oldItem, item.isPresent())));
+        """.trimIndent()
+    }
+
+    private fun inferEntityTypeAndIntLootFunctionCodecField(serializer: String, className: String): String? {
+        val deserializeReturn = Regex(
+            """return\s+new\s+${Regex.escape(className)}\s*\(([\s\S]*?)\)\s*;"""
+        ).find(serializer) ?: return null
+        val constructorArgs = splitTopLevelArguments(deserializeReturn.groupValues[1])
+        if (constructorArgs.size < 2 || constructorArgs.first().trim() != "conditions") return null
+
+        val entityLocals = Regex(
+            """EntityType\s*<\s*\?\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*EntityType\.byString\s*\(\s*GsonHelper\.getAsString\s*\(\s*[^,]+,\s*"([^"]+)"\s*\)\s*\)[^;]*;"""
+        ).findAll(serializer).associate { it.groupValues[1] to it.groupValues[2] }
+        val intLocals = Regex(
+            """int\s+([A-Za-z_$][\w$]*)\s*=\s*GsonHelper\.getAsInt\s*\(\s*[^,]+,\s*"([^"]+)"\s*\)\s*;"""
+        ).findAll(serializer).associate { it.groupValues[1] to it.groupValues[2] }
+        if (entityLocals.isEmpty() && intLocals.isEmpty()) return null
+
+        val entityMembersByKey = Regex(
+            """\b(?:object|json)\.addProperty\s*\(\s*"([^"]+)"\s*,\s*EntityType\.getKey\s*\(\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\s*\)\.toString\s*\(\s*\)\s*\)"""
+        ).findAll(serializer).associate { it.groupValues[1] to it.groupValues[2] }
+        val intMembersByKey = Regex(
+            """\b(?:object|json)\.addProperty\s*\(\s*"([^"]+)"\s*,\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\s*\)"""
+        ).findAll(serializer).associate { it.groupValues[1] to it.groupValues[2] }
+
+        val codecFields = constructorArgs.drop(1).map { argument ->
+            val arg = argument.trim()
+            entityLocals[arg]?.let { key ->
+                val member = entityMembersByKey[key] ?: arg
+                """		BuiltInRegistries.ENTITY_TYPE.byNameCodec().fieldOf("$key").forGetter(o -> o.$member)"""
+            } ?: intLocals[arg]?.let { key ->
+                val member = intMembersByKey[key] ?: arg
+                """		com.mojang.serialization.Codec.INT.fieldOf("$key").forGetter(o -> o.$member)"""
+            } ?: return null
+        }
+        if (codecFields.isEmpty()) return null
+
+        return """
+	public static final MapCodec<$className> CODEC = com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec(instance -> commonFields(instance).and(instance.group(
+${codecFields.joinToString(",\n")}
+	)).apply(instance, $className::new));
         """.trimIndent()
     }
 

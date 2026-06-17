@@ -2727,6 +2727,54 @@ class TextReplacementTest {
                 }
             }
         """.trimIndent())
+        srcDir.resolve("SpawnEntityLootFunction.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import com.google.gson.JsonSyntaxException;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.functions.LootItemConditionalFunction;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+
+            public class SpawnEntityLootFunction extends LootItemConditionalFunction {
+                private final EntityType<?> entityType;
+                private final int count;
+
+                protected SpawnEntityLootFunction(LootItemCondition[] conditions, EntityType<?> entityType, int count) {
+                    super(conditions);
+                    this.entityType = entityType;
+                    this.count = count;
+                }
+
+                public LootItemFunctionType getType() {
+                    return TestLoot.SPAWN_ENTITY.get();
+                }
+
+                public ItemStack run(ItemStack stack, LootContext context) {
+                    return stack;
+                }
+
+                public static class Serializer extends LootItemConditionalFunction.Serializer<SpawnEntityLootFunction> {
+                    public void serialize(JsonObject json, SpawnEntityLootFunction instance, JsonSerializationContext context) {
+                        super.serialize(json, instance, context);
+                        json.addProperty("entity", EntityType.getKey(instance.entityType).toString());
+                        json.addProperty("count", instance.count);
+                    }
+
+                    public SpawnEntityLootFunction deserialize(JsonObject json, JsonDeserializationContext context, LootItemCondition[] conditions) {
+                        EntityType<?> entityType = EntityType.byString(GsonHelper.getAsString(json, "entity")).orElseThrow(() -> new JsonSyntaxException("No value present!"));
+                        int count = GsonHelper.getAsInt(json, "count");
+                        return new SpawnEntityLootFunction(conditions, entityType, count);
+                    }
+                }
+            }
+        """.trimIndent())
         srcDir.resolve("TestLoot.java").writeText("""
             package com.example;
 
@@ -2744,6 +2792,8 @@ class TextReplacementTest {
                         FUNCTIONS.register("item_or_default", () -> new LootItemFunctionType(new ModItemSwap.Serializer()));
                 public static final DeferredHolder<LootItemFunctionType, LootItemFunctionType> NO_EXTRA =
                         FUNCTIONS.register("no_extra", () -> new LootItemFunctionType(new NoExtraLootFunction.Serializer()));
+                public static final DeferredHolder<LootItemFunctionType, LootItemFunctionType> SPAWN_ENTITY =
+                        FUNCTIONS.register("spawn_entity", () -> new LootItemFunctionType(new SpawnEntityLootFunction.Serializer()));
                 public static final DeferredHolder<LootItemConditionType, LootItemConditionType> MOD_EXISTS =
                         CONDITIONS.register("mod_exists", () -> new LootItemConditionType(new ModExistsCondition.ConditionSerializer()));
                 public static final DeferredHolder<LootItemConditionType, LootItemConditionType> CONFIG_ENABLED =
@@ -2768,6 +2818,7 @@ class TextReplacementTest {
         val configEnabled = srcDir.resolve("ConfigEnabled.java").readText()
         val modItemSwap = srcDir.resolve("ModItemSwap.java").readText()
         val noExtraLootFunction = srcDir.resolve("NoExtraLootFunction.java").readText()
+        val spawnEntityLootFunction = srcDir.resolve("SpawnEntityLootFunction.java").readText()
         val registry = srcDir.resolve("TestLoot.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "loot-serializer-mapcodec" })
@@ -2784,11 +2835,17 @@ class TextReplacementTest {
         assertTrue(noExtraLootFunction.contains("public static final MapCodec<NoExtraLootFunction> CODEC = com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec(instance -> commonFields(instance).apply(instance, NoExtraLootFunction::new));"))
         assertTrue(noExtraLootFunction.contains("protected NoExtraLootFunction(java.util.List<LootItemCondition> conditions)"))
         assertTrue(noExtraLootFunction.contains("public LootItemFunctionType<NoExtraLootFunction> getType()"))
+        assertTrue(spawnEntityLootFunction.contains("BuiltInRegistries.ENTITY_TYPE.byNameCodec().fieldOf(\"entity\").forGetter(o -> o.entityType)"))
+        assertTrue(spawnEntityLootFunction.contains("com.mojang.serialization.Codec.INT.fieldOf(\"count\").forGetter(o -> o.count)"))
+        assertTrue(spawnEntityLootFunction.contains("protected SpawnEntityLootFunction(java.util.List<LootItemCondition> conditions, EntityType<?> entityType, int count)"))
+        assertTrue(spawnEntityLootFunction.contains("public LootItemFunctionType<SpawnEntityLootFunction> getType()"))
         assertTrue(registry.contains("DeferredRegister<LootItemFunctionType<?>> FUNCTIONS"))
         assertTrue(registry.contains("DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<ModItemSwap>> ITEM_OR_DEFAULT"))
         assertTrue(registry.contains("DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<NoExtraLootFunction>> NO_EXTRA"))
+        assertTrue(registry.contains("DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<SpawnEntityLootFunction>> SPAWN_ENTITY"))
         assertTrue(registry.contains("new LootItemFunctionType<>(ModItemSwap.CODEC)"))
         assertTrue(registry.contains("new LootItemFunctionType<>(NoExtraLootFunction.CODEC)"))
+        assertTrue(registry.contains("new LootItemFunctionType<>(SpawnEntityLootFunction.CODEC)"))
         assertTrue(registry.contains("new LootItemConditionType(ModExistsCondition.CODEC)"))
         assertTrue(registry.contains("new LootItemConditionType(ConfigEnabled.CODEC)"))
         assertTrue(registry.contains("new LootItemConditionType(EntityTargetCondition.CODEC)"))
@@ -2798,6 +2855,8 @@ class TextReplacementTest {
         assertFalse(configEnabled.contains("net.minecraft.world.level.storage.loot.Serializer"))
         assertFalse(modItemSwap.contains("LootItemConditionalFunction.Serializer"))
         assertFalse(noExtraLootFunction.contains("LootItemConditionalFunction.Serializer"))
+        assertFalse(spawnEntityLootFunction.contains("LootItemConditionalFunction.Serializer"))
+        assertFalse(spawnEntityLootFunction.contains("EntityType.byString"))
         assertFalse(modItemSwap.contains("JsonSyntaxException"))
         assertFalse(modExists.contains("net.minecraft.world.level.storage.loot.Serializer"))
     }
