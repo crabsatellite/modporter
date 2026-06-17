@@ -18174,6 +18174,7 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
                         "super.pickupBlock(player, ${match.groupValues[1].trim()}, ${match.groupValues[2].trim()}, ${match.groupValues[3].trim()})"
                     }
             }
+            result = migrateLegacyBucketPickupCallSites(result)
         }
 
         if (needsDataComponents) result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
@@ -18183,6 +18184,150 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
         if (needsCollisionContext) result = addImportIfMissing(result, "net.minecraft.world.phys.shapes.CollisionContext")
         if (needsLevelReader) result = addImportIfMissing(result, "net.minecraft.world.level.LevelReader")
         return result
+    }
+
+    private fun migrateLegacyBucketPickupCallSites(source: String): String {
+        if (!source.contains("BucketPickup") || !source.contains(".pickupBlock(")) return source
+        var result = source
+        var cursor = 0
+        val instanceofPattern = Regex("""\binstanceof\s+BucketPickup\s+([A-Za-z_$][\w$]*)\b""")
+        while (true) {
+            val match = instanceofPattern.find(result, cursor) ?: break
+            val receiver = match.groupValues[1]
+            val openBrace = result.indexOf('{', match.range.last + 1)
+            if (openBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace <= openBrace) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            val playerArgument = bucketPickupPlayerArgumentForEnclosingMethod(result, match.range.first)
+            val migratedBody = migrateLegacyBucketPickupCallsForReceiver(body, receiver, playerArgument)
+            if (migratedBody != body) {
+                result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
+                cursor = openBrace + 1 + migratedBody.length
+            } else {
+                cursor = closeBrace + 1
+            }
+        }
+
+        cursor = 0
+        val parameterPattern = Regex(
+            """\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?[\w<>\[\].?,\s]+\s+[A-Za-z_$][\w$]*\s*\([^;{}()]*\b(?:net\.minecraft\.world\.level\.block\.)?BucketPickup\s+([A-Za-z_$][\w$]*)[^;{}()]*\)\s*(?:throws\s+[^{]+)?\{"""
+        )
+        while (true) {
+            val match = parameterPattern.find(result, cursor) ?: break
+            val receiver = match.groupValues[1]
+            val openBrace = match.range.last
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace <= openBrace) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            val playerArgument = bucketPickupPlayerArgumentForEnclosingMethod(result, match.range.first)
+            val migratedBody = migrateLegacyBucketPickupCallsForReceiver(body, receiver, playerArgument)
+            if (migratedBody != body) {
+                result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
+                cursor = openBrace + 1 + migratedBody.length
+            } else {
+                cursor = closeBrace + 1
+            }
+        }
+
+        cursor = 0
+        val methodPattern = Regex(
+            """\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?[\w<>\[\].?,\s]+\s+[A-Za-z_$][\w$]*\s*\([^;{}()]*\)\s*(?:throws\s+[^{]+)?\{"""
+        )
+        while (true) {
+            val match = methodPattern.find(result, cursor) ?: break
+            val openBrace = match.range.last
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace <= openBrace) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            val playerArgument = bucketPickupPlayerArgumentForEnclosingMethod(result, match.range.first)
+            val migratedBody = migrateLegacyBucketPickupLocalDeclarationBody(body, playerArgument)
+            if (migratedBody != body) {
+                result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
+                cursor = openBrace + 1 + migratedBody.length
+            } else {
+                cursor = closeBrace + 1
+            }
+        }
+        return result
+    }
+
+    private fun bucketPickupPlayerArgumentForEnclosingMethod(source: String, offset: Int): String {
+        val methodPattern = Regex(
+            """\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?[\w<>\[\].?,\s]+\s+[A-Za-z_$][\w$]*\s*\(([^;{}()]*)\)\s*(?:throws\s+[^{]+)?\{"""
+        )
+        val method = methodPattern.findAll(source.substring(0, offset)).lastOrNull() ?: return "null"
+        val openBrace = method.range.last
+        val closeBrace = findMatchingBrace(source, openBrace)
+        if (closeBrace <= offset) return "null"
+        return singlePlayerParameterName(method.groupValues[1]) ?: "null"
+    }
+
+    private fun singlePlayerParameterName(parameters: String): String? {
+        val playerType = Regex(
+            """(?:^|[\s<,])(?:final\s+)?(?:(?:net\.minecraft\.world\.entity\.player\.)?Player|(?:net\.minecraft\.server\.level\.)?ServerPlayer)\s+([A-Za-z_$][\w$]*)\b"""
+        )
+        val playerParameters = splitTopLevelJavaArgs(parameters)
+            .mapNotNull { parameter -> playerType.find(parameter)?.groupValues?.get(1) }
+            .distinct()
+        return playerParameters.singleOrNull()
+    }
+
+    private fun migrateLegacyBucketPickupLocalDeclarationBody(body: String, playerArgument: String): String {
+        var result = body
+        val declarations = Regex("""(?m)^[ \t]*(?:final\s+)?(?:net\.minecraft\.world\.level\.block\.)?BucketPickup\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(body)
+            .toList()
+            .asReversed()
+        for (declaration in declarations) {
+            val receiver = declaration.groupValues[1]
+            val suffixStart = declaration.range.last + 1
+            val suffix = result.substring(suffixStart)
+            val migratedSuffix = migrateLegacyBucketPickupCallsForReceiver(suffix, receiver, playerArgument)
+            if (migratedSuffix != suffix) {
+                result = result.substring(0, suffixStart) + migratedSuffix
+            }
+        }
+        return result
+    }
+
+    private fun migrateLegacyBucketPickupCallsForReceiver(source: String, receiver: String, playerArgument: String): String {
+        val token = "$receiver.pickupBlock"
+        val migrated = StringBuilder()
+        var cursor = 0
+        while (cursor < source.length) {
+            val tokenIndex = source.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + token.length
+            if (openParen >= source.length || source[openParen] != '(') {
+                migrated.append(source, cursor, openParen)
+                cursor = openParen
+                continue
+            }
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen < 0) break
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            val migratedArgs = if (args.size == 3) listOf(playerArgument) + args else args
+            migrated.append(source, cursor, openParen + 1)
+            migrated.append(migratedArgs.joinToString(", ") { it.trim() })
+            migrated.append(")")
+            cursor = closeParen + 1
+        }
+        if (cursor == 0) return source
+        migrated.append(source, cursor, source.length)
+        return migrated.toString()
     }
 
     private fun migrateLegacyHolderSoundEventPlaySoundArguments(source: String): String {

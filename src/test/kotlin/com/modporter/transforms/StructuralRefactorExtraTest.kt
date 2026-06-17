@@ -10349,6 +10349,63 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy bucket pickup call sites by receiver type evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BucketPickupCalls.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.LevelAccessor;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.BucketPickup;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class BucketPickupCalls {
+                void fromPattern(Block block, LevelAccessor level, BlockPos pos, BlockState state) {
+                    if (block instanceof BucketPickup bucketPickup) {
+                        ItemStack stack = bucketPickup.pickupBlock(level, pos, state);
+                    }
+                    Other bucketPickup = new Other();
+                    bucketPickup.pickupBlock(level, pos, state);
+                }
+
+                void fromPlayerPattern(Block block, Player player, LevelAccessor level, BlockPos pos, BlockState state) {
+                    if (block instanceof BucketPickup bucketPickup) {
+                        bucketPickup.pickupBlock(level, pos, state);
+                    }
+                }
+
+                void fromParameter(BucketPickup bucketPickup, LevelAccessor level, BlockPos pos, BlockState state) {
+                    bucketPickup.pickupBlock(level, pos, state);
+                }
+
+                void fromDeclaration(LevelAccessor level, BlockPos pos, BlockState state) {
+                    BucketPickup bucketPickup = null;
+                    bucketPickup.pickupBlock(level, pos, state);
+                }
+
+                private static class Other {
+                    void pickupBlock(LevelAccessor level, BlockPos pos, BlockState state) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("BucketPickupCalls.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("ItemStack stack = bucketPickup.pickupBlock(null, level, pos, state);"))
+        assertTrue(migrated.contains("void fromPlayerPattern(Block block, Player player, LevelAccessor level, BlockPos pos, BlockState state) {\n        if (block instanceof BucketPickup bucketPickup) {\n            bucketPickup.pickupBlock(player, level, pos, state);"))
+        assertTrue(migrated.contains("void fromParameter(BucketPickup bucketPickup, LevelAccessor level, BlockPos pos, BlockState state) {\n        bucketPickup.pickupBlock(null, level, pos, state);"))
+        assertTrue(migrated.contains("BucketPickup bucketPickup = null;\n        bucketPickup.pickupBlock(null, level, pos, state);"))
+        assertTrue(migrated.contains("Other bucketPickup = new Other();\n        bucketPickup.pickupBlock(level, pos, state);"))
+    }
+
+    @Test
     fun `migrates holder sound event constants only in play sound sound argument slots`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
