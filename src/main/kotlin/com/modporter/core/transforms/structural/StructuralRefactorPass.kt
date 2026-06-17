@@ -388,6 +388,16 @@ class StructuralRefactorPass : Pass {
             errors.add("BaseEntityBlock codec error: ${e.message}")
         }
 
+        // DropExperienceBlock moved its xp provider before Properties in 1.21.
+        // Custom subclasses that simply forward to super must expose the same
+        // order, and their constructor call sites must follow it.
+        try {
+            val dropExperienceChanges = migrateDropExperienceBlockConstructorOrder(projectDir, dryRun)
+            changes.addAll(dropExperienceChanges)
+        } catch (e: Exception) {
+            errors.add("DropExperienceBlock constructor migration error: ${e.message}")
+        }
+
         // Migrate old FinishedRecipe-style builder result adapters to the
         // 1.21 RecipeOutput.accept(id, recipe, advancement) contract.
         try {
@@ -22536,6 +22546,108 @@ public class ${builder.className} implements RecipeBuilder {
         }
 
         return changes
+    }
+
+    private fun migrateDropExperienceBlockConstructorOrder(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val changes = mutableListOf<Change>()
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        val migratedConstructors = linkedSetOf("DropExperienceBlock")
+
+        for (file in javaFiles) {
+            val source = file.readText()
+            if (!source.contains("extends DropExperienceBlock") || !source.contains("super(")) continue
+            val className = javaTopLevelTypeName(source) ?: continue
+            val migrated = migrateDropExperienceSubclassConstructorSource(source, className)
+            if (migrated != source) {
+                migratedConstructors += className
+                changes.add(Change(
+                    file = file,
+                    line = 0,
+                    description = "Migrate DropExperienceBlock subclass constructor to xp-provider-first order",
+                    before = "Subclass(Properties properties, IntProvider xpRange); super(properties, xpRange)",
+                    after = "Subclass(IntProvider xpRange, Properties properties); super(xpRange, properties)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-drop-experience-constructor-order"
+                ))
+                if (!dryRun) {
+                    file.writeText(migrated)
+                }
+            }
+        }
+
+        for (file in javaFiles) {
+            val source = file.readText()
+            val migrated = migrateDropExperienceConstructorCallSitesSource(source, migratedConstructors)
+            if (migrated != source) {
+                changes.add(Change(
+                    file = file,
+                    line = 0,
+                    description = "Migrate DropExperienceBlock constructor calls to xp-provider-first order",
+                    before = "new DropExperienceBlock(Properties, IntProvider)",
+                    after = "new DropExperienceBlock(IntProvider, Properties)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-drop-experience-constructor-order"
+                ))
+                if (!dryRun) {
+                    file.writeText(migrated)
+                }
+            }
+        }
+
+        return changes
+    }
+
+    private fun migrateDropExperienceSubclassConstructorSource(source: String, className: String): String {
+        val id = """[A-Za-z_$][\w$]*"""
+        val constructorPattern = Regex(
+            """public\s+${Regex.escape(className)}\s*\(\s*((?:BlockBehaviour\.)?Properties)\s+($id)\s*,\s*((?:UniformInt|IntProvider))\s+($id)\s*\)"""
+        )
+        val match = constructorPattern.find(source) ?: return source
+        val propertiesType = match.groupValues[1]
+        val propertiesName = match.groupValues[2]
+        val xpType = match.groupValues[3]
+        val xpName = match.groupValues[4]
+        var result = constructorPattern.replaceFirst(
+            source,
+            "public $className($xpType $xpName, $propertiesType $propertiesName)"
+        )
+        val superPattern = Regex("""super\(\s*${Regex.escape(propertiesName)}\s*,\s*${Regex.escape(xpName)}\s*\)\s*;""")
+        result = superPattern.replace(result, "super($xpName, $propertiesName);")
+        return result
+    }
+
+    private fun migrateDropExperienceConstructorCallSitesSource(source: String, constructorClasses: Set<String>): String {
+        if (!source.contains("new ") || (!source.contains("UniformInt") && !source.contains("IntProvider"))) return source
+        val intProviderVariables = Regex("""\b(?:UniformInt|IntProvider)\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        var result = source
+        for (className in constructorClasses) {
+            result = rewriteJavaNew(result, className) { args ->
+                if (args.size != 2) return@rewriteJavaNew null
+                val properties = args[0].trim()
+                val xpProvider = args[1].trim()
+                if (!looksLikeBlockPropertiesExpression(properties) || !looksLikeIntProviderExpression(xpProvider, intProviderVariables)) {
+                    return@rewriteJavaNew null
+                }
+                "new $className($xpProvider, $properties)"
+            }
+        }
+        return result
+    }
+
+    private fun looksLikeIntProviderExpression(expression: String, intProviderVariables: Set<String>): Boolean {
+        val trimmed = expression.trim()
+        return trimmed in intProviderVariables ||
+            trimmed.contains("UniformInt.") ||
+            trimmed.contains("ConstantInt.") ||
+            trimmed.contains("ClampedInt.") ||
+            trimmed.contains("IntProvider.")
     }
 
     private fun migrateMmlibRecipeIdTracking(projectDir: Path, dryRun: Boolean): List<Change> {

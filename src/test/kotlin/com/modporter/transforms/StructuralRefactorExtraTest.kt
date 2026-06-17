@@ -10381,6 +10381,54 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates drop experience block constructor order for subclasses and call sites`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RichOreBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.util.valueproviders.UniformInt;
+            import net.minecraft.world.level.block.DropExperienceBlock;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class RichOreBlock extends DropExperienceBlock {
+                public RichOreBlock(BlockBehaviour.Properties properties, UniformInt xpRange) {
+                    super(properties, xpRange);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleBlocks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.util.valueproviders.UniformInt;
+            import net.minecraft.world.level.block.DropExperienceBlock;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class ExampleBlocks {
+                public Object rich() {
+                    return new RichOreBlock(BlockBehaviour.Properties.of().strength(3.0F), UniformInt.of(0, 2));
+                }
+
+                public Object vanilla() {
+                    return new DropExperienceBlock(BlockBehaviour.Properties.of().strength(3.0F), UniformInt.of(3, 5));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("RichOreBlock.java").readText()
+        val registry = srcDir.resolve("ExampleBlocks.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-drop-experience-constructor-order" })
+        assertTrue(block.contains("public RichOreBlock(UniformInt xpRange, BlockBehaviour.Properties properties)"), block)
+        assertTrue(block.contains("super(xpRange, properties);"), block)
+        assertTrue(registry.contains("new RichOreBlock(UniformInt.of(0, 2), BlockBehaviour.Properties.of().strength(3.0F))"), registry)
+        assertTrue(registry.contains("new DropExperienceBlock(UniformInt.of(3, 5), BlockBehaviour.Properties.of().strength(3.0F))"), registry)
+        assertFalse(registry.contains("new RichOreBlock(BlockBehaviour.Properties"), registry)
+        assertFalse(registry.contains("new DropExperienceBlock(BlockBehaviour.Properties"), registry)
+    }
+
+    @Test
     fun `migrates legacy vanilla block registry codec banner and near packet APIs by source shape`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
