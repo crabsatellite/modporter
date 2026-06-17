@@ -6462,6 +6462,181 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates furnace quick check accessors to recipe holder single stack boundaries`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val accessorDir = srcDir.resolve("mixin")
+        srcDir.createDirectories()
+        accessorDir.createDirectories()
+        accessorDir.resolve("AbstractFurnaceBlockEntityAccessor.java").writeText("""
+            package com.example.mixin;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeManager;
+            import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.gen.Accessor;
+            import org.spongepowered.asm.mixin.gen.Invoker;
+            import javax.annotation.Nullable;
+
+            @Mixin(AbstractFurnaceBlockEntity.class)
+            public interface AbstractFurnaceBlockEntityAccessor {
+                @Accessor("quickCheck")
+                RecipeManager.CachedCheck<Container, ? extends AbstractCookingRecipe> example${'$'}getQuickCheck();
+
+                @Invoker
+                boolean callCanBurn(RegistryAccess registryAccess, @Nullable Recipe<?> recipe, NonNullList<ItemStack> stacks, int stackSize);
+
+                @Accessor("items")
+                NonNullList<ItemStack> example${'$'}getItems();
+            }
+        """.trimIndent())
+        srcDir.resolve("FurnaceHookBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.example.mixin.AbstractFurnaceBlockEntityAccessor;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.world.WorldlyContainer;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
+            import javax.annotation.Nullable;
+            import java.util.Optional;
+
+            public class FurnaceHookBlockEntity extends AbstractFurnaceBlockEntity {
+                public static void tick(Level level, FurnaceHookBlockEntity blockEntity) {
+                    AbstractFurnaceBlockEntityAccessor accessor = (AbstractFurnaceBlockEntityAccessor) blockEntity;
+                    Recipe<?> recipe;
+                    if (!accessor.example${'$'}getItems().get(0).isEmpty()) {
+                        recipe = accessor.example${'$'}getQuickCheck().getRecipeFor(blockEntity, level).orElse(null);
+                    } else {
+                        recipe = null;
+                    }
+                    int maxStackSize = blockEntity.getMaxStackSize();
+                    if (accessor.callCanBurn(level.registryAccess(), recipe, accessor.example${'$'}getItems(), maxStackSize)) {
+                        if (blockEntity.burn(level.registryAccess(), recipe, accessor.example${'$'}getItems(), maxStackSize)) {
+                            blockEntity.setRecipeUsed(recipe);
+                        }
+                    }
+                }
+
+                @SuppressWarnings("unchecked")
+                private boolean burn(RegistryAccess registryAccess, @Nullable Recipe<?> recipe, NonNullList<ItemStack> stacks, int stackSize) {
+                    AbstractFurnaceBlockEntityAccessor accessor = (AbstractFurnaceBlockEntityAccessor) this;
+                    if (recipe != null && accessor.callCanBurn(registryAccess, recipe, stacks, stackSize)) {
+                        ItemStack inputSlotStack = stacks.get(0);
+                        ItemStack resultStack = ((Recipe<WorldlyContainer>) recipe).assemble(this, registryAccess);
+                        EnchantmentHelper.setEnchantments(EnchantmentHelper.getEnchantments(inputSlotStack), resultStack);
+                    }
+                    return true;
+                }
+
+                public boolean canTakeItemThroughFace(int index, ItemStack stack) {
+                    AbstractFurnaceBlockEntityAccessor accessor = (AbstractFurnaceBlockEntityAccessor) this;
+                    Optional<NonNullList<Ingredient>> ingredient = accessor.example${'$'}getQuickCheck().getRecipeFor(this, this.level).map(AbstractCookingRecipe::getIngredients);
+                    return ingredient.isPresent();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val accessor = accessorDir.resolve("AbstractFurnaceBlockEntityAccessor.java").readText()
+        val blockEntity = srcDir.resolve("FurnaceHookBlockEntity.java").readText()
+
+        assertTrue(accessor.contains("RecipeManager.CachedCheck<SingleRecipeInput, ? extends AbstractCookingRecipe> example${'$'}getQuickCheck()"), accessor)
+        assertTrue(accessor.contains("boolean callCanBurn(RegistryAccess registryAccess, @Nullable RecipeHolder<?> recipe"), accessor)
+        assertTrue(blockEntity.contains("RecipeHolder<?> recipe;"), blockEntity)
+        assertTrue(blockEntity.contains("example${'$'}getQuickCheck().getRecipeFor(new SingleRecipeInput(blockEntity.getItem(0)), level).orElse(null)"), blockEntity)
+        assertTrue(blockEntity.contains("private boolean burn(RegistryAccess registryAccess, @Nullable RecipeHolder<?> recipe"), blockEntity)
+        assertTrue(blockEntity.contains("((Recipe<SingleRecipeInput>) recipe.value()).assemble(new SingleRecipeInput(inputSlotStack), registryAccess)"), blockEntity)
+        assertTrue(blockEntity.contains(".map(RecipeHolder::value).map(AbstractCookingRecipe::getIngredients)"), blockEntity)
+        assertTrue(blockEntity.contains("EnchantmentHelper.setEnchantments(resultStack, EnchantmentHelper.getEnchantmentsForCrafting(inputSlotStack))"), blockEntity)
+        assertFalse(accessor.contains("CachedCheck<Container"), accessor)
+        assertFalse(blockEntity.contains("Recipe<WorldlyContainer>"), blockEntity)
+    }
+
+    @Test
+    fun `migrates legacy criterion trigger singleton and entity spawn tag stack config`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val advancementDir = srcDir.resolve("advancement")
+        srcDir.createDirectories()
+        advancementDir.createDirectories()
+        advancementDir.resolve("ExampleAdvancementTriggers.java").writeText("""
+            package com.example.advancement;
+
+            import net.minecraft.advancements.CriterionTrigger;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleAdvancementTriggers {
+                public static final DeferredHolder<CriterionTrigger<?>, IncubationTrigger> INCUBATION_TRIGGER = null;
+            }
+        """.trimIndent())
+        advancementDir.resolve("IncubationTrigger.java").writeText("""
+            package com.example.advancement;
+
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.item.ItemStack;
+
+            public class IncubationTrigger {
+                public static final IncubationTrigger INSTANCE = new IncubationTrigger();
+                public void trigger(ServerPlayer player, ItemStack stack) {}
+            }
+        """.trimIndent())
+        srcDir.resolve("IncubatorBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.example.advancement.IncubationTrigger;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.core.component.DataComponents;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.MobSpawnType;
+            import net.minecraft.world.item.ItemStack;
+
+            public class IncubatorBlockEntity {
+                private ServerPlayer player;
+
+                private boolean incubate(EntityType<?> entityType, NonNullList<ItemStack> stacks, ServerLevel serverLevel) {
+                    ItemStack itemStack = stacks.get(0);
+                    if (!serverLevel.isClientSide()) {
+                        CompoundTag tag = new CompoundTag();
+                        Component customName = itemStack.has(DataComponents.CUSTOM_NAME) ? itemStack.getHoverName() : null;
+                        Entity entity = entityType.spawn(serverLevel, tag, null, serverLevel.getSharedSpawnPos(), MobSpawnType.TRIGGERED, true, false);
+                        if (entity != null && this.player != null) {
+                            IncubationTrigger.INSTANCE.trigger(this.player, itemStack);
+                        }
+                    }
+                    return true;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val blockEntity = srcDir.resolve("IncubatorBlockEntity.java").readText()
+
+        assertTrue(blockEntity.contains("ItemStack entitySpawnStack = itemStack.copyWithCount(1);"), blockEntity)
+        assertTrue(blockEntity.contains("entitySpawnStack.set(net.minecraft.core.component.DataComponents.ENTITY_DATA, net.minecraft.world.item.component.CustomData.of(tag));"), blockEntity)
+        assertTrue(blockEntity.contains("entitySpawnStack.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, customName);"), blockEntity)
+        assertTrue(blockEntity.contains("Entity entity = entityType.spawn(serverLevel, entitySpawnStack, null, serverLevel.getSharedSpawnPos(), MobSpawnType.TRIGGERED, true, false);"), blockEntity)
+        assertTrue(blockEntity.contains("com.example.advancement.ExampleAdvancementTriggers.INCUBATION_TRIGGER.get().trigger(this.player, itemStack);"), blockEntity)
+        assertFalse(blockEntity.contains("IncubationTrigger.INSTANCE"), blockEntity)
+        assertFalse(blockEntity.contains("spawn(serverLevel, tag, null"), blockEntity)
+    }
+
+    @Test
     fun `migrates recipe holder loops to method recipe type parameter bounds`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

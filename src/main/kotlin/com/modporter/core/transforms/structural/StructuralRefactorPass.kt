@@ -8731,7 +8731,8 @@ ${entries.joinToString(",\n")}
     )
 
     private data class CriterionInstanceFactoryHints(
-        val emptyInstanceFactories: Map<String, String>
+        val emptyInstanceFactories: Map<String, String>,
+        val triggerHoldersByTriggerClass: Map<String, String> = emptyMap()
     )
 
     private data class StaticRegistryFieldHints(
@@ -8950,27 +8951,51 @@ ${entries.joinToString(",\n")}
 
     private fun collectCriterionInstanceFactoryHints(srcDir: Path): CriterionInstanceFactoryHints {
         val factories = linkedMapOf<String, String>()
+        val triggerHolders = linkedMapOf<String, String>()
+        val simpleTriggerHolderCandidates = linkedMapOf<String, MutableSet<String>>()
         Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val source = javaFile.readText()
-                if (!source.contains("record Instance") || !source.contains("Criterion<")) return@forEach
                 val className = classNameOfJavaSource(source) ?: return@forEach
                 val packageName = packageNameOf(source)
-                val factory = Regex(
-                    """(?m)^[ \t]*public\s+static\s+Criterion\s*<[^>\r\n]+>\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{"""
-                ).findAll(source).firstOrNull { match ->
-                    val openBrace = source.indexOf('{', match.range.last)
-                    val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
-                    closeBrace > openBrace &&
-                        source.substring(openBrace, closeBrace).contains("new Instance(Optional.empty())")
-                }?.groupValues?.get(1) ?: return@forEach
-                factories["$className.Instance"] = "$className.Instance.$factory()"
-                if (packageName != null) {
-                    factories["$packageName.$className.Instance"] = "$packageName.$className.Instance.$factory()"
+                if (source.contains("record Instance") && source.contains("Criterion<")) {
+                    val factory = Regex(
+                        """(?m)^[ \t]*public\s+static\s+Criterion\s*<[^>\r\n]+>\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{"""
+                    ).findAll(source).firstOrNull { match ->
+                        val openBrace = source.indexOf('{', match.range.last)
+                        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+                        closeBrace > openBrace &&
+                            source.substring(openBrace, closeBrace).contains("new Instance(Optional.empty())")
+                    }?.groupValues?.get(1)
+                    if (factory != null) {
+                        factories["$className.Instance"] = "$className.Instance.$factory()"
+                        if (packageName != null) {
+                            factories["$packageName.$className.Instance"] = "$packageName.$className.Instance.$factory()"
+                        }
+                    }
+                }
+                if (source.contains("DeferredHolder") && source.contains("CriterionTrigger")) {
+                    Regex(
+                        """DeferredHolder\s*<\s*CriterionTrigger\s*<\s*\?\s*>\s*,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>\s+([A-Z][A-Z0-9_]*)\s*="""
+                    ).findAll(source).forEach { match ->
+                        val triggerClass = match.groupValues[1].substringAfterLast('.')
+                        val holder = if (packageName != null) {
+                            "$packageName.$className.${match.groupValues[2]}"
+                        } else {
+                            "$className.${match.groupValues[2]}"
+                        }
+                        if (packageName != null) {
+                            triggerHolders["$packageName.$triggerClass"] = holder
+                        }
+                        simpleTriggerHolderCandidates.getOrPut(triggerClass) { linkedSetOf() }.add(holder)
+                    }
                 }
             }
-        return CriterionInstanceFactoryHints(factories)
+        simpleTriggerHolderCandidates
+            .filterValues { it.size == 1 }
+            .forEach { (triggerClass, holders) -> triggerHolders[triggerClass] = holders.single() }
+        return CriterionInstanceFactoryHints(factories, triggerHolders)
     }
 
     private fun collectDeferredRegisterOwners(srcDir: Path): Map<String, DeferredRegisterOwner> {
@@ -9771,6 +9796,7 @@ ${entries.joinToString(",\n")}
         result = migrateAdvancementRequirementsStrategySource(result)
         result = migrateLegacyAdvancementHolderApis(result)
         result = migrateLegacyAdvancementDatagenSource(result, criterionInstanceFactoryHints)
+        result = migrateLegacyCriterionTriggerInstanceCallSites(result, criterionInstanceFactoryHints)
         result = migrateLegacyDatagenTagConstantsSource(result)
         result = migrateLegacyComponentSerializationSource(result)
         result = migrateRegistryAccessEmptyFallbacks(result)
@@ -9819,6 +9845,7 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyItemEnchantmentComponents(result)
         result = migrateLegacyItemMaxDamageCalls(result)
         result = migrateDeferredSpawnEggLookups(result)
+        result = migrateLegacyEntityTypeSpawnCompoundTagSource(result)
         result = migrateEnchantmentLevelHolderLookups(result)
         result = migrateLegacySweepingDamageRatioCalls(result)
         result = migrateLegacyEnchantmentHelperCalls(result)
@@ -12754,6 +12781,24 @@ ${indent}}
         return result
     }
 
+    private fun migrateLegacyCriterionTriggerInstanceCallSites(
+        source: String,
+        criterionFactoryHints: CriterionInstanceFactoryHints
+    ): String {
+        if (!source.contains(".INSTANCE.") || criterionFactoryHints.triggerHoldersByTriggerClass.isEmpty()) {
+            return source
+        }
+        var result = source
+        criterionFactoryHints.triggerHoldersByTriggerClass.forEach { (triggerClass, holderExpression) ->
+            val simpleTrigger = triggerClass.substringAfterLast('.')
+            result = Regex("""\b${Regex.escape(simpleTrigger)}\.INSTANCE\.""")
+                .replace(result, "$holderExpression.get().")
+            result = Regex("""\b${Regex.escape(triggerClass)}\.INSTANCE\.""")
+                .replace(result, "$holderExpression.get().")
+        }
+        return result
+    }
+
     private fun removeTrailingBuildCall(expression: String, requiredBuilder: String): String {
         val trimmed = expression.trim()
         if (!trimmed.endsWith(".build()") || !trimmed.contains(requiredBuilder)) return expression
@@ -13424,10 +13469,16 @@ ${indent}}"""
     }
 
     private fun migrateSingleStackRecipeInputs(source: String): String {
-        if (!source.contains(".getRecipeFor(")) return source
-
         var changedInput = false
         var result = migrateCachedCheckSingleStackRecipeHolderBoundaries(source)
+        result = migrateQuickCheckRecipeHolderCallBoundaries(result)
+        if (!result.contains(".getRecipeFor(")) return result
+        result = Regex("""((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*getQuickCheck\(\)\.getRecipeFor\(\s*)(this|[A-Za-z_$][\w$]*)(\s*,)""")
+            .replace(result) { match ->
+                changedInput = true
+                val receiver = match.groupValues[2]
+                "${match.groupValues[1]}new SingleRecipeInput($receiver.getItem(0))${match.groupValues[3]}"
+            }
         result = migrateMethodCalls(result, ".getRecipeFor") { args ->
             if (args.size >= 3) {
                 val recipeType = args[0].trim()
@@ -13453,7 +13504,7 @@ ${indent}}"""
             }
         }
         result = rewriteJavaInvocationArguments(result, "getRecipeFor") { args ->
-            if (args.size == 2 && result.contains("RecipeManager.CachedCheck<SingleRecipeInput,")) {
+            if (args.size == 2 && Regex("""RecipeManager\.CachedCheck\s*<\s*SingleRecipeInput\s*,""").containsMatchIn(result)) {
                 val input = args[0].trim()
                 if (!input.startsWith("new SingleRecipeInput(") &&
                     Regex("""^(?:this|[A-Za-z_$][\w$]*)$""").matches(input)) {
@@ -13492,6 +13543,16 @@ ${indent}}"""
             needsRecipeHolder = true
             "${match.groupValues[1]}.map(RecipeHolder::value).map(AbstractCookingRecipe::getCookingTime)"
         }
+        result = Regex(
+            """(?s)(\.getRecipeFor\([^;\r\n]*?\))\.map\(AbstractCookingRecipe::([A-Za-z_$][\w$]*)\)"""
+        ).replace(result) { match ->
+            if (match.value.contains("RecipeHolder::value")) {
+                match.value
+            } else {
+                needsRecipeHolder = true
+                "${match.groupValues[1]}.map(RecipeHolder::value).map(AbstractCookingRecipe::${match.groupValues[2]})"
+            }
+        }
         Regex("""RecipeManager\.CachedCheck\s*<\s*SingleRecipeInput\s*,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>""")
             .findAll(result)
             .map { it.groupValues[1].substringAfterLast('.') }
@@ -13525,6 +13586,18 @@ ${indent}}"""
                         .replace(result, "$holderVar.value().$1(")
                 }
             }
+        Regex("""RecipeHolder\s*<\s*[^;\r\n]+?\s*>\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(result)
+            .map { it.groupValues[1] }
+            .toSet()
+            .forEach { holderVar ->
+                result = Regex(
+                    """\b${Regex.escape(holderVar)}\s*=\s*([^;\r\n]*?\.getRecipeFor\([^;\r\n]*?\))\.map\(RecipeHolder::value\)\.orElse\(null\)\s*;"""
+                ).replace(result) { match ->
+                    needsRecipeHolder = true
+                    "$holderVar = ${match.groupValues[1]}.orElse(null);"
+                }
+            }
         result = Regex("""\.map\(\s*([A-Za-z_$][\w$]*)\s*->\s*\1\.getResultItem\(""")
             .replace(result) { match ->
                 if (result.contains(".getRecipeFor(")) {
@@ -13533,6 +13606,7 @@ ${indent}}"""
                     match.value
                 }
             }
+        result = migrateRecipeHolderSingleStackAssembleCalls(result)
 
         if (needsRecipeHolder) {
             result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeHolder")
@@ -13543,22 +13617,83 @@ ${indent}}"""
         return result
     }
 
-    private fun migrateCachedCheckSingleStackRecipeHolderBoundaries(source: String): String {
-        if (!source.contains("RecipeManager.CachedCheck<Container,")) return source
-        val recipeTypes = Regex("""RecipeManager\.CachedCheck\s*<\s*Container\s*,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>""")
+    private fun migrateQuickCheckRecipeHolderCallBoundaries(source: String): String {
+        if (!source.contains("getQuickCheck().getRecipeFor(")) return source
+        val holderAssignedVariables = Regex("""\b([A-Za-z_$][\w$]*)\s*=\s*[^;\r\n]*getQuickCheck\(\)\.getRecipeFor\(""")
             .findAll(source)
-            .map { it.groupValues[1].substringAfterLast('.') }
+            .map { it.groupValues[1] }
             .toSet()
-        if (recipeTypes.isEmpty()) return source
+        if (holderAssignedVariables.isEmpty()) return source
 
         var result = source
         var changed = false
-        for (recipeType in recipeTypes) {
-            result = Regex("""RecipeManager\.CachedCheck\s*<\s*Container\s*,\s*${Regex.escape(recipeType)}\s*>""")
+        for (variable in holderAssignedVariables) {
+            val id = Regex.escape(variable)
+            result = Regex("""\bRecipe\s*<\s*\?\s*>\s+$id\s*;""")
                 .replace(result) {
                     changed = true
-                    "RecipeManager.CachedCheck<SingleRecipeInput, $recipeType>"
+                    "RecipeHolder<?> $variable;"
                 }
+            result = Regex("""((?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*)*)Recipe\s*<\s*\?\s*>\s+$id\b""")
+                .replace(result) { match ->
+                    changed = true
+                    "${match.groupValues[1]}RecipeHolder<?> $variable"
+                }
+        }
+        if (changed) {
+            result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeHolder")
+        }
+        return result
+    }
+
+    private fun migrateRecipeHolderSingleStackAssembleCalls(source: String): String {
+        if (!source.contains("RecipeHolder<") || !source.contains(".assemble(")) return source
+        val inputStack = Regex("""\bItemStack\s+([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\.get\s*\(\s*0\s*\)\s*;""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?: return source
+        var changed = false
+        var result = Regex(
+            """\(\(\s*Recipe\s*<\s*(?:WorldlyContainer|Container)\s*>\s*\)\s*([A-Za-z_$][\w$]*)\s*\)\.assemble\(\s*(?:this|[A-Za-z_$][\w$]*)\s*,\s*([^)]+?)\s*\)"""
+        ).replace(source) { match ->
+            val recipe = match.groupValues[1]
+            if (!Regex("""RecipeHolder\s*<[^;\r\n]+>\s+${Regex.escape(recipe)}\b""").containsMatchIn(source)) {
+                match.value
+            } else {
+                changed = true
+                "((Recipe<SingleRecipeInput>) $recipe.value()).assemble(new SingleRecipeInput($inputStack), ${match.groupValues[2].trim()})"
+            }
+        }
+        if (!changed) return source
+        result = addImportIfMissing(result, "net.minecraft.world.item.crafting.SingleRecipeInput")
+        val withoutWorldlyContainerImport = removeImport(result, "net.minecraft.world.WorldlyContainer")
+        if (!Regex("""\bWorldlyContainer\b""").containsMatchIn(withoutWorldlyContainerImport)) {
+            result = withoutWorldlyContainerImport
+        }
+        return result
+    }
+
+    private fun migrateCachedCheckSingleStackRecipeHolderBoundaries(source: String): String {
+        if (!source.contains("RecipeManager.CachedCheck") || !source.contains("Container")) return source
+        val javaType = """[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?"""
+        val cachedChecks = Regex("""RecipeManager\.CachedCheck\s*<\s*Container\s*,\s*((?:\?\s+extends\s+)?$javaType)\s*>""")
+            .findAll(source)
+            .map { it.groupValues[1].trim() }
+            .toSet()
+        if (cachedChecks.isEmpty()) return source
+
+        var result = source
+        var changed = false
+        for (typeArg in cachedChecks) {
+            val recipeType = typeArg.removePrefix("? extends ").trim().substringAfterLast('.')
+            val isWildcard = typeArg.startsWith("?")
+            result = Regex("""RecipeManager\.CachedCheck\s*<\s*Container\s*,\s*${Regex.escape(typeArg)}\s*>""")
+                .replace(result) {
+                    changed = true
+                    "RecipeManager.CachedCheck<SingleRecipeInput, $typeArg>"
+                }
+            if (isWildcard) continue
             result = Regex("""((?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*)*)\b${Regex.escape(recipeType)}\s+([A-Za-z_$][\w$]*)\b""")
                 .replace(result) { match ->
                     val variable = match.groupValues[2]
@@ -13578,6 +13713,14 @@ ${indent}}"""
                 .replace(result) {
                     changed = true
                     "RecipeHolder<?> getRecipeUsed("
+                }
+        }
+        if (source.contains("@Mixin(AbstractFurnaceBlockEntity.class)") &&
+            source.contains("@Accessor(\"quickCheck\")")) {
+            result = Regex("""callCanBurn\s*\(\s*RegistryAccess\s+([A-Za-z_$][\w$]*)\s*,\s*((?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*)*)Recipe\s*<\s*\?\s*>\s+([A-Za-z_$][\w$]*)""")
+                .replace(result) { match ->
+                    changed = true
+                    "callCanBurn(RegistryAccess ${match.groupValues[1]}, ${match.groupValues[2]}RecipeHolder<?> ${match.groupValues[3]}"
                 }
         }
         if (changed) {
@@ -14092,6 +14235,85 @@ ${indent}}"""
             result = removeImport(result, "net.minecraftforge.common.ForgeSpawnEggItem")
         }
         return result
+    }
+
+    private fun migrateLegacyEntityTypeSpawnCompoundTagSource(source: String): String {
+        if (!source.contains(".spawn(") || !source.contains("CompoundTag")) return source
+
+        var changed = false
+        val spawnPattern = Regex(
+            """(?m)^([ \t]*)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.spawn\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*,\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^)]+?)\s*\)\s*;"""
+        )
+        val result = spawnPattern.replace(source) { match ->
+            val methodRange = enclosingMethodRange(source, match.range.first) ?: return@replace match.value
+            val methodBody = source.substring(methodRange)
+            val methodPrefix = source.substring(methodRange.first, match.range.first)
+            val tagVariable = match.groupValues[6]
+            if (!Regex("""\bCompoundTag\s+${Regex.escape(tagVariable)}\s*=""").containsMatchIn(methodPrefix)) {
+                return@replace match.value
+            }
+            val itemStackVariables = Regex("""\bItemStack\s+([A-Za-z_$][\w$]*)\s*=""")
+                .findAll(methodPrefix)
+                .map { it.groupValues[1] }
+                .distinct()
+                .toList()
+            if (itemStackVariables.size != 1) return@replace match.value
+            val customNameVariable = Regex("""\bComponent\s+([A-Za-z_$][\w$]*)\s*=""")
+                .findAll(methodPrefix)
+                .map { it.groupValues[1] }
+                .distinct()
+                .singleOrNull()
+            val indent = match.groupValues[1]
+            val entityType = match.groupValues[2]
+            val entityVariable = match.groupValues[3]
+            val spawnReceiver = match.groupValues[4]
+            val level = match.groupValues[5]
+            val player = match.groupValues[7].trim()
+            val pos = match.groupValues[8].trim()
+            val spawnType = match.groupValues[9].trim()
+            val shouldOffsetY = match.groupValues[10].trim()
+            val shouldOffsetYMore = match.groupValues[11].trim()
+            val spawnStack = uniqueLocalNameInScope(methodBody, "entitySpawnStack")
+            changed = true
+            buildString {
+                appendLine("${indent}ItemStack $spawnStack = ${itemStackVariables.single()}.copyWithCount(1);")
+                appendLine("${indent}$spawnStack.set(net.minecraft.core.component.DataComponents.ENTITY_DATA, net.minecraft.world.item.component.CustomData.of($tagVariable));")
+                if (customNameVariable != null) {
+                    appendLine("${indent}if ($customNameVariable != null) {")
+                    appendLine("${indent}    $spawnStack.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, $customNameVariable);")
+                    appendLine("${indent}}")
+                }
+                append("${indent}$entityType $entityVariable = $spawnReceiver.spawn($level, $spawnStack, $player, $pos, $spawnType, $shouldOffsetY, $shouldOffsetYMore);")
+            }
+        }
+        return if (changed) result else source
+    }
+
+    private fun enclosingMethodRange(source: String, index: Int): IntRange? {
+        val methodPattern = Regex(
+            """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|static|final|synchronized)\s+)*(?:<[^>{};]+>\s*)?[A-Za-z_$][\w$<>\[\].?,\s]*\s+[A-Za-z_$][\w$]*\s*\([^;{}]*\)\s*(?:throws\s+[^{]+)?\{"""
+        )
+        var best: IntRange? = null
+        methodPattern.findAll(source).forEach { match ->
+            val openBrace = source.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (closeBrace > openBrace && index in (openBrace + 1) until closeBrace) {
+                val candidate = (openBrace + 1) until closeBrace
+                if (best == null || candidate.count() < best!!.count()) {
+                    best = candidate
+                }
+            }
+        }
+        return best
+    }
+
+    private fun uniqueLocalNameInScope(scope: String, baseName: String): String {
+        if (!Regex("""\b${Regex.escape(baseName)}\b""").containsMatchIn(scope)) return baseName
+        var index = 1
+        while (Regex("""\b${Regex.escape(baseName + index)}\b""").containsMatchIn(scope)) {
+            index++
+        }
+        return baseName + index
     }
 
     private fun migrateEnchantmentLevelHolderLookups(source: String): String {
@@ -17560,6 +17782,11 @@ $methodBody
             return source
         }
         var result = source.replace("EnchantmentHelper.getEnchantments(", "EnchantmentHelper.getEnchantmentsForCrafting(")
+        result = Regex(
+            """EnchantmentHelper\.setEnchantments\(\s*EnchantmentHelper\.getEnchantmentsForCrafting\(([^()\r\n;]+)\)\s*,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\)"""
+        ).replace(result) { match ->
+            "EnchantmentHelper.setEnchantments(${match.groupValues[2]}, EnchantmentHelper.getEnchantmentsForCrafting(${match.groupValues[1].trim()}))"
+        }
         result = Regex(
             """EnchantmentHelper\.getEnchantmentsForCrafting\(([^)]+)\)\.forEach\(\s*\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*->\s*\{"""
         ).replace(result) { match ->
