@@ -263,6 +263,13 @@ class StructuralRefactorPass : Pass {
             errors.add("Grass color enum extension migration error: ${e.message}")
         }
 
+        try {
+            val recipeBookEnumExtensionChanges = migrateLegacyRecipeBookCategoryEnumExtensions(projectDir, dryRun)
+            changes.addAll(recipeBookEnumExtensionChanges)
+        } catch (e: Exception) {
+            errors.add("Recipe book category enum extension migration error: ${e.message}")
+        }
+
         // Convert stale Class::register mod-bus listeners to direct
         // DeferredRegister.register(bus) calls when the target class already
         // declares a DeferredRegister field.
@@ -8324,6 +8331,15 @@ $fields
         val delegateExpression: String
     )
 
+    private data class LegacyRecipeBookCategoryExtension(
+        val sourceFile: Path,
+        val packageName: String,
+        val imports: List<String>,
+        val enumName: String,
+        val methodName: String,
+        val iconExpressions: List<String>
+    )
+
     private data class LegacyRegistryBackedMethod(
         val owner: String,
         val name: String
@@ -8509,6 +8525,223 @@ $entries
             ?.value
             ?.trim()
         return priorHeader == "[[mods]]"
+    }
+
+    private fun migrateLegacyRecipeBookCategoryEnumExtensions(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+        val modId = detectModId(projectDir) ?: return changes
+        val enumPrefix = modId.uppercase().replace(Regex("""[^A-Z0-9_]+"""), "_").trim('_')
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .toList()
+        val extensions = mutableListOf<LegacyRecipeBookCategoryExtension>()
+
+        javaFiles.forEach { javaFile ->
+            val original = javaFile.readText()
+            if (!original.contains("RecipeBookCategories.create(")) return@forEach
+            val packageName = packageNameOf(original)
+            var migrated = original
+            var cursor = 0
+            var changed = false
+            while (true) {
+                val match = Regex("""RecipeBookCategories\.create\s*\(""").find(original, cursor) ?: break
+                val openParen = original.indexOf('(', match.range.last - 1)
+                val closeParen = if (openParen >= 0) findMatchingParen(original, openParen) else -1
+                if (closeParen < 0) {
+                    cursor = match.range.last + 1
+                    continue
+                }
+                val args = splitTopLevelJavaArgs(original.substring(openParen + 1, closeParen))
+                if (args.size < 2) {
+                    cursor = closeParen + 1
+                    continue
+                }
+                val categoryName = Regex(""""((?:\\.|[^"\\])*)"""")
+                    .matchEntire(args[0].trim())
+                    ?.groupValues
+                    ?.get(1)
+                if (categoryName == null) {
+                    cursor = closeParen + 1
+                    continue
+                }
+                val rawEnumName = categoryName.uppercase().replace(Regex("""[^A-Z0-9_]+"""), "_").trim('_')
+                val enumName = if (rawEnumName.startsWith("${enumPrefix}_")) rawEnumName else "${enumPrefix}_$rawEnumName"
+                val methodName = "RecipeBookCategory_${enumName}".replace(Regex("""[^A-Za-z0-9_]+"""), "_")
+                val iconExpressions = args.drop(1).map { it.trim() }.filter { it.isNotBlank() }
+                if (iconExpressions.isEmpty()) {
+                    cursor = closeParen + 1
+                    continue
+                }
+                val callText = original.substring(match.range.first, closeParen + 1)
+                migrated = migrated.replace(callText, """RecipeBookCategories.valueOf("$enumName")""")
+                extensions += LegacyRecipeBookCategoryExtension(
+                    sourceFile = javaFile,
+                    packageName = packageName,
+                    imports = importsUsedByExpressions(original, iconExpressions),
+                    enumName = enumName,
+                    methodName = methodName,
+                    iconExpressions = iconExpressions
+                )
+                changed = true
+                cursor = closeParen + 1
+            }
+            if (changed && migrated != original) {
+                changes.add(Change(
+                    file = javaFile,
+                    line = 0,
+                    description = "Migrate legacy RecipeBookCategories.create() to NeoForge enum extension lookup",
+                    before = "RecipeBookCategories.create(name, icons...)",
+                    after = "RecipeBookCategories.valueOf(generated enum extension name)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-recipebook-category-enum-extension"
+                ))
+                if (!dryRun) javaFile.writeText(migrated)
+            }
+        }
+
+        if (extensions.isEmpty()) return changes
+        extensions.groupBy { it.packageName }.forEach { (packageName, packageExtensions) ->
+            val helperClass = "NeoForgeEnumExtensions"
+            val helperFile = srcDir.resolve(packageName.replace('.', '/')).resolve("$helperClass.java")
+            val helperSource = recipeBookEnumExtensionHelperSource(packageName, helperClass, packageExtensions)
+            changes.add(Change(
+                file = helperFile,
+                line = 0,
+                description = "Generate NeoForge enum extension parameter helper for legacy recipe book categories",
+                before = "(missing recipe book enum extension helper)",
+                after = "$helperClass.java",
+                confidence = Confidence.HIGH,
+                ruleId = "struct-recipebook-category-enum-extension-helper"
+            ))
+            if (!dryRun) {
+                helperFile.parent.createDirectories()
+                val merged = if (helperFile.exists()) {
+                    mergeRecipeBookEnumExtensionHelperMethods(helperFile.readText(), packageExtensions, helperSource)
+                } else {
+                    helperSource
+                }
+                helperFile.writeText(merged)
+            }
+        }
+
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        val metaInf = resourcesDir.resolve("META-INF")
+        val enumExtensionFile = metaInf.resolve("enumextensions.json")
+        val entries = extensions.map { recipeBookEnumExtensionJsonEntry(it) }
+        changes.add(Change(
+            file = enumExtensionFile,
+            line = 0,
+            description = "Declare NeoForge enum extension metadata for legacy recipe book categories",
+            before = "(missing recipe book enum extension entries)",
+            after = "META-INF/enumextensions.json",
+            confidence = Confidence.HIGH,
+            ruleId = "struct-recipebook-category-enum-extension-json"
+        ))
+        if (!dryRun) {
+            metaInf.createDirectories()
+            mergeEnumExtensionEntries(enumExtensionFile, entries)
+            ensureEnumExtensionsTomlEntry(metaInf)
+        }
+        return changes
+    }
+
+    private fun importsUsedByExpressions(source: String, expressions: List<String>): List<String> {
+        val joined = expressions.joinToString("\n")
+        val imports = Regex("""(?m)^\s*import\s+([^;]+);\s*$""")
+            .findAll(source)
+            .map { it.groupValues[1].trim() }
+            .filter { importName ->
+                val simpleName = importName.substringAfterLast('.').substringBefore('<')
+                simpleName == "*" || Regex("""(?<![\w$])${Regex.escape(simpleName)}(?![\w$])""").containsMatchIn(joined)
+            }
+            .filterNot { it == "net.minecraft.client.RecipeBookCategories" }
+            .distinct()
+            .toMutableList()
+        listOf(
+            "java.util.List",
+            "java.util.function.Supplier",
+            "net.minecraft.world.item.ItemStack"
+        ).forEach { required ->
+            if (imports.none { it == required }) imports += required
+        }
+        return imports
+    }
+
+    private fun recipeBookEnumExtensionHelperSource(
+        packageName: String,
+        helperClass: String,
+        extensions: List<LegacyRecipeBookCategoryExtension>
+    ): String {
+        val packageLine = if (packageName.isBlank()) "" else "package $packageName;\n\n"
+        val imports = extensions.flatMap { it.imports }
+            .distinct()
+            .sorted()
+            .joinToString("\n") { "import $it;" }
+        val importBlock = if (imports.isBlank()) "" else "$imports\n\n"
+        val methods = extensions.joinToString("\n\n") { recipeBookEnumExtensionMethod(it) }
+        return """${packageLine}${importBlock}@SuppressWarnings("unused")
+public final class $helperClass {
+	private $helperClass() {
+	}
+
+$methods
+}
+"""
+    }
+
+    private fun recipeBookEnumExtensionMethod(extension: LegacyRecipeBookCategoryExtension): String {
+        val icons = extension.iconExpressions.joinToString(", ")
+        return """
+	public static Object ${extension.methodName}(int idx, Class<?> type) {
+		return type.cast(switch (idx) {
+			case 0 -> (Supplier<List<ItemStack>>) () -> List.of($icons);
+			default -> throw new IllegalArgumentException("Unexpected parameter index: " + idx);
+		});
+	}
+        """.trimEnd()
+    }
+
+    private fun mergeRecipeBookEnumExtensionHelperMethods(
+        existing: String,
+        extensions: List<LegacyRecipeBookCategoryExtension>,
+        freshSource: String
+    ): String {
+        var result = existing
+        Regex("""(?m)^\s*import\s+[^;]+;\s*$""")
+            .findAll(freshSource)
+            .map { it.value.trim().removePrefix("import ").removeSuffix(";") }
+            .forEach { importName ->
+                result = addImportIfMissing(result, importName)
+            }
+        val missingMethods = extensions
+            .filterNot { result.contains(" ${it.methodName}(int idx, Class<?> type)") }
+            .joinToString("\n\n") { recipeBookEnumExtensionMethod(it) }
+        if (missingMethods.isBlank()) return result
+        val insertIndex = result.lastIndexOf('}')
+        return if (insertIndex >= 0) {
+            result.substring(0, insertIndex).trimEnd() + "\n\n" + missingMethods + "\n" + result.substring(insertIndex)
+        } else {
+            result + "\n\n" + missingMethods
+        }
+    }
+
+    private fun recipeBookEnumExtensionJsonEntry(extension: LegacyRecipeBookCategoryExtension): String {
+        val helperInternalName = if (extension.packageName.isBlank()) {
+            "NeoForgeEnumExtensions"
+        } else {
+            "${extension.packageName.replace('.', '/')}/NeoForgeEnumExtensions"
+        }
+        return """    {
+      "enum": "net/minecraft/client/RecipeBookCategories",
+      "name": "${extension.enumName}",
+      "constructor": "(Ljava/util/function/Supplier;)V",
+      "parameters": {
+        "class": "$helperInternalName",
+        "method": "${extension.methodName}"
+      }
+    }"""
     }
 
     private fun migrateLegacyGrassColorModifierEnumExtensions(projectDir: Path, dryRun: Boolean): List<Change> {

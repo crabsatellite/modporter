@@ -2289,6 +2289,62 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy recipe book category create calls migrate to enum extensions`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val resourcesDir = tempDir.resolve("src/main/resources/META-INF")
+        srcDir.createDirectories()
+        resourcesDir.createDirectories()
+        tempDir.resolve("gradle.properties").writeText("mod_id=examplemod\n")
+        resourcesDir.resolve("neoforge.mods.toml").writeText("""
+            modLoader="javafml"
+
+            [[mods]]
+            modId="examplemod"
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleRecipeCategories.java").writeText("""
+            package com.example;
+
+            import com.example.registry.ExampleItems;
+            import com.google.common.base.Suppliers;
+            import net.minecraft.client.RecipeBookCategories;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import java.util.function.Supplier;
+
+            public class ExampleRecipeCategories {
+                public static final Supplier<RecipeBookCategories> MAGIC_SEARCH = Suppliers.memoize(() -> RecipeBookCategories.create("MAGIC_SEARCH", new ItemStack(Items.COMPASS), new ItemStack(ExampleItems.WAND.get())));
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        val categories = srcDir.resolve("ExampleRecipeCategories.java").readText()
+        val helper = srcDir.resolve("NeoForgeEnumExtensions.java").readText()
+        val enumExtensions = resourcesDir.resolve("enumextensions.json").readText()
+        val toml = resourcesDir.resolve("neoforge.mods.toml").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-recipebook-category-enum-extension" })
+        assertTrue(categories.contains("RecipeBookCategories.valueOf(\"EXAMPLEMOD_MAGIC_SEARCH\")"), categories)
+        assertFalse(categories.contains("RecipeBookCategories.create"), categories)
+        assertTrue(helper.contains("public static Object RecipeBookCategory_EXAMPLEMOD_MAGIC_SEARCH(int idx, Class<?> type)"), helper)
+        assertTrue(helper.contains("(Supplier<List<ItemStack>>) () -> List.of(new ItemStack(Items.COMPASS), new ItemStack(ExampleItems.WAND.get()))"), helper)
+        assertTrue(helper.contains("import com.example.registry.ExampleItems;"), helper)
+        assertTrue(enumExtensions.contains("\"enum\": \"net/minecraft/client/RecipeBookCategories\""), enumExtensions)
+        assertTrue(enumExtensions.contains("\"name\": \"EXAMPLEMOD_MAGIC_SEARCH\""), enumExtensions)
+        assertTrue(enumExtensions.contains("\"constructor\": \"(Ljava/util/function/Supplier;)V\""), enumExtensions)
+        assertTrue(toml.contains("enumExtensions=\"META-INF/enumextensions.json\""), toml)
+    }
+
+    @Test
     fun `attachment registration helper is not treated as subscribe event`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val capabilityDir = srcDir.resolve("capability")
