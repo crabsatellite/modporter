@@ -1713,6 +1713,36 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `keeps attribute imports for generic multimap type references`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AttributeMaps.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+
+            public class AttributeMaps {
+                public Multimap<Attribute, AttributeModifier> modifiers() {
+                    ImmutableMultimap.Builder<Attribute, AttributeModifier> builder = ImmutableMultimap.builder();
+                    builder.put(Attributes.ATTACK_DAMAGE, new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath("example", "damage"), 1.0, AttributeModifier.Operation.ADD_VALUE));
+                    return builder.build();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("AttributeMaps.java").readText()
+
+        assertTrue(migrated.contains("import net.minecraft.world.entity.ai.attributes.Attribute;"), migrated)
+        assertTrue(migrated.contains("Multimap<Attribute, AttributeModifier>"), migrated)
+        assertTrue(migrated.contains("ImmutableMultimap.Builder<Attribute, AttributeModifier>"), migrated)
+    }
+
+    @Test
     fun `migrates dirtiness player capability to NeoForge attachment bridge`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val dirtinessDir = srcDir.resolve("dirtiness")

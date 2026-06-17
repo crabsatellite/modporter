@@ -9924,7 +9924,12 @@ ${entries.joinToString(",\n")}
             result = addImportIfMissing(result, "net.neoforged.neoforge.client.model.generators.ConfiguredModel")
             result = addImportIfMissing(result, "net.neoforged.neoforge.client.model.generators.ModelFile")
         }
-        if (!result.contains("Attribute ") && !result.contains("Attribute>")) result = removeImport(result, "net.minecraft.world.entity.ai.attributes.Attribute")
+        val withoutAttributeImport = removeImport(result, "net.minecraft.world.entity.ai.attributes.Attribute")
+        result = if (hasSimpleTypeReference(withoutAttributeImport, "Attribute")) {
+            addImportIfMissing(result, "net.minecraft.world.entity.ai.attributes.Attribute")
+        } else {
+            withoutAttributeImport
+        }
         if (result.contains("@Nullable") &&
             !result.contains("import org.jetbrains.annotations.Nullable;") &&
             !result.contains("import javax.annotation.Nullable;")) {
@@ -21492,6 +21497,10 @@ $encodeLines
             ?.groupValues
             ?.get(1)
             ?: ""
+
+    private fun hasSimpleTypeReference(source: String, typeName: String): Boolean =
+        Regex("""(?<![.\w$])${Regex.escape(typeName)}(?![\w$])""")
+            .containsMatchIn(source)
 
     private fun findMatchingBrace(source: String, openBrace: Int): Int {
         var depth = 0
