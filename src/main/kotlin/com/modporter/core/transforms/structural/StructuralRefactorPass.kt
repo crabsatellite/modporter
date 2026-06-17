@@ -398,6 +398,16 @@ class StructuralRefactorPass : Pass {
             errors.add("DropExperienceBlock constructor migration error: ${e.message}")
         }
 
+        // FlowerBlock now takes Holder<MobEffect> directly. Subclasses that
+        // only forward the legacy Supplier<MobEffect> constructor need the same
+        // signature, and call sites should pass holder constants directly.
+        try {
+            val flowerBlockChanges = migrateFlowerBlockMobEffectHolderConstructors(projectDir, dryRun)
+            changes.addAll(flowerBlockChanges)
+        } catch (e: Exception) {
+            errors.add("FlowerBlock constructor migration error: ${e.message}")
+        }
+
         // Migrate old FinishedRecipe-style builder result adapters to the
         // 1.21 RecipeOutput.accept(id, recipe, advancement) contract.
         try {
@@ -22670,6 +22680,110 @@ public class ${builder.className} implements RecipeBuilder {
             trimmed.contains("ConstantInt.") ||
             trimmed.contains("ClampedInt.") ||
             trimmed.contains("IntProvider.")
+    }
+
+    private fun migrateFlowerBlockMobEffectHolderConstructors(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val changes = mutableListOf<Change>()
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        val migratedConstructors = linkedSetOf("FlowerBlock")
+
+        for (file in javaFiles) {
+            val source = file.readText()
+            if (!source.contains("extends FlowerBlock") || !source.contains("Supplier") || !source.contains("super(")) continue
+            val className = javaTopLevelTypeName(source) ?: continue
+            val migrated = migrateFlowerBlockSubclassConstructorSource(source, className)
+            if (migrated != source) {
+                migratedConstructors += className
+                changes.add(Change(
+                    file = file,
+                    line = 0,
+                    description = "Migrate FlowerBlock subclass constructor to Holder<MobEffect>",
+                    before = "Subclass(Supplier<MobEffect> effect, int duration, Properties properties)",
+                    after = "Subclass(Holder<MobEffect> effect, float duration, Properties properties)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-flower-block-holder-constructor"
+                ))
+                if (!dryRun) {
+                    file.writeText(migrated)
+                }
+            }
+        }
+
+        for (file in javaFiles) {
+            val source = file.readText()
+            val migrated = migrateFlowerBlockConstructorCallSitesSource(source, migratedConstructors)
+            if (migrated != source) {
+                changes.add(Change(
+                    file = file,
+                    line = 0,
+                    description = "Pass MobEffect holders directly to FlowerBlock constructors",
+                    before = "new FlowerBlock(() -> MobEffects.EFFECT, duration, properties)",
+                    after = "new FlowerBlock(MobEffects.EFFECT, duration, properties)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-flower-block-holder-constructor"
+                ))
+                if (!dryRun) {
+                    file.writeText(migrated)
+                }
+            }
+        }
+
+        return changes
+    }
+
+    private fun migrateFlowerBlockSubclassConstructorSource(source: String, className: String): String {
+        val id = """[A-Za-z_$][\w$]*"""
+        val propertiesTypePattern = """(?:BlockBehaviour\.)?Properties"""
+        val constructorPattern = Regex(
+            """public\s+${Regex.escape(className)}\s*\(\s*((?:java\.util\.function\.)?Supplier\s*<\s*(?:\?\s+extends\s+)?MobEffect\s*>)\s+($id)\s*,\s*int\s+($id)\s*,\s*($propertiesTypePattern)\s+($id)\s*\)"""
+        )
+        val match = constructorPattern.find(source) ?: return source
+        val effectName = match.groupValues[2]
+        val durationName = match.groupValues[3]
+        val propertiesType = match.groupValues[4]
+        val propertiesName = match.groupValues[5]
+        val superPattern = Regex(
+            """super\(\s*${Regex.escape(effectName)}\s*,\s*${Regex.escape(durationName)}\s*,\s*${Regex.escape(propertiesName)}\s*\)\s*;"""
+        )
+        if (!superPattern.containsMatchIn(source)) return source
+
+        var result = constructorPattern.replaceFirst(
+            source,
+            "public $className(Holder<MobEffect> $effectName, float $durationName, $propertiesType $propertiesName)"
+        )
+        result = addImportIfMissing(result, "net.minecraft.core.Holder")
+        if (!result.contains("Supplier<") && !result.contains("Supplier<?")) {
+            result = removeImportIfPresent(result, "java.util.function.Supplier")
+        }
+        return result
+    }
+
+    private fun migrateFlowerBlockConstructorCallSitesSource(source: String, constructorClasses: Set<String>): String {
+        if (!source.contains("new ") || !source.contains("() ->") || !source.contains("Effects.")) return source
+        var result = source
+        for (className in constructorClasses) {
+            result = rewriteJavaNew(result, className) { args ->
+                if (args.size != 3) return@rewriteJavaNew null
+                val effectSupplier = args[0].trim()
+                if (!effectSupplier.startsWith("() ->")) return@rewriteJavaNew null
+                val effect = normalizeMobEffectHolderExpression(effectSupplier.removePrefix("() ->").trim())
+                    ?: return@rewriteJavaNew null
+                "new $className($effect, ${args[1].trim()}, ${args[2].trim()})"
+            }
+        }
+        return result
+    }
+
+    private fun normalizeMobEffectHolderExpression(expression: String): String? {
+        val trimmed = expression.trim()
+        val match = Regex("""^((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*Effects\.[A-Z][A-Z0-9_$]*)(?:\.get\(\))?$""")
+            .matchEntire(trimmed)
+            ?: return null
+        return match.groupValues[1]
     }
 
     private fun migrateMmlibRecipeIdTracking(projectDir: Path, dryRun: Boolean): List<Change> {
