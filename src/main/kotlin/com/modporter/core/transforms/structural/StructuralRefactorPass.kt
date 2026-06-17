@@ -122,6 +122,15 @@ class StructuralRefactorPass : Pass {
             errors.add("Packet class transformation error: ${e.message}")
         }
 
+        // Migrate legacy Nitrogen/Forge packet classes that used BasePacket's
+        // instance encode/decode/execute contract onto NeoForge payloads.
+        try {
+            val basePacketChanges = migrateBasePacketPayloads(projectDir, dryRun)
+            changes.addAll(basePacketChanges)
+        } catch (e: Exception) {
+            errors.add("BasePacket payload migration error: ${e.message}")
+        }
+
         // Remove EVENT_BUS.register(this) from @Mod classes without @SubscribeEvent methods
         try {
             val busChanges = removeEmptyEventBusRegistration(projectDir, dryRun)
@@ -1180,7 +1189,7 @@ ${indent}}
     }
 
     private fun findTypeOpenBrace(content: String, className: String): Int {
-        val typeStart = Regex("""public\s+(?:class|record)\s+${Regex.escape(className)}\b""")
+        val typeStart = Regex("""\bpublic\s+(?:(?:static|abstract|final|sealed|non-sealed)\s+)*(?:class|record)\s+${Regex.escape(className)}\b""")
             .find(content)
             ?.range
             ?.first
@@ -2063,6 +2072,331 @@ $registrations
                 }
             }
         return changes
+    }
+
+    private data class BasePacketPayloadInfo(
+        val file: Path,
+        val packageName: String,
+        val fileClassName: String,
+        val simpleName: String,
+        val referenceName: String,
+        val bufferType: String,
+        val direction: String,
+        val registerable: Boolean
+    )
+
+    private fun migrateBasePacketPayloads(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val modId = detectModId(projectDir) ?: return emptyList()
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        val payloads = linkedMapOf<String, BasePacketPayloadInfo>()
+        val changes = mutableListOf<Change>()
+
+        for (file in javaFiles) {
+            val original = file.readText()
+            if (!original.contains("BasePacket") || !original.contains("decode(") || !original.contains("execute(")) {
+                continue
+            }
+            val packageName = packageNameOf(original)
+            val fileClassName = file.fileName.toString().removeSuffix(".java")
+            val payloadTypes = extractBasePacketPayloadTypes(file, original, packageName, fileClassName)
+            if (payloadTypes.isEmpty()) continue
+
+            var modified = original
+            modified = modified.replace("implements BasePacket", "implements CustomPacketPayload")
+            modified = removeImportIfPresent(modified, "com.aetherteam.nitrogen.network.BasePacket")
+            modified = removeImportIfPresent(modified, "net.minecraftforge.network.NetworkEvent")
+            modified = addImportIfMissing(modified, "net.minecraft.network.codec.StreamCodec")
+            modified = addImportIfMissing(modified, "net.minecraft.network.protocol.common.custom.CustomPacketPayload")
+            modified = addImportIfMissing(modified, "net.minecraft.resources.ResourceLocation")
+            modified = Regex("""(?m)^([ \t]*)@Override\s*\r?\n\1(public\s+void\s+(?:encode|execute)\s*\()""")
+                .replace(modified) { match -> match.groupValues[1] + match.groupValues[2] }
+
+            for (payload in payloadTypes) {
+                if (payload.registerable &&
+                    !modified.contains("Type<${payload.simpleName}> TYPE") &&
+                    !modified.contains("Type<${payload.referenceName}> TYPE")) {
+                    val insert = """
+        public static final CustomPacketPayload.Type<${payload.simpleName}> TYPE =
+                new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath("$modId", "${payloadPathName(payload.referenceName.replace('.', '_'))}"));
+
+        public static final StreamCodec<${payload.bufferType}, ${payload.simpleName}> STREAM_CODEC =
+                StreamCodec.of((buf, packet) -> packet.encode(buf), ${payload.simpleName}::decode);
+
+        @Override
+        public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+
+""".trimStart()
+                    val openBrace = findTypeOpenBrace(modified, payload.simpleName)
+                    if (openBrace >= 0) {
+                        modified = modified.substring(0, openBrace + 1) + "\n" + insert + modified.substring(openBrace + 1)
+                    }
+                }
+                if (payload.registerable) {
+                    payloads[payload.referenceName] = payload
+                }
+            }
+
+            if (modified != original) {
+                if (!dryRun) file.writeText(modified)
+                changes.add(Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate BasePacket payload type(s) to CustomPacketPayload",
+                    before = "implements BasePacket + encode/decode/execute(Player)",
+                    after = "implements CustomPacketPayload + TYPE/STREAM_CODEC",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-basepacket-payload"
+                ))
+            }
+        }
+
+        if (payloads.isEmpty()) return changes
+        changes.addAll(rewriteBasePacketHandlers(projectDir, srcDir, modId, payloads, dryRun))
+        changes.addAll(rewritePacketRelayCalls(srcDir, dryRun))
+        return changes
+    }
+
+    private fun extractBasePacketPayloadTypes(
+        file: Path,
+        source: String,
+        packageName: String,
+        fileClassName: String
+    ): List<BasePacketPayloadInfo> {
+        val results = mutableListOf<BasePacketPayloadInfo>()
+        val decodePattern = Regex(
+            """public\s+static\s+([A-Za-z_$][\w$]*)\s+decode\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+([A-Za-z_$][\w$]*)\s*\)"""
+        )
+        for (decode in decodePattern.findAll(source)) {
+            val simpleName = decode.groupValues[1]
+            val bufferType = decode.groupValues[2]
+            val typeStart = findTypeDeclarationStart(source, simpleName) ?: continue
+            val openBrace = source.indexOf('{', typeStart)
+            if (openBrace < 0 || decode.range.first < openBrace) continue
+            val closeBrace = findMatchingBrace(source, openBrace)
+            if (closeBrace <= openBrace || decode.range.first > closeBrace) continue
+            val body = source.substring(openBrace + 1, closeBrace)
+            if (!Regex("""\bvoid\s+execute\s*\(\s*(?:@\w+\s+)?(?:Player|ServerPlayer)\s+[A-Za-z_$][\w$]*\s*\)""")
+                    .containsMatchIn(body)) {
+                continue
+            }
+            val referenceName = if (simpleName == fileClassName) simpleName else "$fileClassName.$simpleName"
+            results.add(BasePacketPayloadInfo(
+                file = file,
+                packageName = packageName,
+                fileClassName = fileClassName,
+                simpleName = simpleName,
+                referenceName = referenceName,
+                bufferType = bufferType,
+                direction = packetDirectionFromPackage(packageName),
+                registerable = true
+            ))
+        }
+
+        val topLevelImplementsBasePacket = Regex(
+            """public\s+(?:abstract\s+)?(?:class|record)\s+${Regex.escape(fileClassName)}\b[\s\S]*?\bimplements\s+BasePacket\b"""
+        ).containsMatchIn(source)
+        if (topLevelImplementsBasePacket &&
+            results.none { it.simpleName == fileClassName } &&
+            Regex("""\bvoid\s+encode\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(source)) {
+            // Abstract base packets, such as shared boss-bar packets, still need
+            // the BasePacket interface removed. Concrete nested payloads above
+            // provide TYPE/STREAM_CODEC/type().
+            results.add(BasePacketPayloadInfo(
+                file = file,
+                packageName = packageName,
+                fileClassName = fileClassName,
+                simpleName = fileClassName,
+                referenceName = fileClassName,
+                bufferType = Regex("""\bvoid\s+encode\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+""")
+                    .find(source)
+                    ?.groupValues
+                    ?.get(1) ?: "FriendlyByteBuf",
+                direction = packetDirectionFromPackage(packageName),
+                registerable = false
+            ))
+        }
+        return results
+    }
+
+    private fun findTypeDeclarationStart(source: String, simpleName: String): Int? =
+        Regex("""\bpublic\s+(?:(?:static|abstract|final|sealed|non-sealed)\s+)*(?:class|record)\s+${Regex.escape(simpleName)}\b""")
+            .find(source)
+            ?.range
+            ?.first
+
+    private fun packetDirectionFromPackage(packageName: String): String = when {
+        packageName.contains(".clientbound") -> "playToClient"
+        packageName.contains(".serverbound") -> "playToServer"
+        else -> "playBidirectional"
+    }
+
+    private fun rewriteBasePacketHandlers(
+        projectDir: Path,
+        srcDir: Path,
+        modId: String,
+        payloads: Map<String, BasePacketPayloadInfo>,
+        dryRun: Boolean
+    ): List<Change> {
+        val changes = mutableListOf<Change>()
+        val uniquePayloadBySimpleName = payloads.values
+            .groupBy { it.simpleName }
+            .mapNotNull { (simpleName, candidates) ->
+                val distinctCandidates = candidates.distinctBy { it.referenceName }
+                if (distinctCandidates.size == 1) simpleName to distinctCandidates.single() else null
+            }
+            .toMap()
+        Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+            .forEach { file ->
+                val original = file.readText()
+                if (!original.contains("BasePacket") ||
+                    !original.contains("messageBuilder") ||
+                    !original.contains("register(")) {
+                    return@forEach
+                }
+                val registrations = Regex("""register\s*\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.class\s*,\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*::decode\s*\)\s*;""")
+                    .findAll(original)
+                    .mapNotNull { match ->
+                        val packetRef = match.groupValues[1]
+                        val payload = payloads[packetRef]
+                            ?: uniquePayloadBySimpleName[packetRef.substringAfterLast('.')]
+                            ?: return@mapNotNull null
+                        "        registrar.${payload.direction}(${payload.referenceName}.TYPE, ${payload.referenceName}.STREAM_CODEC, (payload, context) -> payload.execute(context.player()));"
+                    }
+                    .toList()
+                if (registrations.isEmpty()) return@forEach
+
+                val packageName = packageNameOf(original)
+                val className = file.fileName.toString().removeSuffix(".java")
+                val packetImports = Regex("""(?m)^[ \t]*import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.network\.packet(?:\.[A-Za-z_$][\w$]*)*(?:\.\*)?);\s*$""")
+                    .findAll(original)
+                    .map { "import ${it.groupValues[1]};" }
+                    .distinct()
+                    .joinToString("\n")
+                    .let { if (it.isBlank()) "" else "$it\n" }
+                val migrated = """package $packageName;
+
+${packetImports}import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
+import net.neoforged.neoforge.network.registration.PayloadRegistrar;
+
+public class $className {
+    public static void register(RegisterPayloadHandlersEvent event) {
+        PayloadRegistrar registrar = event.registrar("$modId").versioned("1");
+${registrations.distinct().joinToString("\n")}
+    }
+}
+"""
+                if (!dryRun) file.writeText(migrated)
+                changes.add(Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate BasePacket SimpleChannel registrations to PayloadRegistrar",
+                    before = "SimpleChannel.messageBuilder(... BasePacket::handle)",
+                    after = "RegisterPayloadHandlersEvent PayloadRegistrar registrations",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-basepacket-handler-registration"
+                ))
+                val mainClass = detectModMainClass(projectDir) ?: return@forEach
+                val mainOriginal = mainClass.readText()
+                val busName = detectModBusVariable(mainOriginal) ?: return@forEach
+                val listenerLine = "        $busName.addListener($className::register);"
+                var mainModified = mainOriginal.replace(
+                    Regex("""(?m)^[ \t]*${Regex.escape(className)}\.register\s*\(\s*\)\s*;\s*\r?\n"""),
+                    ""
+                )
+                if (!mainModified.contains("$className::register")) {
+                    mainModified = insertModBusListener(mainModified, busName, listenerLine, className)
+                }
+                if (mainModified != mainOriginal) {
+                    if (!dryRun) mainClass.writeText(mainModified)
+                    changes.add(Change(
+                        file = mainClass,
+                        line = 1,
+                        description = "Register migrated BasePacket payload handler on mod event bus",
+                        before = "$className.register()",
+                        after = "$busName.addListener($className::register)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-basepacket-main-registration"
+                    ))
+                }
+            }
+        return changes
+    }
+
+    private fun rewritePacketRelayCalls(srcDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+            .forEach { file ->
+                val original = file.readText()
+                if (!original.contains("PacketRelay.")) return@forEach
+                var modified = original
+                modified = rewriteJavaInvocation(modified, "PacketRelay.sendToServer") { args ->
+                    if (args.size == 2) "PacketDistributor.sendToServer(${args[1].trim()})" else null
+                }
+                modified = rewriteJavaInvocation(modified, "PacketRelay.sendToPlayer") { args ->
+                    if (args.size == 3) "PacketDistributor.sendToPlayer(${args[2].trim()}, ${args[1].trim()})" else null
+                }
+                modified = rewriteJavaInvocation(modified, "PacketRelay.sendToAll") { args ->
+                    if (args.size == 2) "PacketDistributor.sendToAllPlayers(${args[1].trim()})" else null
+                }
+                modified = rewriteJavaInvocation(modified, "PacketRelay.sendToNear") { args ->
+                    if (args.size != 7) return@rewriteJavaInvocation null
+                    val levelExpr = args[6].trim().removeSuffix(".dimension()")
+                    if (!Regex("""\bServerLevel\s+${Regex.escape(levelExpr)}\b""").containsMatchIn(modified)) {
+                        return@rewriteJavaInvocation null
+                    }
+                    "PacketDistributor.sendToPlayersNear($levelExpr, null, ${args[2].trim()}, ${args[3].trim()}, ${args[4].trim()}, ${args[5].trim()}, ${args[1].trim()})"
+                }
+                if (modified != original) {
+                    modified = addImportIfMissing(modified, "net.neoforged.neoforge.network.PacketDistributor")
+                    modified = removeImportIfPresent(modified, "com.aetherteam.nitrogen.network.PacketRelay")
+                    modified = removeUnusedImportsBySimpleNamePattern(modified, Regex("""[A-Za-z_$][\w$]*PacketHandler"""))
+                    if (!dryRun) file.writeText(modified)
+                    changes.add(Change(
+                        file = file,
+                        line = 1,
+                        description = "Migrate PacketRelay sends to NeoForge PacketDistributor",
+                        before = "PacketRelay.sendTo*(channel, packet, ...)",
+                        after = "PacketDistributor.sendTo*(packet, ...)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-packetrelay-distributor"
+                    ))
+                }
+            }
+        return changes
+    }
+
+    private fun rewriteJavaInvocation(source: String, qualifiedName: String, replacement: (List<String>) -> String?): String {
+        var result = source
+        var cursor = 0
+        while (true) {
+            val index = result.indexOf("$qualifiedName(", cursor)
+            if (index < 0) break
+            val openParen = index + qualifiedName.length
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen <= openParen) {
+                cursor = index + qualifiedName.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            val call = replacement(args)
+            if (call == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            result = result.substring(0, index) + call + result.substring(closeParen + 1)
+            cursor = index + call.length
+        }
+        return result
     }
 
     private fun removeJavaStatementsMatching(source: String, predicate: (String) -> Boolean): String {

@@ -669,6 +669,198 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `base packet records handlers and relay calls migrate to payload registrar`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        val clientboundDir = networkDir.resolve("packet/clientbound")
+        val serverboundDir = networkDir.resolve("packet/serverbound")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+        clientboundDir.createDirectories()
+        serverboundDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.network.ExamplePacketHandler;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                    ExamplePacketHandler.register();
+                }
+            }
+        """.trimIndent())
+        networkDir.resolve("ExamplePacketHandler.java").writeText("""
+            package com.example.network;
+
+            import com.example.network.packet.clientbound.ClientNoticePacket;
+            import com.example.network.packet.clientbound.BossPacket;
+            import com.example.network.packet.serverbound.ServerActionPacket;
+            import com.aetherteam.nitrogen.network.BasePacket;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+            import java.util.function.Function;
+
+            public class ExamplePacketHandler {
+                public static final SimpleChannel INSTANCE = NetworkRegistry.newSimpleChannel(ResourceLocation.fromNamespaceAndPath("example", "main"), () -> "1", "1"::equals, "1"::equals);
+                private static int index;
+
+                public static synchronized void register() {
+                    register(ClientNoticePacket.class, ClientNoticePacket::decode);
+                    register(BossPacket.Display.class, BossPacket.Display::decode);
+                    register(ServerActionPacket.class, ServerActionPacket::decode);
+                }
+
+                private static <MSG extends BasePacket> void register(final Class<MSG> packet, Function<FriendlyByteBuf, MSG> decoder) {
+                    INSTANCE.messageBuilder(packet, index++).encoder(BasePacket::encode).decoder(decoder).consumerMainThread(BasePacket::handle).add();
+                }
+            }
+        """.trimIndent())
+        clientboundDir.resolve("ClientNoticePacket.java").writeText("""
+            package com.example.network.packet.clientbound;
+
+            import com.aetherteam.nitrogen.network.BasePacket;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.world.entity.player.Player;
+
+            public record ClientNoticePacket(int value) implements BasePacket {
+                @Override
+                public void encode(FriendlyByteBuf buf) {
+                    buf.writeInt(this.value());
+                }
+
+                public static ClientNoticePacket decode(FriendlyByteBuf buf) {
+                    return new ClientNoticePacket(buf.readInt());
+                }
+
+                @Override
+                public void execute(Player player) {
+                    player.getId();
+                }
+            }
+        """.trimIndent())
+        clientboundDir.resolve("BossPacket.java").writeText("""
+            package com.example.network.packet.clientbound;
+
+            import com.aetherteam.nitrogen.network.BasePacket;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.world.entity.player.Player;
+
+            public abstract class BossPacket implements BasePacket {
+                protected final int bossID;
+
+                public BossPacket(int bossID) {
+                    this.bossID = bossID;
+                }
+
+                @Override
+                public void encode(FriendlyByteBuf buf) {
+                    buf.writeInt(this.bossID);
+                }
+
+                public static class Display extends BossPacket {
+                    public Display(int bossID) {
+                        super(bossID);
+                    }
+
+                    public static Display decode(FriendlyByteBuf buf) {
+                        return new Display(buf.readInt());
+                    }
+
+                    @Override
+                    public void execute(Player player) {
+                        player.getId();
+                    }
+                }
+            }
+        """.trimIndent())
+        serverboundDir.resolve("ServerActionPacket.java").writeText("""
+            package com.example.network.packet.serverbound;
+
+            import com.aetherteam.nitrogen.network.BasePacket;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.world.entity.player.Player;
+
+            public record ServerActionPacket(int entityID) implements BasePacket {
+                @Override
+                public void encode(FriendlyByteBuf buf) {
+                    buf.writeInt(this.entityID());
+                }
+
+                public static ServerActionPacket decode(FriendlyByteBuf buf) {
+                    return new ServerActionPacket(buf.readInt());
+                }
+
+                @Override
+                public void execute(Player player) {
+                    player.getId();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RelayUse.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.network.PacketRelay;
+            import com.example.network.ExamplePacketHandler;
+            import com.example.network.packet.clientbound.ClientNoticePacket;
+            import com.example.network.packet.serverbound.ServerActionPacket;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.server.level.ServerPlayer;
+
+            public class RelayUse {
+                public void send(ServerLevel level, ServerPlayer player) {
+                    PacketRelay.sendToPlayer(ExamplePacketHandler.INSTANCE, new ClientNoticePacket(1), player);
+                    PacketRelay.sendToServer(ExamplePacketHandler.INSTANCE, new ServerActionPacket(2));
+                    PacketRelay.sendToAll(ExamplePacketHandler.INSTANCE, new ClientNoticePacket(3));
+                    PacketRelay.sendToNear(ExamplePacketHandler.INSTANCE, new ClientNoticePacket(4), player.getX(), player.getY(), player.getZ(), 8.0, level.dimension());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val clientPacket = clientboundDir.resolve("ClientNoticePacket.java").readText()
+        val bossPacket = clientboundDir.resolve("BossPacket.java").readText()
+        val serverPacket = serverboundDir.resolve("ServerActionPacket.java").readText()
+        val handler = networkDir.resolve("ExamplePacketHandler.java").readText()
+        val main = srcDir.resolve("ExampleMod.java").readText()
+        val relay = srcDir.resolve("RelayUse.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-basepacket-payload" })
+        assertTrue(result.changes.any { it.ruleId == "struct-basepacket-handler-registration" })
+        assertTrue(result.changes.any { it.ruleId == "struct-basepacket-main-registration" })
+        assertTrue(result.changes.any { it.ruleId == "struct-packetrelay-distributor" })
+        assertTrue(clientPacket.contains("implements CustomPacketPayload"), clientPacket)
+        assertTrue(clientPacket.contains("StreamCodec.of((buf, packet) -> packet.encode(buf), ClientNoticePacket::decode)"), clientPacket)
+        assertFalse(clientPacket.contains("BasePacket"), clientPacket)
+        assertFalse(clientPacket.contains("@Override\n    public void encode"), clientPacket)
+        assertTrue(bossPacket.contains("abstract class BossPacket implements CustomPacketPayload"), bossPacket)
+        assertTrue(bossPacket.contains("Type<Display> TYPE"), bossPacket)
+        assertTrue(bossPacket.contains("StreamCodec.of((buf, packet) -> packet.encode(buf), Display::decode)"), bossPacket)
+        assertFalse(bossPacket.contains("BossPacket.TYPE"), bossPacket)
+        assertFalse(bossPacket.contains("@Override\n    public void encode"), bossPacket)
+        assertTrue(serverPacket.contains("implements CustomPacketPayload"), serverPacket)
+        assertTrue(handler.contains("public static void register(RegisterPayloadHandlersEvent event)"), handler)
+        assertTrue(handler.contains("registrar.playToClient(ClientNoticePacket.TYPE, ClientNoticePacket.STREAM_CODEC, (payload, context) -> payload.execute(context.player()));"), handler)
+        assertTrue(handler.contains("registrar.playToClient(BossPacket.Display.TYPE, BossPacket.Display.STREAM_CODEC, (payload, context) -> payload.execute(context.player()));"), handler)
+        assertTrue(handler.contains("registrar.playToServer(ServerActionPacket.TYPE, ServerActionPacket.STREAM_CODEC, (payload, context) -> payload.execute(context.player()));"), handler)
+        assertFalse(handler.contains("SimpleChannel"), handler)
+        assertFalse(handler.contains("BasePacket"), handler)
+        assertTrue(main.contains("modEventBus.addListener(ExamplePacketHandler::register);"), main)
+        assertFalse(main.contains("ExamplePacketHandler.register();"), main)
+        assertTrue(relay.contains("PacketDistributor.sendToPlayer(player, new ClientNoticePacket(1));"), relay)
+        assertTrue(relay.contains("PacketDistributor.sendToServer(new ServerActionPacket(2));"), relay)
+        assertTrue(relay.contains("PacketDistributor.sendToAllPlayers(new ClientNoticePacket(3));"), relay)
+        assertTrue(relay.contains("PacketDistributor.sendToPlayersNear(level, null, player.getX(), player.getY(), player.getZ(), 8.0, new ClientNoticePacket(4));"), relay)
+        assertFalse(relay.contains("PacketRelay"), relay)
+        assertFalse(relay.contains("ExamplePacketHandler"), relay)
+    }
+
+    @Test
     fun `server packet handler maps getSender to IPayloadContext player check`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val networkDir = srcDir.resolve("network")
