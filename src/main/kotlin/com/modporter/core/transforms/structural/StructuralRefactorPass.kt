@@ -4061,10 +4061,24 @@ $itemArguments
             for (capability in declarations) {
                 val levelCapability = levelCapabilitySpecs[capability.fieldName]
                 val replacement = when {
-                    levelCapability != null ->
-                        "public static final Supplier<AttachmentType<${levelCapability.apiType}>> ${levelCapability.fieldName} = ATTACHMENT_TYPES.register(\"${levelCapability.idPath}\", () -> AttachmentType.serializable(holder -> new ${levelCapability.implementationType}((Level) holder)).build());"
-                    capability in entityAttachmentCapabilities ->
-                        "public static final Supplier<AttachmentType<${capability.apiType}>> ${capability.fieldName} = ATTACHMENT_TYPES.register(\"${capability.idPath}\", () -> AttachmentType.serializable(holder -> new ${capability.implementationType}((${capability.entityKind}) holder)).build());"
+                    levelCapability != null -> {
+                        val attachmentType = if (levelCapability.apiType in serializableCapabilityTypes ||
+                            implementationByInterface[levelCapability.apiType] == levelCapability.implementationType) {
+                            levelCapability.apiType
+                        } else {
+                            levelCapability.implementationType
+                        }
+                        "public static final Supplier<AttachmentType<$attachmentType>> ${levelCapability.fieldName} = ATTACHMENT_TYPES.register(\"${levelCapability.idPath}\", () -> AttachmentType.<net.minecraft.nbt.CompoundTag, $attachmentType>serializable(holder -> new ${levelCapability.implementationType}((Level) holder)).build());"
+                    }
+                    capability in entityAttachmentCapabilities -> {
+                        val attachmentType = if (capability.apiType in serializableCapabilityTypes ||
+                            implementationByInterface[capability.apiType] == capability.implementationType) {
+                            capability.apiType
+                        } else {
+                            capability.implementationType!!
+                        }
+                        "public static final Supplier<AttachmentType<$attachmentType>> ${capability.fieldName} = ATTACHMENT_TYPES.register(\"${capability.idPath}\", () -> AttachmentType.<net.minecraft.nbt.CompoundTag, $attachmentType>serializable(holder -> new ${capability.implementationType}((${capability.entityKind}) holder)).build());"
+                    }
                     else ->
                         "public static final EntityCapability<${capability.apiType}, Direction> ${capability.fieldName} = EntityCapability.createSided(${capability.apiType}.ID, ${capability.apiType}.class);"
                 }
@@ -9855,6 +9869,7 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyMobCustomDamageSourceUtilityAttacks(result)
         result = migrateMobSpawnEquipmentSignatures(result)
         result = migrateLegacyEnchantmentConstantNames(result)
+        result = migrateLegacyAttachmentGetDataLazyOptionalReturns(result)
         result = migrateLegacyEntityCapabilityOptionalChains(result)
         result = migrateLegacyAuthlibProfileFetchSource(result)
         result = migrateLegacyChunkGeneratorAsyncSignatures(result)
@@ -20498,6 +20513,20 @@ ${indent}}
             result = withoutCodec
         }
         return result
+    }
+
+    private fun migrateLegacyAttachmentGetDataLazyOptionalReturns(source: String): String {
+        if (!source.contains("LazyOptional<") || !source.contains(".getData(")) return source
+        return Regex(
+            """(?s)(\b(?:public|protected|private)?\s*static\s+LazyOptional\s*<[^>\r\n]+>\s+[A-Za-z_$][\w$]*\s*\([^)]*\)\s*\{(?:(?!\n\s*\}).)*?)return\s+([^;\r\n{}]+?\.getData\([^;\r\n{}]+?\))\s*;"""
+        ).replace(source) { match ->
+            val expression = match.groupValues[2].trim()
+            if (expression.contains("LazyOptional.") || expression.contains("ofNullable(")) {
+                match.value
+            } else {
+                "${match.groupValues[1]}return LazyOptional.ofNullable($expression);"
+            }
+        }
     }
 
     private fun migrateLegacyEntityCapabilityOptionalChains(source: String): String {

@@ -2031,7 +2031,7 @@ class StructuralRefactorExtraTest {
         assertTrue(capabilities.contains("EntityCapability<PlayerData, Direction> PLAYER_DATA"), capabilities)
         assertTrue(capabilities.contains("Supplier<AttachmentType<LevelData>> LEVEL_DATA"), capabilities)
         assertTrue(capabilities.contains("DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES"), capabilities)
-        assertTrue(capabilities.contains("AttachmentType.serializable(holder -> new LevelDataCapability((Level) holder)).build()"), capabilities)
+        assertTrue(capabilities.contains("AttachmentType.<net.minecraft.nbt.CompoundTag, LevelData>serializable(holder -> new LevelDataCapability((Level) holder)).build()"), capabilities)
         assertTrue(capabilities.contains("new PlayerDataCapability(player)"), capabilities)
         assertTrue(capabilities.contains("if (!(entity instanceof Player player)) return null;"), capabilities)
         assertFalse(capabilities.contains("AttachCapabilitiesEvent"))
@@ -2196,7 +2196,7 @@ class StructuralRefactorExtraTest {
         assertTrue(result.changes.any { it.ruleId == "struct-custom-entity-capabilities" })
         assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-attachment-api" })
         assertTrue(capabilities.contains("Supplier<AttachmentType<SynchedData>> PLAYER_DATA"), capabilities)
-        assertTrue(capabilities.contains("AttachmentType.serializable(holder -> new SynchedDataCapability((Player) holder)).build()"), capabilities)
+        assertTrue(capabilities.contains("AttachmentType.<net.minecraft.nbt.CompoundTag, SynchedData>serializable(holder -> new SynchedDataCapability((Player) holder)).build()"), capabilities)
         assertFalse(capabilities.contains("EntityCapability<SynchedData"), capabilities)
         assertFalse(capabilities.contains("RegisterCapabilitiesEvent"), capabilities)
         assertFalse(capabilities.contains("@SubscribeEvent"), capabilities)
@@ -2213,6 +2213,30 @@ class StructuralRefactorExtraTest {
         assertTrue(packet.contains("import com.aetherteam.nitrogen.attachment.INBTSynchable;"), packet)
         assertTrue(packet.contains("RegistryFriendlyByteBuf buf"), packet)
         assertTrue(mod.contains("ExampleCapabilities.registerAttachments(modEventBus);"), mod)
+    }
+
+    @Test
+    fun `wraps attachment getData returns for legacy lazy optional getters`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TimeData.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.world.level.Level;
+
+            public interface TimeData {
+                static LazyOptional<TimeData> get(Level world) {
+                    return world.getData(ExampleCapabilities.TIME_DATA.get());
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val api = srcDir.resolve("TimeData.java").readText()
+
+        assertTrue(api.contains("return LazyOptional.ofNullable(world.getData(ExampleCapabilities.TIME_DATA.get()));"), api)
+        assertFalse(api.contains("return world.getData(ExampleCapabilities.TIME_DATA.get());"), api)
     }
 
     @Test
