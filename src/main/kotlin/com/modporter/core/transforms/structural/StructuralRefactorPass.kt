@@ -16485,6 +16485,28 @@ ${indent}}"""
             return methods
         }
 
+        fun attributeModifierStreamLambdaParameters(scope: String): Set<String> {
+            val id = """[A-Za-z_$][\w$]*"""
+            val parameters = linkedSetOf<String>()
+            val attributeModifierCollectionVariables = Regex(
+                """\b(?:java\.util\.)?(?:Collection|Iterable|List|Set)\s*<\s*(?:net\.minecraft\.world\.entity\.ai\.attributes\.)?AttributeModifier\s*>\s+($id)\b"""
+            ).findAll(scope).map { it.groupValues[1] }.toSet()
+            Regex("""(?s)([^;{}]+?)\.stream\s*\(\s*\)\s*\.\w+\s*\(\s*\(?\s*($id)\s*\)?\s*->""")
+                .findAll(scope)
+                .forEach { match ->
+                    val streamSource = match.groupValues[1].trim()
+                    val root = streamSource.substringBefore('.').trim()
+                    val isAttributeModifierSource =
+                        root in attributeModifierCollectionVariables ||
+                            streamSource.endsWith(".getModifiers()") ||
+                            streamSource.contains(".getAttributeModifiers(")
+                    if (isAttributeModifierSource) {
+                        parameters += match.groupValues[2]
+                    }
+                }
+            return parameters
+        }
+
         fun attributeModifierIdExpression(argument: String, callOffset: Int): String? {
             val trimmed = argument.trim()
             if (trimmed.endsWith(".id()")) return null
@@ -16516,12 +16538,56 @@ ${indent}}"""
             return null
         }
 
+        fun isAttributeModifierExpression(expression: String, callOffset: Int): Boolean {
+            val trimmed = expression.trim()
+            if (trimmed in modifierVariables) return true
+            if (Regex("""^new\s+(?:net\.minecraft\.world\.entity\.ai\.attributes\.)?AttributeModifier\s*\(""")
+                    .containsMatchIn(trimmed)) {
+                return true
+            }
+            val scope = enclosingMethodText(result, callOffset) ?: result
+            val variableTypes = javaLocalVariableTypes(scope, genericMethodReturnTypes)
+            val typeParameterBounds = javaTypeParameterBounds(scope)
+            if (trimmed in attributeModifierStreamLambdaParameters(scope)) return true
+            val directType = variableTypes[trimmed]
+            if (directType == "AttributeModifier" || "AttributeModifier" in typeParameterBounds[directType].orEmpty()) {
+                return true
+            }
+            val methodCall = Regex("""(?s)^(?:(.+)\.)?([A-Za-z_$][\w$]*)\s*\(.*\)$""").matchEntire(trimmed)
+                ?: return false
+            val receiver = methodCall.groupValues[1].trim()
+            val methodName = methodCall.groupValues[2]
+            if (receiver.isBlank()) {
+                return methodName in ownerAttributeModifierMethods
+            }
+            if (receiver == "this") {
+                return methodName in ownerAttributeModifierMethods
+            }
+            val receiverType = variableTypes[receiver]
+            if (receiverType != null && methodName in methodsForType(receiverType, typeParameterBounds)) {
+                return true
+            }
+            return methodName in attributeModifierMethods[receiver.substringAfterLast('.')].orEmpty()
+        }
+
         for (variable in modifierVariables) {
             val escaped = Regex.escape(variable)
             result = Regex("""\.(getModifier|hasModifier|removeModifier)\(\s*$escaped\s*\)""")
                 .replace(result) { match -> ".${match.groupValues[1]}($variable.id())" }
             result = Regex("""\b$escaped\.getId\(\)""").replace(result, "$variable.id()")
             result = Regex("""\b$escaped\.getAmount\(\)""").replace(result, "$variable.amount()")
+            result = Regex("""\b$escaped\.getOperation\(\)""").replace(result, "$variable.operation()")
+        }
+        listOf(
+            "getId" to "id",
+            "getAmount" to "amount",
+            "getOperation" to "operation"
+        ).forEach { (legacyName, recordName) ->
+            result = rewriteJavaCallWithOffset(result, legacyName) { receiver, args, callOffset ->
+                if (args.isNotEmpty()) return@rewriteJavaCallWithOffset null
+                if (!isAttributeModifierExpression(receiver, callOffset)) return@rewriteJavaCallWithOffset null
+                "$receiver.$recordName()"
+            }
         }
         listOf("getModifier", "hasModifier", "removeModifier").forEach { methodName ->
             result = rewriteJavaCallWithOffset(result, methodName) { receiver, args, callOffset ->

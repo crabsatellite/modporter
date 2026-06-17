@@ -7937,12 +7937,29 @@ class StructuralRefactorExtraTest {
             package com.example;
 
             import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 
             public class CommandSurface {
                 void apply(Player player, AttributeInstance attribute) {
                     PlayerCapability.get(player).ifPresent(capability -> {
+                        double amount = capability.getLifeModifier().getAmount();
+                        boolean additive = capability.getLifeModifier().getOperation() == AttributeModifier.Operation.ADD_VALUE;
                         attribute.removeModifier(capability.getLifeModifier());
                     });
+                }
+
+                void damage(DamageEvent event) {
+                    float amount = event.getAmount();
+                }
+
+                void armor(ItemStack stack, ArmorItem armorItem) {
+                    double value = stack.getAttributeModifiers(armorItem.getEquipmentSlot()).get(Attributes.ARMOR).stream().mapToDouble((attributeModifier) -> attributeModifier.getAmount() / 15).sum();
+                }
+            }
+
+            class DamageEvent {
+                float getAmount() {
+                    return 1.0F;
                 }
             }
         """.trimIndent())
@@ -7962,6 +7979,10 @@ class StructuralRefactorExtraTest {
         assertTrue(cape.contains("instance.removeModifier(this.getCapeModifier().id())"), cape)
         assertTrue(cape.contains("instance.hasModifier(unknown.getCapeModifier())"), cape)
         assertTrue(commandSurface.contains("attribute.removeModifier(capability.getLifeModifier().id())"), commandSurface)
+        assertTrue(commandSurface.contains("double amount = capability.getLifeModifier().amount();"), commandSurface)
+        assertTrue(commandSurface.contains("boolean additive = capability.getLifeModifier().operation() == AttributeModifier.Operation.ADD_VALUE;"), commandSurface)
+        assertTrue(commandSurface.contains("float amount = event.getAmount();"), commandSurface)
+        assertTrue(commandSurface.contains("mapToDouble((attributeModifier) -> attributeModifier.amount() / 15)"), commandSurface)
     }
 
     @Test
