@@ -10010,6 +10010,8 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyModelRenderPackedColorBodies(result)
         result = migrateLegacyRendererSetupRotations(result)
         result = migrateAttributeHolderApiArguments(result, attributeHolderAccessHints)
+        result = migrateLegacyServerDataConstructors(result)
+        result = migrateLegacyConnectScreenStartConnectingCalls(result)
         result = migrateLegacyClientRenderingSource(result)
         result = migrateLegacySkinManagerTextureLookups(result)
         result = migrateLegacyModelEventSource(result)
@@ -19644,8 +19646,28 @@ $methodBody
         result = Regex("""(\.add\(\s*)($expressionPattern)\.get\(\)(\s*,)""")
             .replace(result) { match ->
                 "${match.groupValues[1]}${match.groupValues[2]}.getDelegate()${match.groupValues[3]}"
-            }
+        }
         return result
+    }
+
+    private fun migrateLegacyServerDataConstructors(source: String): String {
+        if (!source.contains("new ServerData(")) return source
+        return migrateMethodCalls(source, "new ServerData") { args ->
+            if (args.size != 3) return@migrateMethodCalls args
+            val serverType = when (args[2].trim()) {
+                "true" -> "ServerData.Type.LAN"
+                "false" -> "ServerData.Type.OTHER"
+                else -> return@migrateMethodCalls args
+            }
+            listOf(args[0], args[1], serverType)
+        }
+    }
+
+    private fun migrateLegacyConnectScreenStartConnectingCalls(source: String): String {
+        if (!source.contains("ConnectScreen.startConnecting(")) return source
+        return migrateMethodCalls(source, "ConnectScreen.startConnecting") { args ->
+            if (args.size == 5) args + "null" else args
+        }
     }
 
     private fun migrateMeleeAttackGoalReachOverrides(source: String): String {

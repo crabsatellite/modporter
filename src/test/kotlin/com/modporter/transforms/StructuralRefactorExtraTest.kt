@@ -6417,6 +6417,40 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy server data boolean constructor migrates only literal lan flag`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ServerList.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.ConnectScreen;
+            import net.minecraft.client.multiplayer.ServerData;
+            import net.minecraft.client.multiplayer.resolver.ServerAddress;
+
+            public class ServerList {
+                void connect(String name, String ip, boolean lan, Minecraft minecraft) {
+                    ServerData remote = new ServerData("OATS", "oats.aether-mod.net", false);
+                    ServerData local = new ServerData("LAN", "localhost", true);
+                    ServerData dynamic = new ServerData(name, ip, lan);
+                    ConnectScreen.startConnecting(this, minecraft, ServerAddress.parseString(remote.ip), remote, false);
+                    ConnectScreen.startConnecting(this, minecraft, ServerAddress.parseString(local.ip), local, false, null);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("ServerList.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("new ServerData(\"OATS\", \"oats.aether-mod.net\", ServerData.Type.OTHER)"))
+        assertTrue(transformed.contains("new ServerData(\"LAN\", \"localhost\", ServerData.Type.LAN)"))
+        assertTrue(transformed.contains("new ServerData(name, ip, lan)"))
+        assertTrue(transformed.contains("ConnectScreen.startConnecting(this, minecraft, ServerAddress.parseString(remote.ip), remote, false, null)"))
+        assertTrue(transformed.contains("ConnectScreen.startConnecting(this, minecraft, ServerAddress.parseString(local.ip), local, false, null)"))
+        assertFalse(transformed.contains("false, null, null"))
+    }
+
+    @Test
     fun `migrates recipe book menu single stack recipe inputs from source typed recipe registries`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
