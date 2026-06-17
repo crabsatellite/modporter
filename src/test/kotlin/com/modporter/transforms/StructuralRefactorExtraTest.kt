@@ -5680,6 +5680,125 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates recipe book menu single stack recipe inputs from source typed recipe registries`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleRecipeTypes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleRecipeTypes {
+                public static final DeferredHolder<RecipeType<?>, RecipeType<IncubationRecipe>> INCUBATION = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("IncubationRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.level.Level;
+
+            public class IncubationRecipe implements Recipe<Container> {
+                @Override
+                public boolean matches(Container menu, Level level) {
+                    return menu.getItem(0).isEmpty();
+                }
+
+                @Override
+                public ItemStack assemble(Container menu, HolderLookup.Provider provider) {
+                    return ItemStack.EMPTY;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("IncubatorMenu.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.Container;
+            import net.minecraft.world.SimpleContainer;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.entity.player.StackedContents;
+            import net.minecraft.world.inventory.RecipeBookMenu;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.level.Level;
+
+            public class IncubatorMenu extends RecipeBookMenu<Container> {
+                private final Container container;
+                private final Level level;
+
+                @Override
+                public void fillCraftSlotsStackedContents(StackedContents contents) {}
+
+                @Override
+                public void clearCraftingContent() {}
+
+                @Override
+                public boolean recipeMatches(Recipe<? super Container> recipe) {
+                    return recipe.matches(this.container, this.level);
+                }
+
+                protected boolean canIncubate(ItemStack stack) {
+                    return this.level.getRecipeManager().getRecipeFor(ExampleRecipeTypes.INCUBATION.get(), new SimpleContainer(stack), this.level).isPresent();
+                }
+
+                @Override public int getResultSlotIndex() { return -1; }
+                @Override public int getGridWidth() { return 1; }
+                @Override public int getGridHeight() { return 1; }
+                @Override public int getSize() { return 1; }
+                @Override public boolean stillValid(Player player) { return true; }
+            }
+        """.trimIndent())
+        srcDir.resolve("RecipeBookBehavior.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+            import net.minecraft.client.gui.screens.recipebook.RecipeUpdateListener;
+            import net.minecraft.world.inventory.RecipeBookMenu;
+
+            public interface RecipeBookBehavior<T extends RecipeBookMenu<?>, V extends AbstractContainerScreen<T> & RecipeUpdateListener> {
+            }
+        """.trimIndent())
+        srcDir.resolve("AbstractRecipeBookScreen.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+            import net.minecraft.client.gui.screens.recipebook.RecipeBookComponent;
+            import net.minecraft.client.gui.screens.recipebook.RecipeUpdateListener;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.inventory.RecipeBookMenu;
+
+            public abstract class AbstractRecipeBookScreen<T extends RecipeBookMenu<Container>, S extends RecipeBookComponent> extends AbstractContainerScreen<T> implements RecipeUpdateListener, RecipeBookBehavior<T, AbstractRecipeBookScreen<T, S>> {
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val menu = srcDir.resolve("IncubatorMenu.java").readText()
+        val recipe = srcDir.resolve("IncubationRecipe.java").readText()
+        val behavior = srcDir.resolve("RecipeBookBehavior.java").readText()
+        val screen = srcDir.resolve("AbstractRecipeBookScreen.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(menu.contains("extends RecipeBookMenu<SingleRecipeInput, com.example.IncubationRecipe>"), menu)
+        assertTrue(menu.contains("public boolean recipeMatches(RecipeHolder<com.example.IncubationRecipe> recipe)"), menu)
+        assertTrue(menu.contains("recipe.value().matches(new SingleRecipeInput(this.container.getItem(0)), this.level)"), menu)
+        assertTrue(menu.contains("getRecipeFor(ExampleRecipeTypes.INCUBATION.get(), new SingleRecipeInput(stack), this.level)"), menu)
+        assertTrue(menu.contains("import net.minecraft.world.item.crafting.RecipeHolder;"), menu)
+        assertTrue(menu.contains("import net.minecraft.world.item.crafting.SingleRecipeInput;"), menu)
+        assertFalse(menu.contains("Recipe<? super Container>"), menu)
+        assertTrue(recipe.contains("implements Recipe<SingleRecipeInput>"), recipe)
+        assertTrue(recipe.contains("boolean matches(SingleRecipeInput menu, Level level)"), recipe)
+        assertTrue(recipe.contains("ItemStack assemble(SingleRecipeInput menu, HolderLookup.Provider provider)"), recipe)
+        assertFalse(recipe.contains("import net.minecraft.world.Container;"), recipe)
+        assertTrue(behavior.contains("RecipeBookMenu<?, ?>"), behavior)
+        assertTrue(screen.contains("T extends RecipeBookMenu<?, ?>"), screen)
+        assertFalse(screen.contains("import net.minecraft.world.Container;"), screen)
+    }
+
+    @Test
     fun `migrates legacy item tag enchantment and mob spawn equipment APIs`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

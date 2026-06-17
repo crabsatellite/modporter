@@ -7201,6 +7201,7 @@ $fields
         val globalLootModifierProviderClasses = collectGlobalLootModifierProviderClasses(srcDir)
         val recipeProviderClasses = collectRecipeProviderClasses(srcDir)
         val recipeSerializerFactoryHints = collectRecipeSerializerFactoryHints(srcDir)
+        val recipeTypeHints = collectRecipeTypeHints(srcDir)
         val holderValueParameterHints = collectHolderValueParameterHints(srcDir)
         val criterionInstanceFactoryHints = collectCriterionInstanceFactoryHints(srcDir)
         val legacyRegistryBackedMethods = collectLegacyRegistryBackedMethods(javaFiles)
@@ -7430,6 +7431,7 @@ $fields
                     globalLootModifierProviderClasses,
                     recipeProviderClasses,
                     recipeSerializerFactoryHints,
+                    recipeTypeHints,
                     holderValueParameterHints,
                     criterionInstanceFactoryHints,
                     legacyRegistryBackedMethods,
@@ -8320,6 +8322,10 @@ ${entries.joinToString(",\n")}
         val fieldToRecipeClass: Map<String, String>
     )
 
+    private data class RecipeTypeHints(
+        val expressionToRecipeClass: Map<String, String>
+    )
+
     private data class HolderValueParameterHints(
         val soundEventParameters: Map<String, Set<Int>>,
         val potionParameters: Map<String, Set<Int>>
@@ -8409,6 +8415,53 @@ ${entries.joinToString(",\n")}
 
         return RecipeSerializerFactoryHints(fieldToFactory, fieldToRecipeClass)
     }
+
+    private fun collectRecipeTypeHints(srcDir: Path): RecipeTypeHints {
+        val qualified = linkedMapOf<String, String>()
+        val simpleCandidates = linkedMapOf<String, MutableSet<String>>()
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val source = javaFile.readText()
+                if (!source.contains("RecipeType<")) return@forEach
+                val packageName = packageNameOf(source)
+                val imports = Regex("""(?m)^\s*import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+                    .findAll(source)
+                    .associate { match -> match.groupValues[1].substringAfterLast('.') to match.groupValues[1] }
+                val owner = Regex("""\b(?:class|interface|enum)\s+([A-Za-z_$][\w$]*)\b""")
+                    .find(source)
+                    ?.groupValues
+                    ?.get(1)
+                    ?: return@forEach
+                Regex(
+                    """\b(?:DeferredHolder|RegistryObject)\s*<\s*(?:RecipeType\s*<\s*\?\s*>\s*,\s*)?RecipeType\s*<\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>\s*>\s+([A-Z][A-Z0-9_]*)\b"""
+                ).findAll(source).forEach { match ->
+                    val recipeClass = resolveJavaTypeName(match.groupValues[1], packageName, imports)
+                    val fieldName = match.groupValues[2]
+                    qualified[normalizeRecipeTypeExpression("$owner.$fieldName.get()")] = recipeClass
+                    simpleCandidates.getOrPut(normalizeRecipeTypeExpression("$fieldName.get()")) { linkedSetOf() }
+                        .add(recipeClass)
+                }
+            }
+
+        simpleCandidates.forEach { (expression, recipeClasses) ->
+            if (recipeClasses.size == 1) {
+                qualified[expression] = recipeClasses.single()
+            }
+        }
+        return RecipeTypeHints(qualified)
+    }
+
+    private fun normalizeRecipeTypeExpression(expression: String): String =
+        expression.replace(Regex("""\s+"""), "")
+
+    private fun resolveJavaTypeName(typeName: String, packageName: String, imports: Map<String, String>): String =
+        when {
+            "." in typeName -> typeName
+            imports.containsKey(typeName) -> imports.getValue(typeName)
+            packageName.isNotBlank() -> "$packageName.$typeName"
+            else -> typeName
+        }
 
     private fun collectHolderValueParameterHints(srcDir: Path): HolderValueParameterHints {
         val soundEventParameters = linkedMapOf<String, MutableSet<Int>>()
@@ -9198,6 +9251,7 @@ ${entries.joinToString(",\n")}
         globalLootModifierProviderClasses: Set<String> = emptySet(),
         recipeProviderClasses: RecipeProviderClassHints = RecipeProviderClassHints(emptySet(), emptySet()),
         recipeSerializerFactoryHints: RecipeSerializerFactoryHints = RecipeSerializerFactoryHints(emptyMap(), emptyMap()),
+        recipeTypeHints: RecipeTypeHints = RecipeTypeHints(emptyMap()),
         holderValueParameterHints: HolderValueParameterHints = HolderValueParameterHints(emptyMap(), emptyMap()),
         criterionInstanceFactoryHints: CriterionInstanceFactoryHints = CriterionInstanceFactoryHints(emptyMap()),
         legacyRegistryBackedMethods: Set<LegacyRegistryBackedMethod> = emptySet(),
@@ -9278,7 +9332,9 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyHangingEntityBoundingBoxes(result)
         result = migrateLegacyToastTextureRendering(result)
         result = migrateHurtAndBreakEquipmentSlotSource(result)
-        result = migrateSingleStackSmeltingRecipeInputs(result)
+        result = migrateSingleStackRecipeInputs(result)
+        result = migrateSingleStackRecipeImplementations(result)
+        result = migrateRecipeBookMenuSingleStackInputs(result, recipeTypeHints)
         result = migrateProtectedBlockFluidStateAccess(result)
         result = migrateEntityEffectParticleOptions(result)
         result = migrateSkullOwnerResolvableProfileSource(result)
@@ -12651,12 +12707,13 @@ ${indent}}"""
         }
     }
 
-    private fun migrateSingleStackSmeltingRecipeInputs(source: String): String {
-        if (!source.contains(".getRecipeFor(") || !source.contains("RecipeType.SMELTING")) return source
+    private fun migrateSingleStackRecipeInputs(source: String): String {
+        if (!source.contains(".getRecipeFor(")) return source
 
         var changedInput = false
         var result = migrateMethodCalls(source, ".getRecipeFor") { args ->
-            if (args.size >= 3 && args[0].trim() == "RecipeType.SMELTING") {
+            if (args.size >= 3) {
+                val recipeType = args[0].trim()
                 val migratedInput = when {
                     args[1].trim().startsWith("new SingleRecipeInput(") -> args[1]
                     args[1].trim().startsWith("new SimpleContainer(") -> {
@@ -12667,7 +12724,7 @@ ${indent}}"""
                             .trim()
                         "new SingleRecipeInput($inner)"
                     }
-                    Regex("""^(this|[A-Za-z_$][\w$]*)$""").matches(args[1].trim()) -> {
+                    recipeType == "RecipeType.SMELTING" && Regex("""^(this|[A-Za-z_$][\w$]*)$""").matches(args[1].trim()) -> {
                         changedInput = true
                         "new SingleRecipeInput(${args[1].trim()}.getItem(0))"
                     }
@@ -12691,7 +12748,7 @@ ${indent}}"""
         result = Regex("""(?m)(\.getRecipeFor\([^;\r\n]+)\.orElse\(null\)""")
             .replace(result) { match ->
                 val call = match.groupValues[1]
-                if (!call.contains("RecipeType.SMELTING") || call.contains(".map(")) {
+                if ((!call.contains("RecipeType.SMELTING") && !call.contains("new SingleRecipeInput(")) || call.contains(".map(")) {
                     match.value
                 } else {
                     needsRecipeHolder = true
@@ -12717,6 +12774,103 @@ ${indent}}"""
             result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeHolder")
         }
         return result
+    }
+
+    private fun migrateRecipeBookMenuSingleStackInputs(source: String, recipeTypeHints: RecipeTypeHints): String {
+        if (!source.contains("RecipeBookMenu<")) return source
+        var result = source
+        var changed = false
+
+        result = Regex("""RecipeBookMenu\s*<\s*\?\s*>""").replace(result) {
+            changed = true
+            "RecipeBookMenu<?, ?>"
+        }
+        result = Regex("""(\bclass\s+[A-Za-z_$][\w$]*(?:\s*<[^>{}]+>)?\s+extends\s+)RecipeBookMenu\s*<\s*Container\s*>""")
+            .replace(result) { match ->
+                val recipeClass = inferSingleStackRecipeBookRecipeClass(result, recipeTypeHints) ?: return@replace match.value
+                changed = true
+                "${match.groupValues[1]}RecipeBookMenu<SingleRecipeInput, $recipeClass>"
+            }
+        result = Regex("""RecipeBookMenu\s*<\s*Container\s*>(?=\s*,)""").replace(result) {
+            changed = true
+            "RecipeBookMenu<?, ?>"
+        }
+
+        val recipeClass = inferSingleStackRecipeBookRecipeClass(result, recipeTypeHints)
+        if (recipeClass != null) {
+            result = Regex(
+                """(?ms)^([ \t]*)@Override\s*\r?\n\1public\s+boolean\s+recipeMatches\s*\(\s*Recipe\s*<\s*\?\s+super\s+Container\s*>\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*return\s+\2\.matches\s*\(\s*([^,]+?)\s*,\s*([^)]+?)\s*\)\s*;\s*\}"""
+            ).replace(result) { match ->
+                changed = true
+                val indent = match.groupValues[1]
+                val recipeVar = match.groupValues[2]
+                val containerExpr = match.groupValues[3].trim()
+                val levelExpr = match.groupValues[4].trim()
+                "${indent}@Override\n${indent}public boolean recipeMatches(RecipeHolder<$recipeClass> $recipeVar) {\n" +
+                    "${indent}    return $recipeVar.value().matches(new SingleRecipeInput($containerExpr.getItem(0)), $levelExpr);\n" +
+                    "${indent}}"
+            }
+        }
+
+        if (changed) {
+            result = addImportIfMissing(result, "net.minecraft.world.item.crafting.SingleRecipeInput")
+            result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeHolder")
+            val withoutRecipeImport = removeImport(result, "net.minecraft.world.item.crafting.Recipe")
+            if (!Regex("""\bRecipe\s*<""").containsMatchIn(withoutRecipeImport)) {
+                result = withoutRecipeImport
+            }
+            val withoutContainerImport = removeImport(result, "net.minecraft.world.Container")
+            if (!Regex("""\bContainer\b""").containsMatchIn(withoutContainerImport)) {
+                result = withoutContainerImport
+            }
+        }
+        return result
+    }
+
+    private fun migrateSingleStackRecipeImplementations(source: String): String {
+        if (!source.contains("Recipe<Container>") || !source.contains(".getItem(0)")) return source
+        var result = source
+        var changed = false
+        result = result.replace("Recipe<Container>", "Recipe<SingleRecipeInput>")
+        if (result != source) changed = true
+        result = Regex(
+            """(?m)^([ \t]*(?:public|protected|private)?\s*(?:boolean|ItemStack)\s+(?:matches|assemble)\s*\(\s*)Container(\s+[A-Za-z_$][\w$]*\s*,\s*(?:Level|HolderLookup\.Provider)\s+[A-Za-z_$][\w$]*\s*\))"""
+        ).replace(result) { match ->
+            changed = true
+            "${match.groupValues[1]}SingleRecipeInput${match.groupValues[2]}"
+        }
+        if (changed) {
+            result = addImportIfMissing(result, "net.minecraft.world.item.crafting.SingleRecipeInput")
+            val withoutContainerImport = removeImport(result, "net.minecraft.world.Container")
+            if (!Regex("""\bContainer\b""").containsMatchIn(withoutContainerImport)) {
+                result = withoutContainerImport
+            }
+        }
+        return result
+    }
+
+    private fun inferSingleStackRecipeBookRecipeClass(source: String, recipeTypeHints: RecipeTypeHints): String? {
+        val javaType = """[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?"""
+        Regex("""\bRecipeType\s*<\s*\?\s+extends\s+($javaType)\s*>""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.substringAfterLast('.')
+            ?.let { return it }
+        Regex("""\bRecipeType\s*<\s*($javaType)\s*>""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.takeIf { it != "?" }
+            ?.substringAfterLast('.')
+            ?.let { return it }
+
+        Regex("""getRecipeFor\s*\(\s*([^,]+?)\s*,\s*new\s+(?:SimpleContainer|SingleRecipeInput)\s*\(""")
+            .findAll(source)
+            .forEach { match ->
+                recipeTypeHints.expressionToRecipeClass[normalizeRecipeTypeExpression(match.groupValues[1])]?.let { return it }
+            }
+        return null
     }
 
     private fun migrateProtectedBlockFluidStateAccess(source: String): String {
