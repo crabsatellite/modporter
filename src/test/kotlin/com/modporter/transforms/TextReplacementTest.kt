@@ -227,6 +227,29 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `rendered buffer rename adds mesh data import`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+
+            public interface TestMod {
+                BufferBuilder.RenderedBuffer build(BufferBuilder builder);
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import com.mojang.blaze3d.vertex.MeshData;"))
+        assertTrue(transformed.contains("MeshData build(BufferBuilder builder);"))
+        assertFalse(transformed.contains("BufferBuilder.RenderedBuffer"))
+    }
+
+    @Test
     fun `gui overlay render event migrates type and layer name access`() {
         val projectDir = createTestFile("""
             package com.example;

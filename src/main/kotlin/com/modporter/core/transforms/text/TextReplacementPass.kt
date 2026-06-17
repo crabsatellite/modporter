@@ -508,6 +508,11 @@ class TextReplacementPass(
         if (result.contains("Tesselator.getInstance()") && !result.contains("import com.mojang.blaze3d.vertex.Tesselator;")) {
             missingImports.add("import com.mojang.blaze3d.vertex.Tesselator;")
         }
+        if (Regex("\\bMeshData\\b").containsMatchIn(result) &&
+            !result.contains("import com.mojang.blaze3d.vertex.MeshData;") &&
+            !result.contains("import com.mojang.blaze3d.vertex.*;")) {
+            missingImports.add("import com.mojang.blaze3d.vertex.MeshData;")
+        }
         if (result.contains("EntityTypeTags.") && !result.contains("import net.minecraft.tags.EntityTypeTags;")) {
             missingImports.add("import net.minecraft.tags.EntityTypeTags;")
         }
