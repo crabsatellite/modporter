@@ -9391,6 +9391,7 @@ ${entries.joinToString(",\n")}
         result = result.replace("Tags.Items.TOOLS_FISHING_RODS", "Tags.Items.TOOLS_FISHING_ROD")
         result = Regex("""\b(CauldronInteraction\.(?:EMPTY|WATER|LAVA|POWDER_SNOW))\.put\(""")
             .replace(result, "$1.map().put(")
+        result = migrateLegacyCauldronInteractionResults(result)
         result = result.replace(".setTame(true);", ".setTame(true, true);")
         result = Regex("""\.disableShield\(\s*(?:true|false)\s*\)""").replace(result, ".disableShield()")
         result = result.replace("Items.GRASS", "Items.SHORT_GRASS")
@@ -15346,6 +15347,37 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         for (variable in stateVariables) {
             result = Regex("""\b${Regex.escape(variable)}\.get\s*\(""")
                 .replace(result) { "$variable.getValue(" }
+        }
+        return result
+    }
+
+    private fun migrateLegacyCauldronInteractionResults(source: String): String {
+        if (!source.contains("CauldronInteraction") || !source.contains("InteractionResult")) return source
+        var result = source
+        val helperNames = linkedSetOf<String>()
+        Regex(
+            """CauldronInteraction\s+[A-Z0-9_$]+\s*=\s*\([^)]*\)\s*->\s*([A-Za-z_$][\w$]*)\s*\("""
+        ).findAll(result).forEach { match ->
+            helperNames += match.groupValues[1]
+        }
+        for (helper in helperNames) {
+            result = Regex("""\b(private|protected|public)\s+static\s+InteractionResult\s+${Regex.escape(helper)}\s*\(""")
+                .replace(result) { match -> "${match.groupValues[1]} static ItemInteractionResult $helper(" }
+        }
+
+        val hasCauldronBlockLambda = Regex(
+            """CauldronInteraction\s+[A-Z0-9_$]+\s*=\s*\([^)]*\)\s*->\s*\{(?:[^{}]|\{[^{}]*})*InteractionResult\.sidedSuccess"""
+        ).containsMatchIn(result)
+        val migratedHelperReturn = helperNames.any { helper ->
+            Regex("""\bItemInteractionResult\s+${Regex.escape(helper)}\s*\(""").containsMatchIn(result)
+        }
+        if (hasCauldronBlockLambda || migratedHelperReturn) {
+            result = result.replace("InteractionResult.sidedSuccess(", "ItemInteractionResult.sidedSuccess(")
+            result = addImportIfMissing(result, "net.minecraft.world.ItemInteractionResult")
+            val withoutOldImport = removeImport(result, "net.minecraft.world.InteractionResult")
+            if (!Regex("""\bInteractionResult\b""").containsMatchIn(withoutOldImport.replace("ItemInteractionResult", ""))) {
+                result = withoutOldImport
+            }
         }
         return result
     }

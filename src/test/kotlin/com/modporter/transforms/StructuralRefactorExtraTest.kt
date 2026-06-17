@@ -11330,6 +11330,47 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates cauldron interaction result returns to item interaction results`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CauldronSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.cauldron.CauldronInteraction;
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.InteractionResult;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            public class CauldronSurface {
+                public static final CauldronInteraction FILL = (state, level, pos, player, hand, stack) ->
+                    fill(level, pos, player, hand, stack);
+
+                public static final CauldronInteraction CLEAN = (state, level, pos, player, hand, stack) -> {
+                    player.setItemInHand(hand, ItemStack.EMPTY);
+                    return InteractionResult.sidedSuccess(level.isClientSide());
+                };
+
+                private static InteractionResult fill(Level level, BlockPos pos, Player player, InteractionHand hand, ItemStack stack) {
+                    return InteractionResult.sidedSuccess(level.isClientSide());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("CauldronSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(transformed.contains("import net.minecraft.world.ItemInteractionResult;"), transformed)
+        assertFalse(transformed.contains("import net.minecraft.world.InteractionResult;"), transformed)
+        assertTrue(transformed.contains("private static ItemInteractionResult fill("), transformed)
+        assertTrue(transformed.contains("return ItemInteractionResult.sidedSuccess(level.isClientSide());"), transformed)
+        assertFalse(transformed.contains("return InteractionResult.sidedSuccess"), transformed)
+    }
+
+    @Test
     fun `migrates legacy structure start custom loads without dropping nbt logic`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
