@@ -7826,6 +7826,20 @@ $fields
                     text = tooltipMigrated
                 }
 
+                val jsonReloadMigrated = migrateRemovedJsonReloadDeserializersSource(text)
+                if (jsonReloadMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate removed loot Deserializers Gson factory in JSON reload listeners",
+                        before = "Deserializers.createFunctionSerializer().create()",
+                        after = "new GsonBuilder().create()",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-json-reload-deserializers"
+                    ))
+                    text = jsonReloadMigrated
+                }
+
                 val configMigrated = migrateModLoadingContextRegisterConfigSource(text)
                 if (configMigrated != text) {
                     changes.add(Change(
@@ -10249,6 +10263,17 @@ ${entries.joinToString(",\n")}
         if (!source.contains("Item.TooltipContext")) return source
         if (source.contains("import net.minecraft.world.item.Item;")) return source
         return addImportIfMissing(source, "net.minecraft.world.item.Item")
+    }
+
+    private fun migrateRemovedJsonReloadDeserializersSource(source: String): String {
+        if (!source.contains("Deserializers.createFunctionSerializer().create()")) return source
+        var result = source.replace("Deserializers.createFunctionSerializer().create()", "new GsonBuilder().create()")
+        result = addImportIfMissing(result, "com.google.gson.GsonBuilder")
+        val withoutDeserializers = removeImport(result, "net.minecraft.world.level.storage.loot.Deserializers")
+        if (!withoutDeserializers.contains("Deserializers.")) {
+            result = withoutDeserializers
+        }
+        return result
     }
 
     private fun migrateModLoadingContextRegisterConfigSource(source: String): String {

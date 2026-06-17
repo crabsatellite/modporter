@@ -2457,6 +2457,38 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `json reload listeners migrate removed loot deserializers gson factory`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/data")
+        srcDir.createDirectories()
+        srcDir.resolve("ReloadListeners.java").writeText("""
+            package com.example.data;
+
+            import com.google.gson.Gson;
+            import net.minecraft.world.level.storage.loot.Deserializers;
+
+            public class ReloadListeners {
+                public static class FuelReloadListener {
+                    public static final Gson GSON_INSTANCE = Deserializers.createFunctionSerializer().create();
+                }
+
+                public static class RecipeReloadListener {
+                    public static final Gson GSON_INSTANCE = Deserializers.createFunctionSerializer().create();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        val migrated = srcDir.resolve("ReloadListeners.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-json-reload-deserializers" })
+        assertTrue(migrated.contains("import com.google.gson.GsonBuilder;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.world.level.storage.loot.Deserializers;"), migrated)
+        assertFalse(migrated.contains("Deserializers.createFunctionSerializer()"), migrated)
+        assertTrue(migrated.contains("public static final Gson GSON_INSTANCE = new GsonBuilder().create();"), migrated)
+    }
+
+    @Test
     fun `attachment registration helper is not treated as subscribe event`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val capabilityDir = srcDir.resolve("capability")
