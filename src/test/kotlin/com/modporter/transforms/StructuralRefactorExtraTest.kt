@@ -11208,6 +11208,60 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy registry accessors only for declared registry receivers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RegistryOwner.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.Registry;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+            import net.neoforged.neoforge.registries.RegistryBuilder;
+            import java.util.function.Supplier;
+
+            public class RegistryOwner {
+                public static final DeferredRegister<Widget> WIDGETS = null;
+                public static final Registry<Widget> WIDGET_REGISTRY = null;
+                public static final Supplier<Registry<Widget>> LEGACY_WIDGET_REGISTRY = WIDGETS.makeRegistry(() -> new RegistryBuilder<Widget>());
+            }
+        """.trimIndent())
+        srcDir.resolve("NotRegistryOwner.java").writeText("""
+            package com.example;
+
+            public class NotRegistryOwner {
+                public static final NotRegistry NOT_REGISTRY = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("RegistryAccessorSurface.java").writeText("""
+            package com.example;
+
+            import java.util.function.Consumer;
+            import net.minecraft.core.Registry;
+
+            public class RegistryAccessorSurface {
+                public void access(Registry<Widget> localRegistry, Widget widget, Consumer<Widget> consumer) {
+                    RegistryOwner.WIDGET_REGISTRY.getValues().forEach(consumer);
+                    localRegistry.getValues().forEach(consumer);
+                    RegistryOwner.WIDGET_REGISTRY.get().getKey(widget);
+                    RegistryOwner.LEGACY_WIDGET_REGISTRY.get().getKey(widget);
+                    NotRegistryOwner.NOT_REGISTRY.get().getKey(widget);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("RegistryAccessorSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(transformed.contains("RegistryOwner.WIDGET_REGISTRY.stream().forEach(consumer)"), transformed)
+        assertTrue(transformed.contains("localRegistry.stream().forEach(consumer)"), transformed)
+        assertTrue(transformed.contains("RegistryOwner.WIDGET_REGISTRY.getKey(widget)"), transformed)
+        assertTrue(transformed.contains("RegistryOwner.LEGACY_WIDGET_REGISTRY.getKey(widget)"), transformed)
+        assertTrue(transformed.contains("NotRegistryOwner.NOT_REGISTRY.get().getKey(widget)"), transformed)
+        assertTrue(srcDir.resolve("RegistryOwner.java").readText().contains("Registry<Widget> LEGACY_WIDGET_REGISTRY = WIDGETS.makeRegistry(builder -> {})"))
+    }
+
+    @Test
     fun `migrates legacy structure start custom loads without dropping nbt logic`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

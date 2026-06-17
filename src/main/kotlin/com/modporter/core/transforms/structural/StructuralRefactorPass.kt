@@ -7235,6 +7235,7 @@ $fields
         val recipeTypeHints = collectRecipeTypeHints(srcDir)
         val holderValueParameterHints = collectHolderValueParameterHints(srcDir)
         val criterionInstanceFactoryHints = collectCriterionInstanceFactoryHints(srcDir)
+        val staticRegistryFieldHints = collectStaticRegistryFieldHints(srcDir)
         val legacyRegistryBackedMethods = collectLegacyRegistryBackedMethods(javaFiles)
         val attributeModifierIdReferences = collectAttributeModifierIdReferences(javaFiles)
 
@@ -7465,6 +7466,7 @@ $fields
                     recipeTypeHints,
                     holderValueParameterHints,
                     criterionInstanceFactoryHints,
+                    staticRegistryFieldHints,
                     legacyRegistryBackedMethods,
                     attributeModifierIdReferences
                 )
@@ -8365,6 +8367,53 @@ ${entries.joinToString(",\n")}
     private data class CriterionInstanceFactoryHints(
         val emptyInstanceFactories: Map<String, String>
     )
+
+    private data class StaticRegistryFieldHints(
+        val qualifiedFields: Set<String>,
+        val uniqueSimpleFields: Set<String>
+    ) {
+        fun contains(expression: String): Boolean {
+            val normalized = expression.trim()
+            return normalized in qualifiedFields || normalized in uniqueSimpleFields
+        }
+    }
+
+    private fun collectStaticRegistryFieldHints(srcDir: Path): StaticRegistryFieldHints {
+        val qualifiedFields = linkedSetOf<String>()
+        val simpleCounts = linkedMapOf<String, Int>()
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val source = javaFile.readText()
+                if (!source.contains("Registry<")) return@forEach
+                val owner = classNameOfJavaSource(source) ?: return@forEach
+                val packageName = packageNameOf(source)
+                Regex(
+                    """\bstatic\s+(?:final\s+)?Registry\s*<[^>\r\n]+>\s+([A-Za-z_$][\w$]*)\s*="""
+                ).findAll(source).forEach { match ->
+                    val field = match.groupValues[1]
+                    qualifiedFields += "$owner.$field"
+                    if (packageName != null) {
+                        qualifiedFields += "$packageName.$owner.$field"
+                    }
+                    simpleCounts[field] = (simpleCounts[field] ?: 0) + 1
+                }
+                Regex(
+                    """\bstatic\s+(?:final\s+)?(?:java\.util\.function\.)?Supplier\s*<\s*Registry\s*<[^>\r\n]+>\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*[^;\r\n]+?\.makeRegistry\s*\("""
+                ).findAll(source).forEach { match ->
+                    val field = match.groupValues[1]
+                    qualifiedFields += "$owner.$field"
+                    if (packageName != null) {
+                        qualifiedFields += "$packageName.$owner.$field"
+                    }
+                    simpleCounts[field] = (simpleCounts[field] ?: 0) + 1
+                }
+            }
+        return StaticRegistryFieldHints(
+            qualifiedFields = qualifiedFields,
+            uniqueSimpleFields = simpleCounts.filterValues { it == 1 }.keys
+        )
+    }
 
     private fun collectRecipeProviderClasses(srcDir: Path): RecipeProviderClassHints {
         val parentByClass = linkedMapOf<String, String>()
@@ -9285,6 +9334,7 @@ ${entries.joinToString(",\n")}
         recipeTypeHints: RecipeTypeHints = RecipeTypeHints(emptyMap()),
         holderValueParameterHints: HolderValueParameterHints = HolderValueParameterHints(emptyMap(), emptyMap()),
         criterionInstanceFactoryHints: CriterionInstanceFactoryHints = CriterionInstanceFactoryHints(emptyMap()),
+        staticRegistryFieldHints: StaticRegistryFieldHints = StaticRegistryFieldHints(emptySet(), emptySet()),
         legacyRegistryBackedMethods: Set<LegacyRegistryBackedMethod> = emptySet(),
         attributeModifierIdReferences: Set<String> = emptySet()
     ): String {
@@ -9434,7 +9484,7 @@ ${entries.joinToString(",\n")}
         result = migrateAbstractRenderLivingSubscribers(result)
         result = migrateStringRepresentableEnumCodecs(result)
         result = migrateLegacyMapCodecOptionalFields(result)
-        result = migrateLegacyRegistryBuilderAndRegistryAccessors(result)
+        result = migrateLegacyRegistryBuilderAndRegistryAccessors(result, staticRegistryFieldHints)
         result = migrateLegacyLazyRegistryCodecs(result)
         val effectiveCodecConstantOwners = codecConstantOwners + collectCodecConstantOwnersFromSource(result)
         result = migrateKnownVanillaCodecCodecCalls(result, effectiveMapCodecConstantOwners, effectiveCodecConstantOwners)
@@ -15277,10 +15327,14 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         return result
     }
 
-    private fun migrateLegacyRegistryBuilderAndRegistryAccessors(source: String): String {
+    private fun migrateLegacyRegistryBuilderAndRegistryAccessors(
+        source: String,
+        staticRegistryFieldHints: StaticRegistryFieldHints = StaticRegistryFieldHints(emptySet(), emptySet())
+    ): String {
         if (!source.contains("RegistryBuilder") &&
             !source.contains(".getValues()") &&
             !source.contains(".getValue(") &&
+            !source.contains(".getKey(") &&
             !source.contains(".allowModification()") &&
             !source.contains(".disableSync()") &&
             !source.contains(".getCodec()")
@@ -15328,6 +15382,19 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         val registryVariableNames = Regex(
             """\bRegistry\s*<[^>\r\n]+>\s+([A-Za-z_$][\w$]*)\b"""
         ).findAll(result).map { it.groupValues[1] }.toSet()
+        fun isKnownRegistryExpression(expression: String): Boolean {
+            val trimmed = expression.trim()
+            val registryName = trimmed.substringAfterLast(".")
+            val registrySupplierName = if (trimmed.endsWith(".get()")) {
+                trimmed.removeSuffix(".get()").substringAfterLast(".")
+            } else {
+                ""
+            }
+            return registryName in registryVariableNames ||
+                registrySupplierName in registrySupplierNames ||
+                trimmed.startsWith("BuiltInRegistries.") ||
+                staticRegistryFieldHints.contains(trimmed)
+        }
         val registryKeysByType = Regex(
             """ResourceKey<\s*Registry<\s*([A-Za-z_$][\w$]*)\s*>\s*>\s+([A-Za-z_$][\w$]*)\s*="""
         ).findAll(result).associate { it.groupValues[1] to it.groupValues[2] }
@@ -15352,7 +15419,36 @@ public $className(Properties $propertiesName, WoodType $typeName) {
             if (args.isNotEmpty() || !receiver.endsWith(".getValues()")) {
                 null
             } else {
-                "(int) ${receiver.removeSuffix(".getValues()")}.stream().count()"
+                val registryReceiver = receiver.removeSuffix(".getValues()")
+                if (!isKnownRegistryExpression(registryReceiver)) {
+                    null
+                } else {
+                    "(int) $registryReceiver.stream().count()"
+                }
+            }
+        }
+        result = rewriteJavaCall(result, "forEach") { receiver, args ->
+            if (args.size != 1 || !receiver.endsWith(".getValues()")) {
+                null
+            } else {
+                val registryReceiver = receiver.removeSuffix(".getValues()")
+                if (!isKnownRegistryExpression(registryReceiver)) {
+                    null
+                } else {
+                    "$registryReceiver.stream().forEach(${args[0].trim()})"
+                }
+            }
+        }
+        result = rewriteJavaCall(result, "getKey") { receiver, args ->
+            if (args.size != 1 || !receiver.trim().endsWith(".get()")) {
+                null
+            } else {
+                val registryReceiver = receiver.trim().removeSuffix(".get()")
+                if (!isKnownRegistryExpression(registryReceiver)) {
+                    null
+                } else {
+                    "$registryReceiver.getKey(${args[0].trim()})"
+                }
             }
         }
         result = rewriteJavaCall(result, "getValue") { receiver, args ->
@@ -15360,16 +15456,7 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 null
             } else {
                 val trimmedReceiver = receiver.trim()
-                val registryName = trimmedReceiver.substringAfterLast(".")
-                val registrySupplierName = if (trimmedReceiver.endsWith(".get()")) {
-                    trimmedReceiver.removeSuffix(".get()").substringAfterLast(".")
-                } else {
-                    ""
-                }
-                if (registryName in registryVariableNames ||
-                    registrySupplierName in registrySupplierNames ||
-                    trimmedReceiver.startsWith("BuiltInRegistries.")
-                ) {
+                if (isKnownRegistryExpression(trimmedReceiver)) {
                     "$trimmedReceiver.get(${args[0].trim()})"
                 } else {
                     null
