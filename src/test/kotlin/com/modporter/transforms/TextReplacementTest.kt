@@ -1399,6 +1399,10 @@ class TextReplacementTest {
                     entity.get();
                 }
 
+                void makeCustom(RegistryObject<? extends Foo> foo) {
+                    foo.get();
+                }
+
                 void registerSpawnPlacements(SpawnPlacementRegisterEvent event, EntityType<?> type) {
                     event.register(type, SpawnPlacements.Type.ON_GROUND, null, null, SpawnPlacementRegisterEvent.Operation.REPLACE);
                 }
@@ -1429,6 +1433,7 @@ class TextReplacementTest {
         assertTrue(transformed.contains("rec.getHeight()"))
         assertTrue(transformed.contains("void make(Supplier<? extends ChestBlock> block)"))
         assertTrue(transformed.contains("void addEntityAndEgg(DeferredHolder<EntityType<?>, ? extends EntityType<?>> entity)"))
+        assertTrue(transformed.contains("void makeCustom(DeferredHolder<Foo, ? extends Foo> foo)"))
         assertTrue(transformed.contains("import net.neoforged.neoforge.event.entity.RegisterSpawnPlacementsEvent;"))
         assertTrue(transformed.contains("import net.minecraft.world.entity.SpawnPlacementTypes;"))
         assertTrue(transformed.contains("void registerSpawnPlacements(RegisterSpawnPlacementsEvent event, EntityType<?> type)"))

@@ -133,6 +133,22 @@ class TextReplacementPass(
             }
         }
 
+        val beforeRemainingRegistryObjectWildcards = content
+        content = migrateRemainingRegistryObjectWildcardHolders(content)
+        if (content != beforeRemainingRegistryObjectWildcards) {
+            changes.add(
+                Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate remaining RegistryObject wildcard holder parameters to DeferredHolder",
+                    before = "RegistryObject<? extends T>",
+                    after = "DeferredHolder<T, ? extends T>",
+                    confidence = Confidence.HIGH,
+                    ruleId = "registryobject-wildcard-deferredholder"
+                )
+            )
+        }
+
         val beforeTagManager = content
         content = migrateRemovedTagManagerAccess(content)
         if (content != beforeTagManager) {
@@ -602,6 +618,15 @@ class TextReplacementPass(
         }
 
         return dedupeImports(result)
+    }
+
+    private fun migrateRemainingRegistryObjectWildcardHolders(source: String): String {
+        if (!source.contains("RegistryObject<")) return source
+        return Regex("""RegistryObject\s*<\s*\?\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>""")
+            .replace(source) { match ->
+                val type = match.groupValues[1]
+                "DeferredHolder<$type, ? extends $type>"
+            }
     }
 
     private fun migrateParticleOptionsCodecs(source: String): String {
