@@ -11806,63 +11806,131 @@ ${entries.joinToString(",\n")}
         if (!source.contains(".setNormal(") && !source.contains(".normal(")) return source
 
         var result = source
+        result = Regex("""((?:[A-Za-z_$][\w$]*\.)*last\(\))\.setNormal\(\)""")
+            .replace(result, "$1.normal()")
         result = Regex("""\.(?:setNormal|normal)\(\s*([A-Za-z_$][\w$]*)\.normal\(\)\s*,""")
             .replace(result, ".setNormal($1,")
         result = Regex("""\.(?:setNormal|normal)\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*\(\))*)\.normal\(\)\s*,""")
             .replace(result, ".setNormal($1,")
         if (!result.contains("Matrix3f")) return result
+        val poseNormalReceiver = """[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*(?:\([^()]*\))?)*"""
         val normalToPose = Regex(
-            """\bMatrix3f\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\.normal\(\)\s*;"""
+            """\bMatrix3f\s+([A-Za-z_$][\w$]*)\s*=\s*($poseNormalReceiver)\.normal\(\)\s*;"""
         ).findAll(result).associate { it.groupValues[1] to it.groupValues[2] }
-        if (normalToPose.isEmpty()) return result
-
-        val poseNormalMethodNames = linkedSetOf<String>()
+        val poseNormalMethodIndexes = linkedMapOf<String, MutableSet<Int>>()
         val methodPattern = Regex(
-            """(?m)(?:public|protected|private)\s+(?:static\s+)?[\w<>\[\].?,\s]+\s+([A-Za-z_$][\w$]*)\s*\([^)]*\bMatrix3f\s+([A-Za-z_$][\w$]*)[^)]*\)\s*\{"""
+            """(?m)((?:public|protected|private)\s+(?:static\s+)?[\w<>\[\].?,\s]+\s+([A-Za-z_$][\w$]*)\s*)\(([^)]*)\)\s*\{"""
         )
-        var cursor = 0
-        while (true) {
-            val match = methodPattern.find(result, cursor) ?: break
-            val openBrace = result.indexOf('{', match.range.first)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
-            if (openBrace < 0 || closeBrace < 0) {
-                cursor = match.range.last + 1
-                continue
-            }
-            val methodName = match.groupValues[1]
-            val normalParam = match.groupValues[2]
-            val body = result.substring(openBrace + 1, closeBrace)
-            if (!body.contains(".setNormal($normalParam,")) {
-                cursor = closeBrace + 1
-                continue
-            }
-            val signature = result.substring(match.range.first, openBrace)
-            val rewrittenSignature = signature.replace(Regex("""\bMatrix3f\s+${Regex.escape(normalParam)}\b"""), "PoseStack.Pose $normalParam")
-            if (rewrittenSignature != signature) {
-                result = result.substring(0, match.range.first) + rewrittenSignature + result.substring(openBrace)
-                val delta = rewrittenSignature.length - signature.length
-                poseNormalMethodNames += methodName
-                cursor = closeBrace + delta + 1
-            } else {
-                cursor = closeBrace + 1
+
+        var changed = true
+        while (changed) {
+            changed = false
+            var cursor = 0
+            while (true) {
+                val method = methodPattern.find(result, cursor) ?: break
+                val openBrace = result.indexOf('{', method.range.first)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+                if (openBrace < 0 || closeBrace < 0) {
+                    cursor = method.range.last + 1
+                    continue
+                }
+                val params = splitTopLevelJavaArgs(method.groupValues[3])
+                if (params.none { it.contains("Matrix3f") }) {
+                    cursor = closeBrace + 1
+                    continue
+                }
+                val body = result.substring(openBrace + 1, closeBrace)
+                val normalIndexes = linkedSetOf<Int>()
+                val migratedParams = params.mapIndexed { index, param ->
+                    val paramMatch = Regex("""\bMatrix3f\s+([A-Za-z_$][\w$]*)\b""").find(param)
+                    val paramName = paramMatch?.groupValues?.get(1)
+                    if (paramName != null &&
+                        (body.contains(".setNormal($paramName,") ||
+                            body.contains(".normal($paramName,") ||
+                            passesParameterToKnownPoseNormalHelper(body, paramName, poseNormalMethodIndexes))) {
+                        normalIndexes += index
+                        param.replace(Regex("""\bMatrix3f\s+${Regex.escape(paramName)}\b"""), "PoseStack.Pose $paramName")
+                    } else {
+                        param
+                    }
+                }
+                if (normalIndexes.isNotEmpty()) {
+                    val replacementSignature = method.groupValues[1] + "(" + migratedParams.joinToString(", ") { it.trim() } + ")"
+                    result = result.substring(0, method.range.first) +
+                        replacementSignature +
+                        result.substring(openBrace)
+                    poseNormalMethodIndexes.getOrPut(method.groupValues[2]) { linkedSetOf() }.addAll(normalIndexes)
+                    val delta = replacementSignature.length - (openBrace - method.range.first)
+                    cursor = closeBrace + delta + 1
+                    changed = true
+                } else {
+                    cursor = closeBrace + 1
+                }
             }
         }
 
-        for (methodName in poseNormalMethodNames) {
+        poseNormalMethodIndexes.forEach { (methodName, indexes) ->
             result = rewriteJavaInvocationArguments(result, methodName) { args ->
-                val migrated = args.map { arg -> normalToPose[arg.trim()] ?: arg }
+                if (indexes.any { it >= args.size }) return@rewriteJavaInvocationArguments null
+                val migrated = args.mapIndexed { index, arg ->
+                    if (index in indexes) poseNormalArgumentToPose(arg, normalToPose) else arg
+                }
                 if (migrated == args) null else migrated
             }
         }
-        result = migratePoseNormalHelperParametersByIndex(result, normalToPose)
         result = migrateLocalPoseNormalSetNormalCalls(result)
         result = removeUnusedPoseNormalMatrixLocals(result)
+        if (result.contains("PoseStack.Pose")) {
+            result = addImportIfMissing(result, "com.mojang.blaze3d.vertex.PoseStack")
+        }
 
         val withoutMatrix3fImport = removeImport(result, "org.joml.Matrix3f")
         if (!Regex("""\bMatrix3f\b""").containsMatchIn(withoutMatrix3fImport)) {
             result = withoutMatrix3fImport
         }
         return result
+    }
+
+    private fun passesParameterToKnownPoseNormalHelper(
+        body: String,
+        paramName: String,
+        poseNormalMethodIndexes: Map<String, Set<Int>>
+    ): Boolean {
+        if (poseNormalMethodIndexes.isEmpty()) return false
+        poseNormalMethodIndexes.forEach { (methodName, indexes) ->
+            var cursor = 0
+            val token = "$methodName("
+            while (true) {
+                val tokenIndex = body.indexOf(token, cursor)
+                if (tokenIndex < 0) break
+                if (tokenIndex > 0 && (body[tokenIndex - 1].isLetterOrDigit() || body[tokenIndex - 1] == '_' || body[tokenIndex - 1] == '$')) {
+                    cursor = tokenIndex + token.length
+                    continue
+                }
+                val openParen = tokenIndex + methodName.length
+                val closeParen = findMatchingParen(body, openParen)
+                if (closeParen < 0) {
+                    cursor = tokenIndex + token.length
+                    continue
+                }
+                val args = splitTopLevelJavaArgs(body.substring(openParen + 1, closeParen))
+                if (indexes.any { it < args.size && args[it].trim() == paramName }) {
+                    return true
+                }
+                cursor = closeParen + 1
+            }
+        }
+        return false
+    }
+
+    private fun poseNormalArgumentToPose(arg: String, normalToPose: Map<String, String>): String {
+        val trimmed = arg.trim()
+        normalToPose[trimmed]?.let { return it }
+        return when {
+            trimmed.endsWith(".normal()") -> trimmed.removeSuffix(".normal()")
+            trimmed.endsWith(".setNormal()") -> trimmed.removeSuffix(".setNormal()")
+            else -> arg
+        }
     }
 
     private fun migratePoseNormalHelperParametersByIndex(
@@ -11937,7 +12005,8 @@ ${entries.joinToString(",\n")}
             }
             var body = result.substring(openBrace + 1, closeBrace)
             val originalBody = body
-            val declaration = Regex("""(?m)^[ \t]*Matrix3f\s+([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\.normal\(\)\s*;\s*\r?\n""")
+            val poseNormalReceiver = """[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*(?:\([^()]*\))?)*"""
+            val declaration = Regex("""(?m)^[ \t]*Matrix3f\s+([A-Za-z_$][\w$]*)\s*=\s*$poseNormalReceiver\.normal\(\)\s*;\s*\r?\n""")
             var localCursor = 0
             while (true) {
                 val match = declaration.find(body, localCursor) ?: break
@@ -11974,7 +12043,7 @@ ${entries.joinToString(",\n")}
             }
             val body = result.substring(openBrace + 1, closeBrace)
             val localNormalToPose = Regex(
-                """\bMatrix3f\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\.normal\(\)\s*;"""
+                """\bMatrix3f\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*(?:\([^()]*\))?)*)\.normal\(\)\s*;"""
             ).findAll(body).associate { it.groupValues[1] to it.groupValues[2] }
             if (localNormalToPose.isEmpty()) {
                 cursor = closeBrace + 1

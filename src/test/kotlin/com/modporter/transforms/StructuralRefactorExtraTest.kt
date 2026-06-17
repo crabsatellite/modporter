@@ -5558,7 +5558,7 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
-    fun `migrates vertex helper matrix normal pair to transformed normal vector`() {
+    fun `migrates vertex helper matrix normal pair back to pose when source pose is available`() {
         val projectDir = createFile("ShojiRenderer.java", """
             package com.example;
 
@@ -5593,11 +5593,52 @@ class StructuralRefactorExtraTest {
 
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
         assertTrue(renderer.contains("Matrix4f matrix = poseStack.last().pose();"))
-        assertTrue(renderer.contains("Matrix3f normal = poseStack.last().normal();"))
-        assertTrue(renderer.contains("private void addVertex(VertexConsumer builder, Matrix4f pose, Matrix3f normal,"))
-        assertTrue(renderer.contains("org.joml.Vector3f transformedNormal = normal.transform(nx, ny, nz, new org.joml.Vector3f());"))
-        assertTrue(renderer.contains(".setNormal(transformedNormal.x(), transformedNormal.y(), transformedNormal.z())"))
-        assertTrue(!renderer.contains(".setNormal(normal, nx, ny, nz)"))
+        assertTrue(renderer.contains("addVertex(builder, matrix, poseStack.last(), 1, 2, 3, 0, 0, 1, 0, 0, packedLight, packedOverlay);"))
+        assertTrue(renderer.contains("private void addVertex(VertexConsumer builder, Matrix4f pose, PoseStack.Pose normal,"))
+        assertTrue(renderer.contains(".setNormal(normal, nx, ny, nz)"))
+        assertTrue(!renderer.contains("Matrix3f normal = poseStack.last().normal();"))
+        assertTrue(!renderer.contains("transformedNormal"))
+        assertTrue(!renderer.contains("import org.joml.Matrix3f;"))
+    }
+
+    @Test
+    fun `propagates pose normals through nested vertex helper parameters`() {
+        val projectDir = createFile("OverlayRenderer.java", """
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import net.minecraft.client.renderer.MultiBufferSource;
+            import org.joml.Matrix3f;
+            import org.joml.Matrix4f;
+
+            public class OverlayRenderer {
+                public void render(PoseStack poseStack, MultiBufferSource buffer) {
+                    drawSurfaces(buffer, poseStack.last().pose(), poseStack.last().normal());
+                }
+
+                private static void drawSurfaces(MultiBufferSource buffer, Matrix4f matrix, Matrix3f normal) {
+                    VertexConsumer builder = buffer.getBuffer(null);
+                    buildVertex(builder, matrix, normal, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F);
+                }
+
+                private static void buildVertex(VertexConsumer builder, Matrix4f matrix, Matrix3f normal,
+                        float x, float y, float z, float normalX, float normalY, float normalZ) {
+                    builder.addVertex(matrix, x, y, z).setNormal(normal, normalX, normalY, normalZ);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val renderer = tempDir.resolve("src/main/java/com/example/OverlayRenderer.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(renderer.contains("drawSurfaces(buffer, poseStack.last().pose(), poseStack.last());"), renderer)
+        assertTrue(renderer.contains("private static void drawSurfaces(MultiBufferSource buffer, Matrix4f matrix, PoseStack.Pose normal)"), renderer)
+        assertTrue(renderer.contains("private static void buildVertex(VertexConsumer builder, Matrix4f matrix, PoseStack.Pose normal,"), renderer)
+        assertTrue(renderer.contains(".setNormal(normal, normalX, normalY, normalZ)"), renderer)
+        assertFalse(renderer.contains("poseStack.last().setNormal()"), renderer)
+        assertFalse(renderer.contains("import org.joml.Matrix3f;"), renderer)
     }
 
     @Test
