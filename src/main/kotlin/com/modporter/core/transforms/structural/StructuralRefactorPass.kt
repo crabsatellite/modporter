@@ -9663,7 +9663,12 @@ ${entries.joinToString(",\n")}
     }
 
     private fun migrateMobEffectHolderCallsSource(source: String): String {
-        if (!source.contains("MobEffect")) return source
+        if (!source.contains("MobEffect") &&
+            !source.contains("hasEffect(") &&
+            !source.contains("getEffect(") &&
+            !source.contains("removeEffect(") &&
+            !source.contains("addEffect(")
+        ) return source
 
         val mobEffectVariables = Regex("""\bMobEffect\s+(\w+)\s*=""")
             .findAll(source)
@@ -9731,6 +9736,8 @@ ${entries.joinToString(",\n")}
     private fun migrateHolderValueAccessorsSource(source: String): String {
         var result = source
         result = result.replace(".getEffect().getDescriptionId()", ".getEffect().value().getDescriptionId()")
+        result = Regex("""\.getEffect\(\)\s*([!=]=)\s*((?:[A-Za-z_$][\w$]*\.)+[A-Z0-9_$]+)\.get\(\)""")
+            .replace(result) { match -> ".getEffect().value() ${match.groupValues[1]} ${match.groupValues[2]}.get()" }
         val playerSkinVariables = Regex(
             """\b(?:net\.minecraft\.client\.player\.)?(?:AbstractClientPlayer|LocalPlayer|RemotePlayer)\s+([A-Za-z_$][\w$]*)\b"""
         ).findAll(result).map { it.groupValues[1] }.toSet()
@@ -16162,7 +16169,7 @@ ${indent}if ($handlerVar != null) $statement"""
         var result = source
         val oldGuard = Regex(
             """if\s*\(\s*([A-Za-z_$][\w$]*)\.isPassenger\(\)\s*\|\|\s*\1\.isVehicle\(\)\s*\|\|\s*!\s*\1\.canChangeDimensions\(\)\s*\)\s*\{\s*return\s*;\s*\}"""
-        ).find(result) ?: return source
+        ).find(result) ?: return migrateHelperResolvedCanChangeDimensionsCallSites(source)
         val entity = oldGuard.groupValues[1]
         result = result.substring(0, oldGuard.range.first) +
             "if ($entity.isPassenger() || $entity.isVehicle()) {\n\t\t\treturn;\n\t\t}" +
@@ -16173,6 +16180,96 @@ ${indent}if ($handlerVar != null) $statement"""
         val serverLevel = nullGuard.groupValues[1]
         val replacement = "if ($serverLevel == null || !$entity.canChangeDimensions($entity.level(), $serverLevel))\n\t\t\treturn;"
         return result.substring(0, nullGuard.range.first) + replacement + result.substring(nullGuard.range.last + 1)
+    }
+
+    private fun migrateHelperResolvedCanChangeDimensionsCallSites(source: String): String {
+        val helpers = portalDimensionHelperMethods(source)
+        if (helpers.isEmpty()) return source
+        var result = source
+        var changed = false
+        for (helper in helpers) {
+            val helperCall = Regex("""\b(?:this\.)?${Regex.escape(helper.name)}\s*\(\s*([A-Za-z_$][\w$]*)\s*\)""")
+            val guardedEntities = helperCall.findAll(result)
+                .map { it.groupValues[1] }
+                .filter { entity -> Regex("""\b${Regex.escape(entity)}\.canChangeDimensions\(\)""").containsMatchIn(result) }
+                .distinct()
+                .toList()
+            if (guardedEntities.isEmpty()) continue
+
+            val withHelperGuard = addCanChangeDimensionsToHelperDestinationGuard(result, helper)
+            if (withHelperGuard == result) continue
+            result = withHelperGuard
+            for (entity in guardedEntities) {
+                result = removeNoArgCanChangeDimensionsCondition(result, entity)
+            }
+            changed = true
+        }
+        return if (changed) result else source
+    }
+
+    private data class PortalDimensionHelper(
+        val name: String,
+        val entityParameter: String,
+        val destinationLevel: String
+    )
+
+    private fun portalDimensionHelperMethods(source: String): List<PortalDimensionHelper> {
+        val methodPattern = Regex(
+            """(?m)^[ \t]*(?:private|protected|public)\s+(?:static\s+)?[\w.$<>\[\], ?]+\s+([A-Za-z_$][\w$]*)\s*\(\s*Entity\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
+        )
+        return methodPattern.findAll(source).mapNotNull { match ->
+            val openBrace = source.indexOf('{', match.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) return@mapNotNull null
+            val body = source.substring(openBrace + 1, closeBrace)
+            val entity = match.groupValues[2]
+            val destination = Regex("""\bServerLevel\s+([A-Za-z_$][\w$]*)\s*=""")
+                .find(body)
+                ?.groupValues
+                ?.get(1)
+                ?: return@mapNotNull null
+            val usesDestinationTransition = Regex(
+                """\b${Regex.escape(entity)}\.changeDimension\s*\([\s\S]*\b${Regex.escape(destination)}\b"""
+            ).containsMatchIn(body)
+            val hasDestinationGuard = Regex("""\bif\s*\(\s*${Regex.escape(destination)}\s*!=\s*null\b""")
+                .containsMatchIn(body)
+            if (!usesDestinationTransition || !hasDestinationGuard) return@mapNotNull null
+            PortalDimensionHelper(match.groupValues[1], entity, destination)
+        }.toList()
+    }
+
+    private fun addCanChangeDimensionsToHelperDestinationGuard(source: String, helper: PortalDimensionHelper): String {
+        val methodPattern = Regex(
+            """(?m)^[ \t]*(?:private|protected|public)\s+(?:static\s+)?[\w.$<>\[\], ?]+\s+${Regex.escape(helper.name)}\s*\(\s*Entity\s+${Regex.escape(helper.entityParameter)}\s*\)\s*\{"""
+        )
+        val method = methodPattern.find(source) ?: return source
+        val openBrace = source.indexOf('{', method.range.last - 1)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        if (openBrace < 0 || closeBrace < 0) return source
+        val methodText = source.substring(method.range.first, closeBrace + 1)
+        val canChange = "${helper.entityParameter}.canChangeDimensions(${helper.entityParameter}.level(), ${helper.destinationLevel})"
+        if (methodText.contains(canChange)) return source
+        var migratedMethod = Regex(
+            """if\s*\(\s*${Regex.escape(helper.destinationLevel)}\s*!=\s*null\s*&&\s*!\s*${Regex.escape(helper.entityParameter)}\.isPassenger\(\)\s*\)"""
+        ).replace(methodText) {
+            "if (${helper.destinationLevel} != null && !${helper.entityParameter}.isPassenger() && $canChange)"
+        }
+        if (migratedMethod == methodText) {
+            migratedMethod = Regex("""if\s*\(\s*${Regex.escape(helper.destinationLevel)}\s*!=\s*null\s*\)""")
+                .replace(methodText) { "if (${helper.destinationLevel} != null && $canChange)" }
+        }
+        if (migratedMethod == methodText) return source
+        return source.substring(0, method.range.first) + migratedMethod + source.substring(closeBrace + 1)
+    }
+
+    private fun removeNoArgCanChangeDimensionsCondition(source: String, entity: String): String {
+        val escapedEntity = Regex.escape(entity)
+        var result = source
+        result = Regex("""\s*&&\s*$escapedEntity\.canChangeDimensions\(\)""").replace(result, "")
+        result = Regex("""$escapedEntity\.canChangeDimensions\(\)\s*&&\s*""").replace(result, "")
+        result = Regex("""!\s*$escapedEntity\.canChangeDimensions\(\)\s*\|\|\s*""").replace(result, "")
+        result = Regex("""\s*\|\|\s*!\s*$escapedEntity\.canChangeDimensions\(\)""").replace(result, "")
+        return result
     }
 
     private fun migrateLegacyPortalWaitTimeCalls(source: String): String =
@@ -19558,6 +19655,17 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
             result = result
                 .replace("NeoForgeMod.BLOCK_REACH.get()", "Attributes.BLOCK_INTERACTION_RANGE")
                 .replace("NeoForgeMod.ENTITY_REACH.get()", "Attributes.ENTITY_INTERACTION_RANGE")
+            needsAttributes = true
+            val withoutNeoForgeMod = removeImport(result, "net.neoforged.neoforge.common.NeoForgeMod")
+            if (!Regex("""\bNeoForgeMod\b""").containsMatchIn(withoutNeoForgeMod)) {
+                result = withoutNeoForgeMod
+            }
+        }
+        if (result.contains("NeoForgeMod.ENTITY_GRAVITY.get()") ||
+            result.contains("net.neoforged.neoforge.common.NeoForgeMod.ENTITY_GRAVITY.get()")) {
+            result = result
+                .replace("net.neoforged.neoforge.common.NeoForgeMod.ENTITY_GRAVITY.get()", "Attributes.GRAVITY")
+                .replace("NeoForgeMod.ENTITY_GRAVITY.get()", "Attributes.GRAVITY")
             needsAttributes = true
             val withoutNeoForgeMod = removeImport(result, "net.neoforged.neoforge.common.NeoForgeMod")
             if (!Regex("""\bNeoForgeMod\b""").containsMatchIn(withoutNeoForgeMod)) {

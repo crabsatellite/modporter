@@ -3741,6 +3741,34 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates direct deferred effect holders without MobEffect variable declarations`() {
+        val projectDir = createFile("DirectEffectUse.java", """
+            package com.example;
+
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.entity.player.Player;
+
+            public class DirectEffectUse {
+                public boolean immune(Player player) {
+                    return player.hasEffect(ModEffects.REMEDY.get());
+                }
+
+                public boolean sameEffect(MobEffectInstance instance) {
+                    return instance.getEffect() == ModEffects.REMEDY.get();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/DirectEffectUse.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-mobeffect-holder-direct" })
+        assertTrue(migrated.contains("return player.hasEffect(ModEffects.REMEDY);"))
+        assertTrue(migrated.contains("return instance.getEffect().value() == ModEffects.REMEDY.get();"))
+        assertFalse(migrated.contains("hasEffect(ModEffects.REMEDY.get())"))
+    }
+
+    @Test
     fun `migrates item and fluid custom child tags to CustomData components`() {
         val projectDir = createFile("CustomFluidNBTHelper.java", """
             package com.example;
@@ -7711,6 +7739,7 @@ class StructuralRefactorExtraTest {
                     boolean named = stack.hasCustomHoverName();
                     boolean skull = stack.is(Tags.Items.HEADS);
                     AttributeInstance reach = entity instanceof net.minecraft.world.entity.player.Player player ? player.getAttribute(NeoForgeMod.BLOCK_REACH.get()) : null;
+                    AttributeInstance gravity = entity.getAttribute(net.neoforged.neoforge.common.NeoForgeMod.ENTITY_GRAVITY.get());
                     boolean grief = EventHooks.getMobGriefingEvent(level, entity);
                     EventHooks.onFinalizeSpawn(mob, accessor, accessor.getCurrentDifficultyAt(pos), MobSpawnType.SPAWNER, null, null);
                     AABB box = new AABB(pos.above(16), pos.above(16).offset(1, 1, 1));
@@ -8098,6 +8127,7 @@ class StructuralRefactorExtraTest {
         assertTrue(common.contains("stack.has(DataComponents.CUSTOM_NAME)"))
         assertTrue(common.contains("stack.is(ItemTags.SKULLS)"))
         assertTrue(common.contains("Attributes.BLOCK_INTERACTION_RANGE"))
+        assertTrue(common.contains("entity.getAttribute(Attributes.GRAVITY)"))
         assertTrue(common.contains("EventHooks.canEntityGrief(level, entity)"))
         assertTrue(common.contains("EventHooks.finalizeMobSpawn(mob, accessor, accessor.getCurrentDifficultyAt(pos), MobSpawnType.SPAWNER, null)"))
         assertTrue(common.contains("AABB.encapsulatingFullBlocks(pos.above(16), pos.above(16).offset(1, 1, 1))"))
@@ -10718,6 +10748,51 @@ class StructuralRefactorExtraTest {
         assertTrue(caller.contains("entity.changeDimension(makeReturnPortal ? new DemoTeleporter(forcedEntry).getPortalInfo(entity, serverWorld) : new NoReturnTeleporter().getPortalInfo(entity, serverWorld))"))
         assertTrue(!caller.contains("entity.canChangeDimensions())"))
         assertTrue(!caller.contains("changeDimension(serverWorld,"))
+    }
+
+    @Test
+    fun `migrates portal can change dimensions guards into helper resolved destination levels`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PortalBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.server.MinecraftServer;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class PortalBlock extends Block {
+                public void entityInside(BlockState state, Level level, BlockPos pos, Entity entity) {
+                    if (!entity.isPassenger() && !entity.isVehicle() && entity.canChangeDimensions()) {
+                        this.handleTeleportation(entity);
+                    }
+                }
+
+                private void handleTeleportation(Entity entity) {
+                    MinecraftServer server = entity.level().getServer();
+                    ResourceKey<Level> destinationKey = Level.NETHER;
+                    if (server != null) {
+                        ServerLevel destinationLevel = server.getLevel(destinationKey);
+                        if (destinationLevel != null && !entity.isPassenger()) {
+                            entity.changeDimension(new DemoTeleporter(destinationLevel).getPortalInfo(entity, destinationLevel));
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val portal = srcDir.resolve("PortalBlock.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(!portal.contains("entity.canChangeDimensions()"), portal)
+        assertTrue(portal.contains("if (destinationLevel != null && !entity.isPassenger() && entity.canChangeDimensions(entity.level(), destinationLevel))"), portal)
+        assertTrue(portal.contains("entity.changeDimension(new DemoTeleporter(destinationLevel).getPortalInfo(entity, destinationLevel))"), portal)
     }
 
     @Test
