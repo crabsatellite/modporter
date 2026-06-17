@@ -6362,6 +6362,61 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `custom attribute registry holders stay holders in attribute API arguments`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleAttributes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleAttributes {
+                public static final DeferredHolder<Attribute, Attribute> MAX_JUMPS = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("Moa.java").writeText("""
+            package com.example;
+
+            import static com.example.ExampleAttributes.MAX_JUMPS;
+
+            import java.util.List;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+
+            public class Moa extends Mob {
+                public static AttributeSupplier.Builder createMobAttributes() {
+                    return Mob.createMobAttributes()
+                            .add(Attributes.MAX_HEALTH, 35.0)
+                            .add(ExampleAttributes.MAX_JUMPS.get(), -1.0)
+                            .add(MAX_JUMPS.get(), 2.0);
+                }
+
+                void use(List<Attribute> attributes) {
+                    AttributeInstance attribute = this.getAttribute(ExampleAttributes.MAX_JUMPS.get());
+                    double value = this.getAttributeValue(MAX_JUMPS.get());
+                    if (this.getAttributes().hasAttribute(ExampleAttributes.MAX_JUMPS.get())) {}
+                    attributes.add(ExampleAttributes.MAX_JUMPS.get());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("Moa.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains(".add(ExampleAttributes.MAX_JUMPS.getDelegate(), -1.0)"))
+        assertTrue(transformed.contains(".add(MAX_JUMPS.getDelegate(), 2.0)"))
+        assertTrue(transformed.contains("this.getAttribute(ExampleAttributes.MAX_JUMPS.getDelegate())"))
+        assertTrue(transformed.contains("this.getAttributeValue(MAX_JUMPS.getDelegate())"))
+        assertTrue(transformed.contains("this.getAttributes().hasAttribute(ExampleAttributes.MAX_JUMPS.getDelegate())"))
+        assertTrue(transformed.contains("attributes.add(ExampleAttributes.MAX_JUMPS.get());"))
+    }
+
+    @Test
     fun `migrates recipe book menu single stack recipe inputs from source typed recipe registries`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

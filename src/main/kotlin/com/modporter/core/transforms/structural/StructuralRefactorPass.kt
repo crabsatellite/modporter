@@ -7628,6 +7628,7 @@ $fields
         val attributeModifierIdReferences = collectAttributeModifierIdReferences(javaFiles)
         val attributeModifierMethods = collectAttributeModifierMethods(javaFiles)
         val genericMethodReturnTypes = collectGenericMethodReturnTypes(javaFiles)
+        val attributeHolderAccessHints = collectAttributeHolderAccessHints(srcDir)
 
         javaFiles.forEach { javaFile ->
                 val original = javaFile.readText()
@@ -7860,7 +7861,8 @@ $fields
                     legacyRegistryBackedMethods,
                     attributeModifierIdReferences,
                     attributeModifierMethods,
-                    genericMethodReturnTypes
+                    genericMethodReturnTypes,
+                    attributeHolderAccessHints
                 )
                 if (vanilla121Migrated != text) {
                     changes.add(Change(
@@ -8854,6 +8856,41 @@ ${entries.joinToString(",\n")}
             val normalized = expression.trim()
             return normalized in qualifiedFields || normalized in uniqueSimpleFields
         }
+    }
+
+    private data class AttributeHolderAccessHints(
+        val qualifiedFields: Set<String>
+    )
+
+    private fun declaredAttributeHolderFieldNames(source: String): Set<String> {
+        val attributeType = """(?:net\.minecraft\.world\.entity\.ai\.attributes\.)?Attribute"""
+        val holderType = """(?:net\.neoforged\.neoforge\.registries\.)?DeferredHolder\s*<\s*$attributeType\s*,\s*[^>\r\n]+>"""
+        val registryObjectType = """(?:net\.minecraftforge\.registries\.)?RegistryObject\s*<\s*$attributeType\s*>"""
+        return Regex(
+            """(?m)\b(?:(?:public|protected|private|static|final|transient|volatile)\s+)*(?:$holderType|$registryObjectType)\s+([A-Za-z_$][\w$]*)\s*="""
+        ).findAll(source).map { it.groupValues[1] }.toSet()
+    }
+
+    private fun collectAttributeHolderAccessHints(srcDir: Path): AttributeHolderAccessHints {
+        val qualifiedFields = linkedSetOf<String>()
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val source = javaFile.readText()
+                if (!source.contains("Attribute") ||
+                    (!source.contains("DeferredHolder") && !source.contains("RegistryObject"))) {
+                    return@forEach
+                }
+                val owner = classNameOfJavaSource(source) ?: return@forEach
+                val packageName = packageNameOf(source)
+                declaredAttributeHolderFieldNames(source).forEach { field ->
+                    qualifiedFields += "$owner.$field"
+                    if (packageName != null) {
+                        qualifiedFields += "$packageName.$owner.$field"
+                    }
+                }
+            }
+        return AttributeHolderAccessHints(qualifiedFields = qualifiedFields)
     }
 
     private fun collectStaticRegistryFieldHints(srcDir: Path): StaticRegistryFieldHints {
@@ -9913,7 +9950,8 @@ ${entries.joinToString(",\n")}
         legacyRegistryBackedMethods: Set<LegacyRegistryBackedMethod> = emptySet(),
         attributeModifierIdReferences: Set<String> = emptySet(),
         attributeModifierMethods: Map<String, Set<String>> = emptyMap(),
-        genericMethodReturnTypes: Map<String, String> = emptyMap()
+        genericMethodReturnTypes: Map<String, String> = emptyMap(),
+        attributeHolderAccessHints: AttributeHolderAccessHints = AttributeHolderAccessHints(emptySet())
     ): String {
         var result = source
         var needsEntityTypeTags = false
@@ -9971,6 +10009,7 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyBlockStatePropertyGetCalls(result)
         result = migrateLegacyModelRenderPackedColorBodies(result)
         result = migrateLegacyRendererSetupRotations(result)
+        result = migrateAttributeHolderApiArguments(result, attributeHolderAccessHints)
         result = migrateLegacyClientRenderingSource(result)
         result = migrateLegacySkinManagerTextureLookups(result)
         result = migrateLegacyModelEventSource(result)
@@ -19577,6 +19616,35 @@ $methodBody
             result = removeMethodByName(result, "getAttackReachSqr")
         }
 
+        return result
+    }
+
+    private fun migrateAttributeHolderApiArguments(
+        source: String,
+        attributeHolderAccessHints: AttributeHolderAccessHints
+    ): String {
+        if (attributeHolderAccessHints.qualifiedFields.isEmpty() || !source.contains(".get()")) return source
+        val expressions = linkedSetOf<String>()
+        expressions += attributeHolderAccessHints.qualifiedFields
+        declaredAttributeHolderFieldNames(source).forEach { expressions += it }
+        Regex("""(?m)^\s*import\s+static\s+([^;\s]+)\s*;""")
+            .findAll(source)
+            .map { it.groupValues[1].trim() }
+            .filter { it in attributeHolderAccessHints.qualifiedFields }
+            .forEach { expressions += it.substringAfterLast('.') }
+        if (expressions.isEmpty()) return source
+        val expressionPattern = expressions
+            .sortedByDescending { it.length }
+            .joinToString("|") { Regex.escape(it) }
+        var result = source
+        result = Regex("""(\.(?:getAttribute|getAttributeValue|hasAttribute)\(\s*)($expressionPattern)\.get\(\)(\s*\))""")
+            .replace(result) { match ->
+                "${match.groupValues[1]}${match.groupValues[2]}.getDelegate()${match.groupValues[3]}"
+            }
+        result = Regex("""(\.add\(\s*)($expressionPattern)\.get\(\)(\s*,)""")
+            .replace(result) { match ->
+                "${match.groupValues[1]}${match.groupValues[2]}.getDelegate()${match.groupValues[3]}"
+            }
         return result
     }
 
