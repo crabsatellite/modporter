@@ -6078,6 +6078,238 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates nitrogen recipe builders from project source structure`() {
+        val recipeDir = tempDir.resolve("src/main/java/com/example/recipe/recipes/block")
+        val serializerDir = tempDir.resolve("src/main/java/com/example/recipe/serializer")
+        val registryDir = tempDir.resolve("src/main/java/com/example/recipe")
+        val builderDir = tempDir.resolve("src/main/java/com/example/recipe/builder")
+        val providerDir = tempDir.resolve("src/main/java/com/example/data")
+        recipeDir.createDirectories()
+        serializerDir.createDirectories()
+        registryDir.createDirectories()
+        builderDir.createDirectories()
+        providerDir.createDirectories()
+
+        recipeDir.resolve("AbstractBiomeParameterRecipe.java").writeText("""
+            package com.example.recipe.recipes.block;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.aetherteam.nitrogen.recipe.recipes.AbstractBlockStateRecipe;
+            import com.mojang.datafixers.util.Either;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.biome.Biome;
+
+            import java.util.Optional;
+
+            public abstract class AbstractBiomeParameterRecipe extends AbstractBlockStateRecipe {
+                private final Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome;
+
+                public AbstractBiomeParameterRecipe(RecipeType<?> type, Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome, BlockStateIngredient ingredient, BlockPropertyPair result, Optional<ResourceLocation> function) {
+                    super(type, ingredient, result, function);
+                    this.biome = biome;
+                }
+
+                public Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> getBiome() {
+                    return this.biome;
+                }
+            }
+        """.trimIndent())
+        recipeDir.resolve("SwetBallRecipe.java").writeText("""
+            package com.example.recipe.recipes.block;
+
+            public class SwetBallRecipe extends AbstractBiomeParameterRecipe {
+            }
+        """.trimIndent())
+        recipeDir.resolve("PlacementConversionRecipe.java").writeText("""
+            package com.example.recipe.recipes.block;
+
+            public class PlacementConversionRecipe extends AbstractBiomeParameterRecipe {
+            }
+        """.trimIndent())
+        recipeDir.resolve("AccessoryFreezableRecipe.java").writeText("""
+            package com.example.recipe.recipes.block;
+
+            import com.aetherteam.nitrogen.recipe.recipes.AbstractBlockStateRecipe;
+
+            public class AccessoryFreezableRecipe extends AbstractBlockStateRecipe {
+            }
+        """.trimIndent())
+        serializerDir.resolve("BiomeParameterRecipeSerializer.java").writeText("""
+            package com.example.recipe.serializer;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.aetherteam.nitrogen.recipe.serializer.BlockStateRecipeSerializer;
+            import com.example.recipe.recipes.block.AbstractBiomeParameterRecipe;
+            import com.mojang.datafixers.util.Either;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.biome.Biome;
+
+            import java.util.Optional;
+
+            public class BiomeParameterRecipeSerializer<T extends AbstractBiomeParameterRecipe> extends BlockStateRecipeSerializer<T> {
+                public interface Factory<T extends AbstractBiomeParameterRecipe> {
+                    T create(Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome, BlockStateIngredient ingredient, BlockPropertyPair result, Optional<ResourceLocation> function);
+                }
+            }
+        """.trimIndent())
+        registryDir.resolve("ExampleRecipeSerializers.java").writeText("""
+            package com.example.recipe;
+
+            import com.aetherteam.nitrogen.recipe.serializer.BlockStateRecipeSerializer;
+            import com.example.recipe.recipes.block.AccessoryFreezableRecipe;
+            import com.example.recipe.recipes.block.PlacementConversionRecipe;
+            import com.example.recipe.recipes.block.SwetBallRecipe;
+            import com.example.recipe.serializer.BiomeParameterRecipeSerializer;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleRecipeSerializers {
+                public static final DeferredHolder<BiomeParameterRecipeSerializer<SwetBallRecipe>, BiomeParameterRecipeSerializer<SwetBallRecipe>> SWET_BALL_CONVERSION = null;
+                public static final DeferredHolder<BiomeParameterRecipeSerializer<PlacementConversionRecipe>, BiomeParameterRecipeSerializer<PlacementConversionRecipe>> PLACEMENT_CONVERSION = null;
+                public static final DeferredHolder<BlockStateRecipeSerializer<AccessoryFreezableRecipe>, BlockStateRecipeSerializer<AccessoryFreezableRecipe>> ACCESSORY_FREEZABLE = null;
+                public static final DeferredHolder<RecipeSerializer<?>, RecipeSerializer<Object>> OTHER = null;
+            }
+        """.trimIndent())
+        builderDir.resolve("BiomeParameterRecipeBuilder.java").writeText("""
+            package com.example.recipe.builder;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.aetherteam.nitrogen.recipe.BlockStateRecipeUtil;
+            import com.aetherteam.nitrogen.recipe.builder.BlockStateRecipeBuilder;
+            import com.aetherteam.nitrogen.recipe.recipes.AbstractBlockStateRecipe;
+            import com.aetherteam.nitrogen.recipe.serializer.BlockStateRecipeSerializer;
+            import com.google.gson.JsonObject;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.level.biome.Biome;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.properties.Property;
+
+            import javax.annotation.Nullable;
+            import java.util.Map;
+
+            public class BiomeParameterRecipeBuilder extends BlockStateRecipeBuilder {
+                @Nullable
+                private final ResourceKey<Biome> biomeKey;
+                @Nullable
+                private final TagKey<Biome> biomeTag;
+
+                public BiomeParameterRecipeBuilder(BlockPropertyPair result, BlockStateIngredient ingredient, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateRecipeSerializer<?> serializer) {
+                    super(result, ingredient, serializer);
+                    this.biomeKey = biomeKey;
+                    this.biomeTag = biomeTag;
+                }
+
+                public static BiomeParameterRecipeBuilder recipe(BlockStateIngredient ingredient, Block result, ResourceKey<Biome> biomeKey, BlockStateRecipeSerializer<?> serializer) {
+                    return recipe(BlockPropertyPair.of(result, Map.of()), ingredient, biomeKey, null, serializer);
+                }
+
+                public static BiomeParameterRecipeBuilder recipe(BlockStateIngredient ingredient, Block result, TagKey<Biome> biomeTag, BlockStateRecipeSerializer<?> serializer) {
+                    return recipe(BlockPropertyPair.of(result, Map.of()), ingredient, null, biomeTag, serializer);
+                }
+
+                public static BiomeParameterRecipeBuilder recipe(BlockPropertyPair result, BlockStateIngredient ingredient, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateRecipeSerializer<?> serializer) {
+                    return new BiomeParameterRecipeBuilder(result, ingredient, biomeKey, biomeTag, serializer);
+                }
+
+                @Override
+                public void save(RecipeOutput finishedRecipeConsumer, ResourceLocation id) {
+                    finishedRecipeConsumer.accept(new BiomeParameterRecipeBuilder.Result(id, this.biomeKey, this.biomeTag, this.getIngredient(), this.getResultPair(), this.getSerializer()));
+                }
+
+                public static class Result extends BlockStateRecipeBuilder.Result {
+                    public Result(ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient ingredient, BlockPropertyPair result, RecipeSerializer<? extends AbstractBlockStateRecipe> serializer) {
+                        super(id, ingredient, result, serializer, null);
+                    }
+
+                    @Override
+                    public void serializeRecipeData(JsonObject json) {
+                        BlockStateRecipeUtil.biomeKeyToJson(json, null);
+                    }
+                }
+            }
+        """.trimIndent())
+        providerDir.resolve("ExampleRecipeProvider.java").writeText("""
+            package com.example.data;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.aetherteam.nitrogen.recipe.builder.BlockStateRecipeBuilder;
+            import com.example.recipe.ExampleRecipeSerializers;
+            import com.example.recipe.builder.BiomeParameterRecipeBuilder;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.biome.Biome;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+            import net.minecraft.world.level.block.state.properties.Property;
+
+            import java.util.Map;
+
+            public class ExampleRecipeProvider {
+                protected BlockStateRecipeBuilder swetBallConversion(Block result, Block ingredient) {
+                    return BiomeParameterRecipeBuilder.recipe(BlockStateIngredient.of(ingredient), result, ExampleRecipeSerializers.SWET_BALL_CONVERSION.get());
+                }
+
+                protected BlockStateRecipeBuilder convertPlacement(Block result, Block ingredient, TagKey<Biome> biome) {
+                    return BiomeParameterRecipeBuilder.recipe(BlockStateIngredient.of(ingredient), result, biome, ExampleRecipeSerializers.PLACEMENT_CONVERSION.get());
+                }
+
+                protected BlockStateRecipeBuilder convertPlacementWithProperties(Block result, Map<Property<?>, Comparable<?>> resultProperties, Block ingredient, Map<Property<?>, Comparable<?>> ingredientProperties, TagKey<Biome> biome) {
+                    return BiomeParameterRecipeBuilder.recipe(BlockStateIngredient.of(this.pair(ingredient, ingredientProperties)), result, resultProperties, biome, ExampleRecipeSerializers.PLACEMENT_CONVERSION.get());
+                }
+
+                protected BlockStateRecipeBuilder accessoryFreezable(Block result, Block ingredient) {
+                    return BlockStateRecipeBuilder.recipe(BlockStateIngredient.of(this.pair(ingredient, Map.of(BlockStateProperties.LEVEL, 0))), result, ExampleRecipeSerializers.ACCESSORY_FREEZABLE.get());
+                }
+
+                protected BlockPropertyPair pair(Block block, Map<Property<?>, Comparable<?>> properties) {
+                    return BlockPropertyPair.of(block, properties);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val builder = builderDir.resolve("BiomeParameterRecipeBuilder.java").readText()
+        val provider = providerDir.resolve("ExampleRecipeProvider.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-recipe-builder-121" })
+        assertTrue(builder.contains("import com.example.recipe.recipes.block.AbstractBiomeParameterRecipe;"), builder)
+        assertTrue(builder.contains("import com.example.recipe.serializer.BiomeParameterRecipeSerializer;"), builder)
+        assertTrue(builder.contains("public class BiomeParameterRecipeBuilder implements RecipeBuilder"), builder)
+        assertTrue(builder.contains("private final Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome;"), builder)
+        assertTrue(builder.contains("private final BiomeParameterRecipeSerializer.Factory<?> factory;"), builder)
+        assertTrue(builder.contains("AbstractBiomeParameterRecipe recipe = this.factory.create(this.biome, this.ingredient, this.result, this.function);"), builder)
+        assertTrue(builder.contains("recipeOutput.accept(id, recipe, null);"), builder)
+        assertFalse(builder.contains("BlockStateRecipeBuilder.Result"), builder)
+        assertFalse(builder.contains("JsonObject"), builder)
+        assertFalse(builder.contains("BlockStateRecipeUtil"), builder)
+
+        assertTrue(provider.contains("BlockStateRecipeBuilder.recipe(BlockStateIngredient.of(ingredient), result, com.example.recipe.recipes.block.SwetBallRecipe::new)"), provider)
+        assertTrue(provider.contains("protected BiomeParameterRecipeBuilder convertPlacement(Block result, Block ingredient, TagKey<Biome> biome)"), provider)
+        assertTrue(provider.contains("BiomeParameterRecipeBuilder.recipe(BlockStateIngredient.of(ingredient), result, biome, com.example.recipe.recipes.block.PlacementConversionRecipe::new)"), provider)
+        assertTrue(provider.contains("Reference2ObjectArrayMap<Property<?>, Comparable<?>> resultProperties"), provider)
+        assertTrue(provider.contains("this.pair(ingredient, Optional.of(ingredientProperties))"), provider)
+        assertTrue(provider.contains("new Reference2ObjectArrayMap<>(new Property<?>[]{BlockStateProperties.LEVEL}, new Comparable<?>[]{0})"), provider)
+        assertTrue(provider.contains("BlockStateRecipeBuilder.recipe(BlockStateIngredient.of(this.pair(ingredient, Optional.of(new Reference2ObjectArrayMap<>"), provider)
+        assertTrue(provider.contains("com.example.recipe.recipes.block.AccessoryFreezableRecipe::new"), provider)
+        assertTrue(provider.contains("import it.unimi.dsi.fastutil.objects.Reference2ObjectArrayMap;"), provider)
+        assertTrue(provider.contains("import java.util.Optional;"), provider)
+        assertFalse(provider.contains("import java.util.Map;"), provider)
+        assertFalse(provider.contains("ExampleRecipeSerializers.PLACEMENT_CONVERSION.get()"), provider)
+    }
+
+    @Test
     fun `migrates legacy item tag enchantment and mob spawn equipment APIs`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

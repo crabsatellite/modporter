@@ -397,6 +397,17 @@ class StructuralRefactorPass : Pass {
             errors.add("RecipeOutput builder migration error: ${e.message}")
         }
 
+        // Migrate Nitrogen's 1.20 block-state recipe builder source shapes to
+        // the 1.21 factory/Optional property-map API. This derives recipe and
+        // serializer types from project source declarations instead of package
+        // conventions.
+        try {
+            val nitrogenBuilderChanges = migrateNitrogenRecipeBuilders(projectDir, dryRun)
+            changes.addAll(nitrogenBuilderChanges)
+        } catch (e: Exception) {
+            errors.add("Nitrogen recipe builder migration error: ${e.message}")
+        }
+
         // Recipe ids live on RecipeHolder in 1.21, not on the recipe object.
         try {
             val recipeIdChanges = migrateMmlibRecipeIdTracking(projectDir, dryRun)
@@ -22129,6 +22140,349 @@ $encodeLines
             }
         }
         return null
+    }
+
+    private data class JavaSourceType(
+        val file: Path,
+        val packageName: String,
+        val className: String,
+        val source: String
+    ) {
+        val fqn: String
+            get() = if (packageName.isBlank()) className else "$packageName.$className"
+    }
+
+    private data class NitrogenRecipeSerializerSource(
+        val type: JavaSourceType,
+        val recipeClassName: String
+    )
+
+    private data class NitrogenRecipeFactoryReference(
+        val ownerClassName: String,
+        val ownerFqn: String,
+        val fieldName: String,
+        val recipeFactory: String
+    )
+
+    private fun migrateNitrogenRecipeBuilders(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val changes = mutableListOf<Change>()
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+
+        fun readTypes(): List<JavaSourceType> =
+            javaFiles.mapNotNull { file ->
+                val source = file.readText()
+                val className = javaTopLevelTypeName(source) ?: return@mapNotNull null
+                JavaSourceType(file, packageNameOf(source), className, source)
+            }
+
+        var types = readTypes()
+        val typeByName = types.groupBy { it.className }
+        val serializers = collectNitrogenRecipeSerializers(types)
+        val serializerByName = serializers.associateBy { it.type.className }
+        val registryFactories = collectNitrogenRecipeFactoryReferences(types, typeByName)
+        val migratedBiomeBuilderClasses = linkedSetOf<String>()
+
+        for (type in types) {
+            val source = type.file.readText()
+            if (!source.contains("extends BlockStateRecipeBuilder") ||
+                !source.contains("BlockStateRecipeBuilder.Result") ||
+                !source.contains("biomeKey") ||
+                !source.contains("biomeTag") ||
+                !source.contains("BlockStateIngredient") ||
+                !source.contains("BlockPropertyPair")) {
+                continue
+            }
+
+            val expectedSerializerName = type.className.removeSuffix("Builder") + "Serializer"
+            val serializer = serializerByName[expectedSerializerName]
+                ?: serializers.singleOrNull()
+                ?: continue
+            val recipeType = typeByName[serializer.recipeClassName]?.singleOrNull() ?: continue
+            val migrated = nitrogenBiomeParameterRecipeBuilderSource(type, recipeType, serializer.type)
+            if (migrated != source) {
+                migratedBiomeBuilderClasses += type.className
+                changes.add(Change(
+                    file = type.file,
+                    line = 0,
+                    description = "Migrate Nitrogen biome recipe builder to 1.21 RecipeBuilder factory shape",
+                    before = "extends BlockStateRecipeBuilder; Result extends BlockStateRecipeBuilder.Result",
+                    after = "implements RecipeBuilder; RecipeOutput.accept(id, recipe, null)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-nitrogen-recipe-builder-121"
+                ))
+                if (!dryRun) {
+                    type.file.writeText(migrated)
+                }
+            }
+        }
+
+        if (!dryRun) {
+            types = readTypes()
+        }
+        val biomeBuilderClasses = types
+            .filter { type ->
+                val source = type.file.readText()
+                source.contains("class ${type.className}") &&
+                    source.contains("implements RecipeBuilder") &&
+                    source.contains("Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome") &&
+                    source.contains("BiomeParameterRecipeSerializer.Factory<?>")
+            }
+            .map { it.className }
+            .toSet() + migratedBiomeBuilderClasses
+
+        if (registryFactories.isNotEmpty()) {
+            for (file in javaFiles) {
+                val source = file.readText()
+                val migrated = migrateNitrogenRecipeBuilderCallSitesSource(source, registryFactories, biomeBuilderClasses)
+                if (migrated != source) {
+                    changes.add(Change(
+                        file = file,
+                        line = 0,
+                        description = "Migrate Nitrogen recipe builder call sites from serializer holders to recipe factories",
+                        before = "BlockStateRecipeBuilder.recipe(..., SERIALIZER.get())",
+                        after = "BlockStateRecipeBuilder.recipe(..., RecipeClass::new)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-nitrogen-recipe-builder-121"
+                    ))
+                    if (!dryRun) {
+                        file.writeText(migrated)
+                    }
+                }
+            }
+        }
+
+        return changes
+    }
+
+    private fun collectNitrogenRecipeSerializers(types: List<JavaSourceType>): List<NitrogenRecipeSerializerSource> {
+        val id = """[A-Za-z_$][\w$]*"""
+        val serializerPattern = Regex(
+            """class\s+($id)\s*<\s*T\s+extends\s+($id)\s*>\s+extends\s+BlockStateRecipeSerializer\s*<\s*T\s*>"""
+        )
+        return types.mapNotNull { type ->
+            val match = serializerPattern.find(type.source) ?: return@mapNotNull null
+            if (!Regex("""\binterface\s+Factory\s*<\s*T\b""").containsMatchIn(type.source) ||
+                !type.source.contains("Optional<Either<ResourceKey<Biome>, TagKey<Biome>>>")) {
+                return@mapNotNull null
+            }
+            NitrogenRecipeSerializerSource(type, match.groupValues[2])
+        }
+    }
+
+    private fun collectNitrogenRecipeFactoryReferences(
+        types: List<JavaSourceType>,
+        typeByName: Map<String, List<JavaSourceType>>
+    ): List<NitrogenRecipeFactoryReference> {
+        val id = """[A-Za-z_$][\w$]*"""
+        val fieldPattern = Regex(
+            """(?s)\bDeferredHolder\s*<[^;=]*?(?:BiomeParameterRecipeSerializer|BlockStateRecipeSerializer)\s*<\s*($id)\s*>[^;=]*>\s+($id)\s*=\s*[^;]+;"""
+        )
+        return types.flatMap { owner ->
+            fieldPattern.findAll(owner.source).mapNotNull { match ->
+                val recipeClass = match.groupValues[1]
+                val fieldName = match.groupValues[2]
+                val recipeType = typeByName[recipeClass]?.singleOrNull() ?: return@mapNotNull null
+                NitrogenRecipeFactoryReference(
+                    ownerClassName = owner.className,
+                    ownerFqn = owner.fqn,
+                    fieldName = fieldName,
+                    recipeFactory = "${recipeType.fqn}::new"
+                )
+            }.toList()
+        }
+    }
+
+    private fun nitrogenBiomeParameterRecipeBuilderSource(
+        builder: JavaSourceType,
+        recipeType: JavaSourceType,
+        serializerType: JavaSourceType
+    ): String {
+        val recipeImport = if (recipeType.packageName == builder.packageName) "" else "import ${recipeType.fqn};\n"
+        val serializerImport = if (serializerType.packageName == builder.packageName) "" else "import ${serializerType.fqn};\n"
+        return """package ${builder.packageName};
+
+${recipeImport}${serializerImport}import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+import com.mojang.datafixers.util.Either;
+import it.unimi.dsi.fastutil.objects.Reference2ObjectArrayMap;
+import net.minecraft.advancements.Criterion;
+import net.minecraft.data.recipes.RecipeBuilder;
+import net.minecraft.data.recipes.RecipeOutput;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.tags.TagKey;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.level.biome.Biome;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.properties.Property;
+
+import java.util.Optional;
+import javax.annotation.Nullable;
+
+public class ${builder.className} implements RecipeBuilder {
+    private final Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome;
+    private final BlockPropertyPair result;
+    private final BlockStateIngredient ingredient;
+    private Optional<ResourceLocation> function = Optional.empty();
+    private final ${serializerType.className}.Factory<?> factory;
+
+    public ${builder.className}(BlockPropertyPair result, BlockStateIngredient ingredient, Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome, ${serializerType.className}.Factory<?> factory) {
+        this.result = result;
+        this.ingredient = ingredient;
+        this.biome = biome;
+        this.factory = factory;
+    }
+
+    public static ${builder.className} recipe(BlockStateIngredient ingredient, Block result, ResourceKey<Biome> biomeKey, ${serializerType.className}.Factory<?> factory) {
+        return recipe(BlockPropertyPair.of(result, Optional.empty()), ingredient, Optional.of(Either.left(biomeKey)), factory);
+    }
+
+    public static ${builder.className} recipe(BlockStateIngredient ingredient, BlockPropertyPair resultPair, ResourceKey<Biome> biomeKey, ${serializerType.className}.Factory<?> factory) {
+        return recipe(BlockPropertyPair.of(resultPair.block(), resultPair.properties()), ingredient, Optional.of(Either.left(biomeKey)), factory);
+    }
+
+    public static ${builder.className} recipe(BlockStateIngredient ingredient, Block resultBlock, Reference2ObjectArrayMap<Property<?>, Comparable<?>> resultProperties, ResourceKey<Biome> biomeKey, ${serializerType.className}.Factory<?> factory) {
+        return recipe(BlockPropertyPair.of(resultBlock, Optional.ofNullable(resultProperties)), ingredient, Optional.of(Either.left(biomeKey)), factory);
+    }
+
+    public static ${builder.className} recipe(BlockStateIngredient ingredient, Block result, TagKey<Biome> biomeTag, ${serializerType.className}.Factory<?> factory) {
+        return recipe(BlockPropertyPair.of(result, Optional.empty()), ingredient, Optional.of(Either.right(biomeTag)), factory);
+    }
+
+    public static ${builder.className} recipe(BlockStateIngredient ingredient, BlockPropertyPair resultPair, TagKey<Biome> biomeTag, ${serializerType.className}.Factory<?> factory) {
+        return recipe(BlockPropertyPair.of(resultPair.block(), resultPair.properties()), ingredient, Optional.of(Either.right(biomeTag)), factory);
+    }
+
+    public static ${builder.className} recipe(BlockStateIngredient ingredient, Block resultBlock, Reference2ObjectArrayMap<Property<?>, Comparable<?>> resultProperties, TagKey<Biome> biomeTag, ${serializerType.className}.Factory<?> factory) {
+        return recipe(BlockPropertyPair.of(resultBlock, Optional.of(resultProperties)), ingredient, Optional.of(Either.right(biomeTag)), factory);
+    }
+
+    public static ${builder.className} recipe(BlockPropertyPair result, BlockStateIngredient ingredient, Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome, ${serializerType.className}.Factory<?> factory) {
+        return new ${builder.className}(result, ingredient, biome, factory);
+    }
+
+    public RecipeBuilder function(Optional<ResourceLocation> function) {
+        this.function = function;
+        return this;
+    }
+
+    @Override
+    public RecipeBuilder unlockedBy(String name, Criterion<?> criterion) {
+        return this;
+    }
+
+    @Override
+    public RecipeBuilder group(@Nullable String groupName) {
+        return this;
+    }
+
+    @Override
+    public Item getResult() {
+        return Items.AIR;
+    }
+
+    @Override
+    public void save(RecipeOutput recipeOutput, ResourceLocation id) {
+        ${recipeType.className} recipe = this.factory.create(this.biome, this.ingredient, this.result, this.function);
+        recipeOutput.accept(id, recipe, null);
+    }
+}
+"""
+    }
+
+    private fun migrateNitrogenRecipeBuilderCallSitesSource(
+        source: String,
+        registryFactories: List<NitrogenRecipeFactoryReference>,
+        biomeBuilderClasses: Set<String>
+    ): String {
+        if (!source.contains("RecipeBuilder.recipe(") &&
+            !biomeBuilderClasses.any { source.contains("$it.recipe(") } &&
+            !source.contains("BlockPropertyPair.of(") &&
+            !source.contains(".pair(")) {
+            return source
+        }
+
+        val factoryByExpression = registryFactories.flatMap { reference ->
+            listOf(
+                "${reference.ownerClassName}.${reference.fieldName}.get()" to reference.recipeFactory,
+                "${reference.ownerFqn}.${reference.fieldName}.get()" to reference.recipeFactory
+            )
+        }.toMap()
+
+        val propertyVariables = Regex(
+            """\b(?:Map|Reference2ObjectArrayMap)\s*<\s*Property\s*<\s*\?\s*>\s*,\s*Comparable\s*<\s*\?\s*>\s*>\s+([A-Za-z_$][\w$]*)"""
+        ).findAll(source).map { it.groupValues[1] }.toSet()
+
+        var result = source
+        result = rewriteJavaCall(result, "recipe") { receiver, args ->
+            if (args.isEmpty()) return@rewriteJavaCall null
+            val simpleReceiver = receiver.substringAfterLast('.')
+            val factory = factoryByExpression[args.last().trim()] ?: return@rewriteJavaCall null
+            val migratedArgs = args.dropLast(1).map { it.trim() } + factory
+            when {
+                simpleReceiver == "BlockStateRecipeBuilder" ->
+                    "$receiver.recipe(${migratedArgs.joinToString(", ")})"
+                simpleReceiver in biomeBuilderClasses && args.size == 3 ->
+                    "BlockStateRecipeBuilder.recipe(${migratedArgs.joinToString(", ")})"
+                simpleReceiver in biomeBuilderClasses ->
+                    "$receiver.recipe(${migratedArgs.joinToString(", ")})"
+                else -> null
+            }
+        }
+
+        for (builderClass in biomeBuilderClasses) {
+            result = Regex(
+                """(?s)\b((?:public|protected|private)\s+)BlockStateRecipeBuilder(\s+[A-Za-z_$][\w$]*\s*\([^)]*\)\s*\{\s*return\s+(?:[A-Za-z_$][\w$]*\.)?${Regex.escape(builderClass)}\.recipe\s*\()"""
+            ).replace(result) { match -> "${match.groupValues[1]}$builderClass${match.groupValues[2]}" }
+        }
+
+        result = result.replace(
+            Regex("""\bMap\s*<\s*Property\s*<\s*\?\s*>\s*,\s*Comparable\s*<\s*\?\s*>\s*>"""),
+            "Reference2ObjectArrayMap<Property<?>, Comparable<?>>"
+        )
+
+        result = rewriteJavaCall(result, "pair") { receiver, args ->
+            if (receiver != "this" || args.size != 2) return@rewriteJavaCall null
+            val propertyExpression = nitrogenPropertyMapOptionalExpression(args[1], propertyVariables) ?: return@rewriteJavaCall null
+            "this.pair(${args[0].trim()}, $propertyExpression)"
+        }
+
+        result = rewriteJavaCall(result, "of") { receiver, args ->
+            if (receiver.substringAfterLast('.') != "BlockPropertyPair" || args.size != 2) return@rewriteJavaCall null
+            val propertyExpression = nitrogenPropertyMapOptionalExpression(args[1], propertyVariables) ?: return@rewriteJavaCall null
+            "$receiver.of(${args[0].trim()}, $propertyExpression)"
+        }
+
+        if (result.contains("Reference2ObjectArrayMap<") || result.contains("new Reference2ObjectArrayMap<>")) {
+            result = addImportIfMissing(result, "it.unimi.dsi.fastutil.objects.Reference2ObjectArrayMap")
+        }
+        if (result.contains("Optional.")) {
+            result = addImportIfMissing(result, "java.util.Optional")
+        }
+        if (result.contains("new Property<?>[]{")) {
+            result = addImportIfMissing(result, "net.minecraft.world.level.block.state.properties.Property")
+        }
+        if (!Regex("""\bMap\s*<|\bMap\.""").containsMatchIn(result)) {
+            result = removeImport(result, "java.util.Map")
+        }
+        return result
+    }
+
+    private fun nitrogenPropertyMapOptionalExpression(expression: String, propertyVariables: Set<String>): String? {
+        val trimmed = expression.trim()
+        if (trimmed in propertyVariables) return "Optional.of($trimmed)"
+        val mapCall = Regex("""Map\.of\s*\((.*)\)\s*""", RegexOption.DOT_MATCHES_ALL).matchEntire(trimmed) ?: return null
+        val args = splitTopLevelJavaArgs(mapCall.groupValues[1]).map { it.trim() }.filter { it.isNotEmpty() }
+        if (args.isEmpty()) return "Optional.empty()"
+        if (args.size % 2 != 0) return null
+        val keys = args.filterIndexed { index, _ -> index % 2 == 0 }.joinToString(", ")
+        val values = args.filterIndexed { index, _ -> index % 2 == 1 }.joinToString(", ")
+        return "Optional.of(new Reference2ObjectArrayMap<>(new Property<?>[]{$keys}, new Comparable<?>[]{$values}))"
     }
 
     private fun migrateLegacyRecipeOutputBuilders(projectDir: Path, dryRun: Boolean): List<Change> {
