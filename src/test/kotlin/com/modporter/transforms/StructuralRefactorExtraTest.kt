@@ -6192,6 +6192,38 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates getAllRecipesFor recipe instanceof loops to typed holders`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("FreezingCache.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.level.Level;
+
+            public class FreezingCache {
+                public static void cacheRecipes(Level level) {
+                    for (Recipe<?> recipe : level.getRecipeManager().getAllRecipesFor(ExampleRecipeTypes.FREEZABLE.get())) {
+                        if (recipe instanceof FreezableRecipe freezableRecipe) {
+                            Cache.add(freezableRecipe.result());
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("FreezingCache.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("import net.minecraft.world.item.crafting.RecipeHolder;"), transformed)
+        assertTrue(transformed.contains("for (RecipeHolder<FreezableRecipe> freezableRecipeHolder : level.getRecipeManager().getAllRecipesFor(ExampleRecipeTypes.FREEZABLE.get())) {"), transformed)
+        assertTrue(transformed.contains("FreezableRecipe freezableRecipe = freezableRecipeHolder.value();"), transformed)
+        assertFalse(transformed.contains("recipe instanceof FreezableRecipe"), transformed)
+        assertFalse(transformed.contains("import net.minecraft.world.item.crafting.Recipe;"), transformed)
+    }
+
+    @Test
     fun `migrates cacheable function recipe boundaries to optionals`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

@@ -20848,6 +20848,65 @@ public class $className<T extends $recipeBase> extends BlockStateRecipeSerialize
         return result
     }
 
+    private fun migrateRecipeHolderInstanceofGetAllRecipesForLoops(source: String): String {
+        if (!source.contains("getAllRecipesFor(") || !source.contains("instanceof")) return source
+        val id = """[A-Za-z_$][\w$]*"""
+        val loopPattern = Regex(
+            """(?m)^([ \t]*)for\s*\(\s*Recipe\s*<\s*\?\s*>\s+($id)\s*:\s*([^;\r\n]*getAllRecipesFor\([^;\r\n]*\))\s*\)\s*\{"""
+        )
+        var result = source
+        var cursor = 0
+        var changed = false
+        while (true) {
+            val loop = loopPattern.find(result, cursor) ?: break
+            val openBrace = result.indexOf('{', loop.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = loop.range.last + 1
+                continue
+            }
+
+            val recipeVar = loop.groupValues[2]
+            val body = result.substring(openBrace + 1, closeBrace)
+            val ifPattern = Regex("""(?s)^\s*if\s*\(\s*${Regex.escape(recipeVar)}\s+instanceof\s+($id)\s+($id)\s*\)\s*\{""")
+            val ifMatch = ifPattern.find(body)
+            if (ifMatch == null) {
+                cursor = closeBrace + 1
+                continue
+            }
+            val ifOpenBrace = ifMatch.range.last
+            val ifCloseBrace = findMatchingBrace(body, ifOpenBrace)
+            if (ifCloseBrace < 0 || body.substring(ifCloseBrace + 1).isNotBlank()) {
+                cursor = closeBrace + 1
+                continue
+            }
+
+            val indent = loop.groupValues[1]
+            val recipeCall = loop.groupValues[3].trim()
+            val recipeType = ifMatch.groupValues[1]
+            val typedVar = ifMatch.groupValues[2]
+            val innerBody = body.substring(ifOpenBrace + 1, ifCloseBrace).trimEnd()
+            val declarationIndent = Regex("""\r?\n([ \t]*)\S""")
+                .find(innerBody)
+                ?.groupValues
+                ?.get(1)
+                ?: "$indent    "
+            val replacement = "${indent}for (RecipeHolder<$recipeType> ${typedVar}Holder : $recipeCall) {\n" +
+                "${declarationIndent}$recipeType $typedVar = ${typedVar}Holder.value();" +
+                innerBody +
+                "\n$indent}"
+            result = result.substring(0, loop.range.first) + replacement + result.substring(closeBrace + 1)
+            cursor = loop.range.first + replacement.length
+            changed = true
+        }
+        if (!changed) return source
+        result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeHolder")
+        if (!Regex("""\bRecipe\s*[<\[]""").containsMatchIn(removeImport(result, "net.minecraft.world.item.crafting.Recipe"))) {
+            result = removeImport(result, "net.minecraft.world.item.crafting.Recipe")
+        }
+        return result
+    }
+
     private fun migrateRecipeManagerByKeyHolderAccessSource(source: String): String {
         if (!source.contains(".byKey(") || !source.contains(".get()")) return source
         val id = """[A-Za-z_$][\w$]*"""
@@ -20874,6 +20933,7 @@ public class $className<T extends $recipeBase> extends BlockStateRecipeSerialize
         result = migrateLegacyRecordShapedCraftingRecipeSource(result)
         result = migrateLegacyGsonRegistryRecipeSerializerSource(result)
         result = migrateRecipeHolderLoopTypeParameters(result)
+        result = migrateRecipeHolderInstanceofGetAllRecipesForLoops(result)
 
         val id = """[A-Za-z_$][\w$]*"""
         val annotations = """(?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*)*"""
