@@ -5891,6 +5891,193 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates nitrogen block state recipe codec and constructor boundaries`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AbstractBiomeParameterRecipe.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.aetherteam.nitrogen.recipe.recipes.AbstractBlockStateRecipe;
+            import net.minecraft.commands.CacheableFunction;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.biome.Biome;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            import javax.annotation.Nullable;
+
+            public abstract class AbstractBiomeParameterRecipe extends AbstractBlockStateRecipe {
+                @Nullable
+                private final ResourceKey<Biome> biomeKey;
+                @Nullable
+                private final TagKey<Biome> biomeTag;
+
+                public AbstractBiomeParameterRecipe(RecipeType<?> type, ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient ingredient, BlockPropertyPair result, @Nullable CacheableFunction function) {
+                    super(type, id, ingredient, result, function);
+                    this.biomeKey = biomeKey;
+                    this.biomeTag = biomeTag;
+                }
+
+                @Override
+                public boolean matches(Level level, BlockPos pos, BlockState state) {
+                    if (this.biomeKey != null) {
+                        return super.matches(level, pos, state) && level.getBiome(pos).is(this.biomeKey);
+                    } else if (this.biomeTag != null) {
+                        return super.matches(level, pos, state) && level.getBiome(pos).is(this.biomeTag);
+                    } else {
+                        return super.matches(level, pos, state);
+                    }
+                }
+
+                @Nullable
+                public ResourceKey<Biome> getBiomeKey() {
+                    return this.biomeKey;
+                }
+
+                @Nullable
+                public TagKey<Biome> getBiomeTag() {
+                    return this.biomeTag;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("IcestoneFreezableRecipe.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.aetherteam.nitrogen.recipe.recipes.AbstractBlockStateRecipe;
+            import net.minecraft.commands.CacheableFunction;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            import javax.annotation.Nullable;
+
+            public class IcestoneFreezableRecipe extends AbstractBlockStateRecipe {
+                public IcestoneFreezableRecipe(ResourceLocation id, BlockStateIngredient ingredient, BlockPropertyPair result, @Nullable CacheableFunction function) {
+                    super(ExampleRecipeTypes.ICESTONE_FREEZABLE.get(), id, ingredient, result, function);
+                }
+
+                public boolean matches(@Nullable Player player, Level level, BlockPos pos, @Nullable ItemStack stack, BlockState oldState, BlockState newState, RecipeType<?> recipeType) {
+                    return true;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SwetBallRecipe.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import net.minecraft.commands.CacheableFunction;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.biome.Biome;
+
+            import javax.annotation.Nullable;
+
+            public class SwetBallRecipe extends AbstractBiomeParameterRecipe {
+                public SwetBallRecipe(ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient ingredient, BlockPropertyPair result, @Nullable CacheableFunction function) {
+                    super(ExampleRecipeTypes.SWET_BALL_CONVERSION.get(), id, biomeKey, biomeTag, ingredient, result, function);
+                }
+
+                public SwetBallRecipe(ResourceLocation id, BlockStateIngredient ingredient, BlockPropertyPair result, @Nullable CacheableFunction function) {
+                    this(id, null, null, ingredient, result, function);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BiomeParameterRecipeSerializer.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.aetherteam.nitrogen.recipe.BlockStateRecipeUtil;
+            import com.aetherteam.nitrogen.recipe.serializer.BlockStateRecipeSerializer;
+            import com.google.gson.JsonObject;
+            import net.minecraft.commands.CacheableFunction;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.biome.Biome;
+            import org.apache.commons.lang3.tuple.Pair;
+
+            import javax.annotation.Nullable;
+
+            public class BiomeParameterRecipeSerializer<T extends AbstractBiomeParameterRecipe> extends BlockStateRecipeSerializer<T> {
+                private final BiomeParameterRecipeSerializer.CookieBaker<T> factory;
+
+                public BiomeParameterRecipeSerializer(BiomeParameterRecipeSerializer.CookieBaker<T> factory, BlockStateRecipeSerializer.CookieBaker<T> superFactory) {
+                    super(superFactory);
+                    this.factory = factory;
+                }
+
+                @Override
+                public T fromJson(ResourceLocation id, JsonObject json) {
+                    Pair<ResourceKey<Biome>, TagKey<Biome>> biomeRecipeData = BlockStateRecipeUtil.biomeRecipeDataFromJson(json);
+                    ResourceKey<Biome> biomeKey = biomeRecipeData.getLeft();
+                    TagKey<Biome> biomeTag = biomeRecipeData.getRight();
+                    T recipe = super.fromJson(id, json);
+                    return this.factory.create(id, biomeKey, biomeTag, recipe.getIngredient(), recipe.getResult(), recipe.getFunction());
+                }
+
+                @Nullable
+                @Override
+                public T fromNetwork(ResourceLocation id, FriendlyByteBuf buffer) {
+                    ResourceKey<Biome> biomeKey = BlockStateRecipeUtil.readBiomeKey(buffer);
+                    TagKey<Biome> biomeTag = BlockStateRecipeUtil.readBiomeTag(buffer);
+                    BlockStateIngredient ingredient = BlockStateIngredient.fromNetwork(buffer);
+                    BlockPropertyPair result = BlockStateRecipeUtil.readPair(buffer);
+                    CacheableFunction function = BlockStateRecipeUtil.readFunction(buffer);
+                    return this.factory.create(id, biomeKey, biomeTag, ingredient, result, function);
+                }
+
+                @Override
+                public void toNetwork(FriendlyByteBuf buffer, T recipe) {
+                    BlockStateRecipeUtil.writeBiomeKey(buffer, recipe.getBiomeKey());
+                    BlockStateRecipeUtil.writeBiomeTag(buffer, recipe.getBiomeTag());
+                    super.toNetwork(buffer, recipe);
+                }
+
+                public interface CookieBaker<T extends AbstractBiomeParameterRecipe> {
+                    T create(ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient ingredient, BlockPropertyPair result, @Nullable CacheableFunction function);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val abstractRecipe = srcDir.resolve("AbstractBiomeParameterRecipe.java").readText()
+        val simpleRecipe = srcDir.resolve("IcestoneFreezableRecipe.java").readText()
+        val biomeRecipe = srcDir.resolve("SwetBallRecipe.java").readText()
+        val serializer = srcDir.resolve("BiomeParameterRecipeSerializer.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(abstractRecipe.contains("private final Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome;"), abstractRecipe)
+        assertTrue(abstractRecipe.contains("super(type, ingredient, result, function);"), abstractRecipe)
+        assertTrue(abstractRecipe.contains("public Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> getBiome()"), abstractRecipe)
+        assertTrue(simpleRecipe.contains("public IcestoneFreezableRecipe(BlockStateIngredient ingredient, BlockPropertyPair result, Optional<ResourceLocation> function)"), simpleRecipe)
+        assertTrue(simpleRecipe.contains("super(ExampleRecipeTypes.ICESTONE_FREEZABLE.get(), ingredient, result, function);"), simpleRecipe)
+        assertTrue(simpleRecipe.contains("import javax.annotation.Nullable;"), simpleRecipe)
+        assertTrue(biomeRecipe.contains("public SwetBallRecipe(Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome, BlockStateIngredient ingredient, BlockPropertyPair result, Optional<ResourceLocation> function)"), biomeRecipe)
+        assertTrue(biomeRecipe.contains("this(Optional.empty(), ingredient, result, function);"), biomeRecipe)
+        assertTrue(serializer.contains("private final MapCodec<T> codec;"), serializer)
+        assertTrue(serializer.contains("AbstractBlockStateRecipe.Factory<T> superFactory"), serializer)
+        assertTrue(serializer.contains("BlockStateRecipeUtil.KEY_CODEC.optionalFieldOf(\"biome\").forGetter(AbstractBiomeParameterRecipe::getBiome)"), serializer)
+        assertTrue(serializer.contains("Optional<ResourceLocation> function = buffer.readOptional(FriendlyByteBuf::readResourceLocation);"), serializer)
+        assertFalse(serializer.contains("CookieBaker"), serializer)
+        assertFalse(serializer.contains("fromJson(ResourceLocation id, JsonObject json)"), serializer)
+    }
+
+    @Test
     fun `migrates legacy item tag enchantment and mob spawn equipment APIs`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

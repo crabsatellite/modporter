@@ -9473,6 +9473,9 @@ ${entries.joinToString(",\n")}
         result = migrateFoodComponentAccess(result)
         result = migrateSupplierValueCalls(result)
         result = migrateUnboundLevelRegistryAccessCalls(result)
+        result = migrateNitrogenBlockStateRecipeConstructors(result)
+        result = migrateNitrogenBiomeParameterRecipeSource(result)
+        result = migrateNitrogenBiomeParameterRecipeSerializerSource(result)
         result = migrateCacheableFunctionOptionalBoundaries(result)
         result = migrateRecipeHolderAccess(result)
         result = migrateRecipeManagerByKeyHolderAccessSource(result)
@@ -9911,6 +9914,11 @@ ${entries.joinToString(",\n")}
             result = addImportIfMissing(result, "net.neoforged.neoforge.client.model.generators.ModelFile")
         }
         if (!result.contains("Attribute ") && !result.contains("Attribute>")) result = removeImport(result, "net.minecraft.world.entity.ai.attributes.Attribute")
+        if (result.contains("@Nullable") &&
+            !result.contains("import org.jetbrains.annotations.Nullable;") &&
+            !result.contains("import javax.annotation.Nullable;")) {
+            result = addImportIfMissing(result, "javax.annotation.Nullable")
+        }
         if (result.contains("import org.jetbrains.annotations.Nullable;") && result.contains("import javax.annotation.Nullable;")) {
             result = removeImport(result, "javax.annotation.Nullable")
         }
@@ -19474,6 +19482,225 @@ ${modifierLines.joinToString("\n")}
             result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
         }
         return result
+    }
+
+    private fun migrateNitrogenBlockStateRecipeConstructors(source: String): String {
+        if (!source.contains("BlockStateIngredient") ||
+            !source.contains("BlockPropertyPair") ||
+            !source.contains("CacheableFunction") ||
+            !source.contains("super(")) {
+            return source
+        }
+
+        val id = """[A-Za-z_$][\w$]*"""
+        var result = source
+        var changed = false
+        Regex("""class\s+($id)\s+extends\s+AbstractBlockStateRecipe\b""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.let { className ->
+                val constructorPattern = Regex(
+                    """(?s)public\s+${Regex.escape(className)}\s*\(\s*ResourceLocation\s+$id\s*,\s*BlockStateIngredient\s+($id)\s*,\s*BlockPropertyPair\s+($id)\s*,\s*@Nullable\s+CacheableFunction\s+($id)\s*\)\s*\{\s*super\(\s*([^,]+?)\s*,\s*$id\s*,\s*\1\s*,\s*\2\s*,\s*\3\s*\)\s*;\s*\}"""
+                )
+                result = constructorPattern.replace(result) { match ->
+                    changed = true
+                    val ingredient = match.groupValues[1]
+                    val recipeResult = match.groupValues[2]
+                    val function = match.groupValues[3]
+                    val recipeType = match.groupValues[4].trim()
+                    "public $className(BlockStateIngredient $ingredient, BlockPropertyPair $recipeResult, Optional<ResourceLocation> $function) {\n" +
+                        "        super($recipeType, $ingredient, $recipeResult, $function);\n" +
+                        "    }"
+                }
+            }
+
+        Regex("""class\s+($id)\s+extends\s+AbstractBiomeParameterRecipe\b""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.let { className ->
+                val fullConstructorPattern = Regex(
+                    """(?s)public\s+${Regex.escape(className)}\s*\(\s*ResourceLocation\s+$id\s*,\s*@Nullable\s+ResourceKey\s*<\s*Biome\s*>\s+($id)\s*,\s*@Nullable\s+TagKey\s*<\s*Biome\s*>\s+($id)\s*,\s*BlockStateIngredient\s+($id)\s*,\s*BlockPropertyPair\s+($id)\s*,\s*@Nullable\s+CacheableFunction\s+($id)\s*\)\s*\{\s*super\(\s*([^,]+?)\s*,\s*$id\s*,\s*\1\s*,\s*\2\s*,\s*\3\s*,\s*\4\s*,\s*\5\s*\)\s*;\s*\}"""
+                )
+                result = fullConstructorPattern.replace(result) { match ->
+                    changed = true
+                    val ingredient = match.groupValues[3]
+                    val recipeResult = match.groupValues[4]
+                    val function = match.groupValues[5]
+                    val recipeType = match.groupValues[6].trim()
+                    "public $className(Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome, BlockStateIngredient $ingredient, BlockPropertyPair $recipeResult, Optional<ResourceLocation> $function) {\n" +
+                        "        super($recipeType, biome, $ingredient, $recipeResult, $function);\n" +
+                        "    }"
+                }
+                val simpleConstructorPattern = Regex(
+                    """(?s)public\s+${Regex.escape(className)}\s*\(\s*ResourceLocation\s+$id\s*,\s*BlockStateIngredient\s+($id)\s*,\s*BlockPropertyPair\s+($id)\s*,\s*@Nullable\s+CacheableFunction\s+($id)\s*\)\s*\{\s*this\(\s*$id\s*,\s*null\s*,\s*null\s*,\s*\1\s*,\s*\2\s*,\s*\3\s*\)\s*;\s*\}"""
+                )
+                result = simpleConstructorPattern.replace(result) { match ->
+                    changed = true
+                    val ingredient = match.groupValues[1]
+                    val recipeResult = match.groupValues[2]
+                    val function = match.groupValues[3]
+                    "public $className(BlockStateIngredient $ingredient, BlockPropertyPair $recipeResult, Optional<ResourceLocation> $function) {\n" +
+                        "        this(Optional.empty(), $ingredient, $recipeResult, $function);\n" +
+                        "    }"
+                }
+            }
+
+        if (!changed) return source
+        result = addImportIfMissing(result, "java.util.Optional")
+        if (result.contains("Optional<Either<")) {
+            result = addImportIfMissing(result, "com.mojang.datafixers.util.Either")
+        }
+        result = removeImport(result, "net.minecraft.commands.functions.CommandFunction")
+        result = removeImport(result, "net.minecraft.commands.CacheableFunction")
+        if (Regex("""\b@Nullable\b""").containsMatchIn(result)) {
+            result = addImportIfMissing(result, "javax.annotation.Nullable")
+        } else {
+            result = removeImport(result, "javax.annotation.Nullable")
+        }
+        return result
+    }
+
+    private fun migrateNitrogenBiomeParameterRecipeSource(source: String): String {
+        if (!source.contains("extends AbstractBlockStateRecipe") ||
+            !source.contains("biomeKey") ||
+            !source.contains("biomeTag") ||
+            !source.contains("BlockStateIngredient") ||
+            !source.contains("BlockPropertyPair") ||
+            !source.contains("CacheableFunction")) {
+            return source
+        }
+
+        val className = Regex("""class\s+([A-Za-z_$][\w$]*)\s+extends\s+AbstractBlockStateRecipe\b""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?: return source
+        var result = source
+        var changed = false
+        result = Regex(
+            """(?s)@Nullable\s*\r?\n\s*private\s+final\s+ResourceKey\s*<\s*Biome\s*>\s+biomeKey\s*;\s*@Nullable\s*\r?\n\s*private\s+final\s+TagKey\s*<\s*Biome\s*>\s+biomeTag\s*;"""
+        ).replace(result) {
+            changed = true
+            "private final Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome;"
+        }
+        result = Regex(
+            """(?s)public\s+${Regex.escape(className)}\s*\(\s*RecipeType<\?>\s+type\s*,\s*ResourceLocation\s+id\s*,\s*@Nullable\s+ResourceKey\s*<\s*Biome\s*>\s+biomeKey\s*,\s*@Nullable\s+TagKey\s*<\s*Biome\s*>\s+biomeTag\s*,\s*BlockStateIngredient\s+ingredient\s*,\s*BlockPropertyPair\s+result\s*,\s*@Nullable\s+CacheableFunction\s+function\s*\)\s*\{\s*super\(\s*type\s*,\s*id\s*,\s*ingredient\s*,\s*result\s*,\s*function\s*\)\s*;\s*this\.biomeKey\s*=\s*biomeKey\s*;\s*this\.biomeTag\s*=\s*biomeTag\s*;\s*\}"""
+        ).replace(result) {
+            changed = true
+            "public $className(RecipeType<?> type, Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome, BlockStateIngredient ingredient, BlockPropertyPair result, Optional<ResourceLocation> function) {\n" +
+                "        super(type, ingredient, result, function);\n" +
+                "        this.biome = biome;\n" +
+                "    }"
+        }
+        result = Regex(
+            """(?s)if\s*\(\s*this\.biomeKey\s*!=\s*null\s*\)\s*\{\s*return\s+super\.matches\(\s*level\s*,\s*pos\s*,\s*state\s*\)\s*&&\s*level\.getBiome\(\s*pos\s*\)\.is\(\s*this\.biomeKey\s*\)\s*;\s*\}\s*else\s+if\s*\(\s*this\.biomeTag\s*!=\s*null\s*\)\s*\{\s*return\s+super\.matches\(\s*level\s*,\s*pos\s*,\s*state\s*\)\s*&&\s*level\.getBiome\(\s*pos\s*\)\.is\(\s*this\.biomeTag\s*\)\s*;"""
+        ).replace(result) {
+            changed = true
+            "if (this.biome.isPresent() && this.biome.get().left().isPresent()) {\n" +
+                "            return super.matches(level, pos, state) && level.getBiome(pos).is(this.biome.get().left().get());\n" +
+                "        } else if (this.biome.isPresent() && this.biome.get().right().isPresent()) {\n" +
+                "            return super.matches(level, pos, state) && level.getBiome(pos).is(this.biome.get().right().get());"
+        }
+        result = Regex(
+            """(?s)@Nullable\s*\r?\n\s*public\s+ResourceKey\s*<\s*Biome\s*>\s+getBiomeKey\s*\(\s*\)\s*\{\s*return\s+this\.biomeKey\s*;\s*\}\s*@Nullable\s*\r?\n\s*public\s+TagKey\s*<\s*Biome\s*>\s+getBiomeTag\s*\(\s*\)\s*\{\s*return\s+this\.biomeTag\s*;\s*\}"""
+        ).replace(result) {
+            changed = true
+            "public Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> getBiome() {\n" +
+                "        return this.biome;\n" +
+                "    }"
+        }
+        if (!changed) return source
+        result = addImportIfMissing(result, "com.mojang.datafixers.util.Either")
+        result = addImportIfMissing(result, "java.util.Optional")
+        result = removeImport(result, "net.minecraft.commands.functions.CommandFunction")
+        result = removeImport(result, "net.minecraft.commands.CacheableFunction")
+        if (!Regex("""\b@Nullable\b""").containsMatchIn(result)) {
+            result = removeImport(result, "javax.annotation.Nullable")
+        }
+        return result
+    }
+
+    private fun migrateNitrogenBiomeParameterRecipeSerializerSource(source: String): String {
+        if (!source.contains("extends BlockStateRecipeSerializer") ||
+            !source.contains("CookieBaker") ||
+            !source.contains("biomeRecipeDataFromJson") ||
+            !source.contains("readBiomeKey") ||
+            !source.contains("writeBiomeKey")) {
+            return source
+        }
+
+        val packageLine = Regex("""(?m)^package\s+[^;]+;""").find(source)?.value ?: return source
+        val recipeImport = Regex("""(?m)^import\s+([^;]+\.AbstractBiomeParameterRecipe);""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+        val recipeImportLine = recipeImport?.let { "import $it;\n" }.orEmpty()
+        val classMatch = Regex("""public\s+class\s+([A-Za-z_$][\w$]*)\s*<\s*T\s+extends\s+([A-Za-z_$][\w$]*)\s*>\s+extends\s+BlockStateRecipeSerializer\s*<\s*T\s*>""")
+            .find(source)
+            ?: return source
+        val className = classMatch.groupValues[1]
+        val recipeBase = classMatch.groupValues[2]
+
+        return """
+$packageLine
+
+${recipeImportLine}import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+import com.aetherteam.nitrogen.recipe.BlockStateRecipeUtil;
+import com.aetherteam.nitrogen.recipe.recipes.AbstractBlockStateRecipe;
+import com.aetherteam.nitrogen.recipe.serializer.BlockStateRecipeSerializer;
+import com.mojang.datafixers.util.Either;
+import com.mojang.serialization.MapCodec;
+import com.mojang.serialization.codecs.RecordCodecBuilder;
+import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.tags.TagKey;
+import net.minecraft.world.level.biome.Biome;
+
+import java.util.Optional;
+
+public class $className<T extends $recipeBase> extends BlockStateRecipeSerializer<T> {
+    private final $className.Factory<T> factory;
+    private final MapCodec<T> codec;
+
+    public $className($className.Factory<T> factory, AbstractBlockStateRecipe.Factory<T> superFactory) {
+        super(superFactory);
+        this.factory = factory;
+        this.codec = RecordCodecBuilder.mapCodec(inst -> inst.group(
+                BlockStateRecipeUtil.KEY_CODEC.optionalFieldOf("biome").forGetter($recipeBase::getBiome),
+                BlockStateIngredient.CODEC.fieldOf("ingredient").forGetter($recipeBase::getIngredient),
+                BlockPropertyPair.CODEC.fieldOf("result").forGetter($recipeBase::getResult),
+                ResourceLocation.CODEC.optionalFieldOf("mcfunction").forGetter($recipeBase::getFunctionId)
+        ).apply(inst, factory::create));
+    }
+
+    @Override
+    public MapCodec<T> codec() {
+        return this.codec;
+    }
+
+    public T fromNetwork(RegistryFriendlyByteBuf buffer) {
+        Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome = buffer.readOptional(buf -> BlockStateRecipeUtil.STREAM_CODEC.decode((RegistryFriendlyByteBuf) buf));
+        BlockStateIngredient ingredient = BlockStateIngredient.CONTENTS_STREAM_CODEC.decode(buffer);
+        BlockPropertyPair result = BlockStateRecipeUtil.readPair(buffer);
+        Optional<ResourceLocation> function = buffer.readOptional(FriendlyByteBuf::readResourceLocation);
+        return this.factory.create(biome, ingredient, result, function);
+    }
+
+    public void toNetwork(RegistryFriendlyByteBuf buffer, T recipe) {
+        buffer.writeOptional(recipe.getBiome(), (buf, either) -> BlockStateRecipeUtil.STREAM_CODEC.encode((RegistryFriendlyByteBuf) buf, either));
+        super.toNetwork(buffer, recipe);
+    }
+
+    public interface Factory<T extends $recipeBase> {
+        T create(Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome, BlockStateIngredient ingredient, BlockPropertyPair result, Optional<ResourceLocation> function);
+    }
+}
+""".trimStart()
     }
 
     private fun migrateCacheableFunctionOptionalBoundaries(source: String): String {
