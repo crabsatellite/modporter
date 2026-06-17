@@ -15048,6 +15048,71 @@ class StructuralRefactorExtraTest {
                 }
             }
         """.trimIndent())
+        srcDir.resolve("CollectionSizeSurface.java").writeText("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.List;
+            import java.util.Map;
+
+            public class CollectionSizeSurface {
+                private final Map<Integer, String> pages = new HashMap<>();
+                private final Map<Integer, List<String>> nestedPages = new HashMap<>();
+
+                public int pageCount() {
+                    return this.pages.getSize() + this.nestedPages.getSize();
+                }
+
+                public int localCount(Map<String, Integer> counts, SizeCarrier carrier) {
+                    return counts.getSize() + carrier.getSize();
+                }
+            }
+
+            class SizeCarrier {
+                int getSize() {
+                    return 1;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ScreenCollectionSizeSurface.java").writeText("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.Map;
+            import java.util.List;
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.components.Button;
+            import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+            import net.minecraft.network.chat.Component;
+
+            public class ScreenCollectionSizeSurface extends AbstractContainerScreen<MenuSurface> {
+                private final Map<Integer, List<String>> pages = new HashMap<>();
+                private int currentPageNumber;
+
+                public int pageCount() {
+                    return this.pages.size();
+                }
+
+                @Override
+                protected void init() {
+                    super.init();
+                    this.addRenderableWidget(new Button.Builder(Component.literal(">"), (button) -> {
+                        if (this.currentPageNumber < this.pages.size() - 1) {
+                            this.currentPageNumber++;
+                        }
+                    }).bounds(0, 0, 20, 20));
+                }
+
+                @Override
+                public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTicks) {
+                    this.renderBackground(guiGraphics);
+                    super.render(guiGraphics, mouseX, mouseY, partialTicks);
+                }
+            }
+
+            class MenuSurface {
+            }
+        """.trimIndent())
         srcDir.resolve("BlockRegistrySurface.java").writeText("""
             package com.example;
 
@@ -15176,6 +15241,8 @@ class StructuralRefactorExtraTest {
         val duration = srcDir.resolve("UseDurationSurface.java").readText()
         val recipe = srcDir.resolve("RecipeSurface.java").readText()
         val containerScope = srcDir.resolve("ContainerScopeSurface.java").readText()
+        val collectionSize = srcDir.resolve("CollectionSizeSurface.java").readText()
+        val screenCollectionSize = srcDir.resolve("ScreenCollectionSizeSurface.java").readText()
         val registry = srcDir.resolve("BlockRegistrySurface.java").readText()
         val capability = srcDir.resolve("CapabilityUseSurface.java").readText()
         val externalUuid = srcDir.resolve("ExternalUuidModifierSurface.java").readText()
@@ -15197,6 +15264,11 @@ class StructuralRefactorExtraTest {
         assertTrue(containerScope.contains("return matrix.size();"))
         assertTrue(containerScope.contains("int count = matrix.getContainerSize();"))
         assertTrue(containerScope.contains("i < matrix.getContainerSize()"))
+        assertTrue(collectionSize.contains("return this.pages.size() + this.nestedPages.size();"))
+        assertTrue(collectionSize.contains("return counts.size() + carrier.getSize();"))
+        assertTrue(screenCollectionSize.contains("return this.pages.size();"))
+        assertTrue(screenCollectionSize.contains("this.currentPageNumber < this.pages.size() - 1"))
+        assertTrue(!screenCollectionSize.contains("this.pages.getSize()"))
         assertTrue(registry.contains("DeferredHolder<Item, BlockItem> registerBlockItem"))
         assertTrue(capability.contains("DirtinessCapability.get(player).ifPresent(DirtinessData::clean)"))
         assertTrue(!capability.contains("LazyOptional.ofNullable(DirtinessCapability.get"))

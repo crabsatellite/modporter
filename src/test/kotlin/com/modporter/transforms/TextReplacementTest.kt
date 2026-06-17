@@ -476,6 +476,37 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `text replacement does not rewrite collection size on container screens`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.Map;
+            import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+
+            public class TestMod extends AbstractContainerScreen<MenuSurface> {
+                private final Map<Integer, String> pages = new HashMap<>();
+
+                public int pageCount() {
+                    return this.pages.size();
+                }
+            }
+
+            class MenuSurface {
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+        assertTrue(transformed.contains("return this.pages.size();"), transformed)
+        assertTrue(!transformed.contains("this.pages.getSize()"), transformed)
+        assertTrue(!transformed.contains("this.pages.getContainerSize()"), transformed)
+    }
+
+    @Test
     fun `model render rgba floats migrate to packed color`() {
         val projectDir = createTestFile("""
             package com.example;

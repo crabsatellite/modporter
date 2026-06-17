@@ -559,6 +559,16 @@ class StructuralRefactorPass : Pass {
             errors.add("Final entity level accessor migration error: ${e.message}")
         }
 
+        // Final source-shape normalization for collection APIs. Some project-level
+        // rewrites can run after the common API pass; collection getSize() is only
+        // valid when the declared receiver API provides it, not for java.util maps.
+        try {
+            val finalCollectionSizeChanges = migrateDeclaredCollectionGetSizeCalls(projectDir, dryRun)
+            changes.addAll(finalCollectionSizeChanges)
+        } catch (e: Exception) {
+            errors.add("Final collection size migration error: ${e.message}")
+        }
+
         return PassResult(name, changes, errors, skipped)
     }
 
@@ -10741,6 +10751,7 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyItemConstructorsAndProperties(result)
         result = migrateLegacyCustomRecipeSource(result)
         result = migrateContainerSizeCallsForDeclaredContainerScopes(result)
+        result = migrateDeclaredCollectionGetSizeCalls(result)
         result = migrateLegacyMenuScreensRegistration(result)
         result = migrateLegacyEnchantmentIterationSource(result)
         result = migrateLegacyRegistryObjectMethodReferences(result)
@@ -21320,6 +21331,57 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
             }
         }
         return result
+    }
+
+    private fun migrateDeclaredCollectionGetSizeCalls(source: String): String {
+        if (!source.contains(".getSize()")) return source
+        val id = """[A-Za-z_$][\w$]*"""
+        val collectionType = """
+            (?:
+                (?:java\.util\.)?(?:Collection|Iterable|List|Map|Queue|Deque|Set|SortedMap|SortedSet|NavigableMap|NavigableSet)|
+                (?:com\.google\.common\.collect\.)?(?:ImmutableList|ImmutableMap|ImmutableSet|ImmutableCollection|Multimap)|
+                (?:it\.unimi\.dsi\.fastutil\.[A-Za-z0-9_.]+\.)?[A-Za-z0-9_]+(?:2[A-Za-z0-9_]+)?(?:Map|List|Set|Collection)
+            )
+        """.trimIndent().replace(Regex("""\s+"""), "")
+        val declaredCollections = Regex(
+            """\b(?:public|protected|private|static|final|transient|volatile|\s)*($collectionType)(?:\s*<[^;=(){}]*?>+)?\s+($id)\b(?=\s*(?:=|;|,|\)))"""
+        ).findAll(source).map { it.groupValues[2] }.toSet()
+        if (declaredCollections.isEmpty()) return source
+
+        var result = source
+        for (variable in declaredCollections) {
+            val escaped = Regex.escape(variable)
+            result = Regex("""\bthis\.$escaped\.getSize\(\)""").replace(result, "this.$variable.size()")
+            result = Regex("""(?<!\.)\b$escaped\.getSize\(\)""").replace(result, "$variable.size()")
+        }
+        return result
+    }
+
+    private fun migrateDeclaredCollectionGetSizeCalls(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val changes = mutableListOf<Change>()
+        Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                val migrated = migrateDeclaredCollectionGetSizeCalls(original)
+                if (migrated != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate declared Java collection getSize() calls to size()",
+                        before = "Map/List/Set variable .getSize()",
+                        after = "Map/List/Set variable .size()",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-collection-getsize"
+                    ))
+                    if (!dryRun) {
+                        javaFile.writeText(migrated)
+                    }
+                }
+            }
+        return changes
     }
 
     private fun migrateAabbBlockPosPairConstructors(source: String): String {

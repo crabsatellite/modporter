@@ -2,9 +2,11 @@ package com.modporter.transforms
 
 import com.modporter.core.pipeline.Pipeline
 import com.modporter.core.transforms.ast.AstTransformPass
+import com.modporter.core.transforms.build.BuildSystemPass
 import com.modporter.core.transforms.structural.StructuralRefactorPass
 import com.modporter.core.transforms.text.TextReplacementPass
 import com.modporter.mapping.MappingDatabase
+import com.modporter.resources.ResourceMigrationPass
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Path
@@ -84,6 +86,64 @@ class RealWorldPatternsTest {
     }
 
     // ─── Pattern 2: Item registration ───
+
+    @Test
+    fun `full pipeline preserves collection size calls on container screens`() {
+        val projectDir = createFile("LoreBookScreen.java", """
+            package com.example.mymod;
+
+            import java.util.HashMap;
+            import java.util.List;
+            import java.util.Map;
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.components.Button;
+            import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+            import net.minecraft.network.chat.Component;
+
+            public class LoreBookScreen extends AbstractContainerScreen<LoreBookMenu> {
+                private final Map<Integer, List<String>> pages = new HashMap<>();
+                private int currentPageNumber;
+
+                @Override
+                protected void init() {
+                    super.init();
+                    this.addRenderableWidget(new Button.Builder(Component.literal(">"), (button) -> {
+                        if (this.currentPageNumber < this.pages.size() - 1) {
+                            this.currentPageNumber++;
+                        }
+                    }).bounds(0, 0, 20, 20));
+                }
+
+                @Override
+                public void render(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTicks) {
+                    this.renderBackground(guiGraphics);
+                    super.render(guiGraphics, mouseX, mouseY, partialTicks);
+                }
+            }
+
+            class LoreBookMenu {
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pipeline = Pipeline(
+            passes = listOf(
+                TextReplacementPass(db),
+                AstTransformPass(db),
+                StructuralRefactorPass(),
+                BuildSystemPass(),
+                ResourceMigrationPass(db)
+            ),
+            dryRun = false
+        )
+        pipeline.run(projectDir)
+
+        val content = tempDir.resolve("src/main/java/com/example/LoreBookScreen.java").readText()
+
+        assertTrue(content.contains("this.currentPageNumber < this.pages.size() - 1"), content)
+        assertFalse(content.contains("this.pages.getSize()"), content)
+        assertFalse(content.contains("this.pages.getContainerSize()"), content)
+    }
 
     @Test
     fun `transforms item registration pattern`() {
