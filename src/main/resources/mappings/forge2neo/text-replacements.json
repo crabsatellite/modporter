@@ -50,6 +50,14 @@
       "fileGlob": "*.java"
     },
     {
+      "id": "forgegui-import",
+      "pattern": "import\\s+net\\.minecraftforge\\.client\\.gui\\.overlay\\.ForgeGui;\\r?\\n",
+      "replacement": "import net.minecraft.client.gui.Gui;\n",
+      "description": "ForgeGui overlay helper was removed; use vanilla Gui in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "pkg-forge-main",
       "pattern": "net.minecraftforge",
       "replacement": "net.neoforged.neoforge",
@@ -138,8 +146,8 @@
     {
       "id": "cls-ForgeGui",
       "pattern": "\\bForgeGui\\b",
-      "replacement": "ExtendedGui",
-      "description": "ForgeGui -> ExtendedGui",
+      "replacement": "Gui",
+      "description": "ForgeGui -> vanilla Gui",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -3513,7 +3521,7 @@
     },
     {
       "id": "gui-overlay-render-signature",
-      "pattern": "public\\s+void\\s+render\\(\\s*ExtendedGui\\s+\\w+\\s*,\\s*GuiGraphics\\s+(\\w+)\\s*,\\s*float\\s+\\w+\\s*,\\s*int\\s+\\w+\\s*,\\s*int\\s+\\w+\\s*\\)",
+      "pattern": "public\\s+void\\s+render\\(\\s*(?:ExtendedGui|Gui)\\s+\\w+\\s*,\\s*GuiGraphics\\s+(\\w+)\\s*,\\s*float\\s+\\w+\\s*,\\s*int\\s+\\w+\\s*,\\s*int\\s+\\w+\\s*\\)",
       "replacement": "public void render(GuiGraphics $1, DeltaTracker deltaTracker)",
       "description": "IGuiOverlay render signature -> LayeredDraw.Layer render signature",
       "fileGlob": "*.java",

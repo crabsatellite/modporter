@@ -68,6 +68,33 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `forge gui helper migrates to vanilla gui instead of removed extended gui`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraftforge.client.gui.overlay.ForgeGui;
+
+            public class TestMod {
+                void render(ForgeGui gui) {
+                    Object accessor = gui;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.client.gui.Gui;"))
+        assertTrue(transformed.contains("void render(Gui gui)"))
+        assertFalse(transformed.contains("ExtendedGui"))
+        assertFalse(transformed.contains("net.neoforged.neoforge.client.gui.overlay.Gui"))
+        assertFalse(transformed.contains("ForgeGui"))
+    }
+
+    @Test
     fun `network direction checks are not replaced with constant placeholders`() {
         val projectDir = createTestFile("""
             package com.example;

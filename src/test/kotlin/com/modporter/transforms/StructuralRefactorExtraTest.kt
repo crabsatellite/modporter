@@ -2074,6 +2074,8 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.entity.player.Player;
 
             public interface SynchedData extends INBTSynchable<CompoundTag> {
+                Player getPlayer();
+
                 static LazyOptional<SynchedData> get(Player player) {
                     return LazyOptional.ofNullable(player.getCapability(ExampleCapabilities.PLAYER_DATA));
                 }
@@ -2102,6 +2104,7 @@ class StructuralRefactorExtraTest {
                     this.player = player;
                 }
 
+                @Override
                 public Player getPlayer() {
                     return this.player;
                 }
@@ -2127,6 +2130,24 @@ class StructuralRefactorExtraTest {
 
                 public SimpleChannel getPacketChannel() {
                     return ExamplePacketHandler.INSTANCE;
+                }
+            }
+        """.trimIndent())
+        capabilityDir.resolve("SynchedDataHooks.java").writeText("""
+            package com.example.capability;
+
+            import com.aetherteam.nitrogen.capability.INBTSynchable;
+            import net.minecraft.world.entity.player.Player;
+
+            public class SynchedDataHooks {
+                public static void syncFromGetter(Player player, boolean value) {
+                    SynchedData.get(player).ifPresent(synchedData -> {
+                        synchedData.setSynched(INBTSynchable.Direction.CLIENT, "setValue", value);
+                    });
+                }
+
+                public static void syncFromLocal(SynchedData data, boolean value) {
+                    data.setSynched(INBTSynchable.Direction.CLIENT, "setValue", value);
                 }
             }
         """.trimIndent())
@@ -2190,6 +2211,7 @@ class StructuralRefactorExtraTest {
         val capabilities = capabilityDir.resolve("ExampleCapabilities.java").readText()
         val api = capabilityDir.resolve("SynchedData.java").readText()
         val impl = capabilityDir.resolve("SynchedDataCapability.java").readText()
+        val hooks = capabilityDir.resolve("SynchedDataHooks.java").readText()
         val packet = networkDir.resolve("SynchedDataSyncPacket.java").readText()
         val mod = srcDir.resolve("ExampleMod.java").readText()
 
@@ -2210,6 +2232,8 @@ class StructuralRefactorExtraTest {
         assertTrue(impl.contains("this.setSynched(this.getPlayer().getId(), INBTSynchable.Direction.CLIENT, \"setValue\", value);"), impl)
         assertFalse(impl.contains("getPacketChannel"), impl)
         assertFalse(impl.contains("BasePacket"), impl)
+        assertTrue(hooks.contains("synchedData.setSynched(synchedData.getPlayer().getId(), INBTSynchable.Direction.CLIENT, \"setValue\", value);"), hooks)
+        assertTrue(hooks.contains("data.setSynched(data.getPlayer().getId(), INBTSynchable.Direction.CLIENT, \"setValue\", value);"), hooks)
         assertTrue(packet.contains("import com.aetherteam.nitrogen.attachment.INBTSynchable;"), packet)
         assertTrue(packet.contains("RegistryFriendlyByteBuf buf"), packet)
         assertTrue(mod.contains("ExampleCapabilities.registerAttachments(modEventBus);"), mod)
@@ -2237,6 +2261,31 @@ class StructuralRefactorExtraTest {
 
         assertTrue(api.contains("return LazyOptional.ofNullable(world.getData(ExampleCapabilities.TIME_DATA.get()));"), api)
         assertFalse(api.contains("return world.getData(ExampleCapabilities.TIME_DATA.get());"), api)
+    }
+
+    @Test
+    fun `legacy jump from ground overrides keep target public visibility`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RideableEntity.java").writeText("""
+            package com.example;
+
+            public class RideableEntity {
+                @Override
+                protected void jumpFromGround() {
+                    super.jumpFromGround();
+                }
+
+                protected void registerGoals() {
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val migrated = srcDir.resolve("RideableEntity.java").readText()
+        assertTrue(migrated.contains("public void jumpFromGround()"), migrated)
+        assertTrue(migrated.contains("protected void registerGoals()"), migrated)
     }
 
     @Test
@@ -9087,7 +9136,9 @@ class StructuralRefactorExtraTest {
             public class GuiLayerSurface {
                 public static void registerOverlays(RegisterGuiLayersEvent event) {
                     event.registerAbove(VanillaGuiOverlay.CROSSHAIR.id(), "indicator", (gui, graphics, partialTick, screenWidth, screenHeight) -> {
-                        render(graphics, gui, partialTick, screenWidth, screenHeight);
+                        if (gui.shouldDrawSurvivalElements()) {
+                            render(graphics, gui, partialTick, screenWidth, screenHeight);
+                        }
                     });
                 }
 
@@ -10695,6 +10746,8 @@ class StructuralRefactorExtraTest {
         assertTrue(guiLayerSurface.contains("float partialTick = deltaTracker.getGameTimeDeltaPartialTick(false);"))
         assertTrue(guiLayerSurface.contains("int screenWidth = graphics.guiWidth();"))
         assertTrue(guiLayerSurface.contains("int screenHeight = graphics.guiHeight();"))
+        assertTrue(guiLayerSurface.contains("net.minecraft.client.Minecraft.getInstance().gameMode.canHurtPlayer() && !net.minecraft.client.Minecraft.getInstance().options.hideGui"))
+        assertTrue(!guiLayerSurface.contains("shouldDrawSurvivalElements"))
         assertTrue(!guiLayerSurface.contains("VanillaGuiOverlay"))
         assertTrue(poseNormalSurface.contains("private static void emit(VertexConsumer vertex, Matrix4f matrix, PoseStack.Pose normal, int light)"), poseNormalSurface)
         assertTrue(poseNormalSurface.contains("emit(vertex, matrix, pose, 15);"))

@@ -4609,6 +4609,7 @@ $helpers
                 ?.groupValues
                 ?.get(1)
         }.toSet()
+        val syncOwnerAccessors = collectNitrogenSyncOwnerAccessors(javaFiles)
 
         for (javaFile in javaFiles) {
             val original = javaFile.readText()
@@ -4657,8 +4658,9 @@ $helpers
 
             modified = rewriteNitrogenGetSyncPacketSignature(modified, entitySyncPackets)
             val ownerEntityId = inferNitrogenOwnerEntityId(modified)
-            modified = rewriteNitrogenSyncCalls(modified, "setSynched", ownerEntityId)
-            modified = rewriteNitrogenSyncCalls(modified, "forceSync", ownerEntityId)
+            val receiverOwnerEntityIds = inferNitrogenReceiverOwnerEntityIds(modified, syncOwnerAccessors)
+            modified = rewriteNitrogenSyncCalls(modified, "setSynched", ownerEntityId, receiverOwnerEntityIds)
+            modified = rewriteNitrogenSyncCalls(modified, "forceSync", ownerEntityId, receiverOwnerEntityIds)
 
             if (modified.contains("getPacketChannel(")) {
                 modified = removeMethodByName(modified, "getPacketChannel")
@@ -4685,6 +4687,25 @@ $helpers
         }
 
         return changes
+    }
+
+    private fun collectNitrogenSyncOwnerAccessors(javaFiles: List<Path>): Map<String, String> {
+        val entityTypes = "(?:Player|ServerPlayer|Entity|LivingEntity|Mob|AbstractArrow|Projectile)"
+        return javaFiles.mapNotNull { javaFile ->
+            val text = javaFile.readText()
+            if (!text.contains("INBTSynchable")) return@mapNotNull null
+            val typeName = Regex("""\b(?:class|interface)\s+([A-Za-z_$][\w$]*)\b""")
+                .find(text)
+                ?.groupValues
+                ?.get(1)
+                ?: return@mapNotNull null
+            val accessors = Regex("""\b(?:public\s+)?$entityTypes\s+(get[A-Za-z_$][\w$]*)\s*\(\s*\)\s*(?:;|\{)""")
+                .findAll(text)
+                .map { it.groupValues[1] }
+                .distinct()
+                .toList()
+            if (accessors.size == 1) typeName to accessors.single() else null
+        }.toMap()
     }
 
     private fun rewriteNitrogenGetSyncPacketSignature(source: String, entitySyncPackets: Set<String>): String {
@@ -4721,10 +4742,35 @@ $helpers
         return null
     }
 
-    private fun rewriteNitrogenSyncCalls(source: String, methodName: String, ownerEntityId: String?): String {
+    private fun inferNitrogenReceiverOwnerEntityIds(source: String, ownerAccessors: Map<String, String>): Map<String, String> {
+        if (ownerAccessors.isEmpty()) return emptyMap()
+        val typeAlternation = ownerAccessors.keys.joinToString("|") { Regex.escape(it) }
+        val receiverTypes = mutableMapOf<String, MutableSet<String>>()
+        fun record(receiver: String, typeName: String) {
+            receiverTypes.getOrPut(receiver) { mutableSetOf() }.add(typeName)
+        }
+        Regex("""\b($typeAlternation)\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(source)
+            .forEach { match -> record(match.groupValues[2], match.groupValues[1]) }
+        Regex("""\b($typeAlternation)\.get\s*\([^)]*\)\s*(?:\.resolve\s*\(\s*\))?\s*\.ifPresent\s*\(\s*\(?\s*([A-Za-z_$][\w$]*)""")
+            .findAll(source)
+            .forEach { match -> record(match.groupValues[2], match.groupValues[1]) }
+        return receiverTypes.mapNotNull { (receiver, types) ->
+            val typeName = types.singleOrNull() ?: return@mapNotNull null
+            val accessor = ownerAccessors[typeName] ?: return@mapNotNull null
+            receiver to "$receiver.$accessor().getId()"
+        }.toMap()
+    }
+
+    private fun rewriteNitrogenSyncCalls(
+        source: String,
+        methodName: String,
+        ownerEntityId: String?,
+        receiverOwnerEntityIds: Map<String, String>
+    ): String {
         var result = source
         var cursor = 0
-        val pattern = Regex("""(?:(?:this|[A-Za-z_$][\w$]*)\.)?${Regex.escape(methodName)}\s*\(""")
+        val pattern = Regex("""(?:(this|[A-Za-z_$][\w$]*)\.)?${Regex.escape(methodName)}\s*\(""")
         while (true) {
             val match = pattern.find(result, cursor) ?: break
             val lineStart = result.lastIndexOf('\n', match.range.first).let { if (it < 0) 0 else it + 1 }
@@ -4744,7 +4790,13 @@ $helpers
                 cursor = closeParen + 1
                 continue
             }
-            val idExpression = nitrogenSyncIdExpression(args, ownerEntityId)
+            val receiverName = match.groupValues.getOrNull(1).orEmpty()
+            val receiverEntityId = if (receiverName.isNotBlank() && receiverName != "this") {
+                receiverOwnerEntityIds[receiverName]
+            } else {
+                null
+            }
+            val idExpression = nitrogenSyncIdExpression(args, ownerEntityId, receiverEntityId)
             if (idExpression == null) {
                 cursor = closeParen + 1
                 continue
@@ -4760,7 +4812,7 @@ $helpers
         return result
     }
 
-    private fun nitrogenSyncIdExpression(args: List<String>, ownerEntityId: String?): String? {
+    private fun nitrogenSyncIdExpression(args: List<String>, ownerEntityId: String?, receiverEntityId: String?): String? {
         val direction = args.firstOrNull() ?: return null
         return when {
             direction.contains("Direction.DIMENSION") -> "-1"
@@ -4768,7 +4820,7 @@ $helpers
                 val target = args.last().trim()
                 if (target.isBlank()) null else "${stripDimensionAccessor(target)}.getId()"
             }
-            else -> ownerEntityId
+            else -> receiverEntityId ?: ownerEntityId
         }
     }
 
@@ -10023,6 +10075,7 @@ ${entries.joinToString(",\n")}
         result = migrateLegacySkinManagerTextureLookups(result)
         result = migrateLegacyModelEventSource(result)
         result = migrateLegacyGuiLayerRegistrationSource(result)
+        result = migrateLegacyGuiSurvivalElementsSource(result)
         result = migrateLegacyNeoForgeModelApiSource(result)
         result = migrateLegacyEventBusPostBooleans(result)
         result = migrateLegacyForgeBusBindingCalls(result)
@@ -10040,6 +10093,7 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyWolfModelLayerDefinitions(result)
         result = migrateLegacyEmptyUnsidedItemHandlerOverrides(result)
         result = migrateLegacyHangingEntityBoundingBoxes(result)
+        result = migrateLegacyJumpFromGroundVisibility(result)
         result = migrateLegacyToastTextureRendering(result)
         result = migrateHurtAndBreakEquipmentSlotSource(result)
         result = migrateSingleStackRecipeInputs(result)
@@ -12563,6 +12617,19 @@ $body
         val prefix = if (locals.isEmpty()) "" else locals.joinToString(separator = "\n", postfix = "\n") { "\t\t\t$it" }
         return "($graphicsName, deltaTracker) -> {\n$prefix$body}"
     }
+
+    private fun migrateLegacyGuiSurvivalElementsSource(source: String): String {
+        if (!source.contains(".shouldDrawSurvivalElements()")) return source
+        return Regex("""\b[A-Za-z_$][\w$]*\.shouldDrawSurvivalElements\(\)""")
+            .replace(
+                source,
+                "net.minecraft.client.Minecraft.getInstance().gameMode.canHurtPlayer() && !net.minecraft.client.Minecraft.getInstance().options.hideGui"
+            )
+    }
+
+    private fun migrateLegacyJumpFromGroundVisibility(source: String): String =
+        Regex("""(?m)^(\s*)protected(\s+void\s+jumpFromGround\s*\(\s*\))""")
+            .replace(source, "$1public$2")
 
     private fun migrateTextureAtlasSpriteFloatCoordinateCalls(source: String): String {
         var result = source
