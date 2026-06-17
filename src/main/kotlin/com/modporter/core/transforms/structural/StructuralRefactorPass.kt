@@ -9502,6 +9502,7 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyDataAndComponentAccess(result)
         result = migrateLegacySpawnEggItemTypeCalls(result)
         result = migrateLegacyTriStateEventResults(result)
+        result = migrateLegacySleepingTimeCheckEventSource(result)
         result = migrateLegacyCancellableEventHelperParameters(result)
         result = migrateLegacyCancellableEventHelperCallSites(result)
         result = splitLegacyAbstractPlayerInteractSubscribers(result)
@@ -16111,6 +16112,64 @@ protected EntityDimensions getDefaultDimensions(Pose $poseName) {
             if (!Regex("""\bEvent\b""").containsMatchIn(withoutEventImport)) {
                 result = withoutEventImport
             }
+        }
+        return result
+    }
+
+    private fun migrateLegacySleepingTimeCheckEventSource(source: String): String {
+        if (!source.contains("SleepingTimeCheckEvent") && !source.contains("CanPlayerSleepEvent")) return source
+        var result = source
+            .replace(
+                "net.minecraftforge.event.entity.player.SleepingTimeCheckEvent",
+                "net.neoforged.neoforge.event.entity.player.CanPlayerSleepEvent"
+            )
+            .replace(
+                "net.neoforged.neoforge.event.entity.player.SleepingTimeCheckEvent",
+                "net.neoforged.neoforge.event.entity.player.CanPlayerSleepEvent"
+            )
+            .replace("SleepingTimeCheckEvent", "CanPlayerSleepEvent")
+
+        var changed = false
+        var cursor = 0
+        val methodPattern = Regex(
+            """\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?[\w<>\[\].?,\s]+\s+[A-Za-z_$][\w$]*\s*\([^;{}()]*\bCanPlayerSleepEvent\s+([A-Za-z_$][\w$]*)[^;{}()]*\)\s*(?:throws\s+[^{]+)?\{"""
+        )
+        while (true) {
+            val match = methodPattern.find(result, cursor) ?: break
+            val eventVar = match.groupValues[1]
+            val openBrace = match.range.last
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            var migratedBody = body
+            migratedBody = Regex("""\b${Regex.escape(eventVar)}\.setResult\(\s*TriState\.FALSE\s*\)""")
+                .replace(migratedBody, "$eventVar.setProblem(net.minecraft.world.entity.player.Player.BedSleepingProblem.NOT_POSSIBLE_NOW)")
+            migratedBody = Regex("""\b${Regex.escape(eventVar)}\.setResult\(\s*TriState\.TRUE\s*\)""")
+                .replace(migratedBody, "$eventVar.setProblem(null)")
+            migratedBody = Regex("""\b${Regex.escape(eventVar)}\.setResult\(\s*TriState\.DEFAULT\s*\)""")
+                .replace(migratedBody, "$eventVar.setProblem($eventVar.getVanillaProblem())")
+            migratedBody = Regex("""\b${Regex.escape(eventVar)}\.getSleepingLocation\(\)""")
+                .replace(migratedBody, "java.util.Optional.of($eventVar.getPos())")
+            if (migratedBody != body) {
+                result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
+                changed = true
+                cursor = openBrace + 1 + migratedBody.length
+            } else {
+                cursor = closeBrace + 1
+            }
+        }
+
+        if (changed) {
+            result = removeUnusedSimpleImports(
+                result,
+                listOf(
+                    "net.neoforged.neoforge.common.util.TriState",
+                    "net.neoforged.bus.api.Event"
+                )
+            )
         }
         return result
     }

@@ -10349,6 +10349,54 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy sleeping time check event result API by event parameter type`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("SleepSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraftforge.event.entity.player.SleepingTimeCheckEvent;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.common.util.TriState;
+
+            public class SleepSurface {
+                @SubscribeEvent
+                public static void denySleep(SleepingTimeCheckEvent event) {
+                    event.getSleepingLocation().ifPresent(pos -> {});
+                    event.setResult(TriState.FALSE);
+                }
+
+                @SubscribeEvent
+                public static void allowSleep(SleepingTimeCheckEvent sleepEvent) {
+                    sleepEvent.setResult(TriState.TRUE);
+                    sleepEvent.setResult(TriState.DEFAULT);
+                }
+
+                public static void unrelated(OtherEvent event) {
+                    event.setResult(TriState.FALSE);
+                }
+
+                private static class OtherEvent {
+                    void setResult(TriState state) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("SleepSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.neoforged.neoforge.event.entity.player.CanPlayerSleepEvent;"))
+        assertFalse(migrated.contains("SleepingTimeCheckEvent"))
+        assertTrue(migrated.contains("java.util.Optional.of(event.getPos()).ifPresent(pos -> {})"))
+        assertTrue(migrated.contains("event.setProblem(net.minecraft.world.entity.player.Player.BedSleepingProblem.NOT_POSSIBLE_NOW);"))
+        assertTrue(migrated.contains("sleepEvent.setProblem(null);"))
+        assertTrue(migrated.contains("sleepEvent.setProblem(sleepEvent.getVanillaProblem());"))
+        assertTrue(migrated.contains("event.setResult(TriState.FALSE);"))
+    }
+
+    @Test
     fun `migrates legacy projectile dispenser chest boat and projectile damage APIs by source shape`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
