@@ -21851,18 +21851,29 @@ $encodeLines
 
         fun knownCodecSignature(className: String): BlockCodecSignature? = when (className) {
             "BaseEntityBlock" -> BlockCodecSignature("net.minecraft.world.level.block.BaseEntityBlock", "protected")
+            "AbstractChestBlock" -> BlockCodecSignature("net.minecraft.world.level.block.AbstractChestBlock", "protected")
+            "AbstractFurnaceBlock" -> BlockCodecSignature("net.minecraft.world.level.block.AbstractFurnaceBlock", "protected")
             "HorizontalDirectionalBlock" -> BlockCodecSignature("net.minecraft.world.level.block.HorizontalDirectionalBlock", "protected")
             "BaseHorizonBlock" -> BlockCodecSignature("net.minecraft.world.level.block.HorizontalDirectionalBlock", "protected")
             "DirectionalBlock" -> BlockCodecSignature("net.minecraft.world.level.block.DirectionalBlock", "protected")
             "MultifaceBlock" -> BlockCodecSignature("net.minecraft.world.level.block.MultifaceBlock", "protected")
+            "BedBlock" -> BlockCodecSignature("net.minecraft.world.level.block.BedBlock", "public", exactReturn = true)
             "BushBlock" -> BlockCodecSignature("net.minecraft.world.level.block.BushBlock", "public")
             "CropBlock" -> BlockCodecSignature("net.minecraft.world.level.block.CropBlock", "public")
+            "DirtPathBlock" -> BlockCodecSignature("net.minecraft.world.level.block.DirtPathBlock", "public", exactReturn = true)
+            "FarmBlock" -> BlockCodecSignature("net.minecraft.world.level.block.FarmBlock", "public", exactReturn = true)
+            "FrostedIceBlock" -> BlockCodecSignature("net.minecraft.world.level.block.FrostedIceBlock", "public", exactReturn = true)
+            "GrassBlock" -> BlockCodecSignature("net.minecraft.world.level.block.GrassBlock", "public", exactReturn = true)
+            "IronBarsBlock" -> BlockCodecSignature("net.minecraft.world.level.block.IronBarsBlock", "public")
             "RotatedPillarBlock" -> BlockCodecSignature("net.minecraft.world.level.block.RotatedPillarBlock", "public")
             "LeavesBlock" -> BlockCodecSignature("net.minecraft.world.level.block.LeavesBlock", "public")
             "LiquidBlock" -> BlockCodecSignature("net.minecraft.world.level.block.LiquidBlock", "public", exactReturn = true)
+            "SlabBlock" -> BlockCodecSignature("net.minecraft.world.level.block.SlabBlock", "public")
+            "StairBlock" -> BlockCodecSignature("net.minecraft.world.level.block.StairBlock", "public")
             "TransparentBlock" -> BlockCodecSignature("net.minecraft.world.level.block.TransparentBlock", "protected")
             "HalfTransparentBlock" -> BlockCodecSignature("net.minecraft.world.level.block.HalfTransparentBlock", "protected")
             "ChestBlock" -> BlockCodecSignature("net.minecraft.world.level.block.ChestBlock", "public")
+            "WallBlock" -> BlockCodecSignature("net.minecraft.world.level.block.WallBlock", "public", exactReturn = true)
             "WallSignBlock" -> BlockCodecSignature("net.minecraft.world.level.block.WallSignBlock", "public", exactReturn = true)
             "SaplingBlock" -> BlockCodecSignature("net.minecraft.world.level.block.SaplingBlock", "public")
             "Block" -> BlockCodecSignature("net.minecraft.world.level.block.Block", "protected")
@@ -21940,7 +21951,20 @@ $encodeLines
             val classStart = content.indexOf('{', classMatch.range.first)
             if (classStart < 0) continue
 
-            val codecBound = codecSignature.bound
+            val codecBound = if (parentClass == "AbstractChestBlock") {
+                val blockEntityType = Regex("""extends\s+(?:net\.minecraft\.world\.level\.block\.)?AbstractChestBlock\s*<\s*([^>]+)\s*>""")
+                    .find(content)
+                    ?.groupValues
+                    ?.get(1)
+                    ?.trim()
+                if (blockEntityType != null) {
+                    "net.minecraft.world.level.block.AbstractChestBlock<$blockEntityType>"
+                } else {
+                    codecSignature.bound
+                }
+            } else {
+                codecSignature.bound
+            }
             val codecVisibility = codecSignature.visibility
             val codecFieldType = if (codecSignature.exactReturn) codecBound else className
             val codecReturnType = if (codecSignature.exactReturn) codecBound else "? extends $codecBound"

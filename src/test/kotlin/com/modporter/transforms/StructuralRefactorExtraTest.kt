@@ -2853,6 +2853,153 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `block codec generation uses vanilla parent visibility and generic bounds`() {
+        val projectDir = createFile("AerogelSlab.java", """
+            package com.example;
+
+            import net.minecraft.world.level.block.SlabBlock;
+
+            public class AerogelSlab extends SlabBlock {
+                public AerogelSlab(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.resolve("AerogelWall.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.WallBlock;
+
+            public class AerogelWall extends WallBlock {
+                public AerogelWall(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("QuickPane.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.IronBarsBlock;
+
+            public class QuickPane extends IronBarsBlock {
+                public QuickPane(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("AetherGrass.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.GrassBlock;
+
+            public class AetherGrass extends GrassBlock {
+                public AetherGrass(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("EnchantedGrass.java").writeText("""
+            package com.example;
+
+            public class EnchantedGrass extends AetherGrass {
+                public EnchantedGrass(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("AetherFarm.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.FarmBlock;
+
+            public class AetherFarm extends FarmBlock {
+                public AetherFarm(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("AetherPath.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.DirtPathBlock;
+
+            public class AetherPath extends DirtPathBlock {
+                public AetherPath(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("AetherIce.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.FrostedIceBlock;
+
+            public class AetherIce extends FrostedIceBlock {
+                public AetherIce(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SkyBed.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.DyeColor;
+            import net.minecraft.world.level.block.BedBlock;
+
+            public class SkyBed extends BedBlock {
+                public SkyBed(Properties properties) {
+                    super(DyeColor.CYAN, properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("AltarBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.AbstractFurnaceBlock;
+            import net.minecraft.core.BlockPos;
+
+            public class AltarBlock extends AbstractFurnaceBlock {
+                public AltarBlock(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                protected void openContainer(Level level, BlockPos pos, Player player) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TreasureChestBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.AbstractChestBlock;
+            import net.minecraft.world.level.block.entity.ChestBlockEntity;
+
+            public class TreasureChestBlock extends AbstractChestBlock<ChestBlockEntity> {
+                public TreasureChestBlock(Properties properties) {
+                    super(properties, () -> null);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        assertTrue(srcDir.resolve("AerogelSlab.java").readText().contains("public com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.SlabBlock> codec()"))
+        assertTrue(srcDir.resolve("AerogelWall.java").readText().contains("public com.mojang.serialization.MapCodec<net.minecraft.world.level.block.WallBlock> codec()"))
+        assertTrue(srcDir.resolve("QuickPane.java").readText().contains("public com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.IronBarsBlock> codec()"))
+        assertTrue(srcDir.resolve("AetherGrass.java").readText().contains("public com.mojang.serialization.MapCodec<net.minecraft.world.level.block.GrassBlock> codec()"))
+        assertTrue(srcDir.resolve("EnchantedGrass.java").readText().contains("public com.mojang.serialization.MapCodec<net.minecraft.world.level.block.GrassBlock> codec()"))
+        assertTrue(srcDir.resolve("AetherFarm.java").readText().contains("public com.mojang.serialization.MapCodec<net.minecraft.world.level.block.FarmBlock> codec()"))
+        assertTrue(srcDir.resolve("AetherPath.java").readText().contains("public com.mojang.serialization.MapCodec<net.minecraft.world.level.block.DirtPathBlock> codec()"))
+        assertTrue(srcDir.resolve("AetherIce.java").readText().contains("public com.mojang.serialization.MapCodec<net.minecraft.world.level.block.FrostedIceBlock> codec()"))
+        assertTrue(srcDir.resolve("SkyBed.java").readText().contains("public com.mojang.serialization.MapCodec<net.minecraft.world.level.block.BedBlock> codec()"))
+        assertTrue(srcDir.resolve("AltarBlock.java").readText().contains("protected com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.AbstractFurnaceBlock> codec()"))
+        assertTrue(srcDir.resolve("TreasureChestBlock.java").readText().contains("protected com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.AbstractChestBlock<ChestBlockEntity>> codec()"))
+    }
+
+    @Test
     fun `block codec generation resolves custom parent chains to nearest vanilla codec bound`() {
         val projectDir = createFile("TFLeavesBlock.java", """
             package com.example;
