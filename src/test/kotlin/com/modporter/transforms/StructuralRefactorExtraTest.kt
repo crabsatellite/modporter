@@ -8180,6 +8180,66 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates built in registry delegate maps by declared map key type`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val mixinDir = srcDir.resolve("mixin")
+        srcDir.createDirectories()
+        mixinDir.createDirectories()
+        mixinDir.resolve("BlockColorsAccessor.java").writeText("""
+            package com.example.mixin;
+
+            import net.minecraft.client.color.block.BlockColor;
+            import net.minecraft.client.color.block.BlockColors;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.level.block.Block;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.gen.Accessor;
+
+            import java.util.Map;
+
+            @Mixin(BlockColors.class)
+            public interface BlockColorsAccessor {
+                @Accessor("blockColors")
+                Map<Holder.Reference<Block>, BlockColor> demo${'$'}getBlockColors();
+            }
+        """.trimIndent())
+        srcDir.resolve("ColorResolver.java").writeText("""
+            package com.example;
+
+            import com.example.mixin.BlockColorsAccessor;
+            import net.minecraft.client.color.block.BlockColor;
+            import net.minecraft.client.color.block.BlockColors;
+            import net.minecraft.core.Holder;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.Blocks;
+
+            import java.util.HashMap;
+            import java.util.Map;
+
+            public class ColorResolver {
+                public void copy(BlockColors colors) {
+                    Map<Block, BlockColor> map = new HashMap<>();
+                    Map<Holder.Reference<Block>, BlockColor> blockColors = ((BlockColorsAccessor) colors).demo${'$'}getBlockColors();
+                    map.put(Blocks.SHORT_GRASS, blockColors.get(BuiltInRegistries.BLOCK.getDelegateOrThrow(Blocks.SHORT_GRASS)));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val accessor = mixinDir.resolve("BlockColorsAccessor.java").readText()
+        val resolver = srcDir.resolve("ColorResolver.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(accessor.contains("Map<Block, BlockColor> demo${'$'}getBlockColors()"), accessor)
+        assertTrue(resolver.contains("Map<Block, BlockColor> blockColors = ((BlockColorsAccessor) colors).demo${'$'}getBlockColors();"), resolver)
+        assertTrue(resolver.contains("blockColors.get(Blocks.SHORT_GRASS)"), resolver)
+        assertFalse(accessor.contains("Holder.Reference<Block>"))
+        assertFalse(resolver.contains("Holder.Reference<Block>"))
+        assertFalse(resolver.contains("getDelegateOrThrow"))
+    }
+
+    @Test
     fun `migrates MissingMappingsEvent remappers to deferred register aliases`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val initDir = srcDir.resolve("init")

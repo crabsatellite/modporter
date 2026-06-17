@@ -863,20 +863,28 @@ $streamFields,
     }
 
     private fun migrateDyeableLeatherItemColors(source: String): String {
-        if (!source.contains("DataComponents.CUSTOM_DATA") ||
-            !Regex("""\bpublic\s+boolean\s+hasCustomColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(source) ||
-            !Regex("""\bpublic\s+void\s+setColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*,\s*int\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(source)
-        ) {
+        val sourceHasLegacyColorMethods = source.contains("DataComponents.CUSTOM_DATA") &&
+            Regex("""\bpublic\s+boolean\s+hasCustomColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(source) &&
+            Regex("""\bpublic\s+void\s+setColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*,\s*int\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(source)
+        if (!source.contains("DyeableLeatherItem") && !sourceHasLegacyColorMethods) {
             return source
         }
 
         var result = source
+        result = migrateDyeableLeatherGetColorCallSites(result)
         result = result.replace(Regex("""extends\s+ArmorItem\s+implements\s+DyeableLeatherItem"""), "extends ArmorItem")
         result = result.replace(Regex("""\s+implements\s+DyeableLeatherItem\b"""), "")
         result = result.replace(Regex("""implements\s+DyeableLeatherItem\s*,\s*"""), "implements ")
         result = result.replace(Regex(""",\s*DyeableLeatherItem\b"""), "")
         result = removeImportLine(result, "net.minecraft.nbt.CompoundTag")
         result = removeImportLine(result, "net.minecraft.world.item.DyeableLeatherItem")
+
+        val resultHasLegacyColorMethods = result.contains("DataComponents.CUSTOM_DATA") &&
+            Regex("""\bpublic\s+boolean\s+hasCustomColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(result) &&
+            Regex("""\bpublic\s+void\s+setColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*,\s*int\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(result)
+        if (!resultHasLegacyColorMethods) {
+            return result
+        }
 
         if (!result.contains("DEFAULT_COLOR")) {
             val withDefaultColor = insertDyeableDefaultColor(result)
@@ -926,6 +934,13 @@ $streamFields,
         if (!usesSymbolOutsideImports(result, "CustomData")) result = removeImportLine(result, "net.minecraft.world.item.component.CustomData")
         return result
     }
+
+    private fun migrateDyeableLeatherGetColorCallSites(source: String): String =
+        Regex(
+            """\(\(\s*(?:net\.minecraft\.world\.item\.)?DyeableLeatherItem\s*\)\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.getItem\(\)\s*\)\.getColor\(\s*\1\s*\)"""
+        ).replace(source) { match ->
+            "DyedItemColor.getOrDefault(${match.groupValues[1]}, DyedItemColor.LEATHER_COLOR)"
+        }
 
     private fun insertDyeableDefaultColor(source: String): String {
         if (source.contains("DEFAULT_COLOR")) return source

@@ -19603,6 +19603,7 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
         if (result.contains("GameEvent.ENTITY_ROAR")) {
             result = result.replace("GameEvent.ENTITY_ROAR", "GameEvent.ENTITY_ACTION")
         }
+        result = migrateBuiltInRegistryDelegateMapAccess(result)
         if (result.contains("Container")) {
             val containerVariables = Regex("""(?m)^[ \t]*(?:(?:public|protected|private|static|final|transient|volatile)\s+)*(?:(?:@\w+(?:\([^)]*\))?)\s+)*(?:net\.minecraft\.world\.)?Container\s+([A-Za-z_$][\w$]*)\s*(?:[=;,)]|$)""")
                 .findAll(result)
@@ -19702,6 +19703,64 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
         if (needsPlayer) result = addImportIfMissing(result, "net.minecraft.world.entity.player.Player")
         if (needsCollisionContext) result = addImportIfMissing(result, "net.minecraft.world.phys.shapes.CollisionContext")
         if (needsLevelReader) result = addImportIfMissing(result, "net.minecraft.world.level.LevelReader")
+        return result
+    }
+
+    private fun migrateBuiltInRegistryDelegateMapAccess(source: String): String {
+        if (!source.contains("Holder.Reference<") && !source.contains("getDelegateOrThrow(")) return source
+        var result = source
+
+        if (result.contains("@Accessor(\"blockColors\")") && result.contains("BlockColors.class")) {
+            result = Regex("""Map\s*<\s*Holder\.Reference\s*<\s*Block\s*>\s*,\s*BlockColor\s*>""")
+                .replace(result, "Map<Block, BlockColor>")
+        }
+
+        val registryBySimpleType = mapOf(
+            "Block" to "BLOCK",
+            "Item" to "ITEM",
+            "Fluid" to "FLUID",
+            "MobEffect" to "MOB_EFFECT",
+            "SoundEvent" to "SOUND_EVENT",
+            "EntityType" to "ENTITY_TYPE"
+        )
+        val delegateMapVariables = mutableMapOf<String, String>()
+        val mapDeclaration = Regex(
+            """Map\s*<\s*Holder\.Reference\s*<\s*([A-Za-z_$][\w$.]*)\s*>\s*,\s*([^>\r\n;=]+?)\s*>\s+([A-Za-z_$][\w$]*)\s*="""
+        )
+        result = mapDeclaration.replace(result) { match ->
+            val typeName = match.groupValues[1].trim()
+            val simpleType = typeName.substringAfterLast('.')
+            val registryName = registryBySimpleType[simpleType] ?: return@replace match.value
+            val variable = match.groupValues[3]
+            val delegatesIntoMap = Regex(
+                """\b${Regex.escape(variable)}\.get\s*\(\s*BuiltInRegistries\.${Regex.escape(registryName)}\.getDelegateOrThrow\s*\("""
+            ).containsMatchIn(result)
+            if (!delegatesIntoMap) return@replace match.value
+            delegateMapVariables[variable] = registryName
+            "Map<$typeName, ${match.groupValues[2].trim()}> $variable ="
+        }
+
+        for ((variable, registryName) in delegateMapVariables) {
+            result = migrateMethodCalls(result, "$variable.get") { args ->
+                if (args.size != 1) return@migrateMethodCalls args
+                val arg = args.single().trim()
+                val token = "BuiltInRegistries.$registryName.getDelegateOrThrow"
+                if (!arg.startsWith("$token(")) return@migrateMethodCalls args
+                val openParen = arg.indexOf('(', token.length)
+                val closeParen = if (openParen >= 0) findMatchingParen(arg, openParen) else -1
+                if (openParen < 0 || closeParen != arg.length - 1) return@migrateMethodCalls args
+                listOf(arg.substring(openParen + 1, closeParen).trim())
+            }
+        }
+
+        val withoutHolderImport = removeImport(result, "net.minecraft.core.Holder")
+        if (!Regex("""(?<![\w$])Holder(?![\w$])""").containsMatchIn(withoutHolderImport)) {
+            result = withoutHolderImport
+        }
+        val withoutBuiltInRegistriesImport = removeImport(result, "net.minecraft.core.registries.BuiltInRegistries")
+        if (!Regex("""(?<![\w$])BuiltInRegistries(?![\w$])""").containsMatchIn(withoutBuiltInRegistriesImport)) {
+            result = withoutBuiltInRegistriesImport
+        }
         return result
     }
 

@@ -3226,6 +3226,52 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `dyeable leather item interface and external color handlers migrate to dyed item color`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val itemDir = srcDir.resolve("item")
+        val clientDir = srcDir.resolve("client")
+        itemDir.createDirectories()
+        clientDir.createDirectories()
+        itemDir.resolve("LeatherGlovesItem.java").writeText("""
+            package com.example.item;
+
+            import net.minecraft.world.item.DyeableLeatherItem;
+
+            public class LeatherGlovesItem extends GlovesItem implements DyeableLeatherItem {
+                public LeatherGlovesItem(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        clientDir.resolve("ColorResolver.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.world.item.DyeableLeatherItem;
+            import net.minecraft.world.item.ItemStack;
+
+            public class ColorResolver {
+                public int color(ItemStack stack, int tintIndex) {
+                    return tintIndex > 0 ? -1 : ((DyeableLeatherItem) stack.getItem()).getColor(stack);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(tempDir)
+
+        val item = itemDir.resolve("LeatherGlovesItem.java").readText()
+        val colorResolver = clientDir.resolve("ColorResolver.java").readText()
+
+        assertTrue(item.contains("public class LeatherGlovesItem extends GlovesItem"))
+        assertFalse(item.contains("DyeableLeatherItem"))
+        assertTrue(colorResolver.contains("DyedItemColor.getOrDefault(stack, DyedItemColor.LEATHER_COLOR)"))
+        assertTrue(colorResolver.contains("import net.minecraft.world.item.component.DyedItemColor;"))
+        assertFalse(colorResolver.contains("DyeableLeatherItem"))
+        assertFalse(colorResolver.contains(".getColor(stack)"))
+    }
+
+    @Test
     fun `tier sorting registry custom tiers migrate to simple tier incorrect block tags`() {
         val projectDir = createTestFile("""
             package com.example.util;
