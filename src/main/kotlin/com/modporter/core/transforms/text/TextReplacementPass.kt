@@ -863,18 +863,25 @@ $streamFields,
     }
 
     private fun migrateDyeableLeatherItemColors(source: String): String {
-        if (!source.contains("DyeableLeatherItem") || !source.contains("DataComponents.CUSTOM_DATA")) {
+        if (!source.contains("DataComponents.CUSTOM_DATA") ||
+            !Regex("""\bpublic\s+boolean\s+hasCustomColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(source) ||
+            !Regex("""\bpublic\s+void\s+setColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*,\s*int\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(source)
+        ) {
             return source
         }
 
         var result = source
         result = result.replace(Regex("""extends\s+ArmorItem\s+implements\s+DyeableLeatherItem"""), "extends ArmorItem")
+        result = result.replace(Regex("""\s+implements\s+DyeableLeatherItem\b"""), "")
+        result = result.replace(Regex("""implements\s+DyeableLeatherItem\s*,\s*"""), "implements ")
+        result = result.replace(Regex(""",\s*DyeableLeatherItem\b"""), "")
         result = removeImportLine(result, "net.minecraft.nbt.CompoundTag")
         result = removeImportLine(result, "net.minecraft.world.item.DyeableLeatherItem")
 
         if (!result.contains("DEFAULT_COLOR")) {
-            result = Regex("""(private\s+static\s+final\s+MutableComponent\s+TOOLTIP\s*=\s*[^;\r\n]+;)""")
-                .replace(result) { match -> match.value + "\n\tpublic static final int DEFAULT_COLOR = 0xFFBDCFD9;" }
+            val withDefaultColor = insertDyeableDefaultColor(result)
+            if (withDefaultColor == result) return source
+            result = withDefaultColor
         }
 
         val firstMethod = Regex("""\bpublic\s+boolean\s+hasCustomColor\s*\(""").find(result) ?: return result
@@ -918,6 +925,17 @@ $streamFields,
         if (!usesSymbolOutsideImports(result, "CompoundTag")) result = removeImportLine(result, "net.minecraft.nbt.CompoundTag")
         if (!usesSymbolOutsideImports(result, "CustomData")) result = removeImportLine(result, "net.minecraft.world.item.component.CustomData")
         return result
+    }
+
+    private fun insertDyeableDefaultColor(source: String): String {
+        if (source.contains("DEFAULT_COLOR")) return source
+        val classMatch = Regex(
+            """(?m)^[ \t]*(?:(?:public|protected|private|abstract|final|static)\s+)*class\s+[A-Za-z_$][\w$]*\b[^{;]*\{"""
+        ).find(source) ?: return source
+        val insertAt = classMatch.range.last + 1
+        return source.substring(0, insertAt) +
+            "\n\tpublic static final int DEFAULT_COLOR = 0xFFBDCFD9;\n" +
+            source.substring(insertAt)
     }
 
     private fun migrateTierSortingRegistryTiers(

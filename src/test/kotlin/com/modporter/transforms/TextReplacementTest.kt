@@ -520,6 +520,36 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `public entity synched data definitions keep visibility when migrating to builder`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.network.syncher.EntityDataAccessor;
+
+            public class TestMod {
+                @Override
+                public void defineSynchedData() {
+                    super.defineSynchedData();
+                    this.getEntityData().define(DATA_STATE, false);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.network.syncher.SynchedEntityData;"))
+        assertTrue(transformed.contains("public void defineSynchedData(SynchedEntityData.Builder builder)"))
+        assertTrue(transformed.contains("super.defineSynchedData(builder);"))
+        assertTrue(transformed.contains("builder.define(DATA_STATE, false);"))
+        assertTrue(!transformed.contains("public void defineSynchedData()"))
+        assertTrue(!transformed.contains("super.defineSynchedData();"))
+    }
+
+    @Test
     fun `saved data computeIfAbsent migrates to factory provider API`() {
         val projectDir = createTestFile("""
             package com.example;
@@ -3155,6 +3185,44 @@ class TextReplacementTest {
         assertFalse(transformed.contains("CUSTOM_DATA"))
         assertFalse(transformed.contains("CompoundTag"))
         assertFalse(transformed.contains("@Override\n\tpublic boolean hasCustomColor"))
+    }
+
+    @Test
+    fun `dyeable leather item color migration does not require tooltip fields`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ArmorItem;
+            import net.minecraft.world.item.DyeableLeatherItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.core.component.DataComponents;
+
+            public class TestMod extends ArmorItem implements DyeableLeatherItem {
+                @Override
+                public boolean hasCustomColor(ItemStack stack) {
+                    CompoundTag tag = stack.getOrDefault(DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
+                    return tag.contains("display", 10) && tag.getCompound("display").contains("color", 3);
+                }
+
+                @Override
+                public void setColor(ItemStack stack, int color) {
+                    CompoundTag tag = stack.getOrDefault(DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
+                    tag.putInt("color", color);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("public static final int DEFAULT_COLOR = 0xFFBDCFD9;"))
+        assertTrue(transformed.contains("DyedItemColor.getOrDefault(stack, DEFAULT_COLOR);"))
+        assertFalse(transformed.contains("DyeableLeatherItem"))
+        assertFalse(transformed.contains("CUSTOM_DATA"))
     }
 
     @Test

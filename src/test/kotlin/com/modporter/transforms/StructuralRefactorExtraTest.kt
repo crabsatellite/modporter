@@ -7324,6 +7324,117 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates attribute modifier method expressions only when return type is known`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RideSupport.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public interface RideSupport {
+                AttributeModifier STEP = new AttributeModifier("Step Height", 0.4D, AttributeModifier.Operation.ADD_VALUE);
+
+                default <T extends Object & RideSupport> void update(AttributeInstance instance, T vehicle) {
+                    if (instance.hasModifier(vehicle.getStepHeightModifier())) {
+                        instance.removeModifier(vehicle.getStepHeightModifier());
+                    }
+                }
+
+                default AttributeModifier getStepHeightModifier() {
+                    return STEP;
+                }
+
+                default void unrelated(Object vehicle) {
+                    String ignored = String.valueOf(vehicle);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RideAnimal.java").writeText("""
+            package com.example;
+
+            public class RideAnimal implements RideSupport {
+            }
+        """.trimIndent())
+        srcDir.resolve("RidePacket.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+
+            public class RidePacket {
+                void sync(Object entity, AttributeInstance instance) {
+                    if (entity instanceof RideAnimal rideAnimal && instance.hasModifier(rideAnimal.getStepHeightModifier())) {
+                        instance.removeModifier(rideAnimal.getStepHeightModifier());
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Cape.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class Cape {
+                void tick(AttributeInstance instance) {
+                    if (!instance.hasModifier(this.getCapeModifier())) {
+                        instance.addTransientModifier(this.getCapeModifier());
+                    }
+                    instance.removeModifier(this.getCapeModifier());
+                    instance.hasModifier(unknown.getCapeModifier());
+                }
+
+                public AttributeModifier getCapeModifier() {
+                    return new AttributeModifier("Cape Boost", 0.5D, AttributeModifier.Operation.ADD_VALUE);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("PlayerCapability.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public interface PlayerCapability {
+                static LazyOptional<PlayerCapability> get(Player player) {
+                    return LazyOptional.empty();
+                }
+
+                AttributeModifier getLifeModifier();
+            }
+        """.trimIndent())
+        srcDir.resolve("CommandSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+
+            public class CommandSurface {
+                void apply(Player player, AttributeInstance attribute) {
+                    PlayerCapability.get(player).ifPresent(capability -> {
+                        attribute.removeModifier(capability.getLifeModifier());
+                    });
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val rideSupport = srcDir.resolve("RideSupport.java").readText()
+        val ridePacket = srcDir.resolve("RidePacket.java").readText()
+        val cape = srcDir.resolve("Cape.java").readText()
+        val commandSurface = srcDir.resolve("CommandSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(rideSupport.contains("instance.hasModifier(vehicle.getStepHeightModifier().id())"), rideSupport)
+        assertTrue(rideSupport.contains("instance.removeModifier(vehicle.getStepHeightModifier().id())"), rideSupport)
+        assertTrue(ridePacket.contains("instance.hasModifier(rideAnimal.getStepHeightModifier().id())"), ridePacket)
+        assertTrue(ridePacket.contains("instance.removeModifier(rideAnimal.getStepHeightModifier().id())"), ridePacket)
+        assertTrue(cape.contains("instance.hasModifier(this.getCapeModifier().id())"), cape)
+        assertTrue(cape.contains("instance.removeModifier(this.getCapeModifier().id())"), cape)
+        assertTrue(cape.contains("instance.hasModifier(unknown.getCapeModifier())"), cape)
+        assertTrue(commandSurface.contains("attribute.removeModifier(capability.getLifeModifier().id())"), commandSurface)
+    }
+
+    @Test
     fun `migrates cross file attribute modifier id constants without touching non attribute ids`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -12249,6 +12360,7 @@ class StructuralRefactorExtraTest {
         assertTrue(misc.contains("REGISTRY.byNameCodec()"))
         assertTrue(misc.contains("BuiltInRegistries.ENTITY_TYPE.byNameCodec()"))
         assertTrue(misc.contains("Component.Serializer.toJson(Component.literal(\"ok\"))"))
+        assertFalse(misc.contains("this.registryAccess()"))
         assertTrue(!misc.contains("RegistryAccess.EMPTY"))
         assertTrue(!misc.contains("ExtraCodecs.lazyInitializedCodec"))
         assertTrue(misc.contains("new Music(Sounds.MUSIC.getDelegate(), 20, 40, true)"))

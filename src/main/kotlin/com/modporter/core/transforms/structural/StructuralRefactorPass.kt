@@ -7618,6 +7618,8 @@ $fields
         val staticRegistryFieldHints = collectStaticRegistryFieldHints(srcDir)
         val legacyRegistryBackedMethods = collectLegacyRegistryBackedMethods(javaFiles)
         val attributeModifierIdReferences = collectAttributeModifierIdReferences(javaFiles)
+        val attributeModifierMethods = collectAttributeModifierMethods(javaFiles)
+        val genericMethodReturnTypes = collectGenericMethodReturnTypes(javaFiles)
 
         javaFiles.forEach { javaFile ->
                 val original = javaFile.readText()
@@ -7848,7 +7850,9 @@ $fields
                     criterionInstanceFactoryHints,
                     staticRegistryFieldHints,
                     legacyRegistryBackedMethods,
-                    attributeModifierIdReferences
+                    attributeModifierIdReferences,
+                    attributeModifierMethods,
+                    genericMethodReturnTypes
                 )
                 if (vanilla121Migrated != text) {
                     changes.add(Change(
@@ -8093,6 +8097,91 @@ $fields
         }
 
         return references
+    }
+
+    private fun collectAttributeModifierMethods(javaFiles: List<Path>): Map<String, Set<String>> {
+        val id = """[A-Za-z_$][\w$]*"""
+        val declaredMethods = linkedMapOf<String, MutableSet<String>>()
+        val parents = linkedMapOf<String, MutableSet<String>>()
+
+        fun simpleTypeName(expression: String): String =
+            expression
+                .replace(Regex("""<[^<>]*>"""), "")
+                .trim()
+                .removeSuffix("[]")
+                .substringAfterLast('.')
+
+        fun parentNames(declarationTail: String): Set<String> {
+            val result = linkedSetOf<String>()
+            Regex("""\bextends\s+([^{}]*?)(?=\bimplements\b|$)""")
+                .find(declarationTail)
+                ?.groupValues
+                ?.get(1)
+                ?.split(',')
+                ?.map { it.trim() }
+                ?.filter { it.isNotBlank() }
+                ?.forEach { result += simpleTypeName(it) }
+            Regex("""\bimplements\s+([^{}]*)""")
+                .find(declarationTail)
+                ?.groupValues
+                ?.get(1)
+                ?.split(',')
+                ?.map { it.trim() }
+                ?.filter { it.isNotBlank() }
+                ?.forEach { result += simpleTypeName(it) }
+            return result
+        }
+
+        for (javaFile in javaFiles) {
+            val source = javaFile.readText()
+            val owner = javaTopLevelTypeName(source) ?: continue
+            val declaration = Regex("""(?s)\b(?:class|interface|record|enum)\s+${Regex.escape(owner)}\b([^{}]*)\{""")
+                .find(source)
+            if (declaration != null) {
+                parents.getOrPut(owner) { linkedSetOf() }.addAll(parentNames(declaration.groupValues[1]))
+            }
+            Regex(
+                """(?m)\b(?:(?:public|protected|private|static|final|default|abstract|synchronized)\s+)*(?:net\.minecraft\.world\.entity\.ai\.attributes\.)?AttributeModifier\s+($id)\s*\("""
+            ).findAll(source).forEach { match ->
+                declaredMethods.getOrPut(owner) { linkedSetOf() } += match.groupValues[1]
+            }
+        }
+
+        val resolved = linkedMapOf<String, MutableSet<String>>()
+        fun methodsFor(typeName: String, seen: Set<String> = emptySet()): Set<String> {
+            if (typeName in seen) return emptySet()
+            resolved[typeName]?.let { return it }
+            val methods = linkedSetOf<String>()
+            methods += declaredMethods[typeName].orEmpty()
+            parents[typeName].orEmpty().forEach { parent ->
+                methods += methodsFor(parent, seen + typeName)
+            }
+            resolved[typeName] = methods
+            return methods
+        }
+
+        (declaredMethods.keys + parents.keys).forEach { methodsFor(it) }
+        return resolved.mapValues { it.value.toSet() }
+    }
+
+    private fun collectGenericMethodReturnTypes(javaFiles: List<Path>): Map<String, String> {
+        val id = """[A-Za-z_$][\w$]*"""
+        val result = linkedMapOf<String, String>()
+        fun simpleTypeName(type: String): String =
+            type.trim()
+                .replace(Regex("""<[^<>]*>"""), "")
+                .substringAfterLast('.')
+
+        for (javaFile in javaFiles) {
+            val source = javaFile.readText()
+            val owner = javaTopLevelTypeName(source) ?: continue
+            Regex(
+                """(?m)\b(?:(?:public|protected|private|static|final|default|abstract|synchronized)\s+)*(?:$id\.)*$id\s*<\s*($id(?:\.$id)*)\s*>\s+($id)\s*\("""
+            ).findAll(source).forEach { match ->
+                result["$owner.${match.groupValues[2]}"] = simpleTypeName(match.groupValues[1])
+            }
+        }
+        return result
     }
 
     private fun javaTopLevelTypeName(source: String): String? {
@@ -9807,7 +9896,9 @@ ${entries.joinToString(",\n")}
         criterionInstanceFactoryHints: CriterionInstanceFactoryHints = CriterionInstanceFactoryHints(emptyMap()),
         staticRegistryFieldHints: StaticRegistryFieldHints = StaticRegistryFieldHints(emptySet(), emptySet()),
         legacyRegistryBackedMethods: Set<LegacyRegistryBackedMethod> = emptySet(),
-        attributeModifierIdReferences: Set<String> = emptySet()
+        attributeModifierIdReferences: Set<String> = emptySet(),
+        attributeModifierMethods: Map<String, Set<String>> = emptyMap(),
+        genericMethodReturnTypes: Map<String, String> = emptyMap()
     ): String {
         var result = source
         var needsEntityTypeTags = false
@@ -9923,7 +10014,12 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyHolderReferenceBindKeyCalls(result)
         result = migrateLegacyOptionalValueCalls(result)
         result = migrateLegacyBiomeSourceCodecReturnSource(result)
-        result = migrateAttributeModifierResourceLocationIds(result, attributeModifierIdReferences)
+        result = migrateAttributeModifierResourceLocationIds(
+            result,
+            attributeModifierIdReferences,
+            attributeModifierMethods,
+            genericMethodReturnTypes
+        )
         result = migrateEntityRidingOffsetExpressions(result)
         result = migrateLegacyPassengerAttachmentOverrides(result)
         result = migrateLegacyEntityOverrideSignatures(result)
@@ -14366,6 +14462,24 @@ ${indent}}"""
         return best
     }
 
+    private fun enclosingMethodText(source: String, index: Int): String? {
+        val methodPattern = Regex(
+            """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|static|final|synchronized|default|abstract)\s+)*(?:<[^>{};]+>\s*)?[A-Za-z_$][\w$<>\[\].?,\s]*\s+[A-Za-z_$][\w$]*\s*\([^;{}]*\)\s*(?:throws\s+[^{]+)?\{"""
+        )
+        var best: IntRange? = null
+        methodPattern.findAll(source).forEach { match ->
+            val openBrace = source.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (closeBrace > openBrace && index in (openBrace + 1) until closeBrace) {
+                val candidate = match.range.first..closeBrace
+                if (best == null || candidate.count() < best!!.count()) {
+                    best = candidate
+                }
+            }
+        }
+        return best?.let { source.substring(it) }
+    }
+
     private fun uniqueLocalNameInScope(scope: String, baseName: String): String {
         if (!Regex("""\b${Regex.escape(baseName)}\b""").containsMatchIn(scope)) return baseName
         var index = 1
@@ -14588,9 +14702,7 @@ ${indent}}"""
     }
 
     private fun inferRegistryAccessExpression(source: String): String? {
-        if (Regex("""\bextends\s+(?:Mob|Monster|LivingEntity|Entity|[A-Za-z_$][\w$]*(?:Entity|Projectile))\b""").containsMatchIn(source)) {
-            return "this.registryAccess()"
-        }
+        topLevelSelfRegistryAccessExpression(source)?.let { return it }
         val declarations = mutableListOf<String>()
         listOf(
             "RegistryAccess",
@@ -14692,15 +14804,59 @@ ${indent}}"""
         val parameters = currentMethodParametersBeforeOffset(source, offset)
         return holderLookupProviderFromParameters(parameters)
             ?: registryAccessFromParameters(parameters)
-            ?: selfRegistryAccessExpression(source)
+            ?: selfRegistryAccessExpression(source, offset)
     }
 
-    private fun selfRegistryAccessExpression(source: String): String? =
-        if (Regex("""\bextends\s+(?:Mob|Monster|LivingEntity|Entity|[A-Za-z_$][\w$]*(?:Entity|Projectile))\b""").containsMatchIn(source)) {
-            "this.registryAccess()"
-        } else {
-            null
+    private fun topLevelSelfRegistryAccessExpression(source: String): String? {
+        val typeMatch = Regex(
+            """(?m)^[ \t]*(?:(?:public|protected|private|abstract|final|static)\s+)*(?:class|record)\s+[A-Za-z_$][\w$]*\b([^{};]*)\{"""
+        ).find(source) ?: return null
+        return if (javaTypeHeaderExtendsRegistryAccessEntity(typeMatch.groupValues[1])) "this.registryAccess()" else null
+    }
+
+    private fun selfRegistryAccessExpression(source: String, offset: Int): String? {
+        val typePattern = Regex(
+            """(?m)^[ \t]*(?:(?:public|protected|private|abstract|final|static)\s+)*(?:class|record)\s+[A-Za-z_$][\w$]*\b([^{};]*)\{"""
+        )
+        val owner = typePattern.findAll(source)
+            .filter { it.range.first < offset }
+            .lastOrNull { match ->
+                val openBrace = match.range.last
+                val closeBrace = findMatchingBrace(source, openBrace)
+                closeBrace >= offset
+            }
+            ?: return null
+        return if (javaTypeHeaderExtendsRegistryAccessEntity(owner.groupValues[1])) "this.registryAccess()" else null
+    }
+
+    private fun javaTypeHeaderExtendsRegistryAccessEntity(rawHeader: String): Boolean {
+        val header = removeLeadingJavaTypeParameters(rawHeader).replace(Regex("""\s+"""), " ")
+        val parent = Regex("""\bextends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\b""")
+            .find(header)
+            ?.groupValues
+            ?.get(1)
+            ?.substringAfterLast('.')
+            ?: return false
+        return parent in setOf("Mob", "Monster", "LivingEntity", "Entity") ||
+            parent.endsWith("Entity") ||
+            parent.endsWith("Projectile")
+    }
+
+    private fun removeLeadingJavaTypeParameters(rawHeader: String): String {
+        val header = rawHeader.trimStart()
+        if (!header.startsWith("<")) return header
+        var depth = 0
+        for (index in header.indices) {
+            when (header[index]) {
+                '<' -> depth++
+                '>' -> {
+                    if (depth > 0) depth--
+                    if (depth == 0) return header.substring(index + 1)
+                }
+            }
         }
+        return header
+    }
 
     private fun migrateLegacyDamageBonusMobTypeCalls(source: String): String {
         if (!source.contains("EnchantmentHelper.getDamageBonus(") || !source.contains(".getMobType()")) return source
@@ -15106,7 +15262,9 @@ ${indent}}"""
 
     private fun migrateAttributeModifierResourceLocationIds(
         source: String,
-        crossFileAttributeModifierIds: Set<String> = emptySet()
+        crossFileAttributeModifierIds: Set<String> = emptySet(),
+        attributeModifierMethods: Map<String, Set<String>> = emptyMap(),
+        genericMethodReturnTypes: Map<String, String> = emptyMap()
     ): String {
         if (source.contains("getDefaultAttributeModifiers(EquipmentSlot") &&
             source.contains("ImmutableMultimap") &&
@@ -15190,6 +15348,49 @@ ${indent}}"""
             .findAll(result)
             .map { it.groupValues[1] }
             .toSet()
+        val ownerAttributeModifierMethods = ownerName?.let { attributeModifierMethods[it] }.orEmpty() +
+            declaredAttributeModifierMethodNames(result)
+        fun methodsForType(typeName: String, typeParameterBounds: Map<String, Set<String>>): Set<String> {
+            val simple = typeName.substringAfterLast('.')
+            val methods = linkedSetOf<String>()
+            methods += attributeModifierMethods[simple].orEmpty()
+            typeParameterBounds[simple].orEmpty().forEach { bound ->
+                methods += attributeModifierMethods[bound].orEmpty()
+            }
+            return methods
+        }
+
+        fun attributeModifierIdExpression(argument: String, callOffset: Int): String? {
+            val trimmed = argument.trim()
+            if (trimmed.endsWith(".id()")) return null
+            if (trimmed in modifierVariables) return "$trimmed.id()"
+            if (Regex("""^new\s+(?:net\.minecraft\.world\.entity\.ai\.attributes\.)?AttributeModifier\s*\(""")
+                    .containsMatchIn(trimmed)) {
+                return "$trimmed.id()"
+            }
+            val scope = enclosingMethodText(result, callOffset) ?: result
+            val variableTypes = javaLocalVariableTypes(scope, genericMethodReturnTypes)
+            val typeParameterBounds = javaTypeParameterBounds(scope)
+            val methodCall = Regex("""(?s)^(?:(.+)\.)?([A-Za-z_$][\w$]*)\s*\(.*\)$""").matchEntire(trimmed)
+                ?: return null
+            val receiver = methodCall.groupValues[1].trim()
+            val methodName = methodCall.groupValues[2]
+            if (receiver.isBlank()) {
+                return if (methodName in ownerAttributeModifierMethods) "$trimmed.id()" else null
+            }
+            if (receiver == "this") {
+                return if (methodName in ownerAttributeModifierMethods) "$trimmed.id()" else null
+            }
+            val receiverType = variableTypes[receiver]
+            if (receiverType != null && methodName in methodsForType(receiverType, typeParameterBounds)) {
+                return "$trimmed.id()"
+            }
+            if (methodName in attributeModifierMethods[receiver.substringAfterLast('.')].orEmpty()) {
+                return "$trimmed.id()"
+            }
+            return null
+        }
+
         for (variable in modifierVariables) {
             val escaped = Regex.escape(variable)
             result = Regex("""\.(getModifier|hasModifier|removeModifier)\(\s*$escaped\s*\)""")
@@ -15197,12 +15398,90 @@ ${indent}}"""
             result = Regex("""\b$escaped\.getId\(\)""").replace(result, "$variable.id()")
             result = Regex("""\b$escaped\.getAmount\(\)""").replace(result, "$variable.amount()")
         }
+        listOf("getModifier", "hasModifier", "removeModifier").forEach { methodName ->
+            result = rewriteJavaCallWithOffset(result, methodName) { receiver, args, callOffset ->
+                if (args.size != 1) return@rewriteJavaCallWithOffset null
+                val idExpression = attributeModifierIdExpression(args[0], callOffset) ?: return@rewriteJavaCallWithOffset null
+                "$receiver.$methodName($idExpression)"
+            }
+        }
 
         val withoutUuidImport = removeImport(result, "java.util.UUID")
         if (!Regex("""\bUUID\b""").containsMatchIn(withoutUuidImport)) {
             result = withoutUuidImport
         }
         return result
+    }
+
+    private fun declaredAttributeModifierMethodNames(source: String): Set<String> {
+        val id = """[A-Za-z_$][\w$]*"""
+        return Regex(
+            """(?m)\b(?:(?:public|protected|private|static|final|default|abstract|synchronized)\s+)*(?:net\.minecraft\.world\.entity\.ai\.attributes\.)?AttributeModifier\s+($id)\s*\("""
+        ).findAll(source).map { it.groupValues[1] }.toSet()
+    }
+
+    private fun javaLocalVariableTypes(
+        source: String,
+        genericMethodReturnTypes: Map<String, String> = emptyMap()
+    ): Map<String, String> {
+        val id = """[A-Za-z_$][\w$]*"""
+        val types = linkedMapOf<String, String>()
+        val typeExpression = """(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*(?:\s*<[^;=(){}]*>)?(?:\s*\[\])?"""
+        fun simpleTypeName(type: String): String =
+            type.replace(Regex("""<[^<>]*>"""), "")
+                .trim()
+                .removeSuffix("[]")
+                .substringAfterLast('.')
+
+        Regex("""\b($typeExpression)\s+($id)\b(?=\s*(?:[,;)=]))""")
+            .findAll(source)
+            .forEach { match ->
+                val type = simpleTypeName(match.groupValues[1])
+                val name = match.groupValues[2]
+                if (type !in setOf("void", "return", "new", "if", "for", "while", "switch")) {
+                    types[name] = type
+                }
+            }
+        Regex("""\binstanceof\s+($typeExpression)\s+($id)\b""")
+            .findAll(source)
+            .forEach { match ->
+                types[match.groupValues[2]] = simpleTypeName(match.groupValues[1])
+            }
+        Regex("""\b((?:$id\.)*$id)\s*\.\s*($id)\s*\([^;{}]*?\)\s*\.\s*ifPresent\s*\(\s*($id)\s*->""")
+            .findAll(source)
+            .forEach { match ->
+                val owner = match.groupValues[1].substringAfterLast('.')
+                val method = match.groupValues[2]
+                val lambdaParameter = match.groupValues[3]
+                genericMethodReturnTypes["$owner.$method"]?.let { returnedType ->
+                    types[lambdaParameter] = returnedType
+                }
+            }
+        return types
+    }
+
+    private fun javaTypeParameterBounds(source: String): Map<String, Set<String>> {
+        val id = """[A-Za-z_$][\w$]*"""
+        val bounds = linkedMapOf<String, MutableSet<String>>()
+        fun simpleTypeName(type: String): String =
+            type.replace(Regex("""<[^<>]*>"""), "")
+                .trim()
+                .substringAfterLast('.')
+
+        Regex("""<([^<>]*\bextends\b[^<>]*)>""")
+            .findAll(source)
+            .forEach { typeParameters ->
+                typeParameters.groupValues[1].split(',').forEach { parameter ->
+                    val match = Regex("""^\s*($id)\s+extends\s+(.+?)\s*$""").find(parameter) ?: return@forEach
+                    match.groupValues[2].split('&')
+                        .map { simpleTypeName(it) }
+                        .filter { it.isNotBlank() }
+                        .forEach { bound ->
+                            bounds.getOrPut(match.groupValues[1]) { linkedSetOf() } += bound
+                        }
+                }
+            }
+        return bounds
     }
 
     private fun isAttributeModifierIdUse(
@@ -22735,6 +23014,41 @@ $encodeLines
             val receiver = result.substring(receiverStart, tokenIndex).trim()
             val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
             val replacement = transform(receiver, args)
+            if (replacement == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            result = result.substring(0, receiverStart) + replacement + result.substring(closeParen + 1)
+            cursor = receiverStart + replacement.length
+        }
+        return result
+    }
+
+    private fun rewriteJavaCallWithOffset(
+        source: String,
+        methodName: String,
+        transform: (receiver: String, args: List<String>, callOffset: Int) -> String?
+    ): String {
+        var result = source
+        var cursor = 0
+        val token = ".${methodName}("
+        while (true) {
+            val tokenIndex = result.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + methodName.length + 1
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val receiverStart = findExpressionReceiverStart(result, tokenIndex)
+            if (receiverStart < 0 || receiverStart >= tokenIndex) {
+                cursor = closeParen + 1
+                continue
+            }
+            val receiver = result.substring(receiverStart, tokenIndex).trim()
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            val replacement = transform(receiver, args, tokenIndex)
             if (replacement == null) {
                 cursor = closeParen + 1
                 continue

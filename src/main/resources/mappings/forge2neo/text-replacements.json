@@ -3585,8 +3585,8 @@
     },
     {
       "id": "entity-define-synched-data-builder-signature",
-      "pattern": "protected\\s+void\\s+defineSynchedData\\s*\\(\\s*\\)",
-      "replacement": "protected void defineSynchedData(SynchedEntityData.Builder builder)",
+      "pattern": "(public|protected)\\s+void\\s+defineSynchedData\\s*\\(\\s*\\)",
+      "replacement": "$1 void defineSynchedData(SynchedEntityData.Builder builder)",
       "description": "Entity.defineSynchedData now receives SynchedEntityData.Builder in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
