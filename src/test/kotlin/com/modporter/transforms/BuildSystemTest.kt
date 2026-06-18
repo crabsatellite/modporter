@@ -2816,6 +2816,32 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `resolves JEI to compile common api and full NeoForge runtime jars`() {
+        val projectDir = tempDir.resolve("p19-jei")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                compileOnly fg.deobf("mezz.jei:jei-1.20.1-forge-api:15.2.0.27")
+                runtimeOnly fg.deobf("mezz.jei:jei-1.20.1-forge:15.2.0.27")
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(content.contains("""compileOnly "mezz.jei:jei-1.21.1-common-api:19.21.2.313""""))
+        assertTrue(content.contains("""compileOnly "mezz.jei:jei-1.21.1-neoforge:19.21.2.313""""))
+        assertTrue(content.contains("""runtimeOnly "mezz.jei:jei-1.21.1-neoforge:19.21.2.313""""))
+        assertFalse(content.contains("jei-1.20.1-forge"), content)
+        assertFalse(content.contains("fg.deobf"), content)
+    }
+
+    @Test
     fun `resolves versioned public library dependencies to target NeoForge coordinates`() {
         val projectDir = tempDir.resolve("p19-versioned-public-libraries")
         projectDir.createDirectories()

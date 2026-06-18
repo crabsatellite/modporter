@@ -47,12 +47,13 @@
       "forgePrefix": "mezz.jei",
       "modrinthSlug": "jei",
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "mezz.jei:jei-1.21.1-neoforge-api:19.21.2.313" },
+        { "config": "compileOnly", "coord": "mezz.jei:jei-1.21.1-common-api:19.21.2.313" },
+        { "config": "compileOnly", "coord": "mezz.jei:jei-1.21.1-neoforge:19.21.2.313" },
         { "config": "runtimeOnly", "coord": "mezz.jei:jei-1.21.1-neoforge:19.21.2.313" }
       ],
       "mavenUrl": "https://maven.blamejared.com",
       "status": "available",
-      "notes": "JEI: split into API (compileOnly) and runtime"
+      "notes": "JEI: common API plus NeoForge jar are needed on the compile classpath; full NeoForge jar is also staged for runtime"
     },
     {
       "forgePrefix": "com.simibubi.create",
