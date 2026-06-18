@@ -23069,6 +23069,11 @@ $methodBody
             result = result.replace("this.getDefaultRecipeId(this.getResult()).getPath()", "RecipeBuilder.getDefaultRecipeId(this.getResult()).getPath()")
         }
 
+        migrateLegacyRecipeBuilderAdvancementCriteriaSource(result)?.let { migrated ->
+            result = migrated
+            changed = true
+        }
+
         migrateLegacyFinishedRecipeBuilderOutputSource(result, recipeSerializerFactoryHints)?.let { migrated ->
             result = migrated
             changed = true
@@ -23087,6 +23092,10 @@ $methodBody
             result = addImportIfMissing(result, "net.minecraft.advancements.Criterion")
             result = removeImport(result, "net.minecraft.advancements.CriterionTriggerInstance")
         }
+        if (result.contains("new LinkedHashMap<>()")) {
+            result = addImportIfMissing(result, "java.util.LinkedHashMap")
+            result = addImportIfMissing(result, "java.util.Map")
+        }
         if (result.contains("JsonOps.INSTANCE")) {
             result = addImportIfMissing(result, "com.mojang.serialization.JsonOps")
         }
@@ -23097,6 +23106,67 @@ $methodBody
         if (result.contains("SmokingRecipe::new")) result = addImportIfMissing(result, "net.minecraft.world.item.crafting.SmokingRecipe")
         if (result.contains("BlastingRecipe::new")) result = addImportIfMissing(result, "net.minecraft.world.item.crafting.BlastingRecipe")
         if (result.contains("CampfireCookingRecipe::new")) result = addImportIfMissing(result, "net.minecraft.world.item.crafting.CampfireCookingRecipe")
+        return result
+    }
+
+    private fun migrateLegacyRecipeBuilderAdvancementCriteriaSource(source: String): String? {
+        if (!source.contains("implements RecipeBuilder") ||
+            !source.contains("Advancement.Builder") ||
+            !source.contains(".getCriteria()")) {
+            return null
+        }
+        val advancementField = Regex(
+            """private\s+final\s+Advancement\.Builder\s+([A-Za-z_$][\w$]*)\s*=\s*Advancement\.Builder\.advancement\(\)\s*;"""
+        ).find(source)?.groupValues?.get(1) ?: return null
+        val saveOutput = Regex(
+            """void\s+save\s*\(\s*RecipeOutput\s+([A-Za-z_$][\w$]*)\s*,"""
+        ).find(source)?.groupValues?.get(1) ?: return null
+
+        var result = source
+        result = Regex(
+            """private\s+final\s+Advancement\.Builder\s+${Regex.escape(advancementField)}\s*=\s*Advancement\.Builder\.advancement\(\)\s*;"""
+        ).replace(result, "private final Map<String, Criterion<?>> criteria = new LinkedHashMap<>();")
+        result = Regex("""this\.${Regex.escape(advancementField)}\.addCriterion\(([^;\r\n]+)\);""")
+            .replace(result) { match -> "this.criteria.put(${match.groupValues[1]});" }
+        result = result.replace("this.$advancementField.getCriteria().isEmpty()", "this.criteria.isEmpty()")
+
+        val advancementLine = Regex(
+            """(?m)^([ \t]*)this\.${Regex.escape(advancementField)}\.parent\(([^;\r\n]+)\)\.addCriterion\(([^;\r\n]+)\)\.rewards\(([^;\r\n]+)\)\.requirements\(([^;\r\n]+)\);\s*$"""
+        )
+        result = advancementLine.replace(result) { match ->
+            val indent = match.groupValues[1]
+            "${indent}Advancement.Builder advancementBuilder = $saveOutput.advancement().addCriterion(${match.groupValues[3]}).rewards(${match.groupValues[4]}).requirements(${match.groupValues[5]});\n" +
+                "${indent}this.criteria.forEach(advancementBuilder::addCriterion);"
+        }
+        result = replaceLegacyResultAdvancementArgument(result, advancementField)
+
+        return if (result != source) result else null
+    }
+
+    private fun replaceLegacyResultAdvancementArgument(source: String, advancementField: String): String {
+        var result = source
+        var cursor = 0
+        val constructorPattern = Regex("""new\s+((?:[A-Za-z_$][\w$]*\.)*Result)\s*\(""")
+        while (true) {
+            val match = constructorPattern.find(result, cursor) ?: break
+            val openParen = result.indexOf('(', match.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(result, openParen) else -1
+            if (openParen < 0 || closeParen < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            if (args.none { it.trim() == "this.$advancementField" }) {
+                cursor = closeParen + 1
+                continue
+            }
+            val migratedArgs = args.joinToString(", ") { arg ->
+                if (arg.trim() == "this.$advancementField") "advancementBuilder" else arg.trim()
+            }
+            val replacement = "new ${match.groupValues[1]}($migratedArgs)"
+            result = result.substring(0, match.range.first) + replacement + result.substring(closeParen + 1)
+            cursor = match.range.first + replacement.length
+        }
         return result
     }
 
@@ -30969,6 +31039,10 @@ public class ${builder.className} implements RecipeBuilder {
             var content = file.readText()
             if (!content.contains("class Result implements RecipeOutput")) continue
             val original = content
+            val resultClassText = legacyRecipeOutputResultClassText(content) ?: continue
+            if (!Regex("""\bprivate\s+final\s+[A-Za-z_$][\w$]*(?:\s*<[^;]+>)?\s+recipe\s*(?:=|;)""").containsMatchIn(resultClassText)) {
+                continue
+            }
             content = acceptPattern.replace(content) { match ->
                 val indent = match.groupValues[1]
                 val resultType = match.groupValues[2]
@@ -30995,6 +31069,15 @@ public class ${builder.className} implements RecipeBuilder {
         }
 
         return changes
+    }
+
+    private fun legacyRecipeOutputResultClassText(source: String): String? {
+        val match = Regex("""(?m)^[ \t]*(?:public|protected|private)?\s*(?:static\s+)?class\s+Result\b[^{]*\{""")
+            .find(source)
+            ?: return null
+        val openBrace = source.indexOf('{', match.range.last - 1)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        return if (openBrace >= 0 && closeBrace >= 0) source.substring(match.range.first, closeBrace + 1) else null
     }
 
     private fun migrateDropExperienceBlockConstructorOrder(projectDir: Path, dryRun: Boolean): List<Change> {

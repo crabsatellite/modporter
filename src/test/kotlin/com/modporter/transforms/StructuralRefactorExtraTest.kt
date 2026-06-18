@@ -3756,6 +3756,118 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy recipe output result adapters without recipe fields are not rewritten to fake recipe fields`() {
+        val projectDir = createFile("JsonOnlyRecipeBuilder.java", """
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class JsonOnlyRecipeBuilder {
+                public void save(RecipeOutput output, ResourceLocation id) {
+                    output.accept(new JsonOnlyRecipeBuilder.Result(id, this.count()));
+                }
+
+                private int count() { return 1; }
+
+                public static class Result implements RecipeOutput {
+                    private final ResourceLocation id;
+                    private final int count;
+
+                    public Result(ResourceLocation id, int count) {
+                        this.id = id;
+                        this.count = count;
+                    }
+
+                    @Override
+                    public void serializeRecipeData(JsonObject json) {
+                        json.addProperty("count", this.count);
+                    }
+
+                    @Override
+                    public ResourceLocation getId() {
+                        return this.id;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/JsonOnlyRecipeBuilder.java").readText()
+
+        assertTrue(migrated.contains("output.accept(new JsonOnlyRecipeBuilder.Result(id, this.count()));"), migrated)
+        assertFalse(migrated.contains("result.recipe"), migrated)
+    }
+
+    @Test
+    fun `legacy recipe builders migrate advancement criteria to recipe output advancement builder`() {
+        val projectDir = createFile("CriteriaRecipeBuilder.java", """
+            package com.example;
+
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.advancements.AdvancementRewards;
+            import net.minecraft.advancements.AdvancementRequirements;
+            import net.minecraft.advancements.CriterionTriggerInstance;
+            import net.minecraft.advancements.critereon.RecipeUnlockedTrigger;
+            import net.minecraft.data.recipes.RecipeBuilder;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.Items;
+
+            public class CriteriaRecipeBuilder implements RecipeBuilder {
+                private final Advancement.Builder advancement = Advancement.Builder.advancement();
+
+                public RecipeBuilder unlockedBy(String criterionName, CriterionTriggerInstance criterionTrigger) {
+                    this.advancement.addCriterion(criterionName, criterionTrigger);
+                    return this;
+                }
+
+                public RecipeBuilder group(String group) {
+                    return this;
+                }
+
+                public Item getResult() {
+                    return Items.STICK;
+                }
+
+                public void save(RecipeOutput output, ResourceLocation id) {
+                    this.ensureValid(id);
+                    this.advancement.parent(ResourceLocation.parse("recipes/root")).addCriterion("has_the_recipe", RecipeUnlockedTrigger.unlocked(id)).rewards(AdvancementRewards.Builder.recipe(id)).requirements(AdvancementRequirements.Strategy.OR);
+                    output.accept(new Result(id, this.advancement));
+                }
+
+                private void ensureValid(ResourceLocation id) {
+                    if (this.advancement.getCriteria().isEmpty()) {
+                        throw new IllegalStateException("No way of obtaining recipe " + id);
+                    }
+                }
+
+                static class Result {
+                    Result(ResourceLocation id, Advancement.Builder advancement) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/CriteriaRecipeBuilder.java").readText()
+
+        assertTrue(migrated.contains("private final Map<String, Criterion<?>> criteria = new LinkedHashMap<>();"), migrated)
+        assertTrue(migrated.contains("this.criteria.put(criterionName, criterionTrigger);"), migrated)
+        assertTrue(migrated.contains("Advancement.Builder advancementBuilder = output.advancement().addCriterion(\"has_the_recipe\", RecipeUnlockedTrigger.unlocked(id)).rewards(AdvancementRewards.Builder.recipe(id)).requirements(AdvancementRequirements.Strategy.OR);"), migrated)
+        assertTrue(migrated.contains("this.criteria.forEach(advancementBuilder::addCriterion);"), migrated)
+        assertTrue(migrated.contains("output.accept(new Result(id, advancementBuilder));"), migrated)
+        assertTrue(migrated.contains("import java.util.LinkedHashMap;"), migrated)
+        assertTrue(migrated.contains("import java.util.Map;"), migrated)
+        assertFalse(migrated.contains("getCriteria()"), migrated)
+        assertFalse(migrated.contains("Advancement.Builder.advancement()"), migrated)
+    }
+
+    @Test
     fun `mmlib recipe id tracking reads ids from holder tracked recipe id`() {
         val projectDir = createFile("CookingPotBlockEntity.java", """
             package com.example;
