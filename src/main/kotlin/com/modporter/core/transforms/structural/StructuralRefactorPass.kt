@@ -10251,9 +10251,20 @@ ${entries.joinToString(",\n")}
             Regex("""\bvoid\s+setCustomName\s*\(""").containsMatchIn(source)) {
             return source
         }
-        val extendsContainerBlockEntity = Regex(
-            """\bextends\s+(?:[A-Za-z_$][\w$]*\.)?(?:BaseContainerBlockEntity|RandomizableContainerBlockEntity|AbstractFurnaceBlockEntity|FurnaceBlockEntity|SmokerBlockEntity|BlastFurnaceBlockEntity|ChestBlockEntity|BarrelBlockEntity)\b"""
-        ).containsMatchIn(source)
+        val containerBlockEntityParents = setOf(
+            "BaseContainerBlockEntity",
+            "RandomizableContainerBlockEntity",
+            "AbstractFurnaceBlockEntity",
+            "FurnaceBlockEntity",
+            "SmokerBlockEntity",
+            "BlastFurnaceBlockEntity",
+            "ChestBlockEntity",
+            "BarrelBlockEntity"
+        )
+        val directSuperclass = Regex(
+            """\bclass\s+[A-Za-z_$][\w$]*(?:\s*<[^>{}]*>)?\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\b"""
+        ).find(source)?.groupValues?.get(1)?.substringAfterLast('.')
+        val extendsContainerBlockEntity = directSuperclass in containerBlockEntityParents
         if (!extendsContainerBlockEntity) return source
 
         val insertion = """

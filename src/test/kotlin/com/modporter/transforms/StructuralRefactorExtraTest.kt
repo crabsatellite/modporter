@@ -9130,6 +9130,28 @@ class StructuralRefactorExtraTest {
                 }
             }
         """.trimIndent())
+        srcDir.resolve("TreasureChestBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.block.AbstractChestBlock;
+            import net.minecraft.world.level.block.EntityBlock;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+            import java.util.function.Supplier;
+
+            public class TreasureChestBlock extends AbstractChestBlock<TreasureChestBlockEntity> implements EntityBlock {
+                public TreasureChestBlock(Properties properties, Supplier<BlockEntityType<? extends TreasureChestBlockEntity>> blockEntityTypeSupplier) {
+                    super(properties, blockEntityTypeSupplier);
+                }
+
+                @Override
+                public BlockEntity newBlockEntity(BlockPos pos, BlockState state) {
+                    return new TreasureChestBlockEntity(pos, state);
+                }
+            }
+        """.trimIndent())
         srcDir.resolve("LegacyCapabilityHandler.java").writeText("""
             package com.example;
 
@@ -10872,6 +10894,7 @@ class StructuralRefactorExtraTest {
         val surfaces = srcDir.resolve("StrictSurfaces.java").readText()
         val block = srcDir.resolve("SpawnBlock.java").readText()
         val container = srcDir.resolve("NamedContainerBlockEntity.java").readText()
+        val treasureChestBlock = srcDir.resolve("TreasureChestBlock.java").readText()
         val capability = srcDir.resolve("LegacyCapabilityHandler.java").readText()
         val plainFurnace = srcDir.resolve("PlainFurnaceBlockEntity.java").readText()
         val mushroom = srcDir.resolve("LegacyMushroomBlock.java").readText()
@@ -10984,6 +11007,8 @@ class StructuralRefactorExtraTest {
         assertTrue(!legacySpawnEggLookupSurface.contains("DeferredSpawnEggItem"), legacySpawnEggLookupSurface)
         assertTrue(block.contains("super(properties.isValidSpawn((state, getter, pos, entityType) -> false));"))
         assertTrue(!block.contains("boolean isValidSpawn("))
+        assertTrue(!treasureChestBlock.contains("setCustomName(net.minecraft.network.chat.Component name)"), treasureChestBlock)
+        assertTrue(!treasureChestBlock.contains("applyComponents("), treasureChestBlock)
         assertTrue(container.contains("public void setCustomName(net.minecraft.network.chat.Component name)"))
         assertTrue(container.contains("DataComponents.CUSTOM_NAME"))
         assertTrue(plainFurnace.contains("public void setCustomName(net.minecraft.network.chat.Component name)"))
