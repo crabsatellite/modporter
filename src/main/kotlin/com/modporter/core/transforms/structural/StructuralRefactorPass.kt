@@ -11938,7 +11938,8 @@ ${entries.joinToString(",\n")}
             !source.contains("Tesselator.getInstance()") &&
             !source.contains("InventoryScreen.renderEntityInInventory") &&
             !source.contains("PanoramaRenderer") &&
-            !source.contains("ArmorTrim.getTrim(")
+            !source.contains("ArmorTrim.getTrim(") &&
+            !source.contains("ItemRenderer.getArmorFoilBuffer(")
         ) {
             return source
         }
@@ -11978,6 +11979,7 @@ ${entries.joinToString(",\n")}
         result = migrateInventoryScreenEntityPreviewCalls(result)
         result = migratePanoramaRendererRenderApis(result)
         result = migrateArmorTrimComponentRendering(result)
+        result = migrateArmorFoilBufferCalls(result)
         val vertexConsumerVariables = Regex("""\bVertexConsumer\s+([A-Za-z_$][\w$]*)\b""")
             .findAll(result)
             .map { it.groupValues[1] }
@@ -11993,6 +11995,15 @@ ${entries.joinToString(",\n")}
             .replace(result) { match -> ".setUv2(${match.groupValues[1].trim()}, ${match.groupValues[2].trim()})" }
 
         return if (needsBufferUploader) addImportIfMissing(result, "com.mojang.blaze3d.vertex.BufferUploader") else result
+    }
+
+    private fun migrateArmorFoilBufferCalls(source: String): String {
+        if (!source.contains("ItemRenderer.getArmorFoilBuffer(")) return source
+
+        return rewriteJavaCall(source, "getArmorFoilBuffer") { receiver, args ->
+            if (receiver != "ItemRenderer" || args.size != 4) return@rewriteJavaCall null
+            "ItemRenderer.getArmorFoilBuffer(${args[0].trim()}, ${args[1].trim()}, ${args[3].trim()})"
+        }
     }
 
     private fun migrateArmorTrimComponentRendering(source: String): String {

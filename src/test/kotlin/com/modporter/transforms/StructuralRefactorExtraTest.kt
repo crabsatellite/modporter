@@ -9480,6 +9480,40 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy armor foil buffer calls without dropping glint condition`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AccessoryRenderer.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import net.minecraft.client.renderer.MultiBufferSource;
+            import net.minecraft.client.renderer.RenderType;
+            import net.minecraft.client.renderer.entity.ItemRenderer;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.ItemStack;
+
+            public class AccessoryRenderer {
+                public VertexConsumer legacy(MultiBufferSource buffer, ResourceLocation texture, ItemStack stack) {
+                    return ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), false, stack.isEnchanted());
+                }
+
+                public VertexConsumer alreadyMigrated(MultiBufferSource buffer, RenderType renderType) {
+                    return ItemRenderer.getArmorFoilBuffer(buffer, renderType, false);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val renderer = srcDir.resolve("AccessoryRenderer.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(renderer.contains("ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), stack.isEnchanted())"), renderer)
+        assertTrue(renderer.contains("ItemRenderer.getArmorFoilBuffer(buffer, renderType, false)"), renderer)
+        assertFalse(renderer.contains("false, stack.isEnchanted()"), renderer)
+    }
+
+    @Test
     fun `migrates strict runtime compile API surfaces without mod-specific rules`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
