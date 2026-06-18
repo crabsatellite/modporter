@@ -13818,6 +13818,62 @@ class StructuralRefactorExtraTest {
                 }
             }
         """.trimIndent())
+        srcDir.resolve("LoreInventory.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.SimpleContainer;
+            import net.minecraft.world.entity.player.Player;
+
+            public class LoreInventory extends SimpleContainer {
+                private final Player player;
+
+                public LoreInventory(Player player) {
+                    super(1);
+                    this.player = player;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LoreBookMenu.java").writeText("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.Map;
+            import java.util.function.Predicate;
+            import net.minecraft.world.item.ItemStack;
+
+            public class LoreBookMenu {
+                private static final Map<Predicate<ItemStack>, String> LORE_ENTRY_OVERRIDES = new HashMap<>();
+                private final LoreInventory loreInventory;
+
+                public LoreBookMenu(LoreInventory loreInventory) {
+                    this.loreInventory = loreInventory;
+                }
+
+                public static void addLoreEntryOverride(Predicate<ItemStack> predicate, String entry) {
+                    LORE_ENTRY_OVERRIDES.putIfAbsent(predicate, entry);
+                }
+
+                public String getLoreEntryKey(ItemStack stack) {
+                    for (Predicate<ItemStack> predicate : LORE_ENTRY_OVERRIDES.keySet()) {
+                        if (predicate.test(stack)) {
+                            return LORE_ENTRY_OVERRIDES.get(predicate);
+                        }
+                    }
+                    return "lore." + stack.getDescriptionId();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LoreClient.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+
+            public class LoreClient {
+                public static void registerLoreOverrides() {
+                    LoreBookMenu.addLoreEntryOverride(stack -> ItemStack.isSameItemSameComponents(stack, ExampleItems.createExampleBannerItemStack()), "lore.example");
+                }
+            }
+        """.trimIndent())
 
         val result = StructuralRefactorPass().apply(tempDir)
         val blocks = srcDir.resolve("ExampleBlocks.java").readText()
@@ -13825,8 +13881,12 @@ class StructuralRefactorExtraTest {
         val tabs = srcDir.resolve("ExampleTabs.java").readText()
         val recipe = srcDir.resolve("ExampleRecipe.java").readText()
         val entity = srcDir.resolve("ExampleEntity.java").readText()
+        val loreInventory = srcDir.resolve("LoreInventory.java").readText()
+        val loreBook = srcDir.resolve("LoreBookMenu.java").readText()
+        val loreClient = srcDir.resolve("LoreClient.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-banner-pattern-components" })
+        assertTrue(result.changes.any { it.ruleId == "struct-registry-backed-itemstack-predicate" })
         assertTrue(blocks.contains("public static BannerPatternLayers EXAMPLE_PATTERN(HolderGetter<BannerPattern> patternRegistry)"), blocks)
         assertTrue(blocks.contains(".add(patternRegistry.getOrThrow(BannerPatterns.STRIPE_BOTTOM), DyeColor.CYAN)"), blocks)
         assertTrue(blocks.contains("import net.minecraft.core.HolderGetter;"), blocks)
@@ -13841,6 +13901,12 @@ class StructuralRefactorExtraTest {
         assertTrue(recipe.contains("ExampleItems.createExampleBannerItemStack(registries.lookupOrThrow(Registries.BANNER_PATTERN))"), recipe)
         assertTrue(recipe.contains("import net.minecraft.core.registries.Registries;"), recipe)
         assertTrue(entity.contains("ExampleItems.createExampleBannerItemStack(level.holderLookup(Registries.BANNER_PATTERN))"), entity)
+        assertTrue(loreInventory.contains("public final Player player;"), loreInventory)
+        assertTrue(loreBook.contains("Map<Function<RegistryAccess, Predicate<ItemStack>>, String> LORE_ENTRY_OVERRIDES"), loreBook)
+        assertTrue(loreBook.contains("public static void addLoreEntryOverride(Function<RegistryAccess, Predicate<ItemStack>> predicate, String entry)"), loreBook)
+        assertTrue(loreBook.contains("Optional<String> key = LORE_ENTRY_OVERRIDES.entrySet().stream().filter(e -> e.getKey().apply(this.loreInventory.player.registryAccess()).test(stack)).findAny().map(Map.Entry::getValue);"), loreBook)
+        assertTrue(loreBook.contains("return key.orElseGet(() -> \"lore.\" + stack.getDescriptionId());"), loreBook)
+        assertTrue(loreClient.contains("LoreBookMenu.addLoreEntryOverride(registryAccess -> stack -> ItemStack.isSameItemSameComponents(stack, ExampleItems.createExampleBannerItemStack(registryAccess.registryOrThrow(Registries.BANNER_PATTERN).asLookup())), \"lore.example\")"), loreClient)
     }
 
     @Test

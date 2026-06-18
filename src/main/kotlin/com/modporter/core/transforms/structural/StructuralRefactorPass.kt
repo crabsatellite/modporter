@@ -7825,6 +7825,7 @@ $fields
         val holderValueParameterHints = collectHolderValueParameterHints(srcDir)
         val criterionInstanceFactoryHints = collectCriterionInstanceFactoryHints(srcDir)
         val staticRegistryFieldHints = collectStaticRegistryFieldHints(srcDir)
+        val legacyItemStackPredicateOverrides = collectLegacyItemStackPredicateOverrideMethods(javaFiles)
         val legacyBannerPatternFactories = collectLegacyBannerPatternLayerFactories(javaFiles)
         val legacyBannerItemFactories = collectLegacyBannerItemStackFactories(javaFiles)
         val legacyRegistryBackedMethods = collectLegacyRegistryBackedMethods(javaFiles)
@@ -8088,6 +8089,23 @@ $fields
                     text = brewingMigrated
                 }
 
+                val predicateOverrideMigrated = migrateLegacyRegistryBackedItemStackPredicateOverrides(
+                    text,
+                    legacyItemStackPredicateOverrides
+                )
+                if (predicateOverrideMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate item-stack predicate override registries to registry-aware predicates",
+                        before = "Predicate<ItemStack> override registry",
+                        after = "Function<RegistryAccess, Predicate<ItemStack>> override registry",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-registry-backed-itemstack-predicate"
+                    ))
+                    text = predicateOverrideMigrated
+                }
+
                 val bannerPatternMigrated = migrateLegacyBannerPatternLayerSource(
                     text,
                     legacyBannerPatternFactories,
@@ -8309,6 +8327,179 @@ $fields
         ).findAll(source)
             .map { it.groupValues[1].substringAfterLast('.') }
             .toSet()
+    }
+
+    private data class LegacyItemStackPredicateOverrideMethod(
+        val packageName: String,
+        val ownerClass: String,
+        val methodName: String
+    ) {
+        val qualifiedOwner: String = if (packageName.isBlank()) ownerClass else "$packageName.$ownerClass"
+    }
+
+    private fun collectLegacyItemStackPredicateOverrideMethods(javaFiles: List<Path>): Set<LegacyItemStackPredicateOverrideMethod> =
+        javaFiles.mapNotNull { javaFile ->
+            val source = javaFile.readText()
+            if (!source.contains("Predicate<ItemStack>") ||
+                !source.contains("Map<Predicate<ItemStack>") ||
+                !source.contains(".putIfAbsent(")) {
+                return@mapNotNull null
+            }
+            val ownerClass = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+            val packageName = packageNameOf(source)
+            val methodPattern = Regex(
+                """(?m)\bstatic\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*Predicate\s*<\s*ItemStack\s*>\s+[A-Za-z_$][\w$]*\s*,"""
+            )
+            methodPattern.findAll(source)
+                .map { LegacyItemStackPredicateOverrideMethod(packageName, ownerClass, it.groupValues[1]) }
+                .toList()
+        }.flatten().toSet()
+
+    private fun migrateLegacyRegistryBackedItemStackPredicateOverrides(
+        source: String,
+        methods: Set<LegacyItemStackPredicateOverrideMethod>
+    ): String {
+        var result = migratePlayerBackedSimpleContainerFieldVisibility(source)
+        if (!source.contains("Predicate<ItemStack>") && methods.none { source.contains("${it.methodName}(") }) {
+            return result
+        }
+        result = migrateLegacyItemStackPredicateOverrideDefinitions(result)
+        result = migrateLegacyItemStackPredicateOverrideCallSites(result, methods)
+        if (result == source) return source
+        if (result.contains("Function<RegistryAccess, Predicate<ItemStack>>")) {
+            result = addImportIfMissing(result, "java.util.function.Function")
+            result = addImportIfMissing(result, "net.minecraft.core.RegistryAccess")
+        }
+        if (result.contains("Optional<String>")) {
+            result = addImportIfMissing(result, "java.util.Optional")
+        }
+        return result
+    }
+
+    private fun migrateLegacyItemStackPredicateOverrideDefinitions(source: String): String {
+        if (!source.contains("Map<Predicate<ItemStack>") ||
+            !source.contains("Predicate<ItemStack>") ||
+            !source.contains(".putIfAbsent(")) {
+            return migratePlayerBackedSimpleContainerFieldVisibility(source)
+        }
+        val registryAccess = inferItemStackPredicateOverrideRegistryAccess(source) ?: return migratePlayerBackedSimpleContainerFieldVisibility(source)
+        var result = source
+        val fieldNames = Regex("""Map\s*<\s*Predicate\s*<\s*ItemStack\s*>\s*,\s*String\s*>\s+([A-Za-z_$][\w$]*)""")
+            .findAll(result)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (fieldNames.isEmpty()) return migratePlayerBackedSimpleContainerFieldVisibility(source)
+
+        result = Regex("""Map\s*<\s*Predicate\s*<\s*ItemStack\s*>\s*,\s*String\s*>""")
+            .replace(result, "Map<Function<RegistryAccess, Predicate<ItemStack>>, String>")
+        result = Regex("""Predicate\s*<\s*ItemStack\s*>\s+([A-Za-z_$][\w$]*)(?=\s*,\s*String\s+[A-Za-z_$][\w$]*\s*\))""")
+            .replace(result, "Function<RegistryAccess, Predicate<ItemStack>> $1")
+
+        for (fieldName in fieldNames) {
+            val loopPattern = Regex(
+                """(?ms)^([ \t]*)for\s*\(\s*Predicate\s*<\s*ItemStack\s*>\s+([A-Za-z_$][\w$]*)\s*:\s*${Regex.escape(fieldName)}\.keySet\(\)\s*\)\s*\{\s*if\s*\(\s*\2\.test\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\)\s*\{\s*return\s+${Regex.escape(fieldName)}\.get\(\s*\2\s*\)\s*;\s*}\s*}\s*return\s+([^;\r\n]+);\s*$"""
+            )
+            result = loopPattern.replace(result) { match ->
+                val indent = match.groupValues[1]
+                val stack = match.groupValues[3]
+                val fallback = match.groupValues[4].trim()
+                "${indent}Optional<String> key = $fieldName.entrySet().stream().filter(e -> e.getKey().apply($registryAccess).test($stack)).findAny().map(Map.Entry::getValue);\n" +
+                    "${indent}return key.orElseGet(() -> $fallback);"
+            }
+        }
+
+        result = migratePlayerBackedSimpleContainerFieldVisibility(result)
+        return result
+    }
+
+    private fun inferItemStackPredicateOverrideRegistryAccess(source: String): String? {
+        val inventoryField = Regex(
+            """(?m)^[ \t]*private\s+final\s+([A-Za-z_$][\w$]*(?:Inventory|Container))\s+([A-Za-z_$][\w$]*)\s*;"""
+        ).find(source) ?: return null
+        val fieldName = inventoryField.groupValues[2]
+        return "this.$fieldName.player.registryAccess()"
+    }
+
+    private fun migratePlayerBackedSimpleContainerFieldVisibility(source: String): String {
+        if (!source.contains("private final Player player") ||
+            !source.contains("this.player = player") ||
+            !Regex("""extends\s+SimpleContainer\b""").containsMatchIn(source)) {
+            return source
+        }
+        return source.replace(
+            Regex("""(?m)^([ \t]*)private\s+final\s+Player\s+player\s*;"""),
+            "$1public final Player player;"
+        )
+    }
+
+    private fun migrateLegacyItemStackPredicateOverrideCallSites(
+        source: String,
+        methods: Set<LegacyItemStackPredicateOverrideMethod>
+    ): String {
+        if (methods.isEmpty()) return source
+        var result = source
+        methods.forEach { method ->
+            result = rewriteJavaCallWithOffset(result, method.methodName) { receiver, args, _ ->
+                if (args.size < 2) return@rewriteJavaCallWithOffset null
+                val receiverText = receiver.trim()
+                val matchesOwner = receiverText == method.ownerClass || receiverText == method.qualifiedOwner ||
+                    receiverText.endsWith(".${method.ownerClass}")
+                if (!matchesOwner || !isLegacyItemStackPredicateLambda(args[0])) return@rewriteJavaCallWithOffset null
+                val migratedArgs = args.toMutableList()
+                migratedArgs[0] = "registryAccess -> ${args[0].trim()}"
+                "$receiverText.${method.methodName}(${migratedArgs.joinToString(", ") { it.trim() }})"
+            }
+            result = rewriteUnqualifiedLegacyItemStackPredicateOverrideCallSites(result, method)
+        }
+        return result
+    }
+
+    private fun rewriteUnqualifiedLegacyItemStackPredicateOverrideCallSites(
+        source: String,
+        method: LegacyItemStackPredicateOverrideMethod
+    ): String {
+        var result = source
+        var cursor = 0
+        val token = "${method.methodName}("
+        while (true) {
+            val tokenIndex = result.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            if (tokenIndex > 0) {
+                val prev = result[tokenIndex - 1]
+                if (prev.isLetterOrDigit() || prev == '_' || prev == '$' || prev == '.') {
+                    cursor = tokenIndex + token.length
+                    continue
+                }
+            }
+            val openParen = tokenIndex + method.methodName.length
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            if (looksLikeJavaMethodDeclaration(result, tokenIndex, closeParen)) {
+                cursor = closeParen + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            if (args.size < 2 || !isLegacyItemStackPredicateLambda(args[0])) {
+                cursor = closeParen + 1
+                continue
+            }
+            val migratedArgs = args.toMutableList()
+            migratedArgs[0] = "registryAccess -> ${args[0].trim()}"
+            val replacement = "${method.methodName}(${migratedArgs.joinToString(", ") { it.trim() }})"
+            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
+            cursor = tokenIndex + replacement.length
+        }
+        return result
+    }
+
+    private fun isLegacyItemStackPredicateLambda(expression: String): Boolean {
+        val trimmed = expression.trim()
+        if (!trimmed.contains("->")) return false
+        if (Regex("""^\s*(?:\(?\s*)?registryAccess\s*(?:\)?\s*)?->""").containsMatchIn(trimmed)) return false
+        return Regex("""^\s*(?:\(?\s*)?[A-Za-z_$][\w$]*\s*(?:\)?\s*)?->""").containsMatchIn(trimmed)
     }
 
     private data class LegacyBannerPatternLayerFactory(
@@ -8642,6 +8833,11 @@ $fields
             ?.groupValues
             ?.get(1)
             ?.let { return "$it.lookupOrThrow(Registries.BANNER_PATTERN)" }
+        Regex("""\b(registryAccess)\s*->""")
+            .find(combined)
+            ?.groupValues
+            ?.get(1)
+            ?.let { return "$it.registryOrThrow(Registries.BANNER_PATTERN).asLookup()" }
         Regex("""(?:ServerLevel|Level|LevelAccessor|LevelReader|WorldGenLevel|ServerLevelAccessor)\s+([A-Za-z_$][\w$]*)""")
             .find(combined)
             ?.groupValues
