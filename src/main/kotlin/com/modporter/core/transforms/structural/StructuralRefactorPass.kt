@@ -10602,6 +10602,7 @@ ${entries.joinToString(",\n")}
         result = result.replace("Tags.Items.TOOLS_BOWS", "Tags.Items.TOOLS_BOW")
         result = result.replace("Tags.Items.TOOLS_CROSSBOWS", "Tags.Items.TOOLS_CROSSBOW")
         result = result.replace("Tags.Items.TOOLS_FISHING_RODS", "Tags.Items.TOOLS_FISHING_ROD")
+        result = result.replace("EquipmentSlot.Type.ARMOR", "EquipmentSlot.Type.HUMANOID_ARMOR")
         result = Regex("""\b(CauldronInteraction\.(?:EMPTY|WATER|LAVA|POWDER_SNOW))\.put\(""")
             .replace(result, "$1.map().put(")
         result = migrateLegacyCauldronInteractionResults(result)
