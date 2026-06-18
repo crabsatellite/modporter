@@ -8098,6 +8098,20 @@ $fields
                     text = screenBackgroundMigrated
                 }
 
+                val legacyHeartTypeSheetMigrated = migrateLegacyHeartTypeSheetCoordinatesSource(text)
+                if (legacyHeartTypeSheetMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate legacy Gui.HeartType sheet coordinates to an explicit 1.20-compatible coordinate helper",
+                        before = "Gui.HeartType#getX(halfHeart, blinking) in GuiGraphics.blit(...)",
+                        after = "modporterLegacyHeartTypeX(heartType, halfHeart, blinking)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-hearttype-legacy-sheet-coordinates"
+                    ))
+                    text = legacyHeartTypeSheetMigrated
+                }
+
                 val customDataMigrated = migrateCustomDataComponentsSource(text)
                 if (customDataMigrated != text) {
                     changes.add(Change(
@@ -11665,6 +11679,126 @@ ${indent}}
         }
         return result
     }
+
+    private fun migrateLegacyHeartTypeSheetCoordinatesSource(source: String): String {
+        if (!source.contains(".getX(") || !source.contains(".blit(")) return source
+        val heartTypeReceivers = collectHeartTypeReceiverNames(source)
+        if (heartTypeReceivers.isEmpty() &&
+            !Regex("""(?:net\.minecraft\.client\.gui\.)?Gui\.HeartType\.[A-Z][A-Z0-9_]*\.getX\s*\(""").containsMatchIn(source) &&
+            !Regex("""(?<![\w$])HeartType\.[A-Z][A-Z0-9_]*\.getX\s*\(""").containsMatchIn(source)
+        ) {
+            return source
+        }
+
+        var changed = false
+        var result = rewriteJavaInvocationArguments(source, "blit") { args ->
+            var argChanged = false
+            val migratedArgs = args.map { arg ->
+                val replacement = replaceLegacyHeartTypeGetXCalls(arg, heartTypeReceivers)
+                if (replacement != arg) argChanged = true
+                replacement
+            }
+            if (argChanged) {
+                changed = true
+                migratedArgs
+            } else {
+                null
+            }
+        }
+        if (!changed) return source
+        if (!result.contains("private static int modporterLegacyHeartTypeX(")) {
+            result = insertBeforeLastClassBrace(result, legacyHeartTypeXHelperSource())
+        }
+        return result
+    }
+
+    private fun collectHeartTypeReceiverNames(source: String): Set<String> {
+        val names = linkedSetOf<String>()
+        Regex("""\b(?:net\.minecraft\.client\.gui\.)?Gui\.HeartType\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(source)
+            .forEach { names += it.groupValues[1] }
+        if (source.contains("import net.minecraft.client.gui.Gui.HeartType;")) {
+            Regex("""(?<![\w$.])HeartType\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(source)
+                .forEach { names += it.groupValues[1] }
+        }
+        return names
+    }
+
+    private fun replaceLegacyHeartTypeGetXCalls(expression: String, heartTypeReceivers: Set<String>): String {
+        var result = expression
+        var cursor = 0
+        val receiverPattern = Regex(
+            """(?<![\w$])((?:net\.minecraft\.client\.gui\.)?Gui\.HeartType\.[A-Z][A-Z0-9_]*|HeartType\.[A-Z][A-Z0-9_]*|[A-Za-z_$][\w$]*)\.getX\s*\("""
+        )
+        while (true) {
+            val match = receiverPattern.find(result, cursor) ?: break
+            val receiver = match.groupValues[1]
+            val isKnownHeartType = receiver in heartTypeReceivers ||
+                receiver.startsWith("Gui.HeartType.") ||
+                receiver.startsWith("net.minecraft.client.gui.Gui.HeartType.") ||
+                receiver.startsWith("HeartType.")
+            if (!isKnownHeartType) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val openParen = result.indexOf('(', match.range.first)
+            val closeParen = if (openParen >= 0) findMatchingParen(result, openParen) else -1
+            if (openParen < 0 || closeParen < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            if (args.size != 2) {
+                cursor = closeParen + 1
+                continue
+            }
+            val replacement = "modporterLegacyHeartTypeX($receiver, ${args[0].trim()}, ${args[1].trim()})"
+            result = result.substring(0, match.range.first) + replacement + result.substring(closeParen + 1)
+            cursor = match.range.first + replacement.length
+        }
+        return result
+    }
+
+    private fun legacyHeartTypeXHelperSource(): String = """
+
+	private static int modporterLegacyHeartTypeX(net.minecraft.client.gui.Gui.HeartType heartType, boolean halfHeart, boolean blinking) {
+		int index;
+		boolean canBlink;
+		if (heartType == net.minecraft.client.gui.Gui.HeartType.CONTAINER) {
+			index = 0;
+			canBlink = false;
+		} else if (heartType == net.minecraft.client.gui.Gui.HeartType.NORMAL) {
+			index = 2;
+			canBlink = true;
+		} else if (heartType == net.minecraft.client.gui.Gui.HeartType.POISIONED) {
+			index = 4;
+			canBlink = true;
+		} else if (heartType == net.minecraft.client.gui.Gui.HeartType.WITHERED) {
+			index = 6;
+			canBlink = true;
+		} else if (heartType == net.minecraft.client.gui.Gui.HeartType.ABSORBING) {
+			index = 8;
+			canBlink = false;
+		} else if (heartType == net.minecraft.client.gui.Gui.HeartType.FROZEN) {
+			index = 9;
+			canBlink = false;
+		} else {
+			throw new IllegalArgumentException("Unsupported legacy Gui.HeartType sheet coordinates: " + heartType);
+		}
+
+		int offset;
+		if (heartType == net.minecraft.client.gui.Gui.HeartType.CONTAINER) {
+			offset = blinking ? 1 : 0;
+		} else {
+			offset = halfHeart ? 1 : 0;
+			if (canBlink && blinking) {
+				offset += 2;
+			}
+		}
+		return 16 + (index * 2 + offset) * 9;
+	}
+""".trimEnd()
 
     private fun migrateCustomDataComponentsSource(source: String): String {
         var result = source

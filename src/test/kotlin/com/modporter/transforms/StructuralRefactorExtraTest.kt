@@ -16987,6 +16987,39 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy Gui HeartType sheet coordinates without changing texture source`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("HeartOverlaySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.Gui;
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class HeartOverlaySurface {
+                private static final ResourceLocation HEARTS = ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, "textures/gui/custom_hearts.png");
+
+                public void render(GuiGraphics guiGraphics, Gui.HeartType heartType, int x, int y, boolean halfHeart, boolean blink) {
+                    guiGraphics.blit(HEARTS, x, y, heartType.getX(halfHeart, blink), 0, 9, 9);
+                    guiGraphics.blit(HEARTS, x + 10, y, Gui.HeartType.CONTAINER.getX(false, blink), 0, 9, 9);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("HeartOverlaySurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("""ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, "textures/gui/custom_hearts.png")"""), migrated)
+        assertTrue(migrated.contains("guiGraphics.blit(HEARTS, x, y, modporterLegacyHeartTypeX(heartType, halfHeart, blink), 0, 9, 9);"), migrated)
+        assertTrue(migrated.contains("modporterLegacyHeartTypeX(Gui.HeartType.CONTAINER, false, blink)"), migrated)
+        assertTrue(migrated.contains("private static int modporterLegacyHeartTypeX(net.minecraft.client.gui.Gui.HeartType heartType, boolean halfHeart, boolean blinking)"), migrated)
+        assertTrue(migrated.contains("return 16 + (index * 2 + offset) * 9;"), migrated)
+        assertFalse(migrated.contains(".getX("), migrated)
+    }
+
+    @Test
     fun `empty project returns empty results`() {
         val projectDir = tempDir.resolve("empty-project")
         projectDir.createDirectories()
