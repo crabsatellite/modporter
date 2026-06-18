@@ -585,6 +585,13 @@ class StructuralRefactorPass : Pass {
             errors.add("Final collection size migration error: ${e.message}")
         }
 
+        try {
+            val duplicateLookupChanges = normalizeDuplicateHolderLookupConstructorArguments(projectDir, dryRun)
+            changes.addAll(duplicateLookupChanges)
+        } catch (e: Exception) {
+            errors.add("Duplicate HolderLookup constructor argument cleanup error: ${e.message}")
+        }
+
         return PassResult(name, changes, errors, skipped)
     }
 
@@ -12501,6 +12508,7 @@ ${indent}}
         }
 
         result = migrateGlobalLootModifierCodecs(result)
+        result = migrateDuplicateHolderLookupConstructorArguments(result)
         result = migrateNeoForgeGameTestResourceAssertions(result)
 
         result = Regex(
@@ -12856,6 +12864,7 @@ ${indent}}
         }
 
         result = migrateJava21StrictWarningSource(result)
+        result = migrateDuplicateHolderLookupConstructorArguments(result)
 
         if (needsEntityTypeTags) result = addImportIfMissing(result, "net.minecraft.tags.EntityTypeTags")
         if (needsHolder) result = addImportIfMissing(result, "net.minecraft.core.Holder")
@@ -23158,14 +23167,29 @@ $methodBody
                     changed = true
                     "new $newClass(${match.groupValues[2]}, $providerExpression)"
                 }
+            providerClasses.forEach { className ->
+                result = migrateMethodCalls(result, "new $className") { args ->
+                    if (args.size <= 2) return@migrateMethodCalls args
+                    val lookupArg = args.getOrNull(1)?.trim() ?: return@migrateMethodCalls args
+                    val extrasAreDuplicateLookups = args.drop(2).all { extra ->
+                        val trimmed = extra.trim()
+                        trimmed == lookupArg || trimmed == providerExpression
+                    }
+                    if (!extrasAreDuplicateLookups) return@migrateMethodCalls args
+                    changed = true
+                    args.take(2)
+                }
+            }
         }
         return if (changed) result else source
     }
 
     private fun migrateLegacyPackMetadataSectionSource(source: String): String {
-        if (!source.contains("new PackMetadataSection(") || !source.contains("Collectors.toMap")) return source
+        if (!source.contains("new PackMetadataSection(")) return source
         var result = source
         var changed = false
+        val packTypeMapValues = collectPackMetadataMapFormatValues(result)
+        val consumedPackTypeMaps = mutableSetOf<String>()
         var cursor = 0
         val token = "new PackMetadataSection"
         while (cursor < result.length) {
@@ -23176,10 +23200,21 @@ $methodBody
             val closeParen = findMatchingParen(result, openParen)
             if (closeParen < 0) break
             val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
-            if (args.size == 3 && args[2].contains("Collectors.toMap")) {
+            val supportedFormatArg = args.getOrNull(2)?.trim()
+            val packFormat = when {
+                args.size != 3 -> null
+                supportedFormatArg?.contains("Collectors.toMap") == true -> args[1].trim()
+                supportedFormatArg != null && supportedFormatArg in packTypeMapValues -> {
+                    consumedPackTypeMaps += supportedFormatArg
+                    packTypeMapValues.getValue(supportedFormatArg)
+                }
+                supportedFormatArg?.startsWith("Map.of(") == true -> packMetadataMapOfFormatValue(supportedFormatArg)
+                else -> null
+            }
+            if (packFormat != null) {
                 val replacementArgs = listOf(
                     args[0].trim(),
-                    args[1].trim(),
+                    packFormat,
                     "java.util.Optional.of(new InclusiveRange<>(0, Integer.MAX_VALUE))"
                 ).joinToString(",\n\t\t\t\t\t\t")
                 result = result.substring(0, openParen + 1) + replacementArgs + result.substring(closeParen)
@@ -23190,6 +23225,15 @@ $methodBody
             }
         }
         if (!changed) return source
+        for (mapName in consumedPackTypeMaps) {
+            val declarationPattern = Regex(
+                """(?m)^[ \t]*(?:java\.util\.)?Map\s*<\s*PackType\s*,\s*Integer\s*>\s+${Regex.escape(mapName)}\s*=\s*Map\.of\([^\r\n;]+;\s*\r?\n"""
+            )
+            val withoutDeclaration = declarationPattern.replace(result, "")
+            if (!Regex("""\b${Regex.escape(mapName)}\b""").containsMatchIn(withoutDeclaration)) {
+                result = withoutDeclaration
+            }
+        }
         result = addImportIfMissing(result, "net.minecraft.util.InclusiveRange")
         if (!result.contains("Arrays.")) {
             result = removeImport(result, "java.util.Arrays")
@@ -23200,7 +23244,117 @@ $methodBody
         if (!result.contains("Collectors.")) {
             result = removeImport(result, "java.util.stream.Collectors")
         }
+        val withoutMapImport = removeImport(result, "java.util.Map")
+        if (!Regex("""\bMap\s*[.<]""").containsMatchIn(withoutMapImport)) {
+            result = withoutMapImport
+        }
         return result
+    }
+
+    private fun collectPackMetadataMapFormatValues(source: String): Map<String, String> {
+        val values = linkedMapOf<String, String>()
+        Regex("""(?m)\b(?:java\.util\.)?Map\s*<\s*PackType\s*,\s*Integer\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*(Map\.of\([^\r\n;]+)\s*;""")
+            .findAll(source)
+            .forEach { match ->
+                val mapName = match.groupValues[1]
+                val value = packMetadataMapOfFormatValue(match.groupValues[2])
+                if (value != null) values[mapName] = value
+            }
+        return values
+    }
+
+    private fun packMetadataMapOfFormatValue(expression: String): String? {
+        val openParen = expression.indexOf('(')
+        if (openParen < 0) return null
+        val closeParen = findMatchingParen(expression, openParen)
+        if (closeParen < 0) return null
+        val entries = splitTopLevelJavaArgs(expression.substring(openParen + 1, closeParen))
+        if (entries.size != 2) return null
+        if (!Regex("""^PackType\.[A-Z_]+$""").matches(entries[0].trim())) return null
+        return entries[1].trim()
+    }
+
+    private fun migrateDuplicateHolderLookupConstructorArguments(source: String): String {
+        if (!source.contains("HolderLookup.Provider") && !source.contains("getLookupProvider(")) return source
+        val lookupExpressions = holderLookupProviderExpressions(source)
+        if (lookupExpressions.isEmpty()) return source
+
+        var result = source
+        var cursor = 0
+        val constructorPattern = Regex("""new\s+[A-Za-z_$][\w$]*(?:\s*<[^;\r\n(){}]*>)?\s*\(""")
+        while (true) {
+            val match = constructorPattern.find(result, cursor) ?: break
+            val openParen = result.indexOf('(', match.range.first)
+            val closeParen = if (openParen >= 0) findMatchingParen(result, openParen) else -1
+            if (openParen < 0 || closeParen < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            if (args.size < 3) {
+                cursor = closeParen + 1
+                continue
+            }
+            val seenLookupArgs = mutableSetOf<String>()
+            var changed = false
+            val keptArgs = args.filterIndexed { index, arg ->
+                val trimmed = arg.trim()
+                if (index == 0 || trimmed !in lookupExpressions) {
+                    true
+                } else if (trimmed in seenLookupArgs) {
+                    changed = true
+                    false
+                } else {
+                    seenLookupArgs += trimmed
+                    true
+                }
+            }
+            if (!changed) {
+                cursor = closeParen + 1
+                continue
+            }
+            val replacementArgs = keptArgs.joinToString(", ") { it.trim() }
+            result = result.substring(0, openParen + 1) + replacementArgs + result.substring(closeParen)
+            cursor = openParen + 1 + replacementArgs.length
+        }
+        return result
+    }
+
+    private fun holderLookupProviderExpressions(source: String): Set<String> {
+        val expressions = linkedSetOf<String>()
+        Regex(
+            """(?:java\.util\.concurrent\.)?CompletableFuture\s*<\s*HolderLookup\.Provider\s*>\s+([A-Za-z_$][\w$]*)\b"""
+        ).findAll(source).forEach { expressions += it.groupValues[1] }
+        Regex("""\b([A-Za-z_$][\w$]*)\.getLookupProvider\(\)""")
+            .findAll(source)
+            .forEach { expressions += "${it.groupValues[1]}.getLookupProvider()" }
+        return expressions
+    }
+
+    private fun normalizeDuplicateHolderLookupConstructorArguments(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val text = javaFile.readText()
+                val migrated = migrateDuplicateHolderLookupConstructorArguments(text)
+                if (migrated == text) return@forEach
+                if (!dryRun) {
+                    javaFile.writeText(migrated)
+                }
+                changes.add(Change(
+                    file = javaFile,
+                    line = 0,
+                    description = "Remove duplicate HolderLookup provider constructor arguments in ${javaFile.fileName}",
+                    before = "new Provider(..., lookupProvider, lookupProvider)",
+                    after = "new Provider(..., lookupProvider)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-deduplicate-holderlookup-constructor-args"
+                ))
+            }
+        return changes
     }
 
     private fun migrateLegacyLootFunctionSource(source: String): String {

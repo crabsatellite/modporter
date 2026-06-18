@@ -4644,9 +4644,14 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                         }
                     }
 
-                    val constructorCall = Regex("""new\s+${Regex.escape(providerClass)}\s*\(\s*packOutput\s*,\s*([^)]+?)\s*\)""")
+                    val constructorCall = Regex("""new\s+${Regex.escape(providerClass)}\s*\(\s*packOutput\s*,\s*([^,()]+(?:\([^()]*\))?)\s*\)""")
                     modified = constructorCall.replace(modified) { match ->
-                        "new $providerClass(packOutput, $lookupProviderExpr, ${match.groupValues[1].trim()})"
+                        val existingSecondArg = match.groupValues[1].trim()
+                        if (existingSecondArg == lookupProviderExpr || existingSecondArg.endsWith(".getLookupProvider()")) {
+                            match.value
+                        } else {
+                            "new $providerClass(packOutput, $lookupProviderExpr, $existingSecondArg)"
+                        }
                     }
                 }
 

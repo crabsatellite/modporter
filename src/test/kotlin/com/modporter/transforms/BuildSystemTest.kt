@@ -3161,6 +3161,60 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `global loot modifier provider keeps already migrated lookup constructor calls`() {
+        val projectDir = tempDir.resolve("p19-global-loot-modifier-existing-lookup")
+        val dataDir = projectDir.resolve("src/main/java/com/example/data")
+        dataDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        dataDir.resolve("ExampleLootModifierProvider.java").writeText("""
+            package com.example.data;
+
+            import java.util.concurrent.CompletableFuture;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.common.data.GlobalLootModifierProvider;
+
+            public class ExampleLootModifierProvider extends GlobalLootModifierProvider {
+                public ExampleLootModifierProvider(PackOutput output, CompletableFuture<HolderLookup.Provider> lookupProvider) {
+                    super(output, lookupProvider, "example");
+                }
+
+                protected void start() {
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("ModData.java").writeText("""
+            package com.example.data;
+
+            import java.util.concurrent.CompletableFuture;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class ModData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput packOutput = generator.getPackOutput();
+                    CompletableFuture<HolderLookup.Provider> provider = event.getLookupProvider();
+                    generator.addProvider(true, new ExampleLootModifierProvider(packOutput, provider));
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val modData = dataDir.resolve("ModData.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(modData.contains("new ExampleLootModifierProvider(packOutput, provider)"), modData)
+        assertFalse(modData.contains("provider, provider"), modData)
+    }
+
+    @Test
     fun `mmlib recipe provider derives mod id from project metadata`() {
         val projectDir = tempDir.resolve("p19-mmlib-datagen-metadata-modid")
         val dataDir = projectDir.resolve("src/main/java/com/example/data")

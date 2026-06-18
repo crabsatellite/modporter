@@ -17587,6 +17587,88 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `deduplicates global loot modifier provider lookup constructor arguments`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LegacyGlobalLootModifierGenerator.java").writeText("""
+            package com.example;
+
+            import java.util.concurrent.CompletableFuture;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.common.data.GlobalLootModifierProvider;
+
+            public class LegacyGlobalLootModifierGenerator extends GlobalLootModifierProvider {
+                public LegacyGlobalLootModifierGenerator(PackOutput output, CompletableFuture<HolderLookup.Provider> provider) {
+                    super(output, provider, "example");
+                }
+
+                @Override
+                protected void start() {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyGlobalLootModifierData.java").writeText("""
+            package com.example;
+
+            import java.util.concurrent.CompletableFuture;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class LegacyGlobalLootModifierData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput output = event.getGenerator().getPackOutput();
+                    CompletableFuture<HolderLookup.Provider> provider = event.getLookupProvider();
+                    generator.addProvider(event.includeServer(), new LegacyGlobalLootModifierGenerator(output, provider, provider));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LegacyGlobalLootModifierData.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("new LegacyGlobalLootModifierGenerator(output, provider)"), migrated)
+        assertFalse(migrated.contains("provider, provider"), migrated)
+    }
+
+    @Test
+    fun `migrates pack metadata pack type maps to supported format range`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PackMetadataMapSurface.java").writeText("""
+            package com.example;
+
+            import java.util.Map;
+            import net.minecraft.SharedConstants;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.server.packs.PackType;
+            import net.minecraft.server.packs.metadata.pack.PackMetadataSection;
+
+            public class PackMetadataMapSurface {
+                public PackMetadataSection metadata() {
+                    Map<PackType, Integer> packTypes = Map.of(PackType.SERVER_DATA, SharedConstants.getCurrentVersion().getPackVersion(PackType.SERVER_DATA));
+                    return new PackMetadataSection(Component.literal("Data"), SharedConstants.getCurrentVersion().getPackVersion(PackType.CLIENT_RESOURCES), packTypes);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("PackMetadataMapSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.util.InclusiveRange;"), migrated)
+        assertTrue(migrated.contains("new PackMetadataSection(Component.literal(\"Data\"),"), migrated)
+        assertTrue(migrated.contains("SharedConstants.getCurrentVersion().getPackVersion(PackType.SERVER_DATA),"), migrated)
+        assertTrue(migrated.contains("java.util.Optional.of(new InclusiveRange<>(0, Integer.MAX_VALUE))"), migrated)
+        assertFalse(migrated.contains("Map<PackType, Integer> packTypes"), migrated)
+        assertFalse(migrated.contains("import java.util.Map;"), migrated)
+    }
+
+    @Test
     fun `empty project returns empty results`() {
         val projectDir = tempDir.resolve("empty-project")
         projectDir.createDirectories()
