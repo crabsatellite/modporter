@@ -17514,6 +17514,79 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy singleplayer world open and clear calls`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("WorldFlowSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.gui.screens.Screen;
+            import net.minecraft.client.gui.screens.worldselection.WorldOpenFlows;
+
+            public class WorldFlowSurface {
+                public void openDirect(Minecraft minecraft, Screen screen, String levelId) {
+                    minecraft.createWorldOpenFlows().loadLevel(screen, levelId);
+                }
+
+                public void openFromFlow(WorldOpenFlows flows, Screen screen, String levelId) {
+                    flows.loadLevel(screen, levelId);
+                }
+
+                public void stop(Minecraft minecraft, Screen screen) {
+                    minecraft.clearLevel(screen);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("WorldFlowSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("minecraft.createWorldOpenFlows().openWorld(levelId, () -> minecraft.setScreen(screen))"), migrated)
+        assertTrue(migrated.contains("flows.openWorld(levelId, () -> Minecraft.getInstance().setScreen(screen))"), migrated)
+        assertTrue(migrated.contains("minecraft.disconnect(screen);"), migrated)
+        assertFalse(migrated.contains(".loadLevel("), migrated)
+        assertFalse(migrated.contains(".clearLevel("), migrated)
+    }
+
+    @Test
+    fun `migrates LevelStorageAccess summary reads through data tag`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LevelSummarySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.storage.LevelStorageSource;
+            import net.minecraft.world.level.storage.LevelSummary;
+
+            import javax.annotation.Nullable;
+
+            public class LevelSummarySurface {
+                @Nullable
+                private static LevelSummary loadedSummary = null;
+
+                @Nullable
+                public static LevelSummary getLoaded(LevelStorageSource.LevelStorageAccess source) {
+                    loadedSummary = source.getSummary();
+                    return loadedSummary;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LevelSummarySurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import java.io.IOException;"), migrated)
+        assertTrue(migrated.contains("try {"), migrated)
+        assertTrue(migrated.contains("loadedSummary = source.getSummary(source.getDataTag());"), migrated)
+        assertTrue(migrated.contains("} catch (IOException e) {"), migrated)
+        assertTrue(migrated.contains("return null;"), migrated)
+        assertFalse(migrated.contains("source.getSummary();"), migrated)
+    }
+
+    @Test
     fun `empty project returns empty results`() {
         val projectDir = tempDir.resolve("empty-project")
         projectDir.createDirectories()

@@ -12235,6 +12235,7 @@ ${indent}}
         result = migrateAttributeHolderApiArguments(result, attributeHolderAccessHints)
         result = migrateLegacyServerDataConstructors(result)
         result = migrateLegacyConnectScreenStartConnectingCalls(result)
+        result = migrateLegacySingleplayerWorldFlowSource(result)
         val bindingCurseMigrated = migrateLegacyBindingCurseChecks(result)
         if (bindingCurseMigrated != result) {
             result = bindingCurseMigrated
@@ -23709,6 +23710,100 @@ $methodBody
         return migrateMethodCalls(source, "ConnectScreen.startConnecting") { args ->
             if (args.size == 5) args + "null" else args
         }
+    }
+
+    private fun migrateLegacySingleplayerWorldFlowSource(source: String): String {
+        if (!source.contains("loadLevel(") &&
+            !source.contains("clearLevel(") &&
+            !source.contains("getSummary()")) {
+            return source
+        }
+
+        val id = """[A-Za-z_$][\w$]*"""
+        val minecraftVariables = Regex("""\bMinecraft\s+($id)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        val worldOpenFlowsVariables = Regex("""\b(?:WorldOpenFlows|net\.minecraft\.client\.gui\.screens\.worldselection\.WorldOpenFlows)\s+($id)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        val levelStorageAccessVariables = Regex("""\b(?:LevelStorageSource\.)?LevelStorageAccess\s+($id)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+
+        var result = source
+        var needsMinecraftImport = false
+        result = rewriteJavaCall(result, "loadLevel") { receiver, args ->
+            if (args.size != 2) return@rewriteJavaCall null
+            val screen = args[0].trim()
+            val levelId = args[1].trim()
+            val minecraftReceiver = Regex("""^(.+)\.createWorldOpenFlows\(\)$""")
+                .matchEntire(receiver)
+                ?.groupValues
+                ?.get(1)
+                ?.trim()
+            if (minecraftReceiver != null) {
+                "$receiver.openWorld($levelId, () -> $minecraftReceiver.setScreen($screen))"
+            } else if (receiver in worldOpenFlowsVariables) {
+                needsMinecraftImport = true
+                "$receiver.openWorld($levelId, () -> Minecraft.getInstance().setScreen($screen))"
+            } else {
+                null
+            }
+        }
+
+        result = rewriteJavaCall(result, "clearLevel") { receiver, args ->
+            if (args.size != 1) return@rewriteJavaCall null
+            val isMinecraftReceiver = receiver == "Minecraft.getInstance()" || receiver in minecraftVariables
+            if (!isMinecraftReceiver) return@rewriteJavaCall null
+            "$receiver.disconnect(${args[0].trim()})"
+        }
+
+        var needsIOExceptionImport = false
+        for (receiver in levelStorageAccessVariables) {
+            val assignmentReturn = Regex(
+                """(?m)^([ \t]*)($id(?:\.$id)*)\s*=\s*${Regex.escape(receiver)}\.getSummary\(\)\s*;\s*\r?\n\1return\s+\2\s*;"""
+            )
+            result = assignmentReturn.replace(result) { match ->
+                if (!isNullableLevelSummaryMethod(result, match.range.first)) {
+                    return@replace match.value
+                }
+                needsIOExceptionImport = true
+                val indent = match.groupValues[1]
+                val summaryTarget = match.groupValues[2]
+                "${indent}try {\n" +
+                    "$indent    $summaryTarget = $receiver.getSummary($receiver.getDataTag());\n" +
+                    "$indent    return $summaryTarget;\n" +
+                    "$indent} catch (IOException e) {\n" +
+                    "$indent    return null;\n" +
+                    "$indent}"
+            }
+        }
+
+        result = rewriteJavaCall(result, "getSummary") { receiver, args ->
+            if (args.isNotEmpty()) return@rewriteJavaCall null
+            if (receiver !in levelStorageAccessVariables) return@rewriteJavaCall null
+            "$receiver.getSummary($receiver.getDataTag())"
+        }
+
+        if (needsMinecraftImport) {
+            result = addImportIfMissing(result, "net.minecraft.client.Minecraft")
+        }
+        if (needsIOExceptionImport) {
+            result = addImportIfMissing(result, "java.io.IOException")
+        }
+        return result
+    }
+
+    private fun isNullableLevelSummaryMethod(source: String, offset: Int): Boolean {
+        val prefix = source.substring(0, offset)
+        val methodPattern = Regex(
+            """(?ms)(?:^[ \t]*@[^\r\n]+\s*\r?\n[ \t]*)*(?:public|protected|private)?\s*(?:static\s+)?(?:@Nullable\s+)?LevelSummary\s+[A-Za-z_$][\w$]*\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\{"""
+        )
+        val method = methodPattern.findAll(prefix).lastOrNull() ?: return false
+        return method.value.contains("@Nullable")
     }
 
     private fun migrateLegacyBindingCurseChecks(source: String): String {
