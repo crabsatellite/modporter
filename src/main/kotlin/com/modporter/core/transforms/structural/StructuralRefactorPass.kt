@@ -31031,14 +31031,31 @@ public class ${builder.className} implements RecipeBuilder {
                 rel.startsWith("build/") || rel.contains("/build/")
             }}
             .toList()
+        val recipeConstructors = collectRecipeConstructors(javaFiles)
 
         val acceptPattern = Regex(
             """(?s)([ \t]*)consumer\.accept\(\s*new\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.Result)\((.*?)\)\s*\);"""
         )
         for (file in javaFiles) {
             var content = file.readText()
-            if (!content.contains("class Result implements RecipeOutput")) continue
+            if (!content.contains("class Result") || !content.contains("RecipeOutput")) continue
             val original = content
+            content = migrateConstructableRecipeOutputResultAdapters(content, recipeConstructors)
+            if (content != original) {
+                changes.add(Change(
+                    file = file,
+                    line = 0,
+                    description = "Migrate constructable legacy Result adapters to RecipeOutput recipe instances",
+                    before = "output.accept(new Builder.Result(...)); class Result implements RecipeOutput",
+                    after = "output.accept(id, new Recipe(...), advancement); Result adapter removed",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-legacy-recipe-output-result-instance"
+                ))
+                if (!dryRun) {
+                    file.writeText(content)
+                }
+                continue
+            }
             val resultClassText = legacyRecipeOutputResultClassText(content) ?: continue
             if (!Regex("""\bprivate\s+final\s+[A-Za-z_$][\w$]*(?:\s*<[^;]+>)?\s+recipe\s*(?:=|;)""").containsMatchIn(resultClassText)) {
                 continue
@@ -31068,6 +31085,212 @@ public class ${builder.className} implements RecipeBuilder {
             }
         }
 
+        changes.addAll(removeUnusedLegacyRecipeOutputResultClasses(javaFiles, dryRun))
+        return changes
+    }
+
+    private data class RecipeConstructorSignature(
+        val className: String,
+        val params: List<JavaParameterInfo>
+    )
+
+    private fun collectRecipeConstructors(javaFiles: List<Path>): Map<String, List<RecipeConstructorSignature>> {
+        val constructors = linkedMapOf<String, MutableList<RecipeConstructorSignature>>()
+        javaFiles.forEach { file ->
+            val source = file.readText()
+            val className = javaTopLevelTypeName(source) ?: return@forEach
+            if (!className.endsWith("Recipe")) return@forEach
+            Regex("""(?m)^[ \t]*public\s+${Regex.escape(className)}\s*\(([^()]*)\)""")
+                .findAll(source)
+                .forEach { match ->
+                    constructors.getOrPut(className) { mutableListOf() }
+                        .add(RecipeConstructorSignature(className, parseJavaParameters(match.groupValues[1])))
+                }
+        }
+        return constructors
+    }
+
+    private fun migrateConstructableRecipeOutputResultAdapters(
+        source: String,
+        recipeConstructors: Map<String, List<RecipeConstructorSignature>>
+    ): String {
+        if (!source.contains("RecipeOutput") || !source.contains(".accept(new ")) return source
+        val resultClassText = legacyRecipeOutputResultClassText(source) ?: return source
+        val resultConstructor = Regex("""public\s+Result\s*\(([^()]*)\)""")
+            .find(resultClassText)
+            ?: return source
+        val resultParams = parseJavaParameters(resultConstructor.groupValues[1])
+        if (resultParams.isEmpty()) return source
+        val recipeCandidates = legacyResultRecipeClassCandidates(source, resultClassText, recipeConstructors)
+        if (recipeCandidates.isEmpty()) return source
+
+        var result = source
+        var changed = false
+        var cursor = 0
+        val acceptPattern = Regex("""(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.accept\(\s*new\s+((?:[A-Za-z_$][\w$]*\.)*Result)\s*\(""")
+        while (true) {
+            val match = acceptPattern.find(result, cursor) ?: break
+            val openParen = result.indexOf('(', match.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(result, openParen) else -1
+            if (openParen < 0 || closeParen < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val acceptClose = nextNonWhitespaceIndex(result, closeParen + 1)
+            if (acceptClose < 0 || result[acceptClose] != ')') {
+                cursor = closeParen + 1
+                continue
+            }
+            val semicolon = nextNonWhitespaceIndex(result, acceptClose + 1)
+            if (semicolon < 0 || result[semicolon] != ';') {
+                cursor = closeParen + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen)).map { it.trim() }
+            if (args.size != resultParams.size) {
+                cursor = closeParen + 1
+                continue
+            }
+            val argsByName = resultParams.mapIndexed { index, param -> param.name to args[index] }.toMap()
+            val migration = recipeCandidates.asSequence()
+                .flatMap { candidate -> recipeConstructors[candidate].orEmpty().asSequence() }
+                .mapNotNull { constructor -> recipeOutputResultRecipeConstruction(constructor, resultParams, argsByName) }
+                .firstOrNull()
+            if (migration == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            val output = match.groupValues[2]
+            val replacement = "${match.groupValues[1]}$output.accept(${migration.idExpression}, ${migration.recipeExpression}, ${migration.advancementExpression});"
+            result = result.substring(0, match.range.first) + replacement + result.substring(semicolon + 1)
+            cursor = match.range.first + replacement.length
+            changed = true
+        }
+        if (!changed) return source
+        result = removeLegacyResultClass(result)
+        if (!Regex("""\bJsonObject\b""").containsMatchIn(result)) {
+            result = removeImport(result, "com.google.gson.JsonObject")
+        }
+        if (!Regex("""\bJsonOps\b""").containsMatchIn(result)) {
+            result = removeImport(result, "com.mojang.serialization.JsonOps")
+        }
+        if (result.contains("Optional.ofNullable(")) {
+            result = addImportIfMissing(result, "java.util.Optional")
+        }
+        return result
+    }
+
+    private data class RecipeOutputResultConstruction(
+        val idExpression: String,
+        val recipeExpression: String,
+        val advancementExpression: String
+    )
+
+    private fun recipeOutputResultRecipeConstruction(
+        constructor: RecipeConstructorSignature,
+        resultParams: List<JavaParameterInfo>,
+        argsByName: Map<String, String>
+    ): RecipeOutputResultConstruction? {
+        val resultParamTypes = resultParams.associate { it.name to it.type }
+        val constructorArgs = constructor.params.map { param ->
+            val expression = argsByName[param.name] ?: return null
+            val sourceType = resultParamTypes[param.name].orEmpty()
+            migrateRecipeOutputResultArgument(expression, sourceType, param.type)
+        }
+        val idExpression = argsByName["id"] ?: argsByName["recipeId"] ?: return null
+        val advancement = argsByName["advancement"]
+        val advancementId = argsByName["advancementId"]
+        val advancementExpression = if (advancement != null && advancementId != null) {
+            "$advancement.build($advancementId)"
+        } else {
+            "null"
+        }
+        return RecipeOutputResultConstruction(
+            idExpression = idExpression,
+            recipeExpression = "new ${constructor.className}(${constructorArgs.joinToString(", ")})",
+            advancementExpression = advancementExpression
+        )
+    }
+
+    private fun migrateRecipeOutputResultArgument(expression: String, sourceType: String, targetType: String): String {
+        val targetSimple = targetType.substringBefore('<').substringAfterLast('.').trim()
+        val sourceSimple = sourceType.substringBefore('<').substringAfterLast('.').trim()
+        return if (targetSimple == "Optional" && sourceSimple != "Optional") {
+            "Optional.ofNullable($expression)"
+        } else {
+            expression
+        }
+    }
+
+    private fun legacyResultRecipeClassCandidates(
+        source: String,
+        resultClassText: String,
+        recipeConstructors: Map<String, List<RecipeConstructorSignature>>
+    ): List<String> {
+        val candidates = linkedSetOf<String>()
+        Regex("""RecipeSerializer\s*<\s*([A-Za-z_$][\w$]*)\s*>""")
+            .findAll(resultClassText + "\n" + source)
+            .forEach { candidates += it.groupValues[1] }
+        Regex("""<([^;\r\n{}]*Recipe[^;\r\n{}]*)>""")
+            .findAll(source)
+            .forEach { match ->
+                splitTopLevelJavaArgs(match.groupValues[1])
+                    .map { it.trim().substringAfterLast('.') }
+                    .filter { it.endsWith("Recipe") && recipeConstructors.containsKey(it) }
+                    .forEach { candidates += it }
+            }
+        Regex("""import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.([A-Za-z_$][\w$]*Recipe));""")
+            .findAll(source)
+            .forEach { match -> candidates += match.groupValues[2] }
+        return candidates.filter { recipeConstructors.containsKey(it) }
+    }
+
+    private fun removeLegacyResultClass(source: String): String {
+        val match = Regex("""(?m)^[ \t]*(?:public|protected|private)?\s*(?:static\s+)?class\s+Result\b[^{]*\{""")
+            .find(source)
+            ?: return source
+        val openBrace = source.indexOf('{', match.range.last - 1)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        if (openBrace < 0 || closeBrace < 0) return source
+        var end = closeBrace + 1
+        if (end < source.length && source[end] == '\r') end++
+        if (end < source.length && source[end] == '\n') end++
+        return source.removeRange(match.range.first, end)
+    }
+
+    private fun removeUnusedLegacyRecipeOutputResultClasses(javaFiles: List<Path>, dryRun: Boolean): List<Change> {
+        val texts = javaFiles.associateWith { it.readText() }
+        val allText = texts.values.joinToString("\n")
+        val changes = mutableListOf<Change>()
+        texts.forEach { (file, source) ->
+            if (!source.contains("class Result implements RecipeOutput")) return@forEach
+            val owner = javaTopLevelTypeName(source) ?: return@forEach
+            val withoutOwnResult = removeLegacyResultClass(source)
+            val externalText = allText.replace(source, withoutOwnResult)
+            val referenced = Regex("""\b(?:new\s+|extends\s+)?${Regex.escape(owner)}\.Result\b""").containsMatchIn(externalText) ||
+                Regex("""\bnew\s+Result\s*\(""").containsMatchIn(withoutOwnResult) ||
+                Regex("""\bextends\s+Result\b""").containsMatchIn(withoutOwnResult)
+            if (referenced || withoutOwnResult == source) return@forEach
+            var migrated = withoutOwnResult
+            if (!Regex("""\bJsonObject\b""").containsMatchIn(migrated)) {
+                migrated = removeImport(migrated, "com.google.gson.JsonObject")
+            }
+            if (!Regex("""\bJsonOps\b""").containsMatchIn(migrated)) {
+                migrated = removeImport(migrated, "com.mojang.serialization.JsonOps")
+            }
+            changes.add(Change(
+                file = file,
+                line = 0,
+                description = "Remove unreferenced legacy RecipeOutput Result adapter",
+                before = "class Result implements RecipeOutput",
+                after = "direct RecipeOutput.accept recipe instances",
+                confidence = Confidence.HIGH,
+                ruleId = "struct-legacy-recipe-output-result-cleanup"
+            ))
+            if (!dryRun) {
+                file.writeText(migrated)
+            }
+        }
         return changes
     }
 

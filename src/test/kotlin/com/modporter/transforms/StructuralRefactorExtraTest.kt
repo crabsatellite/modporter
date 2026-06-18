@@ -3868,6 +3868,213 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy result adapters construct recipe instances from matching recipe constructors`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleRecipe.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.crafting.Ingredient;
+
+            public class ExampleRecipe {
+                public ExampleRecipe(String group, Ingredient ingredient, Optional<CompoundTag> tag, int time) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleRecipeBuilder.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.advancements.AdvancementRewards;
+            import net.minecraft.advancements.AdvancementRequirements;
+            import net.minecraft.advancements.CriterionTriggerInstance;
+            import net.minecraft.advancements.critereon.RecipeUnlockedTrigger;
+            import net.minecraft.data.recipes.RecipeBuilder;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class ExampleRecipeBuilder implements RecipeBuilder {
+                private final Ingredient ingredient;
+                private final CompoundTag tag;
+                private final int time;
+                private final Advancement.Builder advancement = Advancement.Builder.advancement();
+                private String group;
+                private final RecipeSerializer<ExampleRecipe> serializer;
+
+                public ExampleRecipeBuilder(Ingredient ingredient, CompoundTag tag, int time, RecipeSerializer<ExampleRecipe> serializer) {
+                    this.ingredient = ingredient;
+                    this.tag = tag;
+                    this.time = time;
+                    this.serializer = serializer;
+                }
+
+                public RecipeBuilder unlockedBy(String criterionName, CriterionTriggerInstance criterionTrigger) {
+                    this.advancement.addCriterion(criterionName, criterionTrigger);
+                    return this;
+                }
+
+                public RecipeBuilder group(String group) {
+                    this.group = group;
+                    return this;
+                }
+
+                public Item getResult() {
+                    return Items.STICK;
+                }
+
+                public void save(RecipeOutput output, ResourceLocation id) {
+                    this.advancement.parent(ResourceLocation.parse("recipes/root")).addCriterion("has_the_recipe", RecipeUnlockedTrigger.unlocked(id)).rewards(AdvancementRewards.Builder.recipe(id)).requirements(AdvancementRequirements.Strategy.OR);
+                    output.accept(new ExampleRecipeBuilder.Result(id, this.group == null ? "" : this.group, this.ingredient, this.tag, this.time, this.advancement, id.withPrefix("recipes/misc/"), this.serializer));
+                }
+
+                public static class Result implements RecipeOutput {
+                    private final ResourceLocation id;
+                    private final String group;
+                    private final Ingredient ingredient;
+                    private final CompoundTag tag;
+                    private final int time;
+                    private final Advancement.Builder advancement;
+                    private final ResourceLocation advancementId;
+                    private final RecipeSerializer<ExampleRecipe> serializer;
+
+                    public Result(ResourceLocation id, String group, Ingredient ingredient, CompoundTag tag, int time, Advancement.Builder advancement, ResourceLocation advancementId, RecipeSerializer<ExampleRecipe> serializer) {
+                        this.id = id;
+                        this.group = group;
+                        this.ingredient = ingredient;
+                        this.tag = tag;
+                        this.time = time;
+                        this.advancement = advancement;
+                        this.advancementId = advancementId;
+                        this.serializer = serializer;
+                    }
+
+                    public void serializeRecipeData(JsonObject json) {
+                    }
+
+                    public RecipeSerializer<?> getType() {
+                        return this.serializer;
+                    }
+
+                    public ResourceLocation getId() {
+                        return this.id;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        pass.apply(tempDir)
+        val migrated = srcDir.resolve("ExampleRecipeBuilder.java").readText()
+
+        assertTrue(migrated.contains("output.accept(id, new ExampleRecipe(this.group == null ? \"\" : this.group, this.ingredient, Optional.ofNullable(this.tag), this.time), this.advancement.build(id.withPrefix(\"recipes/misc/\")));"), migrated)
+        assertTrue(migrated.contains("import java.util.Optional;"), migrated)
+        assertFalse(migrated.contains("class Result"), migrated)
+        assertFalse(migrated.contains("implements RecipeOutput {"), migrated)
+    }
+
+    @Test
+    fun `legacy result adapter cleanup removes unreferenced parent result adapters after child migration`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ChildRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.crafting.Ingredient;
+
+            public class ChildRecipe {
+                public ChildRecipe(ResourceLocation id, Ingredient ingredient) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BaseRecipeBuilder.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public abstract class BaseRecipeBuilder {
+                public static class Result implements RecipeOutput {
+                    private final ResourceLocation id;
+                    private final RecipeSerializer<?> serializer;
+
+                    public Result(ResourceLocation id, RecipeSerializer<?> serializer) {
+                        this.id = id;
+                        this.serializer = serializer;
+                    }
+
+                    public void serializeRecipeData(JsonObject json) {
+                    }
+
+                    public RecipeSerializer<?> getType() {
+                        return this.serializer;
+                    }
+
+                    public ResourceLocation getId() {
+                        return this.id;
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ChildRecipeBuilder.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class ChildRecipeBuilder extends BaseRecipeBuilder {
+                private final Ingredient ingredient;
+                private final RecipeSerializer<ChildRecipe> serializer;
+
+                public ChildRecipeBuilder(Ingredient ingredient, RecipeSerializer<ChildRecipe> serializer) {
+                    this.ingredient = ingredient;
+                    this.serializer = serializer;
+                }
+
+                public void save(RecipeOutput output, ResourceLocation id) {
+                    output.accept(new ChildRecipeBuilder.Result(id, this.ingredient, this.serializer));
+                }
+
+                public static class Result extends BaseRecipeBuilder.Result {
+                    private final Ingredient ingredient;
+
+                    public Result(ResourceLocation id, Ingredient ingredient, RecipeSerializer<ChildRecipe> serializer) {
+                        super(id, serializer);
+                        this.ingredient = ingredient;
+                    }
+
+                    public void serializeRecipeData(JsonObject json) {
+                        super.serializeRecipeData(json);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        pass.apply(tempDir)
+        val base = srcDir.resolve("BaseRecipeBuilder.java").readText()
+        val child = srcDir.resolve("ChildRecipeBuilder.java").readText()
+
+        assertTrue(child.contains("output.accept(id, new ChildRecipe(id, this.ingredient), null);"), child)
+        assertFalse(child.contains("class Result"), child)
+        assertFalse(base.contains("class Result"), base)
+        assertFalse(base.contains("implements RecipeOutput"), base)
+    }
+
+    @Test
     fun `mmlib recipe id tracking reads ids from holder tracked recipe id`() {
         val projectDir = createFile("CookingPotBlockEntity.java", """
             package com.example;
