@@ -12228,6 +12228,7 @@ ${indent}}
         result = migrateLegacyCriterionTriggerInstanceCallSites(result, criterionInstanceFactoryHints)
         result = migrateLegacyDatagenTagConstantsSource(result)
         result = migrateLegacyComponentSerializationSource(result)
+        result = migrateLegacyNitrogenLanguageHelpersSource(result)
         result = migrateGameProfileDisplayNameComponents(result)
         result = migrateRegistryAccessEmptyFallbacks(result)
         result = migrateLegacyGameEventListenerSource(result)
@@ -20571,7 +20572,11 @@ public $className(Properties $propertiesName, WoodType $typeName) {
     }
 
     private fun migrateLegacyComponentSerializationSource(source: String): String {
-        if (!source.contains("Component.Serializer.toJson(") && !source.contains("Component.Serializer.fromJson(")) return source
+        if (!source.contains("Component.Serializer.toJson(") &&
+            !source.contains("Component.Serializer.toJsonTree(") &&
+            !source.contains("Component.Serializer.fromJson(")) {
+            return source
+        }
         var result = source
         result = rewriteJavaInvocationArgumentsWithOffset(result, "Component.Serializer.toJson") { args, offset ->
             val registries = registryAccessExpressionAt(result, offset) ?: return@rewriteJavaInvocationArgumentsWithOffset null
@@ -20581,12 +20586,39 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 else -> null
             }
         }
+        result = rewriteJavaInvocation(result, "Component.Serializer.toJsonTree") { args ->
+            if (args.size == 1) {
+                "net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, ${args[0].trim()}).getOrThrow()"
+            } else {
+                null
+            }
+        }
         result = rewriteJavaInvocationArgumentsWithOffset(result, "Component.Serializer.fromJson") { args, offset ->
             val registries = registryAccessExpressionAt(result, offset) ?: return@rewriteJavaInvocationArgumentsWithOffset null
             when {
                 args.size == 1 -> listOf(args[0], registries)
                 args.size == 2 && isRegistryAccessEmptyExpression(args[1]) -> listOf(args[0], registries)
                 else -> null
+            }
+        }
+        return result
+    }
+
+    private fun migrateLegacyNitrogenLanguageHelpersSource(source: String): String {
+        if (!source.contains("addCuriosIdentifier(") && !source.contains("addCuriosModifier(")) return source
+        var result = source
+        result = rewriteJavaCall(result, "addCuriosIdentifier") { receiver, args ->
+            if (args.size == 2) {
+                "$receiver.add(\"curios.identifier.\" + ${args[0].trim()}, ${args[1].trim()})"
+            } else {
+                null
+            }
+        }
+        result = rewriteJavaCall(result, "addCuriosModifier") { receiver, args ->
+            if (args.size == 2) {
+                "$receiver.add(\"curios.modifiers.\" + ${args[0].trim()}, ${args[1].trim()})"
+            } else {
+                null
             }
         }
         return result

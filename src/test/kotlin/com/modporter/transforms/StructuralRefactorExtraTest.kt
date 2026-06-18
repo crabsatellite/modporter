@@ -4116,6 +4116,44 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates component json tree and removed Nitrogen Curios language helpers`() {
+        val projectDir = createFile("LegacyLanguageProvider.java", """
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.ChatFormatting;
+            import net.minecraft.network.chat.Component;
+
+            public class LegacyLanguageProvider {
+                public void tips(JsonObject object, String key) {
+                    object.add("title", Component.Serializer.toJsonTree(Component.translatable("tips.title").withStyle(ChatFormatting.BOLD, ChatFormatting.YELLOW)));
+                    object.add("tip", Component.Serializer.toJsonTree(Component.translatable(key)));
+                }
+
+                public void add(String key, String value) {
+                }
+
+                public void addTranslations() {
+                    this.addCuriosIdentifier("aether_ring", "Ring");
+                    this.addCuriosModifier("aether_ring", "When worn as ring:");
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/LegacyLanguageProvider.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, Component.translatable(\"tips.title\").withStyle(ChatFormatting.BOLD, ChatFormatting.YELLOW)).getOrThrow()"), migrated)
+        assertTrue(migrated.contains("net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, Component.translatable(key)).getOrThrow()"), migrated)
+        assertTrue(migrated.contains("this.add(\"curios.identifier.\" + \"aether_ring\", \"Ring\");"), migrated)
+        assertTrue(migrated.contains("this.add(\"curios.modifiers.\" + \"aether_ring\", \"When worn as ring:\");"), migrated)
+        assertFalse(migrated.contains("Component.Serializer.toJsonTree"), migrated)
+        assertFalse(migrated.contains("addCuriosIdentifier"), migrated)
+        assertFalse(migrated.contains("addCuriosModifier"), migrated)
+    }
+
+    @Test
     fun `migrates GameEventListener event holder signatures and comparisons`() {
         val projectDir = createFile("ListenerBE.java", """
             package com.example;
