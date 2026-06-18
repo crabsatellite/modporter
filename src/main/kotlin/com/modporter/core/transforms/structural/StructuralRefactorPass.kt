@@ -8140,6 +8140,48 @@ $fields
                     text = coloredLayerMigrated
                 }
 
+                val shearableSignatureMigrated = migrateLegacyShearableSignaturesSource(text)
+                if (shearableSignatureMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate legacy NeoForge shearable method signatures to 1.21 IShearable",
+                        before = "onSheared(..., int fortune) / isShearable(ItemStack, Level, BlockPos)",
+                        after = "onSheared(..., BlockPos) / isShearable(Player, ItemStack, Level, BlockPos)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-legacy-shearable-signatures"
+                    ))
+                    text = shearableSignatureMigrated
+                }
+
+                val explosionSignatureMigrated = migrateLegacyIgnoreExplosionSignatureSource(text)
+                if (explosionSignatureMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate Entity ignoreExplosion override to the 1.21 Explosion-aware signature",
+                        before = "ignoreExplosion()",
+                        after = "ignoreExplosion(Explosion explosion)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-legacy-ignore-explosion-signature"
+                    ))
+                    text = explosionSignatureMigrated
+                }
+
+                val dimensionEffectsMigrated = migrateDimensionSpecialEffectsCloudSignatureSource(text)
+                if (dimensionEffectsMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate DimensionSpecialEffects cloud renderer override to the 1.21 model/projection matrix signature",
+                        before = "renderClouds(..., Matrix4f projectionMatrix)",
+                        after = "renderClouds(..., Matrix4f modelViewMatrix, Matrix4f projectionMatrix)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-dimension-effects-cloud-signature"
+                    ))
+                    text = dimensionEffectsMigrated
+                }
+
                 val customDataMigrated = migrateCustomDataComponentsSource(text)
                 if (customDataMigrated != text) {
                     changes.add(Change(
@@ -11889,6 +11931,66 @@ ${indent}}
             args.take(13) + color
         }
         return if (changed) addImportIfMissing(result, "net.minecraft.util.FastColor") else source
+    }
+
+    private fun migrateLegacyShearableSignaturesSource(source: String): String {
+        if (!source.contains("onSheared(") && !source.contains("isShearable(")) return source
+        val id = """[A-Za-z_$][\w$]*"""
+        var changed = false
+        var result = source
+
+        val onShearedPattern = Regex(
+            """onSheared\s*\(\s*((?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*)*)Player\s+($id)\s*,\s*ItemStack\s+($id)\s*,\s*Level\s+($id)\s*,\s*BlockPos\s+($id)\s*,\s*int\s+($id)\s*\)"""
+        )
+        result = onShearedPattern.replace(result) { match ->
+            val fortuneName = match.groupValues[6]
+            val methodText = javaDeclaredMethodText(source, "onSheared")
+            val bodyStart = methodText?.indexOf('{') ?: -1
+            val bodyUsesFortune = bodyStart >= 0 &&
+                Regex("""\b${Regex.escape(fortuneName)}\b""").containsMatchIn(methodText!!.substring(bodyStart))
+            if (bodyUsesFortune) {
+                match.value
+            } else {
+                changed = true
+                "onSheared(${match.groupValues[1]}Player ${match.groupValues[2]}, ItemStack ${match.groupValues[3]}, Level ${match.groupValues[4]}, BlockPos ${match.groupValues[5]})"
+            }
+        }
+
+        result = Regex(
+            """isShearable\s*\(\s*ItemStack\s+($id)\s*,\s*Level\s+($id)\s*,\s*BlockPos\s+($id)\s*\)"""
+        ).replace(result) { match ->
+            changed = true
+            "isShearable(Player player, ItemStack ${match.groupValues[1]}, Level ${match.groupValues[2]}, BlockPos ${match.groupValues[3]})"
+        }
+
+        if (!changed) return source
+        if (Regex("""\bisShearable\s*\(\s*Player\s+""").containsMatchIn(result)) {
+            result = addImportIfMissing(result, "net.minecraft.world.entity.player.Player")
+        }
+        return result
+    }
+
+    private fun migrateLegacyIgnoreExplosionSignatureSource(source: String): String {
+        if (!source.contains("ignoreExplosion(")) return source
+        var changed = false
+        val result = Regex("""\b(public\s+boolean\s+ignoreExplosion)\s*\(\s*\)""")
+            .replace(source) { match ->
+                changed = true
+                "${match.groupValues[1]}(Explosion explosion)"
+            }
+        return if (changed) addImportIfMissing(result, "net.minecraft.world.level.Explosion") else source
+    }
+
+    private fun migrateDimensionSpecialEffectsCloudSignatureSource(source: String): String {
+        if (!source.contains("renderClouds(") || source.contains("modelViewMatrix, Matrix4f")) return source
+        var changed = false
+        val result = Regex(
+            """renderClouds\s*\(\s*ClientLevel\s+([A-Za-z_$][\w$]*)\s*,\s*int\s+([A-Za-z_$][\w$]*)\s*,\s*float\s+([A-Za-z_$][\w$]*)\s*,\s*PoseStack\s+([A-Za-z_$][\w$]*)\s*,\s*double\s+([A-Za-z_$][\w$]*)\s*,\s*double\s+([A-Za-z_$][\w$]*)\s*,\s*double\s+([A-Za-z_$][\w$]*)\s*,\s*Matrix4f\s+([A-Za-z_$][\w$]*)\s*\)"""
+        ).replace(source) { match ->
+            changed = true
+            "renderClouds(ClientLevel ${match.groupValues[1]}, int ${match.groupValues[2]}, float ${match.groupValues[3]}, PoseStack ${match.groupValues[4]}, double ${match.groupValues[5]}, double ${match.groupValues[6]}, double ${match.groupValues[7]}, Matrix4f modelViewMatrix, Matrix4f ${match.groupValues[8]})"
+        }
+        return if (changed) result else source
     }
 
     private fun migrateCustomDataComponentsSource(source: String): String {

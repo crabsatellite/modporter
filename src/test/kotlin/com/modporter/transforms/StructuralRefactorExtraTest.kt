@@ -17228,6 +17228,113 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy shearable signatures without dropping used fortune semantics`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ShearableSignatureSurface.java").writeText("""
+            package com.example;
+
+            import java.util.Collections;
+            import java.util.List;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+            import org.jetbrains.annotations.Nullable;
+
+            public class ShearableSignatureSurface {
+                @Override
+                public List<ItemStack> onSheared(@Nullable Player player, ItemStack item, Level level, BlockPos pos, int fortune) {
+                    return Collections.emptyList();
+                }
+
+                @Override
+                public boolean isShearable(ItemStack item, Level world, BlockPos pos) {
+                    return true;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FortuneAwareShearableSurface.java").writeText("""
+            package com.example;
+
+            import java.util.Collections;
+            import java.util.List;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            public class FortuneAwareShearableSurface {
+                public List<ItemStack> onSheared(Player player, ItemStack item, Level level, BlockPos pos, int fortune) {
+                    return fortune > 0 ? Collections.singletonList(item) : Collections.emptyList();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ShearableSignatureSurface.java").readText()
+        val fortuneAware = srcDir.resolve("FortuneAwareShearableSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("onSheared(@Nullable Player player, ItemStack item, Level level, BlockPos pos)"), migrated)
+        assertTrue(migrated.contains("isShearable(Player player, ItemStack item, Level world, BlockPos pos)"), migrated)
+        assertFalse(migrated.contains("int fortune"), migrated)
+        assertTrue(fortuneAware.contains("int fortune"), fortuneAware)
+        assertTrue(fortuneAware.contains("fortune > 0"), fortuneAware)
+    }
+
+    @Test
+    fun `migrates legacy explosion override signature`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExplosionSignatureSurface.java").writeText("""
+            package com.example;
+
+            public class ExplosionSignatureSurface {
+                @Override
+                public boolean ignoreExplosion() {
+                    return true;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ExplosionSignatureSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.world.level.Explosion;"), migrated)
+        assertTrue(migrated.contains("public boolean ignoreExplosion(Explosion explosion)"), migrated)
+        assertFalse(migrated.contains("ignoreExplosion()"), migrated)
+    }
+
+    @Test
+    fun `migrates dimension special effects cloud renderer signature`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DimensionCloudSignatureSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import net.minecraft.client.multiplayer.ClientLevel;
+            import org.joml.Matrix4f;
+
+            public class DimensionCloudSignatureSurface {
+                @Override
+                public boolean renderClouds(ClientLevel level, int ticks, float partialTick, PoseStack poseStack, double camX, double camY, double camZ, Matrix4f projectionMatrix) {
+                    return false;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("DimensionCloudSignatureSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("renderClouds(ClientLevel level, int ticks, float partialTick, PoseStack poseStack, double camX, double camY, double camZ, Matrix4f modelViewMatrix, Matrix4f projectionMatrix)"), migrated)
+        assertFalse(migrated.contains("double camZ, Matrix4f projectionMatrix)"), migrated)
+    }
+
+    @Test
     fun `empty project returns empty results`() {
         val projectDir = tempDir.resolve("empty-project")
         projectDir.createDirectories()
