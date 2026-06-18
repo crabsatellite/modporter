@@ -7876,6 +7876,7 @@ $fields
         val deferredHolderRegistryBaseHints = collectDeferredHolderRegistryBaseHints(srcDir)
         val deferredRegisterOwners = collectDeferredRegisterOwners(srcDir)
         val lootTableProviderClasses = collectLootTableProviderClasses(srcDir)
+        val lootTableProviderFactoryMethods = collectLootTableProviderFactoryMethods(srcDir)
         val globalLootModifierProviderClasses = collectGlobalLootModifierProviderClasses(srcDir)
         val recipeProviderClasses = collectRecipeProviderClasses(srcDir)
         val recipeSerializerFactoryHints = collectRecipeSerializerFactoryHints(srcDir)
@@ -8287,6 +8288,7 @@ $fields
                     spriteSourceProviderClasses,
                     finalMapDecorationClasses,
                     lootTableProviderClasses,
+                    lootTableProviderFactoryMethods,
                     globalLootModifierProviderClasses,
                     recipeProviderClasses,
                     recipeSerializerFactoryHints,
@@ -10619,8 +10621,23 @@ ${entries.joinToString(",\n")}
                 Regex("""\bclass\s+([A-Za-z_$][\w$]*)\s+extends\s+LootTableProvider\b""")
                     .findAll(source)
                     .forEach { classes.add(it.groupValues[1]) }
-            }
+        }
         return classes
+    }
+
+    private fun collectLootTableProviderFactoryMethods(srcDir: Path): Map<String, Set<String>> {
+        val factories = linkedMapOf<String, MutableSet<String>>()
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val source = javaFile.readText()
+                if (!source.contains("static LootTableProvider") || !source.contains("new LootTableProvider(")) return@forEach
+                val owner = classNameOfJavaSource(source) ?: return@forEach
+                Regex("""\b(?:public|protected|private)\s+static\s+LootTableProvider\s+([A-Za-z_$][\w$]*)\s*\(""")
+                    .findAll(source)
+                    .forEach { match -> factories.getOrPut(owner) { linkedSetOf() }.add(match.groupValues[1]) }
+            }
+        return factories.mapValues { it.value.toSet() }
     }
 
     private data class RecipeProviderClassHints(
@@ -12162,6 +12179,7 @@ ${indent}}
         spriteSourceProviderClasses: Set<String> = emptySet(),
         finalMapDecorationClasses: Set<String> = emptySet(),
         lootTableProviderClasses: Set<String> = emptySet(),
+        lootTableProviderFactoryMethods: Map<String, Set<String>> = emptyMap(),
         globalLootModifierProviderClasses: Set<String> = emptySet(),
         recipeProviderClasses: RecipeProviderClassHints = RecipeProviderClassHints(emptySet(), emptySet()),
         recipeSerializerFactoryHints: RecipeSerializerFactoryHints = RecipeSerializerFactoryHints(emptyMap(), emptyMap()),
@@ -12395,7 +12413,7 @@ ${indent}}
         result = migrateDimensionSpecialEffectsRenderSkySource(result)
         result = migrateLegacyRecipeProviderSource(result, recipeProviderClasses)
         result = migrateLegacyRecipeBuilderSource(result, recipeSerializerFactoryHints)
-        result = migrateLegacyLootProviderHolderLookupSource(result, lootTableProviderClasses)
+        result = migrateLegacyLootProviderHolderLookupSource(result, lootTableProviderClasses, lootTableProviderFactoryMethods)
         result = migrateLegacyGlobalLootModifierProviderSource(result, globalLootModifierProviderClasses)
         result = migrateLegacyEntityLootSubProviderSource(result)
         result = migrateLegacyLootFunctionSource(result)
@@ -21732,15 +21750,19 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
 
     private fun migrateLegacyLootTableResourceLocationRegistry(source: String): String {
         if (!Regex("""(?m)^\s*private\s+static\s+ResourceLocation\s+register\s*\(""").containsMatchIn(source) &&
-            !Regex("""(?m)^\s*private\s+static\s+final\s+Set\s*<\s*ResourceLocation\s*>""").containsMatchIn(source)) {
+            !Regex("""(?m)^\s*(?:public|protected|private)?\s*static\s+final\s+Set\s*<\s*ResourceLocation\s*>""").containsMatchIn(source)) {
             return source
         }
 
         var result = source
         val className = classNameOfJavaSource(source) ?: ""
-        val lootSetNames = Regex(
-            """(?m)^([ \t]*private\s+static\s+final\s+)Set\s*<\s*ResourceLocation\s*>(\s+([A-Za-z_$][\w$]*(?:LOOT|Loot|loot)[A-Za-z_$][\w$]*)\s*=)"""
-        ).findAll(result).map { it.groupValues[3] }.toSet()
+        val staticResourceLocationSetPattern = Regex(
+            """(?m)^([ \t]*(?:public|protected|private)?\s*static\s+final\s+)Set\s*<\s*ResourceLocation\s*>(\s+([A-Za-z_$][\w$]*)\s*=)"""
+        )
+        val lootSetNames = staticResourceLocationSetPattern.findAll(result)
+            .map { it.groupValues[3] }
+            .filter { it.contains("loot", ignoreCase = true) }
+            .toSet()
         val classLooksLikeLootRegistry = Regex(""".*(?:Loot|LootTables|LootIds)$""").matches(className) || lootSetNames.isNotEmpty()
         if (!classLooksLikeLootRegistry) return source
         if (lootSetNames.isEmpty() &&
@@ -21748,9 +21770,13 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
             return source
         }
 
-        result = Regex(
-            """(?m)^([ \t]*private\s+static\s+final\s+)Set\s*<\s*ResourceLocation\s*>(\s+[A-Za-z_$][\w$]*(?:LOOT|Loot|loot)[A-Za-z_$][\w$]*\s*=)"""
-        ).replace(result, "$1Set<ResourceKey<LootTable>>$2")
+        result = staticResourceLocationSetPattern.replace(result) { match ->
+            if (match.groupValues[3].contains("loot", ignoreCase = true)) {
+                "${match.groupValues[1]}Set<ResourceKey<LootTable>>${match.groupValues[2]}"
+            } else {
+                match.value
+            }
+        }
         result = Regex(
             """(?m)^([ \t]*public\s+static\s+final\s+)ResourceLocation(\s+[A-Z0-9_]+\s*=\s*register\()"""
         ).replace(result, "$1ResourceKey<LootTable>$2")
@@ -23222,13 +23248,21 @@ $methodBody
 
     private fun migrateLegacyLootProviderHolderLookupSource(
         source: String,
-        lootTableProviderClasses: Set<String>
+        lootTableProviderClasses: Set<String>,
+        lootTableProviderFactoryMethods: Map<String, Set<String>>
     ): String {
-        if (!source.contains("LootTableProvider") && lootTableProviderClasses.none { source.contains("new $it(") }) return source
+        if (!source.contains("LootTableProvider") &&
+            lootTableProviderClasses.none { source.contains("new $it(") } &&
+            lootTableProviderFactoryMethods.none { (owner, methods) -> methods.any { source.contains("$owner.$it(") } }) {
+            return source
+        }
 
         var result = source
         var changed = false
         result = migrateLegacyLootTableSubProviderFactorySource(result).also {
+            if (it != result) changed = true
+        }
+        result = migrateLegacyLootTableProviderFactorySource(result).also {
             if (it != result) changed = true
         }
         val className = Regex("""\bclass\s+([A-Za-z_$][\w$]*)\s+extends\s+LootTableProvider\b""")
@@ -23278,9 +23312,65 @@ $methodBody
                     changed = true
                     "new $newClass(${match.groupValues[2]}, $providerExpression)"
                 }
+            lootTableProviderFactoryMethods.forEach { (owner, methods) ->
+                methods.forEach { method ->
+                    val beforeFactoryCalls = result
+                    result = migrateMethodCalls(result, "$owner.$method") { args ->
+                        if (args.size == 1) args + providerExpression else args
+                    }
+                    if (result != beforeFactoryCalls) changed = true
+                }
+            }
         }
 
+        if (changed && result.contains("CompletableFuture<HolderLookup.Provider>")) {
+            result = addImportIfMissing(result, "net.minecraft.core.HolderLookup")
+            result = addImportIfMissing(result, "java.util.concurrent.CompletableFuture")
+        }
         return if (changed) result else source
+    }
+
+    private fun migrateLegacyLootTableProviderFactorySource(source: String): String {
+        if (!source.contains("new LootTableProvider(")) return source
+        var result = source
+        val methodPattern = Regex(
+            """(?m)^[ \t]*(?:public|protected|private)\s+static\s+LootTableProvider\s+[A-Za-z_$][\w$]*\s*\("""
+        )
+        val methodRanges = methodPattern.findAll(result)
+            .mapNotNull { match ->
+                val openBrace = result.indexOf('{', match.range.last)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+                if (openBrace < 0 || closeBrace < 0) null else match.range.first..closeBrace
+            }
+            .toList()
+            .asReversed()
+
+        for (range in methodRanges) {
+            val method = result.substring(range.first, range.last + 1)
+            val declaration = Regex(
+                """(?s)^([ \t]*(?:public|protected|private)\s+static\s+LootTableProvider\s+[A-Za-z_$][\w$]*\s*)\((.*?)\)(\s*\{)"""
+            ).find(method) ?: continue
+            val params = splitTopLevelJavaArgs(declaration.groupValues[2])
+            if (params.any { it.contains("HolderLookup.Provider") }) continue
+            val outputParam = params.mapNotNull(::parseJavaParameter)
+                .firstOrNull { (type, _) -> type.substringAfterLast('.') == "PackOutput" }
+                ?: continue
+            val lookupName = "lookupProvider"
+            var migratedMethod = method
+            var migratedConstructor = false
+            migratedMethod = rewriteJavaNew(migratedMethod, "LootTableProvider") { args ->
+                if (args.size != 3) return@rewriteJavaNew null
+                if (args[0].trim() != outputParam.second) return@rewriteJavaNew null
+                migratedConstructor = true
+                "new LootTableProvider(${args[0].trim()}, ${args[1].trim()}, ${args[2].trim()}, $lookupName)"
+            }
+            if (!migratedConstructor) continue
+            val paramsRange = declaration.groups[2]?.range ?: continue
+            val newParams = (params + "CompletableFuture<HolderLookup.Provider> $lookupName").joinToString(", ")
+            migratedMethod = migratedMethod.substring(0, paramsRange.first) + newParams + migratedMethod.substring(paramsRange.last + 1)
+            result = result.substring(0, range.first) + migratedMethod + result.substring(range.last + 1)
+        }
+        return result
     }
 
     private fun migrateLegacyLootTableSubProviderFactorySource(source: String): String {

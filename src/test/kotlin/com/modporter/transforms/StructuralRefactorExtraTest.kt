@@ -4261,6 +4261,87 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates loot table provider factories and public loot id registries`() {
+        val projectDir = createFile("LegacyLootTableFactory.java", """
+            package com.example;
+
+            import java.util.List;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.loot.LootTableProvider;
+            import net.minecraft.world.level.storage.loot.parameters.LootContextParamSets;
+
+            public class LegacyLootTableFactory {
+                public static LootTableProvider create(PackOutput output) {
+                    return new LootTableProvider(output, ExampleLoot.IMMUTABLE_LOOT_TABLES, List.of(
+                        new LootTableProvider.SubProviderEntry(LegacyChestLoot::new, LootContextParamSets.CHEST)
+                    ));
+                }
+            }
+        """.trimIndent())
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.resolve("LegacyData.java").writeText("""
+            package com.example;
+
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class LegacyData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput output = generator.getPackOutput();
+                    generator.addProvider(event.includeServer(), LegacyLootTableFactory.create(output));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleLoot.java").writeText("""
+            package com.example;
+
+            import java.util.Collections;
+            import java.util.HashSet;
+            import java.util.Set;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.storage.loot.LootTable;
+
+            public class ExampleLoot {
+                public static final Set<ResourceLocation> LOOT_TABLES = new HashSet<>();
+                public static final Set<ResourceLocation> IMMUTABLE_LOOT_TABLES = Collections.unmodifiableSet(LOOT_TABLES);
+                public static final ResourceLocation ENTITY_DROP = register("entities/demo");
+
+                private static ResourceLocation register(String id) {
+                    return register(ExampleMod.prefix(id));
+                }
+
+                private static ResourceLocation register(ResourceLocation id) {
+                    if (LOOT_TABLES.add(id)) {
+                        return id;
+                    }
+                    throw new IllegalArgumentException(id + " duplicate");
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val factory = srcDir.resolve("LegacyLootTableFactory.java").readText()
+        val data = srcDir.resolve("LegacyData.java").readText()
+        val loot = srcDir.resolve("ExampleLoot.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(factory.contains("public static LootTableProvider create(PackOutput output, CompletableFuture<HolderLookup.Provider> lookupProvider)"), factory)
+        assertTrue(factory.contains("new LootTableProvider(output, ExampleLoot.IMMUTABLE_LOOT_TABLES, List.of("), factory)
+        assertTrue(factory.contains("), lookupProvider)"), factory)
+        assertTrue(factory.contains("import net.minecraft.core.HolderLookup;"), factory)
+        assertTrue(factory.contains("import java.util.concurrent.CompletableFuture;"), factory)
+        assertTrue(data.contains("LegacyLootTableFactory.create(output, event.getLookupProvider())"), data)
+        assertTrue(loot.contains("public static final Set<ResourceKey<LootTable>> LOOT_TABLES"), loot)
+        assertTrue(loot.contains("public static final Set<ResourceKey<LootTable>> IMMUTABLE_LOOT_TABLES"), loot)
+        assertTrue(loot.contains("public static final ResourceKey<LootTable> ENTITY_DROP = register(\"entities/demo\")"), loot)
+        assertTrue(loot.contains("private static ResourceKey<LootTable> register(String id)"), loot)
+        assertTrue(loot.contains("private static ResourceKey<LootTable> register(ResourceKey<LootTable> id)"), loot)
+        assertFalse(loot.contains("Set<ResourceLocation>"), loot)
+    }
+
+    @Test
     fun `migrates GameEventListener event holder signatures and comparisons`() {
         val projectDir = createFile("ListenerBE.java", """
             package com.example;
