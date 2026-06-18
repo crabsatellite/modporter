@@ -11934,7 +11934,8 @@ ${entries.joinToString(",\n")}
             !source.contains(".getU(") &&
             !source.contains(".getV(") &&
             !source.contains("BufferUploader.drawWithShader(") &&
-            !source.contains("Tesselator.getInstance()")
+            !source.contains("Tesselator.getInstance()") &&
+            !source.contains("InventoryScreen.renderEntityInInventory")
         ) {
             return source
         }
@@ -11971,6 +11972,7 @@ ${entries.joinToString(",\n")}
         result = migrateTextureAtlasSpriteFloatCoordinateCalls(result)
         result = migrateVertexConsumerPoseNormals(result)
         result = migrateLegacyTesselatorSource(result)
+        result = migrateInventoryScreenEntityPreviewCalls(result)
         val vertexConsumerVariables = Regex("""\bVertexConsumer\s+([A-Za-z_$][\w$]*)\b""")
             .findAll(result)
             .map { it.groupValues[1] }
@@ -11986,6 +11988,47 @@ ${entries.joinToString(",\n")}
             .replace(result) { match -> ".setUv2(${match.groupValues[1].trim()}, ${match.groupValues[2].trim()})" }
 
         return if (needsBufferUploader) addImportIfMissing(result, "com.mojang.blaze3d.vertex.BufferUploader") else result
+    }
+
+    private fun migrateInventoryScreenEntityPreviewCalls(source: String): String {
+        if (!source.contains("InventoryScreen.renderEntityInInventory")) return source
+
+        var result = rewriteJavaCall(source, "renderEntityInInventoryFollowsMouse") { receiver, args ->
+            if (receiver != "InventoryScreen" || args.size != 7) return@rewriteJavaCall null
+            val guiGraphics = args[0].trim()
+            val x = args[1].trim()
+            val y = args[2].trim()
+            val scale = args[3].trim()
+            val angleXInput = args[4].trim()
+            val angleYInput = args[5].trim()
+            val entity = args[6].trim()
+            "InventoryScreen.renderEntityInInventoryFollowsAngle(" +
+                "$guiGraphics, " +
+                "($x) - ($scale), " +
+                "($y) - ($scale), " +
+                "($x) + ($scale), " +
+                "($y) + ($scale), " +
+                "$scale, " +
+                "0.0F, " +
+                "(float) Math.atan((double) (($angleXInput) / 40.0F)), " +
+                "(float) Math.atan((double) (($angleYInput) / 40.0F)), " +
+                "$entity)"
+        }
+        result = rewriteJavaCall(result, "renderEntityInInventory") { receiver, args ->
+            if (receiver != "InventoryScreen" || args.size != 7) return@rewriteJavaCall null
+            if (args[4].contains("Vector3f")) return@rewriteJavaCall null
+            val entity = args[6].trim()
+            "InventoryScreen.renderEntityInInventory(" +
+                "${args[0].trim()}, " +
+                "(float) (${args[1].trim()}), " +
+                "(float) (${args[2].trim()}), " +
+                "(float) (${args[3].trim()}), " +
+                "new org.joml.Vector3f(0.0F, $entity.getBbHeight() / 2.0F, 0.0F), " +
+                "${args[4].trim()}, " +
+                "${args[5].trim()}, " +
+                "$entity)"
+        }
+        return result
     }
 
     private fun migrateLegacyTesselatorSource(source: String): String {

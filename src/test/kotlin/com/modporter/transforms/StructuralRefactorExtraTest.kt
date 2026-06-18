@@ -9261,6 +9261,46 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates inventory screen entity preview signatures without losing angle semantics`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PreviewScreen.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.screens.inventory.InventoryScreen;
+            import net.minecraft.world.entity.LivingEntity;
+            import org.joml.Quaternionf;
+            import org.joml.Vector3f;
+
+            public class PreviewScreen {
+                void direct(GuiGraphics guiGraphics, int posX, int posY, int scale, Quaternionf xQuaternion, Quaternionf zQuaternion, LivingEntity livingEntity) {
+                    InventoryScreen.renderEntityInInventory(guiGraphics, posX, posY, scale, xQuaternion, zQuaternion, livingEntity);
+                }
+
+                void followsAngle(GuiGraphics guiGraphics, int x, int y, int mouseX, int mouseY, LivingEntity player) {
+                    InventoryScreen.renderEntityInInventoryFollowsMouse(guiGraphics, x + 33, y + 75, 30, (float) (x + 31) - mouseX, (float) (y + 25) - mouseY, player);
+                }
+
+                void alreadyNew(GuiGraphics guiGraphics, Vector3f offset, Quaternionf pose, LivingEntity entity) {
+                    InventoryScreen.renderEntityInInventory(guiGraphics, 10.0F, 20.0F, 30.0F, offset, pose, null, entity);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val preview = srcDir.resolve("PreviewScreen.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(preview.contains("new org.joml.Vector3f(0.0F, livingEntity.getBbHeight() / 2.0F, 0.0F), xQuaternion, zQuaternion, livingEntity)"), preview)
+        assertTrue(preview.contains("InventoryScreen.renderEntityInInventoryFollowsAngle("), preview)
+        assertTrue(preview.contains("(float) Math.atan((double) (((float) (x + 31) - mouseX) / 40.0F))"), preview)
+        assertTrue(preview.contains("(float) Math.atan((double) (((float) (y + 25) - mouseY) / 40.0F))"), preview)
+        assertTrue(preview.contains("InventoryScreen.renderEntityInInventory(guiGraphics, 10.0F, 20.0F, 30.0F, offset, pose, null, entity);"), preview)
+        assertFalse(preview.contains("renderEntityInInventoryFollowsMouse(guiGraphics, x + 33"), preview)
+    }
+
+    @Test
     fun `migrates strict runtime compile API surfaces without mod-specific rules`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
