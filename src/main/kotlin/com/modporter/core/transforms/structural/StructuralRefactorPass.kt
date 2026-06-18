@@ -11040,6 +11040,7 @@ ${entries.joinToString(",\n")}
         result = migrateClientLevelEntityInsertionCalls(result)
         result = migrateCommandSourceStackLevelAccess(result)
         result = migrateLegacyStaticFmlModEventBusAccess(result)
+        result = migrateCuriosInventoryOptionalTypes(result)
         result = migrateLegacyOptionalValueCalls(result)
         if (result.contains("IEntityAdditionalSpawnData")) {
             result = result
@@ -11691,6 +11692,27 @@ ${entries.joinToString(",\n")}
             if (receiver != "CuriosApi.getCuriosHelper()" || args.size != 2) return@rewriteJavaCall null
             "CuriosApi.getCuriosInventory(${args[0].trim()}).flatMap(handler -> handler.findFirstCurio(${args[1].trim()}))"
         }
+        return result
+    }
+
+    private fun migrateCuriosInventoryOptionalTypes(source: String): String {
+        if (!source.contains("CuriosApi.getCuriosInventory") || !source.contains("LazyOptional")) return source
+
+        val before = source
+        var result = Regex("""\b(?:net\.neoforged\.neoforge\.common\.util\.)?LazyOptional\s*<\s*ICuriosItemHandler\s*>""")
+            .replace(source, "Optional<ICuriosItemHandler>")
+        if (result == before) return source
+        val optionalCuriosVariables = Regex("""\bOptional\s*<\s*ICuriosItemHandler\s*>\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(result)
+            .map { it.groupValues[1] }
+            .toSet()
+        optionalCuriosVariables.forEach { variable ->
+            result = Regex("""\b${Regex.escape(variable)}\.resolve\(\)""").replace(result, variable)
+            result = Regex("""\b${Regex.escape(variable)}\.isPresent\(\)\s*&&\s*${Regex.escape(variable)}\.isPresent\(\)""")
+                .replace(result, "$variable.isPresent()")
+        }
+        result = removeImport(result, "net.neoforged.neoforge.common.util.LazyOptional")
+        result = addImportIfMissing(result, "java.util.Optional")
         return result
     }
 

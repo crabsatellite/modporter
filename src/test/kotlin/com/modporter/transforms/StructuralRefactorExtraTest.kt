@@ -15351,10 +15351,18 @@ class StructuralRefactorExtraTest {
             import java.util.Optional;
             import net.minecraft.world.entity.LivingEntity;
             import net.minecraft.world.entity.player.Player;
+            import net.neoforged.neoforge.common.util.LazyOptional;
             import top.theillusivec4.curios.api.CuriosApi;
             import top.theillusivec4.curios.api.SlotResult;
+            import top.theillusivec4.curios.api.type.capability.ICuriosItemHandler;
 
             public class CuriosSurface {
+                private final LazyOptional<ICuriosItemHandler> handler;
+
+                public CuriosSurface(Player player) {
+                    this.handler = CuriosApi.getCuriosInventory(player);
+                }
+
                 public static void keep(Player player) {
                     CuriosApi.getCuriosHelper().getEquippedCurios(player).ifPresent(handler -> {});
                 }
@@ -15362,6 +15370,13 @@ class StructuralRefactorExtraTest {
                 public static boolean has(LivingEntity entity) {
                     Optional<SlotResult> slot = CuriosApi.getCuriosHelper().findFirstCurio(entity, stack -> !stack.isEmpty());
                     return slot.isPresent();
+                }
+
+                public static void local(LivingEntity entity) {
+                    LazyOptional<ICuriosItemHandler> lazyHandler = CuriosApi.getCuriosInventory(entity);
+                    if (lazyHandler.isPresent() && lazyHandler.resolve().isPresent()) {
+                        lazyHandler.resolve().get().getCurios();
+                    }
                 }
             }
         """.trimIndent())
@@ -15623,6 +15638,12 @@ class StructuralRefactorExtraTest {
         assertTrue(Regex("""@SuppressWarnings\("removal"\)\s+@Override\s+public\s+void\s+initializeClient""").containsMatchIn(strict))
         assertTrue(curios.contains("CuriosApi.getCuriosInventory(player).map(handler -> handler.getEquippedCurios()).ifPresent"))
         assertTrue(curios.contains("CuriosApi.getCuriosInventory(entity).flatMap(handler -> handler.findFirstCurio(stack -> !stack.isEmpty()))"))
+        assertTrue(curios.contains("private final Optional<ICuriosItemHandler> handler;"), curios)
+        assertTrue(curios.contains("Optional<ICuriosItemHandler> lazyHandler = CuriosApi.getCuriosInventory(entity);"), curios)
+        assertTrue(curios.contains("if (lazyHandler.isPresent())"), curios)
+        assertTrue(curios.contains("lazyHandler.get().getCurios();"), curios)
+        assertFalse(curios.contains("LazyOptional"), curios)
+        assertFalse(curios.contains(".resolve()"), curios)
         assertTrue(Regex("""@SuppressWarnings\("this-escape"\)\s+public\s+ConstructorThisCallSurface""").containsMatchIn(constructorThisCall))
         assertTrue(Regex("""@SuppressWarnings\("this-escape"\)\s+public\s+LookGoal""").containsMatchIn(nestedConstructorThisCall))
         assertTrue(Regex("""@SuppressWarnings\("this-escape"\)\s+public\s+MoveGoal""").containsMatchIn(nestedConstructorThisCall))
