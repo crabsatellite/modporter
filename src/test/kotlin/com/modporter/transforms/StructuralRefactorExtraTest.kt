@@ -15934,6 +15934,37 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates Quark backpack InventoryIIH wrappers to BackpackContainer`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("QuarkBackpackCompat.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import org.violetmoon.quark.addons.oddities.inventory.slot.BackpackSlot;
+            import org.violetmoon.quark.base.util.InventoryIIH;
+
+            public class QuarkBackpackCompat {
+                public Object create(ItemStack backpack) {
+                    InventoryIIH inv = new InventoryIIH(backpack);
+                    return new BackpackSlot(inv, 0, 8, 18);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val second = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("QuarkBackpackCompat.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-quark-backpack-container-121" })
+        assertFalse(second.changes.any { it.ruleId == "struct-quark-backpack-container-121" })
+        assertTrue(source.contains("import org.violetmoon.quark.addons.oddities.inventory.BackpackContainer;"), source)
+        assertFalse(source.contains("InventoryIIH"), source)
+        assertTrue(source.contains("BackpackContainer inv = new BackpackContainer(backpack);"), source)
+        assertTrue(source.contains("new BackpackSlot(inv, 0, 8, 18)"), source)
+    }
+
+    @Test
     fun `migrates strict warning surfaces by source shape without mod specific rules`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

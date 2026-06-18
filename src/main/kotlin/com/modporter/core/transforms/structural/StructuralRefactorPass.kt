@@ -193,6 +193,15 @@ class StructuralRefactorPass : Pass {
             errors.add("Nitrogen attachment API migration error: ${e.message}")
         }
 
+        // Quark 1.21 replaced the old InventoryIIH backpack item-handler
+        // wrapper with the public BackpackContainer used by BackpackSlot.
+        try {
+            val quarkBackpackChanges = migrateQuarkBackpackInventoryWrappers(projectDir, dryRun)
+            changes.addAll(quarkBackpackChanges)
+        } catch (e: Exception) {
+            errors.add("Quark backpack inventory wrapper migration error: ${e.message}")
+        }
+
         // Migrate block-entity fluid handlers from legacy getCapability()
         // overrides to RegisterCapabilitiesEvent block-entity registrations.
         try {
@@ -4741,6 +4750,48 @@ $helpers
             }
         }
 
+        return changes
+    }
+
+    private fun migrateQuarkBackpackInventoryWrappers(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        val changes = mutableListOf<Change>()
+        val wrapperDeclaration = Regex(
+            """\b((?:final\s+)?)InventoryIIH\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+InventoryIIH\s*\("""
+        )
+
+        for (javaFile in javaFiles) {
+            val original = javaFile.readText()
+            if (!original.contains("org.violetmoon.quark.base.util.InventoryIIH") ||
+                !original.contains("new BackpackSlot(") ||
+                !wrapperDeclaration.containsMatchIn(original)) {
+                continue
+            }
+
+            var modified = wrapperDeclaration.replace(original) { match ->
+                "${match.groupValues[1]}BackpackContainer ${match.groupValues[2]} = new BackpackContainer("
+            }
+            modified = removeImport(modified, "org.violetmoon.quark.base.util.InventoryIIH")
+            modified = addImportIfMissing(modified, "org.violetmoon.quark.addons.oddities.inventory.BackpackContainer")
+            modified = cleanupRedundantBlankLines(modified)
+
+            if (modified != original) {
+                if (!dryRun) javaFile.writeText(modified)
+                changes += Change(
+                    file = javaFile,
+                    line = 1,
+                    description = "Migrate Quark backpack InventoryIIH wrappers to BackpackContainer",
+                    before = "InventoryIIH item-handler wrapper for BackpackSlot",
+                    after = "BackpackContainer passed to BackpackSlot",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-quark-backpack-container-121"
+                )
+            }
+        }
         return changes
     }
 
