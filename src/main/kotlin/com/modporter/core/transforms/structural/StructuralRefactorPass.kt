@@ -7736,6 +7736,8 @@ $fields
         val attributeModifierMethods = collectAttributeModifierMethods(javaFiles)
         val genericMethodReturnTypes = collectGenericMethodReturnTypes(javaFiles)
         val attributeHolderAccessHints = collectAttributeHolderAccessHints(srcDir)
+        val optionalCompoundRecipeTagOwners = collectLegacyOptionalCompoundRecipeTagOwners(javaFiles)
+        val legacyCookingRecipeClasses = collectLegacyCookingRecipeClasses(javaFiles)
 
         javaFiles.forEach { javaFile ->
                 val original = javaFile.readText()
@@ -7983,7 +7985,8 @@ $fields
                     attributeModifierIdReferences,
                     attributeModifierMethods,
                     genericMethodReturnTypes,
-                    attributeHolderAccessHints
+                    attributeHolderAccessHints,
+                    optionalCompoundRecipeTagOwners
                 )
                 if (vanilla121Migrated != text) {
                     changes.add(Change(
@@ -8024,6 +8027,20 @@ $fields
                         ruleId = "struct-recipe-codec-121"
                     ))
                     text = recipeSerializerMigrated
+                }
+
+                val cookingRecipeConstructorMigrated = migrateLegacyCookingRecipeConstructorsSource(text, legacyCookingRecipeClasses)
+                if (cookingRecipeConstructorMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate legacy AbstractCookingRecipe constructors away from recipe ids",
+                        before = "AbstractCookingRecipe subclass constructors with ResourceLocation recipe id",
+                        after = "idless 1.21 cooking recipe constructors and SingleRecipeInput methods",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-cooking-recipe-idless-constructor"
+                    ))
+                    text = cookingRecipeConstructorMigrated
                 }
 
                 val deferredHolderMigrated = migrateDeferredHolderGenericsSource(text, deferredHolderRegistryBaseHints)
@@ -10582,7 +10599,8 @@ ${entries.joinToString(",\n")}
         attributeModifierIdReferences: Set<String> = emptySet(),
         attributeModifierMethods: Map<String, Set<String>> = emptyMap(),
         genericMethodReturnTypes: Map<String, String> = emptyMap(),
-        attributeHolderAccessHints: AttributeHolderAccessHints = AttributeHolderAccessHints(emptySet())
+        attributeHolderAccessHints: AttributeHolderAccessHints = AttributeHolderAccessHints(emptySet()),
+        optionalCompoundRecipeTagOwners: Set<String> = emptySet()
     ): String {
         var result = source
         var needsEntityTypeTags = false
@@ -10651,6 +10669,7 @@ ${entries.joinToString(",\n")}
             needsEnchantmentEffectComponents = true
         }
         result = migrateRecipeBookGhostRecipeSource(result)
+        result = migrateOptionalCompoundRecipeTagAccess(result, optionalCompoundRecipeTagOwners)
         result = migrateLegacyClientRenderingSource(result)
         result = migrateLegacySkinManagerTextureLookups(result)
         result = migrateLegacyModelEventSource(result)
@@ -24981,70 +25000,634 @@ $encodeLines
             lambda.substring(header.range.last + 1)
     }
 
+    private data class JavaParameterInfo(
+        val type: String,
+        val name: String
+    )
+
+    private data class LegacyRecipeSerializerParam(
+        val type: String,
+        val name: String,
+        val codecLine: String,
+        val networkReadLine: String,
+        val networkWriteLine: String,
+        val constructorArg: String = name,
+        val optionalCompoundTag: Boolean = false,
+        val needsCodec: Boolean = false,
+        val needsBuiltInRegistries: Boolean = false,
+        val needsRegistries: Boolean = false,
+        val needsJsonSyntaxException: Boolean = false
+    )
+
     private fun migrateCustomRecipeSerializer121Source(source: String): String {
-        if (!source.contains("implements RecipeSerializer<CustomFluidCraftingRecipe>") || !source.contains("fromJson(")) {
+        if (!source.contains("implements RecipeSerializer<") || !source.contains("fromJson(")) return source
+        var result = migrateLegacyFactoryCookingRecipeSerializerSource(source)
+        result = migrateLegacyStructuredRecipeSerializerSource(result)
+        return result
+    }
+
+    private fun collectLegacyOptionalCompoundRecipeTagOwners(javaFiles: List<Path>): Set<String> =
+        javaFiles.mapNotNull { javaFile ->
+            val source = runCatching { javaFile.readText() }.getOrNull() ?: return@mapNotNull null
+            legacyStructuredRecipeSerializerOptionalCompoundOwner(source)
+        }.toSet()
+
+    private fun collectLegacyCookingRecipeClasses(javaFiles: List<Path>): Set<String> {
+        val superTypes = javaFiles.mapNotNull { javaFile ->
+            val source = runCatching { javaFile.readText() }.getOrNull() ?: return@mapNotNull null
+            val className = javaTopLevelTypeName(source) ?: return@mapNotNull null
+            val superType = Regex("""\bclass\s+${Regex.escape(className)}(?:\s*<[^>{}]+>)?\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)""")
+                .find(source)
+                ?.groupValues
+                ?.get(1)
+                ?.substringAfterLast('.')
+                ?: return@mapNotNull null
+            className to superType
+        }.toMap()
+
+        val cookingClasses = superTypes
+            .filterValues { it == "AbstractCookingRecipe" }
+            .keys
+            .toMutableSet()
+        var changed: Boolean
+        do {
+            changed = false
+            superTypes.forEach { (className, superType) ->
+                if (superType in cookingClasses && cookingClasses.add(className)) {
+                    changed = true
+                }
+            }
+        } while (changed)
+        return cookingClasses
+    }
+
+    private fun legacyStructuredRecipeSerializerOptionalCompoundOwner(source: String): String? {
+        val className = javaTopLevelTypeName(source) ?: return null
+        if (!source.contains("implements RecipeSerializer<$className>") ||
+            !source.contains("fromJson(ResourceLocation") ||
+            !source.contains("fromNetwork(ResourceLocation") ||
+            !source.contains("toNetwork(FriendlyByteBuf")) {
+            return null
+        }
+
+        val constructorMatch = Regex("""public\s+${Regex.escape(className)}\s*\(\s*ResourceLocation\s+([A-Za-z_$][\w$]*)\s*,\s*([^)]*)\)""")
+            .find(source)
+            ?: return null
+        val legacyIdName = constructorMatch.groupValues[1]
+        val constructorParams = parseJavaParameters(constructorMatch.groupValues[2])
+        if (constructorParams.isEmpty()) return null
+
+        val fromJsonMethod = javaMethodText(source, "fromJson") ?: return null
+        val fromNetworkMethod = javaMethodText(source, "fromNetwork") ?: return null
+        val toNetworkMethod = javaMethodText(source, "toNetwork") ?: return null
+        val fromJsonArgs = constructorArgsForClass(fromJsonMethod, className) ?: return null
+        val fromNetworkArgs = constructorArgsForClass(fromNetworkMethod, className) ?: return null
+        if (fromJsonArgs.size != constructorParams.size + 1 ||
+            fromNetworkArgs.size != constructorParams.size + 1 ||
+            fromJsonArgs.first().trim() !in setOf(legacyIdName, "id", "recipeId", "recipeLocation") ||
+            fromNetworkArgs.first().trim() !in setOf(legacyIdName, "id", "recipeId", "recipeLocation")) {
+            return null
+        }
+        if (fromJsonArgs.drop(1).any { !isJavaIdentifier(it.trim()) } ||
+            fromNetworkArgs.drop(1).any { !isJavaIdentifier(it.trim()) }) {
+            return null
+        }
+
+        val params = constructorParams.mapIndexed { index, param ->
+            legacyRecipeSerializerParam(
+                param,
+                fromJsonMethod,
+                fromNetworkMethod,
+                toNetworkMethod,
+                fromJsonArgs[index + 1].trim(),
+                fromNetworkArgs[index + 1].trim()
+            ) ?: return null
+        }
+        return className.takeIf { params.any { it.optionalCompoundTag } }
+    }
+
+    private fun migrateLegacyCookingRecipeConstructorsSource(
+        source: String,
+        legacyCookingRecipeClasses: Set<String>
+    ): String {
+        val className = javaTopLevelTypeName(source) ?: return source
+        if (className !in legacyCookingRecipeClasses) return source
+
+        var result = source
+        val idNames = Regex("""public\s+${Regex.escape(className)}\s*\([^)]*\bResourceLocation\s+([A-Za-z_$][\w$]*)\s*,\s*String\s+group""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toMutableSet()
+        idNames.add("id")
+        idNames.add("recipeId")
+        idNames.add("recipeLocation")
+
+        result = Regex("""(public\s+${Regex.escape(className)}\s*\(\s*[^)]*?)\s*ResourceLocation\s+([A-Za-z_$][\w$]*)\s*,\s*String\s+group""")
+            .replace(result) { match -> "${match.groupValues[1]}String group" }
+        idNames.forEach { idName ->
+            result = Regex("""super\(([^;\r\n]*?),\s*${Regex.escape(idName)}\s*,\s*group\s*,""")
+                .replace(result) { match -> "super(${match.groupValues[1]}, group," }
+        }
+
+        val beforeInputMigration = result
+        result = Regex("""(\bItemStack\s+assemble\s*\(\s*)Container(\s+[A-Za-z_$][\w$]*\s*,\s*HolderLookup\.Provider\s+[A-Za-z_$][\w$]*\s*\))""")
+            .replace(result) { match -> "${match.groupValues[1]}SingleRecipeInput${match.groupValues[2]}" }
+        if (result != beforeInputMigration) {
+            result = addImportIfMissing(result, "net.minecraft.world.item.crafting.SingleRecipeInput")
+            val withoutContainerImport = removeImport(result, "net.minecraft.world.Container")
+            if (!hasSimpleTypeReference(withoutContainerImport, "Container")) {
+                result = withoutContainerImport
+            }
+        }
+
+        val withoutResourceLocationImport = removeImport(result, "net.minecraft.resources.ResourceLocation")
+        if (!hasSimpleTypeReference(withoutResourceLocationImport, "ResourceLocation")) {
+            result = withoutResourceLocationImport
+        }
+        return result
+    }
+
+    private fun migrateLegacyFactoryCookingRecipeSerializerSource(source: String): String {
+        if (!source.contains("CookieBaker<") ||
+            !source.contains("this.factory.create(") ||
+            !source.contains("fromNetwork(ResourceLocation") ||
+            !Regex("""toNetwork\s*\(\s*(?:FriendlyByteBuf|RegistryFriendlyByteBuf)\s+""").containsMatchIn(source)) {
             return source
         }
-        val modIdExpression = inferModAccess(source)?.modIdExpression ?: return source
-        var result = source
-        result = result
-            .replace("import com.google.gson.JsonObject;\n", "")
-            .replace("import com.google.gson.JsonParseException;\n", "")
-            .replace("import net.minecraft.network.FriendlyByteBuf;\n", "")
-            .replace("import net.minecraft.util.GsonHelper;\n", "")
-            .replace("import net.minecraft.core.RegistryAccess;\n", "")
+
+        val classMatch = Regex(
+            """(?s)public\s+class\s+([A-Za-z_$][\w$]*)\s*<\s*T\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>\s+implements\s+RecipeSerializer\s*<\s*T\s*>\s*\{"""
+        ).find(source) ?: return source
+        val className = classMatch.groupValues[1]
+        val recipeBase = classMatch.groupValues[2].substringAfterLast('.')
+        val openBrace = source.indexOf('{', classMatch.range.last)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        if (openBrace < 0 || closeBrace < 0) return source
+
+        val fromJsonMethod = javaMethodText(source, "fromJson") ?: return source
+        val fromNetworkMethod = javaMethodText(source, "fromNetwork") ?: return source
+        val toNetworkMethod = javaMethodText(source, "toNetwork") ?: return source
+        val factoryArgs = Regex("""this\.factory\.create\s*\(([^;]+)\)""")
+            .find(fromJsonMethod)
+            ?.groupValues
+            ?.get(1)
+            ?.let(::splitTopLevelJavaArgs)
+            ?: return source
+        if (factoryArgs.size != 7 || factoryArgs.first().trim() !in setOf("id", "recipeId", "recipeLocation")) {
+            return source
+        }
+        val categoryMatch = Regex("""([A-Za-z_$][\w$]*)\s+([A-Za-z_$][\w$]*)\s*=\s*buffer\.readEnum\(\s*([A-Za-z_$][\w$]*)\.class\s*\)""")
+            .find(fromNetworkMethod)
+            ?: return source
+        val categoryType = categoryMatch.groupValues[1]
+        if (categoryType != categoryMatch.groupValues[3]) return source
+        if (!fromJsonMethod.contains("$categoryType.CODEC.byName(") ||
+            !fromJsonMethod.contains("Ingredient.fromJson(") ||
+            !fromNetworkMethod.contains("Ingredient.fromNetwork(buffer)") ||
+            !(fromNetworkMethod.contains("buffer.readItem()") || fromNetworkMethod.contains("ItemStack.STREAM_CODEC.decode(buffer)")) ||
+            !toNetworkMethod.contains(".toNetwork(buffer)") ||
+            !(toNetworkMethod.contains("buffer.writeItem(") || toNetworkMethod.contains("ItemStack.STREAM_CODEC.encode(buffer,"))) {
+            return source
+        }
+
+        val replacement = """
+            public class $className<T extends $recipeBase> implements RecipeSerializer<T> {
+                private final $className.CookieBaker<T> factory;
+                private final MapCodec<T> codec;
+                private final StreamCodec<RegistryFriendlyByteBuf, T> streamCodec;
+
+                public $className($className.CookieBaker<T> factory, int defaultCookingTime) {
+                    this.factory = factory;
+                    this.codec = RecordCodecBuilder.mapCodec((instance) -> instance.group(
+                            Codec.STRING.optionalFieldOf("group", "").forGetter(AbstractCookingRecipe::getGroup),
+                            $categoryType.CODEC.fieldOf("category").forGetter($recipeBase::aetherCategory),
+                            Ingredient.CODEC_NONEMPTY.fieldOf("ingredient").forGetter((recipe) -> recipe.getIngredients().get(0)),
+                            ItemStack.CODEC.fieldOf("result").forGetter($recipeBase::getResult),
+                            Codec.FLOAT.fieldOf("experience").orElse(0.0F).forGetter(AbstractCookingRecipe::getExperience),
+                            Codec.INT.fieldOf("cookingtime").orElse(defaultCookingTime).forGetter(AbstractCookingRecipe::getCookingTime)
+                    ).apply(instance, factory::create));
+                    this.streamCodec = StreamCodec.of(this::toNetwork, this::fromNetwork);
+                }
+
+                @Override
+                public MapCodec<T> codec() {
+                    return this.codec;
+                }
+
+                @Override
+                public StreamCodec<RegistryFriendlyByteBuf, T> streamCodec() {
+                    return this.streamCodec;
+                }
+
+                public T fromNetwork(RegistryFriendlyByteBuf buffer) {
+                    String group = buffer.readUtf();
+                    $categoryType category = buffer.readEnum($categoryType.class);
+                    Ingredient ingredient = Ingredient.CONTENTS_STREAM_CODEC.decode(buffer);
+                    ItemStack result = ItemStack.STREAM_CODEC.decode(buffer);
+                    float experience = buffer.readFloat();
+                    int cookingTime = buffer.readVarInt();
+                    return this.factory.create(group, category, ingredient, result, experience, cookingTime);
+                }
+
+                public void toNetwork(RegistryFriendlyByteBuf buffer, T recipe) {
+                    buffer.writeUtf(recipe.getGroup());
+                    buffer.writeEnum(Objects.requireNonNullElse(recipe.aetherCategory(), $categoryType.UNKNOWN));
+                    Ingredient.CONTENTS_STREAM_CODEC.encode(buffer, recipe.getIngredients().get(0));
+                    ItemStack.STREAM_CODEC.encode(buffer, recipe.getResult());
+                    buffer.writeFloat(recipe.getExperience());
+                    buffer.writeVarInt(recipe.getCookingTime());
+                }
+
+                public interface CookieBaker<T extends $recipeBase> {
+                    T create(String group, $categoryType category, Ingredient ingredient, ItemStack result, float experience, int cookingTime);
+                }
+            }
+        """.trimIndent()
+
+        var result = source.substring(0, classMatch.range.first) + replacement + source.substring(closeBrace + 1)
+        listOf(
+            "com.google.gson.JsonElement",
+            "com.google.gson.JsonObject",
+            "com.google.gson.JsonSyntaxException",
+            "net.minecraft.network.FriendlyByteBuf",
+            "net.minecraft.resources.ResourceLocation",
+            "net.minecraft.util.GsonHelper",
+            "net.neoforged.neoforge.registries.ForgeRegistries",
+            "net.minecraftforge.registries.ForgeRegistries",
+            "javax.annotation.Nullable"
+        ).forEach { result = removeImport(result, it) }
         result = addImportIfMissing(result, "com.mojang.serialization.Codec")
         result = addImportIfMissing(result, "com.mojang.serialization.MapCodec")
         result = addImportIfMissing(result, "com.mojang.serialization.codecs.RecordCodecBuilder")
         result = addImportIfMissing(result, "net.minecraft.network.RegistryFriendlyByteBuf")
         result = addImportIfMissing(result, "net.minecraft.network.codec.StreamCodec")
+        result = addImportIfMissing(result, "net.minecraft.world.item.crafting.AbstractCookingRecipe")
+        result = addImportIfMissing(result, "java.util.Objects")
+        return result
+    }
 
-        result = result.replace(
-            "public static final DeferredHolder<RecipeSerializer<CustomFluidCraftingRecipe>, RecipeSerializer<CustomFluidCraftingRecipe>> SERIALIZER =",
-            "public static final DeferredHolder<RecipeSerializer<?>, Serializer> SERIALIZER ="
-        )
-        result = result.replace("public ItemStack getResultItem(RegistryAccess registryAccess)", "public ItemStack getResultItem(HolderLookup.Provider registryAccess)")
-        result = result.replace(Regex("""@Override\s+public\s+ResourceLocation\s+getId\(\)"""), "public ResourceLocation getId()")
+    private fun migrateLegacyStructuredRecipeSerializerSource(source: String): String {
+        val className = javaTopLevelTypeName(source) ?: return source
+        if (!source.contains("implements RecipeSerializer<$className>") ||
+            !source.contains("fromJson(ResourceLocation") ||
+            !source.contains("fromNetwork(ResourceLocation") ||
+            !Regex("""toNetwork\s*\(\s*(?:FriendlyByteBuf|RegistryFriendlyByteBuf)\s+""").containsMatchIn(source)) {
+            return source
+        }
 
-        val serializerBody = """
-            public static class Serializer implements RecipeSerializer<CustomFluidCraftingRecipe> {
-                private static final MapCodec<CustomFluidCraftingRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
-                        ResourceLocation.CODEC.fieldOf("fluid_id").forGetter(CustomFluidCraftingRecipe::getFluidId),
-                        BuiltInRegistries.ITEM.byNameCodec().fieldOf("ingredient").forGetter(CustomFluidCraftingRecipe::getIngredient),
-                        Codec.INT.optionalFieldOf("ingredient_count", 4).forGetter(CustomFluidCraftingRecipe::getIngredientCount)
-                ).apply(instance, (fluidId, ingredient, ingredientCount) ->
-                        new CustomFluidCraftingRecipe(ResourceLocation.fromNamespaceAndPath($modIdExpression, "custom_fluid_crafting"), fluidId, ingredient, ingredientCount)));
+        val constructorMatch = Regex("""public\s+${Regex.escape(className)}\s*\(\s*ResourceLocation\s+([A-Za-z_$][\w$]*)\s*,\s*([^)]*)\)""")
+            .find(source)
+            ?: return source
+        val legacyIdName = constructorMatch.groupValues[1]
+        val constructorParams = parseJavaParameters(constructorMatch.groupValues[2])
+        if (constructorParams.isEmpty()) return source
 
-                private static final StreamCodec<RegistryFriendlyByteBuf, CustomFluidCraftingRecipe> STREAM_CODEC = StreamCodec.of(
+        val fromJsonMethod = javaMethodText(source, "fromJson") ?: return source
+        val fromNetworkMethod = javaMethodText(source, "fromNetwork") ?: return source
+        val toNetworkMethod = javaMethodText(source, "toNetwork") ?: return source
+        val fromJsonArgs = constructorArgsForClass(fromJsonMethod, className) ?: return source
+        val fromNetworkArgs = constructorArgsForClass(fromNetworkMethod, className) ?: return source
+        if (fromJsonArgs.size != constructorParams.size + 1 ||
+            fromNetworkArgs.size != constructorParams.size + 1 ||
+            fromJsonArgs.first().trim() !in setOf(legacyIdName, "id", "recipeId", "recipeLocation") ||
+            fromNetworkArgs.first().trim() !in setOf(legacyIdName, "id", "recipeId", "recipeLocation")) {
+            return source
+        }
+        if (fromJsonArgs.drop(1).any { !isJavaIdentifier(it.trim()) } ||
+            fromNetworkArgs.drop(1).any { !isJavaIdentifier(it.trim()) }) {
+            return source
+        }
+
+        val params = constructorParams.mapIndexed { index, param ->
+            legacyRecipeSerializerParam(
+                param,
+                fromJsonMethod,
+                fromNetworkMethod,
+                toNetworkMethod,
+                fromJsonArgs[index + 1].trim(),
+                fromNetworkArgs[index + 1].trim()
+            ) ?: return source
+        }
+
+        val migratedConstructorParams = constructorParams.joinToString(", ") { constructorParam ->
+            val migratedParam = params.first { it.name == constructorParam.name }
+            "${migratedParam.type} ${constructorParam.name}"
+        }
+
+        var result = source
+        result = result.replaceRange(constructorMatch.range, "public $className($migratedConstructorParams)")
+        result = removeLegacyRecipeIdState(result, legacyIdName)
+        result = migrateLegacyRecipeInputTypeForSingleStack(result)
+        for (param in params.filter { it.optionalCompoundTag }) {
+            result = result.replace(Regex("""(?m)^([ \t]*(?:private|protected|public)\s+final\s+)CompoundTag(\s+${Regex.escape(param.name)}\s*;)"""), "$1Optional<CompoundTag>$2")
+            result = result.replace(Regex("""(?m)^([ \t]*)public\s+CompoundTag\s+get${param.name.replaceFirstChar { it.uppercase() }}\s*\(\s*\)"""), "$1public Optional<CompoundTag> get${param.name.replaceFirstChar { it.uppercase() }}()")
+        }
+        result = replaceNestedClass(result, "Serializer", legacyStructuredRecipeSerializerBody(className, params))
+
+        listOf(
+            "com.google.gson.JsonObject",
+            "net.minecraft.network.FriendlyByteBuf",
+            "net.minecraft.util.GsonHelper",
+            "net.neoforged.neoforge.common.crafting.CraftingHelper",
+            "net.minecraftforge.common.crafting.CraftingHelper",
+            "javax.annotation.Nullable"
+        ).forEach { result = removeImport(result, it) }
+        result = addImportIfMissing(result, "com.mojang.serialization.Codec")
+        result = addImportIfMissing(result, "com.mojang.serialization.MapCodec")
+        result = addImportIfMissing(result, "com.mojang.serialization.codecs.RecordCodecBuilder")
+        result = addImportIfMissing(result, "net.minecraft.network.RegistryFriendlyByteBuf")
+        result = addImportIfMissing(result, "net.minecraft.network.codec.StreamCodec")
+        if (params.any { it.needsBuiltInRegistries }) {
+            result = addImportIfMissing(result, "net.minecraft.core.registries.BuiltInRegistries")
+        }
+        if (params.any { it.needsRegistries }) {
+            result = addImportIfMissing(result, "net.minecraft.core.registries.Registries")
+        }
+        if (params.any { it.needsJsonSyntaxException }) {
+            result = addImportIfMissing(result, "com.google.gson.JsonSyntaxException")
+        } else {
+            result = removeImport(result, "com.google.gson.JsonSyntaxException")
+        }
+        if (params.any { it.optionalCompoundTag }) {
+            result = addImportIfMissing(result, "java.util.Optional")
+        }
+        val withoutResourceLocationImport = removeImport(result, "net.minecraft.resources.ResourceLocation")
+        if (!hasSimpleTypeReference(withoutResourceLocationImport, "ResourceLocation")) {
+            result = withoutResourceLocationImport
+        }
+        result = removeImport(result, "net.minecraft.core.RegistryAccess")
+        result = migrateOptionalCompoundRecipeTagAccess(result, setOf(className))
+        return result
+    }
+
+    private fun parseJavaParameters(paramsText: String): List<JavaParameterInfo> =
+        splitTopLevelJavaArgs(paramsText).mapNotNull { raw ->
+            val cleaned = raw.trim()
+                .replace(Regex("""^(?:@\w+(?:\([^)]*\))?\s+)+"""), "")
+                .removePrefix("final ")
+                .trim()
+            Regex("""(.+?)\s+([A-Za-z_$][\w$]*)$""")
+                .find(cleaned)
+                ?.let { JavaParameterInfo(it.groupValues[1].trim(), it.groupValues[2]) }
+        }
+
+    private fun isJavaIdentifier(value: String): Boolean =
+        Regex("""[A-Za-z_$][\w$]*""").matches(value)
+
+    private fun legacyRecipeSerializerParam(
+        param: JavaParameterInfo,
+        fromJsonMethod: String,
+        fromNetworkMethod: String,
+        toNetworkMethod: String,
+        fromJsonArgName: String = param.name,
+        fromNetworkArgName: String = param.name
+    ): LegacyRecipeSerializerParam? {
+        val type = param.type.removePrefix("@Nullable").trim()
+        val name = param.name
+        val jsonLocal = fromJsonArgName.removePrefix("this.").substringAfterLast('.')
+        val networkLocal = fromNetworkArgName.removePrefix("this.").substringAfterLast('.')
+        val jsonVar = Regex("""JsonObject\s+([A-Za-z_$][\w$]*)""").find(fromJsonMethod)?.groupValues?.get(1) ?: "json"
+        val bufferVar = Regex("""(?:FriendlyByteBuf|RegistryFriendlyByteBuf)\s+([A-Za-z_$][\w$]*)""").find(fromNetworkMethod)?.groupValues?.get(1) ?: "buffer"
+        val recipeVar = Regex("""\b${Regex.escape(type.substringAfterLast('.'))}\s+([A-Za-z_$][\w$]*)\s*\)""")
+            .find(toNetworkMethod)
+            ?.groupValues
+            ?.get(1)
+            ?: Regex("""\b[A-Za-z_$][\w$<>?,\s]+\s+([A-Za-z_$][\w$]*)\s*\)""").find(toNetworkMethod)?.groupValues?.get(1)
+            ?: "recipe"
+
+        fun requireWrite(pattern: Regex): Boolean = pattern.containsMatchIn(toNetworkMethod)
+        fun getter(): String = "(recipe) -> recipe.$name"
+        fun recipeField(): String = "$recipeVar.$name"
+
+        if (type == "String") {
+            val match = Regex("""String\s+${Regex.escape(jsonLocal)}\s*=\s*GsonHelper\.getAsString\(\s*${Regex.escape(jsonVar)}\s*,\s*"([^"]+)"\s*,\s*([^)]+)\)""")
+                .find(fromJsonMethod)
+                ?: return null
+            if (!fromNetworkMethod.contains("String $networkLocal = $bufferVar.readUtf()") ||
+                !requireWrite(Regex("""${Regex.escape(bufferVar)}\.writeUtf\("""))) return null
+            return LegacyRecipeSerializerParam(
+                type = type,
+                name = name,
+                codecLine = """Codec.STRING.optionalFieldOf("${match.groupValues[1]}", ${match.groupValues[2].trim()}).forGetter(${getter()})""",
+                networkReadLine = "String $name = buffer.readUtf();",
+                networkWriteLine = "buffer.writeUtf(${recipeField()});",
+                needsCodec = true
+            )
+        }
+
+        if (type == "Ingredient") {
+            val field = Regex("""Ingredient\s+${Regex.escape(jsonLocal)}\s*=\s*Ingredient\.fromJson\(\s*GsonHelper\.getAsJsonObject\(\s*${Regex.escape(jsonVar)}\s*,\s*"([^"]+)"\s*\)\s*\)""")
+                .find(fromJsonMethod)
+                ?.groupValues
+                ?.get(1)
+                ?: Regex("""Ingredient\s+${Regex.escape(jsonLocal)}\s*=\s*Ingredient\.fromJson\(""")
+                    .find(fromJsonMethod)
+                    ?.let { name }
+                ?: return null
+            if (!fromNetworkMethod.contains("Ingredient $networkLocal = Ingredient.fromNetwork($bufferVar)") ||
+                !requireWrite(Regex("""${Regex.escape(recipeField())}\.toNetwork\(\s*${Regex.escape(bufferVar)}\s*\)"""))) return null
+            return LegacyRecipeSerializerParam(
+                type = type,
+                name = name,
+                codecLine = """Ingredient.CODEC_NONEMPTY.fieldOf("$field").forGetter(${getter()})""",
+                networkReadLine = "Ingredient $name = Ingredient.CONTENTS_STREAM_CODEC.decode(buffer);",
+                networkWriteLine = "Ingredient.CONTENTS_STREAM_CODEC.encode(buffer, ${recipeField()});"
+            )
+        }
+
+        if (type == "int") {
+            val match = Regex("""int\s+${Regex.escape(jsonLocal)}\s*=\s*GsonHelper\.getAsInt\(\s*${Regex.escape(jsonVar)}\s*,\s*"([^"]+)"\s*,\s*([^)]+)\)""")
+                .find(fromJsonMethod)
+                ?: return null
+            if (!fromNetworkMethod.contains("int $networkLocal = $bufferVar.readVarInt()") ||
+                !requireWrite(Regex("""${Regex.escape(bufferVar)}\.writeVarInt\("""))) return null
+            return LegacyRecipeSerializerParam(
+                type = type,
+                name = name,
+                codecLine = """Codec.INT.fieldOf("${match.groupValues[1]}").orElse(${match.groupValues[2].trim()}).forGetter(${getter()})""",
+                networkReadLine = "int $name = buffer.readVarInt();",
+                networkWriteLine = "buffer.writeVarInt(${recipeField()});",
+                needsCodec = true
+            )
+        }
+
+        if (type == "ResourceLocation") {
+            val field = Regex("""ResourceLocation\s+${Regex.escape(jsonLocal)}\s*=\s*ResourceLocation\.(?:parse|tryParse)\(\s*GsonHelper\.getAsString\(\s*${Regex.escape(jsonVar)}\s*,\s*"([^"]+)"\s*\)\s*\)""")
+                .find(fromJsonMethod)
+                ?.groupValues
+                ?.get(1)
+                ?: return null
+            if (!fromNetworkMethod.contains("ResourceLocation $networkLocal = $bufferVar.readResourceLocation()") ||
+                !requireWrite(Regex("""${Regex.escape(bufferVar)}\.writeResourceLocation\("""))) return null
+            return LegacyRecipeSerializerParam(
+                type = type,
+                name = name,
+                codecLine = """ResourceLocation.CODEC.fieldOf("$field").forGetter(${getter()})""",
+                networkReadLine = "ResourceLocation $name = buffer.readResourceLocation();",
+                networkWriteLine = "buffer.writeResourceLocation(${recipeField()});"
+            )
+        }
+
+        if (type == "Item") {
+            val field = Regex("""Item\s+${Regex.escape(jsonLocal)}\s*=\s*BuiltInRegistries\.ITEM\.get\(\s*ResourceLocation\.(?:parse|tryParse)\(\s*GsonHelper\.getAsString\(\s*${Regex.escape(jsonVar)}\s*,\s*"([^"]+)"\s*\)\s*\)\s*\)""")
+                .find(fromJsonMethod)
+                ?.groupValues
+                ?.get(1)
+                ?: return null
+            if (!fromNetworkMethod.contains("Item $networkLocal = BuiltInRegistries.ITEM.byId($bufferVar.readVarInt())") ||
+                !requireWrite(Regex("""${Regex.escape(bufferVar)}\.writeVarInt\(\s*BuiltInRegistries\.ITEM\.getId\("""))) return null
+            return LegacyRecipeSerializerParam(
+                type = type,
+                name = name,
+                codecLine = """BuiltInRegistries.ITEM.byNameCodec().fieldOf("$field").forGetter(${getter()})""",
+                networkReadLine = "Item $name = BuiltInRegistries.ITEM.byId(buffer.readVarInt());",
+                networkWriteLine = "buffer.writeVarInt(BuiltInRegistries.ITEM.getId(${recipeField()}));",
+                needsBuiltInRegistries = true
+            )
+        }
+
+        if (type.startsWith("EntityType")) {
+            val field = Regex("""EntityType<\?>\s+${Regex.escape(jsonLocal)}\s*=\s*EntityType\.byString\(\s*GsonHelper\.getAsString\(\s*${Regex.escape(jsonVar)}\s*,\s*"([^"]+)"\s*\)\s*\)""")
+                .find(fromJsonMethod)
+                ?.groupValues
+                ?.get(1)
+                ?: return null
+            if (!fromNetworkMethod.contains("EntityType<?> $networkLocal = EntityType.byString($bufferVar.readUtf())") ||
+                !requireWrite(Regex("""${Regex.escape(bufferVar)}\.writeUtf\(\s*EntityType\.getKey\("""))) return null
+            return LegacyRecipeSerializerParam(
+                type = type,
+                name = name,
+                codecLine = """BuiltInRegistries.ENTITY_TYPE.byNameCodec().fieldOf("$field").forGetter(${getter()})""",
+                networkReadLine = """EntityType<?> $name = EntityType.byString(buffer.readUtf()).orElseThrow(() -> new JsonSyntaxException("Entity type cannot be found"));""",
+                networkWriteLine = "buffer.writeUtf(EntityType.getKey(${recipeField()}).toString());",
+                needsBuiltInRegistries = true,
+                needsJsonSyntaxException = true
+            )
+        }
+
+        if (type == "CompoundTag") {
+            val field = Regex("""${Regex.escape(jsonVar)}\.has\(\s*"([^"]+)"\s*\)""")
+                .find(fromJsonMethod)
+                ?.groupValues
+                ?.get(1)
+                ?: return null
+            if (!fromNetworkMethod.contains("$bufferVar.readBoolean()") ||
+                !fromNetworkMethod.contains("$networkLocal = $bufferVar.readNbt()") ||
+                !toNetworkMethod.contains("$recipeVar.$name != null") ||
+                !toNetworkMethod.contains("$bufferVar.writeNbt($recipeVar.$name)")) return null
+            return LegacyRecipeSerializerParam(
+                type = "Optional<CompoundTag>",
+                name = name,
+                codecLine = """CompoundTag.CODEC.optionalFieldOf("$field").forGetter(${getter()})""",
+                networkReadLine = "Optional<CompoundTag> $name = buffer.readOptional(RegistryFriendlyByteBuf::readNbt);",
+                networkWriteLine = "buffer.writeOptional(${recipeField()}, RegistryFriendlyByteBuf::writeNbt);",
+                optionalCompoundTag = true
+            )
+        }
+
+        val enumMatch = Regex("""${Regex.escape(type)}\s+${Regex.escape(jsonLocal)}\s*=\s*${Regex.escape(type)}\.CODEC\.byName\(\s*GsonHelper\.getAsString\(\s*${Regex.escape(jsonVar)}\s*,\s*"([^"]+)"\s*,\s*null\s*\)\s*,\s*([^)]+)\)""")
+            .find(fromJsonMethod)
+        if (enumMatch != null) {
+            if (!fromNetworkMethod.contains("$type $networkLocal = $bufferVar.readEnum($type.class)") ||
+                !requireWrite(Regex("""${Regex.escape(bufferVar)}\.writeEnum\("""))) return null
+            return LegacyRecipeSerializerParam(
+                type = type,
+                name = name,
+                codecLine = """$type.CODEC.fieldOf("${enumMatch.groupValues[1]}").orElse(${enumMatch.groupValues[2].trim()}).forGetter(${getter()})""",
+                networkReadLine = "$type $name = buffer.readEnum($type.class);",
+                networkWriteLine = "buffer.writeEnum(${recipeField()});"
+            )
+        }
+
+        return null
+    }
+
+    private fun legacyStructuredRecipeSerializerBody(className: String, params: List<LegacyRecipeSerializerParam>): String {
+        val codecLines = params.joinToString(",\n") { "                        ${it.codecLine}" }
+        val constructorArgs = params.joinToString(", ") { it.constructorArg }
+        val readLines = params.joinToString("\n") { "                    ${it.networkReadLine}" }
+        val writeLines = params.joinToString("\n") { "                    ${it.networkWriteLine}" }
+        return """
+            public static class Serializer implements RecipeSerializer<$className> {
+                private static final MapCodec<$className> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+$codecLines
+                ).apply(instance, $className::new));
+
+                private static final StreamCodec<RegistryFriendlyByteBuf, $className> STREAM_CODEC = StreamCodec.of(
                         Serializer::toNetwork,
                         Serializer::fromNetwork
                 );
 
                 @Override
-                public MapCodec<CustomFluidCraftingRecipe> codec() {
+                public MapCodec<$className> codec() {
                     return CODEC;
                 }
 
                 @Override
-                public StreamCodec<RegistryFriendlyByteBuf, CustomFluidCraftingRecipe> streamCodec() {
+                public StreamCodec<RegistryFriendlyByteBuf, $className> streamCodec() {
                     return STREAM_CODEC;
                 }
 
-                private static CustomFluidCraftingRecipe fromNetwork(RegistryFriendlyByteBuf buffer) {
-                    ResourceLocation fluidId = buffer.readResourceLocation();
-                    Item ingredient = BuiltInRegistries.ITEM.byId(buffer.readVarInt());
-                    int ingredientCount = buffer.readInt();
-                    return new CustomFluidCraftingRecipe(ResourceLocation.fromNamespaceAndPath($modIdExpression, "custom_fluid_crafting"), fluidId, ingredient, ingredientCount);
+                private static $className fromNetwork(RegistryFriendlyByteBuf buffer) {
+$readLines
+                    return new $className($constructorArgs);
                 }
 
-                private static void toNetwork(RegistryFriendlyByteBuf buffer, CustomFluidCraftingRecipe recipe) {
-                    buffer.writeResourceLocation(recipe.fluidId);
-                    buffer.writeVarInt(BuiltInRegistries.ITEM.getId(recipe.ingredient));
-                    buffer.writeInt(recipe.ingredientCount);
+                private static void toNetwork(RegistryFriendlyByteBuf buffer, $className recipe) {
+$writeLines
                 }
             }
         """.trimIndent()
-        result = replaceNestedClass(result, "Serializer", serializerBody)
+    }
+
+    private fun removeLegacyRecipeIdState(source: String, idName: String): String {
+        var result = source
+        result = Regex("""(?m)^[ \t]*(?:private|protected|public)\s+final\s+ResourceLocation\s+${Regex.escape(idName)}\s*;\s*\r?\n""")
+            .replace(result, "")
+        result = Regex("""(?m)^[ \t]*this\.${Regex.escape(idName)}\s*=\s*${Regex.escape(idName)}\s*;\s*\r?\n""")
+            .replace(result, "")
+        result = removeDeclaredMethod(result, "getId")
+        return result
+    }
+
+    private fun migrateLegacyRecipeInputTypeForSingleStack(source: String): String {
+        if (!source.contains("Recipe<Container>") || !source.contains(".getItem(0)")) return source
+        var result = source.replace("Recipe<Container>", "Recipe<SingleRecipeInput>")
+        result = Regex("""(?m)^([ \t]*(?:@\w+(?:\([^)]*\))?\s*)*(?:public|protected|private)?\s*(?:boolean|ItemStack)\s+(?:matches|assemble)\s*\(\s*)Container(\s+[A-Za-z_$][\w$]*\s*,\s*(?:Level|HolderLookup\.Provider)\s+[A-Za-z_$][\w$]*\s*\))""")
+            .replace(result) { match -> "${match.groupValues[1]}SingleRecipeInput${match.groupValues[2]}" }
+        result = addImportIfMissing(result, "net.minecraft.world.item.crafting.SingleRecipeInput")
+        val withoutContainerImport = removeImport(result, "net.minecraft.world.Container")
+        if (!hasSimpleTypeReference(withoutContainerImport, "Container")) {
+            result = withoutContainerImport
+        }
+        return result
+    }
+
+    private fun migrateOptionalCompoundRecipeTagAccess(
+        source: String,
+        optionalCompoundRecipeTagOwners: Set<String> = emptySet()
+    ): String {
+        if (optionalCompoundRecipeTagOwners.isEmpty() || !source.contains(".getTag()")) return source
+
+        val ownerPattern = optionalCompoundRecipeTagOwners.joinToString("|") { Regex.escape(it) }
+        val directVariables = Regex("""\b(?:[A-Za-z_$][\w$]*\.)*(?:$ownerPattern)\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        val holderVariables = Regex("""\bRecipeHolder\s*<\s*(?:[A-Za-z_$][\w$]*\.)*(?:$ownerPattern)\s*>\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+
+        var result = source
+        holderVariables.forEach { variable ->
+            result = Regex("""CompoundTag\s+([A-Za-z_$][\w$]*)\s*=\s*${Regex.escape(variable)}\.value\(\)\.getTag\(\)\s*;""")
+                .replace(result) { match -> "CompoundTag ${match.groupValues[1]} = $variable.value().getTag().orElse(null);" }
+        }
+        directVariables.forEach { variable ->
+            result = Regex("""CompoundTag\s+([A-Za-z_$][\w$]*)\s*=\s*${Regex.escape(variable)}\.getTag\(\)\s*;""")
+                .replace(result) { match -> "CompoundTag ${match.groupValues[1]} = $variable.getTag().orElse(null);" }
+        }
         return result
     }
 
@@ -25129,6 +25712,11 @@ $encodeLines
             .replace(result) { match -> "DeferredHolder<EntityType<?>, EntityType<${match.groupValues[2].trim()}>>" }
         result = Regex("""DeferredHolder<BlockEntityType<\s*([^>]+?)\s*>,\s*BlockEntityType<\s*([^>]+?)\s*>>""")
             .replace(result) { match -> "DeferredHolder<BlockEntityType<?>, BlockEntityType<${match.groupValues[2].trim()}>>" }
+        result = Regex(
+            """(?s)DeferredHolder\s*<\s*RecipeSerializer\s*<\s*([^>]+?)\s*>\s*,\s*RecipeSerializer\s*<\s*\1\s*>\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]*?\b((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)::new\s*\))"""
+        ).replace(result) { match ->
+            "DeferredHolder<RecipeSerializer<?>, ${match.groupValues[4]}> ${match.groupValues[2]} = ${match.groupValues[3]}"
+        }
         result = Regex("""DeferredHolder<RecipeSerializer<\s*([^>]+?)\s*>,\s*RecipeSerializer<\s*([^>]+?)\s*>>""")
             .replace(result) { match -> "DeferredHolder<RecipeSerializer<?>, RecipeSerializer<${match.groupValues[2].trim()}>>" }
         result = Regex("""DeferredHolder<RecipeType<\s*([^>]+?)\s*>,\s*RecipeType<\s*([^>]+?)\s*>>""")
@@ -25211,6 +25799,18 @@ $encodeLines
         val closeBrace = findMatchingBrace(source, openBrace)
         if (closeBrace < 0) return source
         return source.substring(0, match.range.first) + replacement + source.substring(closeBrace + 1)
+    }
+
+    private fun removeDeclaredMethod(source: String, methodName: String): String {
+        val pattern = Regex(
+            """(?m)^[ \t]*(?:@\w+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:public|protected|private)\s+(?:static\s+)?[\w<>\[\].?,\s]+\s+${Regex.escape(methodName)}\s*\("""
+        )
+        val match = pattern.find(source) ?: return source
+        val openBrace = source.indexOf('{', match.range.last)
+        if (openBrace < 0) return source
+        val closeBrace = findMatchingBrace(source, openBrace)
+        if (closeBrace < 0) return source
+        return source.substring(0, match.range.first).trimEnd() + "\n\n" + source.substring(closeBrace + 1).trimStart('\r', '\n')
     }
 
     private fun replaceNestedClass(source: String, className: String, replacement: String): String {

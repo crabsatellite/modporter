@@ -4437,11 +4437,25 @@ class StructuralRefactorExtraTest {
                 public CraftingBookCategory category() { return CraftingBookCategory.MISC; }
                 public static class Serializer implements RecipeSerializer<CustomFluidCraftingRecipe> {
                     @Override
-                    public CustomFluidCraftingRecipe fromJson(ResourceLocation recipeId, JsonObject json) { return null; }
+                    public CustomFluidCraftingRecipe fromJson(ResourceLocation recipeId, JsonObject json) {
+                        ResourceLocation fluidId = ResourceLocation.parse(GsonHelper.getAsString(json, "fluid_id"));
+                        Item ingredient = BuiltInRegistries.ITEM.get(ResourceLocation.parse(GsonHelper.getAsString(json, "ingredient")));
+                        int ingredientCount = GsonHelper.getAsInt(json, "ingredient_count", 4);
+                        return new CustomFluidCraftingRecipe(recipeId, fluidId, ingredient, ingredientCount);
+                    }
                     @Override
-                    public CustomFluidCraftingRecipe fromNetwork(ResourceLocation recipeId, FriendlyByteBuf buffer) { return null; }
+                    public CustomFluidCraftingRecipe fromNetwork(ResourceLocation recipeId, FriendlyByteBuf buffer) {
+                        ResourceLocation fluidId = buffer.readResourceLocation();
+                        Item ingredient = BuiltInRegistries.ITEM.byId(buffer.readVarInt());
+                        int ingredientCount = buffer.readVarInt();
+                        return new CustomFluidCraftingRecipe(recipeId, fluidId, ingredient, ingredientCount);
+                    }
                     @Override
-                    public void toNetwork(FriendlyByteBuf buffer, CustomFluidCraftingRecipe recipe) {}
+                    public void toNetwork(FriendlyByteBuf buffer, CustomFluidCraftingRecipe recipe) {
+                        buffer.writeResourceLocation(recipe.fluidId);
+                        buffer.writeVarInt(BuiltInRegistries.ITEM.getId(recipe.ingredient));
+                        buffer.writeVarInt(recipe.ingredientCount);
+                    }
                 }
             }
         """.trimIndent())
@@ -4472,12 +4486,157 @@ class StructuralRefactorExtraTest {
         assertTrue(recipe.contains("DeferredHolder<RecipeSerializer<?>, Serializer> SERIALIZER"))
         assertTrue(recipe.contains("public MapCodec<CustomFluidCraftingRecipe> codec()"))
         assertTrue(recipe.contains("public StreamCodec<RegistryFriendlyByteBuf, CustomFluidCraftingRecipe> streamCodec()"))
+        assertTrue(recipe.contains("""ResourceLocation.CODEC.fieldOf("fluid_id").forGetter((recipe) -> recipe.fluidId)"""))
+        assertTrue(recipe.contains("""BuiltInRegistries.ITEM.byNameCodec().fieldOf("ingredient").forGetter((recipe) -> recipe.ingredient)"""))
+        assertTrue(recipe.contains("""Codec.INT.fieldOf("ingredient_count").orElse(4).forGetter((recipe) -> recipe.ingredientCount)"""))
+        assertTrue(recipe.contains("new CustomFluidCraftingRecipe(fluidId, ingredient, ingredientCount)"))
         assertTrue(recipe.contains("public ItemStack getResultItem(HolderLookup.Provider registryAccess)"))
-        assertTrue(!recipe.contains("@Override\n    public ResourceLocation getId()"))
+        assertFalse(recipe.contains("private final ResourceLocation id;"))
+        assertFalse(recipe.contains("public ResourceLocation getId()"))
         assertTrue(registry.contains("DeferredHolder<Block, LiquidBlock> fluidBlock"))
         assertTrue(registry.contains("DeferredHolder<FluidType, DynamicFluidType> fluidType"))
         assertTrue(registry.contains("DeferredHolder<Block, T> registerBlock"))
         assertTrue(registry.contains("registerBlockItem(String name, DeferredHolder<Block, T> block)"))
+    }
+
+    @Test
+    fun `migrates structured recipe serializer with renamed locals and optional tag access`() {
+        val projectDir = createFile("IncubationRecipe.java", """
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSyntaxException;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.level.Level;
+            import net.neoforged.neoforge.common.crafting.CraftingHelper;
+
+            public class IncubationRecipe implements Recipe<Container> {
+                protected final ResourceLocation id;
+                protected final String group;
+                protected final Ingredient ingredient;
+                protected final EntityType<?> entity;
+                protected final CompoundTag tag;
+                protected final int incubationTime;
+
+                public IncubationRecipe(ResourceLocation id, String group, Ingredient ingredient, EntityType<?> entity, CompoundTag tag, int incubationTime) {
+                    this.id = id;
+                    this.group = group;
+                    this.ingredient = ingredient;
+                    this.entity = entity;
+                    this.tag = tag;
+                    this.incubationTime = incubationTime;
+                }
+
+                public boolean matches(Container menu, Level level) { return this.ingredient.test(menu.getItem(0)); }
+                public ItemStack assemble(Container menu, HolderLookup.Provider provider) { return ItemStack.EMPTY; }
+                public boolean canCraftInDimensions(int width, int height) { return true; }
+                public EntityType<?> getEntity() { return this.entity; }
+                public CompoundTag getTag() { return this.tag; }
+                public int getIncubationTime() { return this.incubationTime; }
+                public NonNullList<Ingredient> getIngredients() { return NonNullList.of(Ingredient.EMPTY, this.ingredient); }
+                public ResourceLocation getId() { return this.id; }
+                public RecipeSerializer<?> getSerializer() { return new Serializer(); }
+
+                public static class Serializer implements RecipeSerializer<IncubationRecipe> {
+                    @Override
+                    public IncubationRecipe fromJson(ResourceLocation recipeLocation, JsonObject jsonObject) {
+                        String group = GsonHelper.getAsString(jsonObject, "group", "");
+                        Ingredient ingredient = Ingredient.fromJson(GsonHelper.getAsJsonObject(jsonObject, "ingredient"));
+                        EntityType<?> entityType = EntityType.byString(GsonHelper.getAsString(jsonObject, "entity")).orElseThrow(() -> new JsonSyntaxException("Entity type cannot be found"));
+                        CompoundTag tag = null;
+                        if (jsonObject.has("tag")) {
+                            tag = CraftingHelper.getNBT(jsonObject.get("tag"));
+                        }
+                        int incubationTime = GsonHelper.getAsInt(jsonObject, "incubationtime", 2500);
+                        return new IncubationRecipe(recipeLocation, group, ingredient, entityType, tag, incubationTime);
+                    }
+
+                    @Override
+                    public IncubationRecipe fromNetwork(ResourceLocation recipeLocation, FriendlyByteBuf buffer) {
+                        String group = buffer.readUtf();
+                        Ingredient ingredient = Ingredient.fromNetwork(buffer);
+                        EntityType<?> entityType = EntityType.byString(buffer.readUtf()).orElseThrow(() -> new JsonSyntaxException("Entity type cannot be found"));
+                        CompoundTag tag = null;
+                        if (buffer.readBoolean()) {
+                            tag = buffer.readNbt();
+                        }
+                        int incubationTime = buffer.readVarInt();
+                        return new IncubationRecipe(recipeLocation, group, ingredient, entityType, tag, incubationTime);
+                    }
+
+                    @Override
+                    public void toNetwork(FriendlyByteBuf buffer, IncubationRecipe recipe) {
+                        buffer.writeUtf(recipe.group);
+                        recipe.ingredient.toNetwork(buffer);
+                        buffer.writeUtf(EntityType.getKey(recipe.getEntity()).toString());
+                        if (recipe.tag != null) {
+                            buffer.writeBoolean(true);
+                            buffer.writeNbt(recipe.tag);
+                        } else {
+                            buffer.writeBoolean(false);
+                        }
+                        buffer.writeVarInt(recipe.getIncubationTime());
+                    }
+                }
+            }
+        """.trimIndent())
+        projectDir.resolve("src/main/java/com/example/IncubatorBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
+            import net.minecraft.world.item.crafting.RecipeHolder;
+
+            public class IncubatorBlockEntity {
+                void spawn(RecipeHolder<IncubationRecipe> recipe, ClientboundBlockEntityDataPacket packet) {
+                    CompoundTag tag = recipe.value().getTag();
+                    CompoundTag packetTag = packet.getTag();
+                }
+            }
+        """.trimIndent())
+        projectDir.resolve("src/main/java/com/example/RecipeRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class RecipeRegistry {
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS = DeferredRegister.create(Registries.RECIPE_SERIALIZER, "example");
+                public static final DeferredHolder<RecipeSerializer<IncubationRecipe>, RecipeSerializer<IncubationRecipe>> INCUBATION =
+                        RECIPE_SERIALIZERS.register("incubation", IncubationRecipe.Serializer::new);
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val recipe = tempDir.resolve("src/main/java/com/example/IncubationRecipe.java").readText()
+        val blockEntity = tempDir.resolve("src/main/java/com/example/IncubatorBlockEntity.java").readText()
+        val registry = tempDir.resolve("src/main/java/com/example/RecipeRegistry.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-recipe-codec-121" })
+        assertTrue(recipe.contains("public IncubationRecipe(String group, Ingredient ingredient, EntityType<?> entity, Optional<CompoundTag> tag, int incubationTime)"))
+        assertTrue(recipe.contains("public Optional<CompoundTag> getTag()"))
+        assertTrue(recipe.contains("""BuiltInRegistries.ENTITY_TYPE.byNameCodec().fieldOf("entity").forGetter((recipe) -> recipe.entity)"""))
+        assertTrue(recipe.contains("""CompoundTag.CODEC.optionalFieldOf("tag").forGetter((recipe) -> recipe.tag)"""))
+        assertTrue(recipe.contains("public MapCodec<IncubationRecipe> codec()"))
+        assertTrue(recipe.contains("public StreamCodec<RegistryFriendlyByteBuf, IncubationRecipe> streamCodec()"))
+        assertFalse(recipe.contains("ResourceLocation id"))
+        assertFalse(recipe.contains("fromJson(ResourceLocation"))
+        assertTrue(blockEntity.contains("CompoundTag tag = recipe.value().getTag().orElse(null);"))
+        assertTrue(blockEntity.contains("CompoundTag packetTag = packet.getTag();"))
+        assertTrue(registry.contains("DeferredHolder<RecipeSerializer<?>, IncubationRecipe.Serializer> INCUBATION"))
     }
 
     @Test
