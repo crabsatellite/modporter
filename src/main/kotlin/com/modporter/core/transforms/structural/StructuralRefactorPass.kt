@@ -7825,6 +7825,8 @@ $fields
         val holderValueParameterHints = collectHolderValueParameterHints(srcDir)
         val criterionInstanceFactoryHints = collectCriterionInstanceFactoryHints(srcDir)
         val staticRegistryFieldHints = collectStaticRegistryFieldHints(srcDir)
+        val legacyBannerPatternFactories = collectLegacyBannerPatternLayerFactories(javaFiles)
+        val legacyBannerItemFactories = collectLegacyBannerItemStackFactories(javaFiles)
         val legacyRegistryBackedMethods = collectLegacyRegistryBackedMethods(javaFiles)
         val attributeModifierIdReferences = collectAttributeModifierIdReferences(javaFiles)
         val attributeModifierMethods = collectAttributeModifierMethods(javaFiles)
@@ -8086,6 +8088,24 @@ $fields
                     text = brewingMigrated
                 }
 
+                val bannerPatternMigrated = migrateLegacyBannerPatternLayerSource(
+                    text,
+                    legacyBannerPatternFactories,
+                    legacyBannerItemFactories
+                )
+                if (bannerPatternMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate legacy banner pattern builders to 1.21 banner pattern components",
+                        before = "BannerPattern.Builder#toListTag + BlockEntityTag Patterns",
+                        after = "HolderGetter-backed BannerPatternLayers + DataComponents.BANNER_PATTERNS",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-banner-pattern-components"
+                    ))
+                    text = bannerPatternMigrated
+                }
+
                 val vanilla121Migrated = migrateVanilla121ApiSource(
                     text,
                     mapCodecConstantOwners,
@@ -8289,6 +8309,387 @@ $fields
         ).findAll(source)
             .map { it.groupValues[1].substringAfterLast('.') }
             .toSet()
+    }
+
+    private data class LegacyBannerPatternLayerFactory(
+        val packageName: String,
+        val ownerClass: String,
+        val fieldName: String
+    ) {
+        val qualifiedOwner: String = if (packageName.isBlank()) ownerClass else "$packageName.$ownerClass"
+    }
+
+    private data class LegacyBannerItemStackFactory(
+        val packageName: String,
+        val ownerClass: String,
+        val methodName: String
+    ) {
+        val qualifiedOwner: String = if (packageName.isBlank()) ownerClass else "$packageName.$ownerClass"
+    }
+
+    private fun collectLegacyBannerPatternLayerFactories(javaFiles: List<Path>): Set<LegacyBannerPatternLayerFactory> =
+        javaFiles.mapNotNull { javaFile ->
+            val source = javaFile.readText()
+            if (!source.contains("BannerPattern.Builder") || !source.contains("new BannerPattern.Builder()")) {
+                return@mapNotNull null
+            }
+            val ownerClass = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+            val packageName = packageNameOf(source)
+            Regex("""(?m)\bstatic\s+final\s+BannerPattern\.Builder\s+([A-Za-z_$][\w$]*)\s*=""")
+                .findAll(source)
+                .map { LegacyBannerPatternLayerFactory(packageName, ownerClass, it.groupValues[1]) }
+                .toList()
+        }.flatten().toSet()
+
+    private fun collectLegacyBannerItemStackFactories(javaFiles: List<Path>): Set<LegacyBannerItemStackFactory> =
+        javaFiles.mapNotNull { javaFile ->
+            val source = javaFile.readText()
+            if (!source.contains(".toListTag()") ||
+                !source.contains("BlockItem.setBlockEntityData") ||
+                !source.contains("BlockEntityType.BANNER")) {
+                return@mapNotNull null
+            }
+            val ownerClass = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+            val packageName = packageNameOf(source)
+            javaMethodRanges(source)
+                .mapNotNull { method ->
+                    val methodText = source.substring(method.range)
+                    if (methodText.contains(".toListTag()") &&
+                        methodText.contains("BlockItem.setBlockEntityData") &&
+                        methodText.contains("BlockEntityType.BANNER") &&
+                        Regex("""\bItemStack\s+${Regex.escape(method.name)}\s*\(""").containsMatchIn(method.header)) {
+                        LegacyBannerItemStackFactory(packageName, ownerClass, method.name)
+                    } else {
+                        null
+                    }
+                }
+        }.flatten().toSet()
+
+    private fun migrateLegacyBannerPatternLayerSource(
+        source: String,
+        patternFactories: Set<LegacyBannerPatternLayerFactory>,
+        itemFactories: Set<LegacyBannerItemStackFactory>
+    ): String {
+        if (!source.contains("BannerPattern") &&
+            !source.contains(".toListTag()") &&
+            itemFactories.none { source.contains("${it.methodName}()") }) {
+            return source
+        }
+
+        var result = source
+        result = migrateLegacyBannerPatternFactoryDefinitions(result)
+        result = migrateLegacyBannerItemStackFactoryDefinitions(result, patternFactories)
+        result = migrateLegacyBannerItemStackFactoryCalls(result, itemFactories)
+
+        if (result == source) return source
+
+        if (result.contains("HolderGetter<BannerPattern>")) {
+            result = addImportIfMissing(result, "net.minecraft.core.HolderGetter")
+            result = addImportIfMissing(result, "net.minecraft.world.level.block.entity.BannerPattern")
+        }
+        if (result.contains("BannerPatternLayers")) {
+            result = addImportIfMissing(result, "net.minecraft.world.level.block.entity.BannerPatternLayers")
+        }
+        if (result.contains("DataComponents.BANNER_PATTERNS")) {
+            result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
+        }
+        if (result.contains("Registries.BANNER_PATTERN")) {
+            result = addImportIfMissing(result, "net.minecraft.core.registries.Registries")
+        }
+        result = removeUnusedSimpleImport(result, "net.minecraft.nbt.CompoundTag", "CompoundTag")
+        result = removeUnusedSimpleImport(result, "net.minecraft.world.level.block.entity.BlockEntityType", "BlockEntityType")
+        return result
+    }
+
+    private fun migrateLegacyBannerPatternFactoryDefinitions(source: String): String {
+        if (!source.contains("BannerPattern.Builder") || !source.contains("new BannerPattern.Builder()")) return source
+        val pattern = Regex(
+            """(?ms)^([ \t]*)(public|protected|private)?([ \t]+static[ \t]+final[ \t]+)BannerPattern\.Builder[ \t]+([A-Za-z_$][\w$]*)[ \t]*=[ \t]*new[ \t]+BannerPattern\.Builder[ \t]*\([ \t]*\)(.*?);[ \t]*$"""
+        )
+        return pattern.replace(source) { match ->
+            val initializerTail = match.groupValues[5]
+            val entries = legacyBannerPatternEntries(initializerTail)
+            if (entries.isEmpty()) return@replace match.value
+            val indent = match.groupValues[1]
+            val visibility = match.groupValues[2].ifBlank { "public" }
+            val fieldName = match.groupValues[4]
+            buildString {
+                append(indent)
+                append(visibility)
+                append(" static BannerPatternLayers ")
+                append(fieldName)
+                append("(HolderGetter<BannerPattern> patternRegistry) {\n")
+                append(indent)
+                append("    return new BannerPatternLayers.Builder()\n")
+                entries.forEach { entry ->
+                    append(indent)
+                    append("        .add(patternRegistry.getOrThrow(")
+                    append(entry.first)
+                    append("), ")
+                    append(entry.second)
+                    append(")\n")
+                }
+                append(indent)
+                append("        .build();\n")
+                append(indent)
+                append("}")
+            }
+        }
+    }
+
+    private fun migrateLegacyBannerItemStackFactoryDefinitions(
+        source: String,
+        patternFactories: Set<LegacyBannerPatternLayerFactory>
+    ): String {
+        if (!source.contains(".toListTag()") ||
+            !source.contains("BlockItem.setBlockEntityData") ||
+            !source.contains("BlockEntityType.BANNER")) {
+            return source
+        }
+        var result = source
+        val methods = javaMethodRanges(result)
+            .filter { method ->
+                val methodText = result.substring(method.range)
+                methodText.contains(".toListTag()") &&
+                    methodText.contains("BlockItem.setBlockEntityData") &&
+                    methodText.contains("BlockEntityType.BANNER")
+            }
+            .toList()
+        for (method in methods.asReversed()) {
+            val originalMethod = result.substring(method.range)
+            val migratedMethod = migrateLegacyBannerItemStackFactoryMethod(originalMethod, patternFactories)
+            if (migratedMethod != originalMethod) {
+                result = result.substring(0, method.range.first) + migratedMethod + result.substring(method.range.last + 1)
+            }
+        }
+        return result
+    }
+
+    private fun migrateLegacyBannerItemStackFactoryMethod(
+        methodText: String,
+        patternFactories: Set<LegacyBannerPatternLayerFactory>
+    ): String {
+        var migrated = ensureBannerPatternRegistryParameter(methodText)
+        val nbtPattern = Regex(
+            """(?m)^([ \t]*)CompoundTag[ \t]+([A-Za-z_$][\w$]*)[ \t]*=[ \t]*new[ \t]+CompoundTag\([ \t]*\);[ \t]*\r?\n\1\2\.put\([ \t]*"Patterns"[ \t]*,[ \t]*(.+?)\.toListTag\([ \t]*\)[ \t]*\);[ \t]*\r?\n\1BlockItem\.setBlockEntityData\([ \t]*([^,\r\n]+?)[ \t]*,[ \t]*BlockEntityType\.BANNER[ \t]*,[ \t]*\2[ \t]*\);[ \t]*$"""
+        )
+        migrated = nbtPattern.replace(migrated) { match ->
+            val indent = match.groupValues[1]
+            val legacyExpression = match.groupValues[3].trim()
+            val stackExpression = match.groupValues[4].trim()
+            val layersExpression = migrateLegacyBannerLayersExpression(legacyExpression, patternFactories)
+            "$indent$stackExpression.set(DataComponents.BANNER_PATTERNS, $layersExpression);"
+        }
+        return migrated
+    }
+
+    private fun ensureBannerPatternRegistryParameter(methodText: String): String {
+        if (methodText.contains("HolderGetter<BannerPattern>")) return methodText
+        val declaration = Regex(
+            """(?m)^([ \t]*(?:@\w+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:public|protected|private)\s+(?:static\s+)?[\w<>\[\].?,\s]+\s+[A-Za-z_$][\w$]*\s*)\(([^)]*)\)"""
+        ).find(methodText) ?: return methodText
+        val existingParams = declaration.groupValues[2].trim()
+        val newParams = if (existingParams.isBlank()) {
+            "HolderGetter<BannerPattern> patternRegistry"
+        } else {
+            "$existingParams, HolderGetter<BannerPattern> patternRegistry"
+        }
+        return methodText.substring(0, declaration.range.first) +
+            declaration.groupValues[1] +
+            "($newParams)" +
+            methodText.substring(declaration.range.last + 1)
+    }
+
+    private fun migrateLegacyBannerLayersExpression(
+        legacyExpression: String,
+        patternFactories: Set<LegacyBannerPatternLayerFactory>
+    ): String {
+        val trimmed = legacyExpression.trim()
+        val field = patternFactories.firstOrNull { factory ->
+            trimmed == factory.fieldName ||
+                trimmed == "${factory.ownerClass}.${factory.fieldName}" ||
+                trimmed == "${factory.qualifiedOwner}.${factory.fieldName}"
+        }
+        if (field != null) {
+            return if (trimmed == field.fieldName) {
+                "${field.fieldName}(patternRegistry)"
+            } else {
+                "${trimmed.substringBeforeLast('.')}.${field.fieldName}(patternRegistry)"
+            }
+        }
+        return "$trimmed.build()"
+    }
+
+    private fun migrateLegacyBannerItemStackFactoryCalls(
+        source: String,
+        itemFactories: Set<LegacyBannerItemStackFactory>
+    ): String {
+        if (itemFactories.isEmpty()) return source
+        var result = source
+        itemFactories.forEach { factory ->
+            result = rewriteQualifiedLegacyBannerItemStackFactoryCalls(result, factory)
+            result = rewriteUnqualifiedLegacyBannerItemStackFactoryCalls(result, factory)
+        }
+        return result
+    }
+
+    private fun rewriteQualifiedLegacyBannerItemStackFactoryCalls(
+        source: String,
+        factory: LegacyBannerItemStackFactory
+    ): String =
+        rewriteJavaCallWithOffset(source, factory.methodName) { receiver, args, callOffset ->
+            if (args.isNotEmpty()) return@rewriteJavaCallWithOffset null
+            val receiverText = receiver.trim()
+            val matchesFactory = receiverText == factory.ownerClass || receiverText == factory.qualifiedOwner ||
+                receiverText.endsWith(".${factory.ownerClass}")
+            if (!matchesFactory) return@rewriteJavaCallWithOffset null
+            val lookup = inferBannerPatternRegistryLookupExpression(source, callOffset) ?: return@rewriteJavaCallWithOffset null
+            "$receiverText.${factory.methodName}($lookup)"
+        }
+
+    private fun rewriteUnqualifiedLegacyBannerItemStackFactoryCalls(
+        source: String,
+        factory: LegacyBannerItemStackFactory
+    ): String {
+        var result = source
+        var cursor = 0
+        val token = "${factory.methodName}("
+        while (true) {
+            val tokenIndex = result.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            if (tokenIndex > 0) {
+                val prev = result[tokenIndex - 1]
+                if (prev.isLetterOrDigit() || prev == '_' || prev == '$' || prev == '.') {
+                    cursor = tokenIndex + token.length
+                    continue
+                }
+            }
+            val openParen = tokenIndex + factory.methodName.length
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            if (result.substring(openParen + 1, closeParen).trim().isNotEmpty()) {
+                cursor = closeParen + 1
+                continue
+            }
+            if (looksLikeJavaMethodDeclaration(result, tokenIndex, closeParen)) {
+                cursor = closeParen + 1
+                continue
+            }
+            val lookup = inferBannerPatternRegistryLookupExpression(result, tokenIndex)
+            if (lookup == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            val replacement = "${factory.methodName}($lookup)"
+            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
+            cursor = tokenIndex + replacement.length
+        }
+        return result
+    }
+
+    private fun looksLikeJavaMethodDeclaration(source: String, methodNameIndex: Int, closeParen: Int): Boolean {
+        val next = source.drop(closeParen + 1).dropWhile { it.isWhitespace() }.firstOrNull()
+        if (next != '{') return false
+        val lineStart = source.lastIndexOf('\n', methodNameIndex).let { if (it < 0) 0 else it + 1 }
+        val prefix = source.substring(lineStart, methodNameIndex)
+        return Regex("""\b(?:public|protected|private)\b""").containsMatchIn(prefix) ||
+            Regex("""\bItemStack\s+$""").containsMatchIn(prefix)
+    }
+
+    private fun inferBannerPatternRegistryLookupExpression(source: String, offset: Int): String? {
+        inferCreativeTabBannerPatternLookup(source, offset)?.let { return it }
+        val method = javaMethodRanges(source).firstOrNull { offset in it.range }
+        if (method != null) {
+            inferBannerPatternLookupFromScope(source.substring(method.range.first, offset), method.header)?.let { return it }
+        }
+        return inferBannerPatternLookupFromScope(source.substring(0, offset), null)
+    }
+
+    private fun inferCreativeTabBannerPatternLookup(source: String, offset: Int): String? {
+        val pattern = Regex(
+            """\.displayItems\s*\(\s*\(\s*(?:CreativeModeTab\.ItemDisplayParameters\s+)?([A-Za-z_$][\w$]*)\s*,\s*(?:CreativeModeTab\.Output\s+)?([A-Za-z_$][\w$]*)\s*\)\s*->\s*\{"""
+        )
+        return pattern.findAll(source)
+            .mapNotNull { match ->
+                val openBrace = source.indexOf('{', match.range.last)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+                if (openBrace >= 0 && closeBrace >= offset && offset > openBrace) {
+                    "${match.groupValues[1]}.holders().lookupOrThrow(Registries.BANNER_PATTERN)"
+                } else {
+                    null
+                }
+            }
+            .lastOrNull()
+    }
+
+    private fun inferBannerPatternLookupFromScope(scopePrefix: String, methodHeader: String?): String? {
+        val combined = listOfNotNull(methodHeader, scopePrefix).joinToString("\n")
+        Regex("""HolderGetter\s*<\s*BannerPattern\s*>\s+([A-Za-z_$][\w$]*)""")
+            .find(combined)
+            ?.groupValues
+            ?.get(1)
+            ?.let { return it }
+        Regex("""HolderLookup\.Provider\s+([A-Za-z_$][\w$]*)""")
+            .find(combined)
+            ?.groupValues
+            ?.get(1)
+            ?.let { return "$it.lookupOrThrow(Registries.BANNER_PATTERN)" }
+        Regex("""RegistryAccess\s+([A-Za-z_$][\w$]*)""")
+            .find(combined)
+            ?.groupValues
+            ?.get(1)
+            ?.let { return "$it.lookupOrThrow(Registries.BANNER_PATTERN)" }
+        Regex("""(?:ServerLevel|Level|LevelAccessor|LevelReader|WorldGenLevel|ServerLevelAccessor)\s+([A-Za-z_$][\w$]*)""")
+            .find(combined)
+            ?.groupValues
+            ?.get(1)
+            ?.let { return "$it.holderLookup(Registries.BANNER_PATTERN)" }
+        return null
+    }
+
+    private fun legacyBannerPatternEntries(initializerTail: String): List<Pair<String, String>> {
+        val entries = mutableListOf<Pair<String, String>>()
+        var cursor = 0
+        val token = ".addPattern("
+        while (true) {
+            val tokenIndex = initializerTail.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + ".addPattern".length
+            val closeParen = findMatchingParen(initializerTail, openParen)
+            if (closeParen < 0) break
+            val args = splitTopLevelJavaArgs(initializerTail.substring(openParen + 1, closeParen))
+            if (args.size == 2) {
+                entries += args[0].trim() to args[1].trim()
+            }
+            cursor = closeParen + 1
+        }
+        return entries
+    }
+
+    private data class JavaMethodRange(val name: String, val header: String, val range: IntRange)
+
+    private fun javaMethodRanges(source: String): List<JavaMethodRange> {
+        val pattern = Regex(
+            """(?m)^[ \t]*(?:@\w+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:public|protected|private)\s+(?:static\s+)?(?:<[^>{};]+>\s*)?[\w<>\[\].?,\s]+\s+([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\{"""
+        )
+        return pattern.findAll(source).mapNotNull { match ->
+            val openBrace = source.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) return@mapNotNull null
+            JavaMethodRange(match.groupValues[1], match.value, match.range.first..closeBrace)
+        }.toList()
+    }
+
+    private fun removeUnusedSimpleImport(source: String, importName: String, simpleName: String): String {
+        val without = removeImport(source, importName)
+        return if (Regex("""(?<![.\w$])${Regex.escape(simpleName)}(?![\w$])""").containsMatchIn(without)) {
+            source
+        } else {
+            without
+        }
     }
 
     private fun collectLegacyRegistryBackedMethods(javaFiles: List<Path>): Set<LegacyRegistryBackedMethod> {

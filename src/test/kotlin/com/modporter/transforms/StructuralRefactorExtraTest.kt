@@ -13735,6 +13735,115 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy banner pattern builders to component factories with registry context`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleBlocks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.DyeColor;
+            import net.minecraft.world.level.block.entity.BannerPattern;
+            import net.minecraft.world.level.block.entity.BannerPatterns;
+
+            public class ExampleBlocks {
+                public static final BannerPattern.Builder EXAMPLE_PATTERN = new BannerPattern.Builder()
+                    .addPattern(BannerPatterns.STRIPE_BOTTOM, DyeColor.CYAN)
+                    .addPattern(BannerPatterns.BORDER, DyeColor.WHITE);
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleItems.java").writeText("""
+            package com.example;
+
+            import net.minecraft.ChatFormatting;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.ItemStack.TooltipPart;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+
+            public class ExampleItems {
+                public static ItemStack EXAMPLE_BANNER = null;
+
+                public static ItemStack createExampleBannerItemStack() {
+                    if (EXAMPLE_BANNER == null) {
+                        ItemStack bannerStack = new ItemStack(Items.BLACK_BANNER).setHoverName(Component.literal("example").withStyle(ChatFormatting.GOLD));
+                        CompoundTag tag = new CompoundTag();
+                        tag.put("Patterns", ExampleBlocks.EXAMPLE_PATTERN.toListTag());
+                        BlockItem.setBlockEntityData(bannerStack, BlockEntityType.BANNER, tag);
+                        bannerStack.hideTooltipPart(TooltipPart.ADDITIONAL);
+                        EXAMPLE_BANNER = bannerStack;
+                    }
+                    return EXAMPLE_BANNER;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleTabs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.CreativeModeTab;
+
+            public class ExampleTabs {
+                public static final CreativeModeTab TAB = CreativeModeTab.builder()
+                    .displayItems((features, output) -> {
+                        output.accept(ExampleItems.createExampleBannerItemStack());
+                    })
+                    .build();
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.CraftingInput;
+
+            public class ExampleRecipe {
+                public ItemStack assemble(CraftingInput input, HolderLookup.Provider registries) {
+                    return ExampleItems.createExampleBannerItemStack();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.LevelAccessor;
+
+            public class ExampleEntity {
+                public boolean check(LevelAccessor level, ItemStack stack) {
+                    return ItemStack.matches(stack, ExampleItems.createExampleBannerItemStack());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val blocks = srcDir.resolve("ExampleBlocks.java").readText()
+        val items = srcDir.resolve("ExampleItems.java").readText()
+        val tabs = srcDir.resolve("ExampleTabs.java").readText()
+        val recipe = srcDir.resolve("ExampleRecipe.java").readText()
+        val entity = srcDir.resolve("ExampleEntity.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-banner-pattern-components" })
+        assertTrue(blocks.contains("public static BannerPatternLayers EXAMPLE_PATTERN(HolderGetter<BannerPattern> patternRegistry)"), blocks)
+        assertTrue(blocks.contains(".add(patternRegistry.getOrThrow(BannerPatterns.STRIPE_BOTTOM), DyeColor.CYAN)"), blocks)
+        assertTrue(blocks.contains("import net.minecraft.core.HolderGetter;"), blocks)
+        assertTrue(blocks.contains("import net.minecraft.world.level.block.entity.BannerPatternLayers;"), blocks)
+
+        assertTrue(items.contains("public static ItemStack createExampleBannerItemStack(HolderGetter<BannerPattern> patternRegistry)"), items)
+        assertTrue(items.contains("bannerStack.set(DataComponents.BANNER_PATTERNS, ExampleBlocks.EXAMPLE_PATTERN(patternRegistry));"), items)
+        assertFalse(items.contains("BlockItem.setBlockEntityData"), items)
+        assertFalse(items.contains("toListTag"), items)
+
+        assertTrue(tabs.contains("ExampleItems.createExampleBannerItemStack(features.holders().lookupOrThrow(Registries.BANNER_PATTERN))"), tabs)
+        assertTrue(recipe.contains("ExampleItems.createExampleBannerItemStack(registries.lookupOrThrow(Registries.BANNER_PATTERN))"), recipe)
+        assertTrue(recipe.contains("import net.minecraft.core.registries.Registries;"), recipe)
+        assertTrue(entity.contains("ExampleItems.createExampleBannerItemStack(level.holderLookup(Registries.BANNER_PATTERN))"), entity)
+    }
+
+    @Test
     fun `migrates legacy vanilla block registry codec banner and near packet APIs by source shape`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
