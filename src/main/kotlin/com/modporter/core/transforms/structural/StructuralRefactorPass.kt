@@ -278,6 +278,13 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            val stateSwitchingButtonChanges = migrateLegacyStateSwitchingButtonTextures(projectDir, dryRun)
+            changes.addAll(stateSwitchingButtonChanges)
+        } catch (e: Exception) {
+            errors.add("Legacy StateSwitchingButton texture migration error: ${e.message}")
+        }
+
+        try {
             val curiosClientChanges = migrateCuriosClientApi(projectDir, dryRun)
             changes.addAll(curiosClientChanges)
         } catch (e: Exception) {
@@ -9193,6 +9200,193 @@ public class LegacyImageButton extends ImageButton {
 			v += this.yDiffTex;
 		}
 		guiGraphics.blit(this.resourceLocation, this.getX(), this.getY(), (float) this.xTexStart, (float) v, this.width, this.height, this.textureWidth, this.textureHeight);
+	}
+}
+"""
+    }
+
+    private fun migrateLegacyStateSwitchingButtonTextures(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+        val helperPackages = mutableSetOf<String>()
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .filter { it.fileName.toString() != "LegacyStateSwitchingButton.java" }
+            .toList()
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (!original.contains("StateSwitchingButton") && !original.contains("initTextureValues(")) return@forEach
+                if (!containsLegacyStateSwitchingButtonInitCall(original)) return@forEach
+                val packageName = packageNameOf(original)
+                var migrated = rewriteLegacyStateSwitchingButtonSuperclasses(original)
+                migrated = rewriteLegacyStateSwitchingButtonInitCalls(migrated)
+                migrated = rewriteLegacyStateSwitchingButtonObjectCreations(migrated)
+                if (migrated != original) {
+                    helperPackages += packageName
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate legacy StateSwitchingButton UV textures to generated compatibility widget",
+                        before = "StateSwitchingButton.initTextureValues(xTexStart, yTexStart, yDiffTex, xDiffTex, texture)",
+                        after = "LegacyStateSwitchingButton(old UV texture shape)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-legacy-state-switching-button-textures"
+                    ))
+                    if (!dryRun) javaFile.writeText(migrated)
+                }
+            }
+
+        helperPackages.forEach { packageName ->
+            val helperFile = srcDir.resolve(packageName.replace('.', '/')).resolve("LegacyStateSwitchingButton.java")
+            changes.add(Change(
+                file = helperFile,
+                line = 0,
+                description = "Generate compatibility StateSwitchingButton preserving legacy UV spritesheet rendering",
+                before = "(missing LegacyStateSwitchingButton)",
+                after = "LegacyStateSwitchingButton.java",
+                confidence = Confidence.HIGH,
+                ruleId = "struct-legacy-state-switching-button-helper"
+            ))
+            if (!dryRun && !helperFile.exists()) {
+                helperFile.parent.createDirectories()
+                helperFile.writeText(legacyStateSwitchingButtonSource(packageName))
+            }
+        }
+        return changes
+    }
+
+    private fun containsLegacyStateSwitchingButtonInitCall(source: String): Boolean {
+        var cursor = 0
+        while (true) {
+            val tokenIndex = source.indexOf("initTextureValues(", cursor)
+            if (tokenIndex < 0) return false
+            if (tokenIndex > 0 && (source[tokenIndex - 1].isLetterOrDigit() || source[tokenIndex - 1] == '_' || source[tokenIndex - 1] == '$')) {
+                cursor = tokenIndex + "initTextureValues(".length
+                continue
+            }
+            val openParen = tokenIndex + "initTextureValues".length
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + "initTextureValues(".length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (isLegacyStateSwitchingButtonInitArgs(args)) return true
+            cursor = closeParen + 1
+        }
+    }
+
+    private fun rewriteLegacyStateSwitchingButtonSuperclasses(source: String): String {
+        if (!Regex("""extends\s+StateSwitchingButton\b""").containsMatchIn(source)) return source
+        return if (containsLegacyStateSwitchingButtonInitCall(source)) {
+            source.replace(Regex("""extends\s+StateSwitchingButton\b"""), "extends LegacyStateSwitchingButton")
+        } else {
+            source
+        }
+    }
+
+    private fun rewriteLegacyStateSwitchingButtonInitCalls(source: String): String =
+        rewriteJavaCall(source, "initTextureValues") { receiver, args ->
+            if (!isLegacyStateSwitchingButtonInitArgs(args)) return@rewriteJavaCall null
+            if (receiver == "this" || receiver == "super" || source.contains("extends LegacyStateSwitchingButton")) {
+                return@rewriteJavaCall null
+            }
+            val target = legacyStateSwitchingButtonAssignmentTarget(receiver) ?: return@rewriteJavaCall null
+            "$target = LegacyStateSwitchingButton.replace($receiver, ${args.joinToString(", ") { it.trim() }})"
+        }
+
+    private fun rewriteLegacyStateSwitchingButtonObjectCreations(source: String): String {
+        var result = source
+        var cursor = 0
+        val replacements = mutableListOf<Pair<String, String>>()
+        while (true) {
+            val match = Regex("""new\s+StateSwitchingButton\s*\(""").find(source, cursor) ?: break
+            val openParen = source.indexOf('(', match.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(source, openParen) else -1
+            if (closeParen < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (args.size == 5) {
+                val call = source.substring(match.range.first, closeParen + 1)
+                replacements += call to call.replaceFirst(Regex("""new\s+StateSwitchingButton"""), "new LegacyStateSwitchingButton")
+            }
+            cursor = closeParen + 1
+        }
+        replacements.forEach { (before, after) ->
+            result = result.replace(before, after)
+        }
+        return result
+    }
+
+    private fun legacyStateSwitchingButtonAssignmentTarget(receiver: String): String? {
+        val trimmed = receiver.trim()
+        if (trimmed == "this" || trimmed == "super") return null
+        val assignable = Regex("""(?:this|[A-Za-z_$][\w$]*)(?:\.[A-Za-z_$][\w$]*)*""")
+        return trimmed.takeIf { assignable.matches(it) }
+    }
+
+    private fun isLegacyStateSwitchingButtonInitArgs(args: List<String>): Boolean {
+        if (args.size != 5) return false
+        if (args.any { it.contains("WidgetSprites") }) return false
+        return args.take(4).all { it.trim().isNotBlank() } && args[4].trim().isNotBlank()
+    }
+
+    private fun legacyStateSwitchingButtonSource(packageName: String): String {
+        val packageLine = if (packageName.isBlank()) "" else "package $packageName;\n\n"
+        return """${packageLine}import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.StateSwitchingButton;
+import net.minecraft.client.gui.components.WidgetSprites;
+import net.minecraft.resources.ResourceLocation;
+
+public class LegacyStateSwitchingButton extends StateSwitchingButton {
+	protected int xTexStart;
+	protected int yTexStart;
+	protected int yDiffTex;
+	protected int xDiffTex;
+	protected ResourceLocation resourceLocation;
+
+	public LegacyStateSwitchingButton(int x, int y, int width, int height, boolean initialState) {
+		super(x, y, width, height, initialState);
+	}
+
+	public static LegacyStateSwitchingButton replace(StateSwitchingButton button, int xTexStart, int yTexStart, int yDiffTex, int xDiffTex, ResourceLocation texture) {
+		LegacyStateSwitchingButton legacy = button instanceof LegacyStateSwitchingButton existing
+			? existing
+			: new LegacyStateSwitchingButton(button.getX(), button.getY(), button.getWidth(), button.getHeight(), button.isStateTriggered());
+		legacy.active = button.active;
+		legacy.visible = button.visible;
+		legacy.setTooltip(button.getTooltip());
+		legacy.initTextureValues(xTexStart, yTexStart, yDiffTex, xDiffTex, texture);
+		return legacy;
+	}
+
+	public void initTextureValues(int xTexStart, int yTexStart, int yDiffTex, int xDiffTex, ResourceLocation texture) {
+		super.initTextureValues(new WidgetSprites(texture, texture, texture, texture));
+		this.xTexStart = xTexStart;
+		this.yTexStart = yTexStart;
+		this.yDiffTex = yDiffTex;
+		this.xDiffTex = xDiffTex;
+		this.resourceLocation = texture;
+	}
+
+	@Override
+	public void renderWidget(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTicks) {
+		if (this.resourceLocation == null) {
+			super.renderWidget(guiGraphics, mouseX, mouseY, partialTicks);
+			return;
+		}
+		int u = this.xTexStart;
+		if (this.isStateTriggered()) {
+			u += this.xDiffTex;
+		}
+		int v = this.yTexStart;
+		if (this.isHoveredOrFocused()) {
+			v += this.yDiffTex;
+		}
+		guiGraphics.blit(this.resourceLocation, this.getX(), this.getY(), (float) u, (float) v, this.width, this.height, 256, 256);
 	}
 }
 """

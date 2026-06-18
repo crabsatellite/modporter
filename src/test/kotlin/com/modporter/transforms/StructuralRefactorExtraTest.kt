@@ -2413,6 +2413,57 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy state switching button UV textures migrate to compatibility widget`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/client")
+        srcDir.createDirectories()
+        srcDir.resolve("RecipeBookButtons.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.client.gui.screens.recipebook.RecipeBookComponent;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class RecipeBookButtons extends RecipeBookComponent {
+                private static final ResourceLocation FILTER_LOCATION = ResourceLocation.fromNamespaceAndPath("examplemod", "textures/gui/recipe_book.png");
+
+                @Override
+                protected void initFilterButtonTextures() {
+                    this.filterButton.initTextureValues(0, 72, 28, 18, FILTER_LOCATION);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CustomToggleButton.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.client.gui.components.StateSwitchingButton;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class CustomToggleButton extends StateSwitchingButton {
+                public CustomToggleButton(ResourceLocation texture) {
+                    super(0, 0, 26, 16, false);
+                    this.initTextureValues(1, 2, 3, 4, texture);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        val recipeBookButtons = srcDir.resolve("RecipeBookButtons.java").readText()
+        val customToggle = srcDir.resolve("CustomToggleButton.java").readText()
+        val helper = srcDir.resolve("LegacyStateSwitchingButton.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-state-switching-button-textures" })
+        assertTrue(recipeBookButtons.contains("this.filterButton = LegacyStateSwitchingButton.replace(this.filterButton, 0, 72, 28, 18, FILTER_LOCATION);"), recipeBookButtons)
+        assertFalse(recipeBookButtons.contains("this.filterButton.initTextureValues(0, 72, 28, 18, FILTER_LOCATION)"), recipeBookButtons)
+        assertTrue(customToggle.contains("public class CustomToggleButton extends LegacyStateSwitchingButton"), customToggle)
+        assertTrue(customToggle.contains("this.initTextureValues(1, 2, 3, 4, texture);"), customToggle)
+        assertTrue(helper.contains("public class LegacyStateSwitchingButton extends StateSwitchingButton"), helper)
+        assertTrue(helper.contains("public static LegacyStateSwitchingButton replace(StateSwitchingButton button"), helper)
+        assertTrue(helper.contains("u += this.xDiffTex;"), helper)
+        assertTrue(helper.contains("v += this.yDiffTex;"), helper)
+        assertTrue(helper.contains("guiGraphics.blit(this.resourceLocation"), helper)
+    }
+
+    @Test
     fun `curios client RenderButton constructor and mod id migrate by dependency API`() {
         val srcDir = tempDir.resolve("src/main/java/com/example/client")
         srcDir.createDirectories()
