@@ -11935,7 +11935,8 @@ ${entries.joinToString(",\n")}
             !source.contains(".getV(") &&
             !source.contains("BufferUploader.drawWithShader(") &&
             !source.contains("Tesselator.getInstance()") &&
-            !source.contains("InventoryScreen.renderEntityInInventory")
+            !source.contains("InventoryScreen.renderEntityInInventory") &&
+            !source.contains("PanoramaRenderer")
         ) {
             return source
         }
@@ -11973,6 +11974,7 @@ ${entries.joinToString(",\n")}
         result = migrateVertexConsumerPoseNormals(result)
         result = migrateLegacyTesselatorSource(result)
         result = migrateInventoryScreenEntityPreviewCalls(result)
+        result = migratePanoramaRendererRenderApis(result)
         val vertexConsumerVariables = Regex("""\bVertexConsumer\s+([A-Za-z_$][\w$]*)\b""")
             .findAll(result)
             .map { it.groupValues[1] }
@@ -11988,6 +11990,60 @@ ${entries.joinToString(",\n")}
             .replace(result) { match -> ".setUv2(${match.groupValues[1].trim()}, ${match.groupValues[2].trim()})" }
 
         return if (needsBufferUploader) addImportIfMissing(result, "com.mojang.blaze3d.vertex.BufferUploader") else result
+    }
+
+    private data class JavaParameter(val type: String, val name: String)
+
+    private fun migratePanoramaRendererRenderApis(source: String): String {
+        if (!source.contains("PanoramaRenderer")) return source
+
+        var result = source
+        result = rewriteJavaCallWithOffset(result, "render") { receiver, args, callOffset ->
+            if (args.size != 2) return@rewriteJavaCallWithOffset null
+            if (!Regex("""[A-Za-z_$][\w$]*""").matches(receiver)) return@rewriteJavaCallWithOffset null
+            val methodText = enclosingMethodText(result, callOffset) ?: return@rewriteJavaCallWithOffset null
+            val params = javaMethodParameters(methodText)
+            if (params.none { it.name == receiver && it.type.endsWith("PanoramaRenderer") } &&
+                !Regex("""\bPanoramaRenderer\s+${Regex.escape(receiver)}\b""").containsMatchIn(methodText)) {
+                return@rewriteJavaCallWithOffset null
+            }
+            val guiGraphics = params.firstOrNull { it.type.endsWith("GuiGraphics") }?.name ?: return@rewriteJavaCallWithOffset null
+            val screen = params.firstOrNull { it.type.endsWith("Screen") }?.name ?: return@rewriteJavaCallWithOffset null
+            "$receiver.render($guiGraphics, $screen.width, $screen.height, ${args[0].trim()}, ${args[1].trim()})"
+        }
+
+        if (result.contains("@Mixin(PanoramaRenderer.class)") ||
+            result.contains("@Mixin(net.minecraft.client.renderer.PanoramaRenderer.class)")) {
+            val beforeMixin = result
+            result = result
+                .replace("method = \"render(FF)V\"", "method = \"render(Lnet/minecraft/client/gui/GuiGraphics;IIFF)V\"")
+                .replace("method = {\"render(FF)V\"}", "method = {\"render(Lnet/minecraft/client/gui/GuiGraphics;IIFF)V\"}")
+            result = Regex(
+                """\b((?:public|protected|private)\s+(?:static\s+)?)void\s+([A-Za-z_$][\w$]*)\s*\(\s*float\s+([A-Za-z_$][\w$]*)\s*,\s*float\s+([A-Za-z_$][\w$]*)\s*,\s*CallbackInfo\s+([A-Za-z_$][\w$]*)\s*\)"""
+            ).replace(result) { match ->
+                "${match.groupValues[1]}void ${match.groupValues[2]}(GuiGraphics guiGraphics, int width, int height, float ${match.groupValues[3]}, float ${match.groupValues[4]}, CallbackInfo ${match.groupValues[5]})"
+            }
+            if (result != beforeMixin && !result.contains("import net.minecraft.client.gui.GuiGraphics;")) {
+                result = addImportIfMissing(result, "net.minecraft.client.gui.GuiGraphics")
+            }
+        }
+
+        return result
+    }
+
+    private fun javaMethodParameters(methodText: String): List<JavaParameter> {
+        val paramsText = Regex(
+            """(?s)\b(?:public|protected|private|static|final|synchronized|default|abstract|\s)+[A-Za-z_$][\w$<>\[\].?,\s]*\s+[A-Za-z_$][\w$]*\s*\(([^{};]*)\)\s*(?:throws\s+[^{]+)?\{"""
+        ).find(methodText)?.groupValues?.get(1) ?: return emptyList()
+        return splitTopLevelJavaArgs(paramsText).mapNotNull { rawParam ->
+            val cleaned = rawParam
+                .replace(Regex("""@\w+(?:\([^)]*\))?\s*"""), "")
+                .replace(Regex("""\bfinal\s+"""), "")
+                .trim()
+            val name = Regex("""([A-Za-z_$][\w$]*)\s*$""").find(cleaned)?.groupValues?.get(1) ?: return@mapNotNull null
+            val type = cleaned.removeSuffix(name).trim().removeSuffix("...").trim()
+            if (type.isBlank()) null else JavaParameter(type, name)
+        }
     }
 
     private fun migrateInventoryScreenEntityPreviewCalls(source: String): String {

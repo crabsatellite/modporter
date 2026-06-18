@@ -9305,6 +9305,79 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates panorama renderer signatures only with explicit screen context`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val mixinDir = srcDir.resolve("mixin")
+        srcDir.createDirectories()
+        mixinDir.createDirectories()
+        srcDir.resolve("TitleScreenBehavior.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.systems.RenderSystem;
+            import net.minecraft.Util;
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.minecraft.client.renderer.PanoramaRenderer;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.util.Mth;
+
+            public interface TitleScreenBehavior {
+                default float handleFading(GuiGraphics guiGraphics, TitleScreen titleScreen, PanoramaRenderer panorama, ResourceLocation panoramaOverlay, float partialTicks) {
+                    float fadeAmount = (float) (Util.getMillis() - 1L) / 1000.0F;
+                    panorama.render(partialTicks, Mth.clamp(fadeAmount, 0.0F, 1.0F));
+                    RenderSystem.enableBlend();
+                    guiGraphics.blit(panoramaOverlay, 0, 0, titleScreen.width, titleScreen.height, 0.0F, 0.0F, 16, 128, 16, 128);
+                    return Mth.clamp(fadeAmount - 1.0F, 0.0F, 1.0F);
+                }
+            }
+        """.trimIndent())
+        mixinDir.resolve("PanoramaRendererMixin.java").writeText("""
+            package com.example.mixin;
+
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.renderer.PanoramaRenderer;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.injection.At;
+            import org.spongepowered.asm.mixin.injection.Inject;
+            import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+            @Mixin(PanoramaRenderer.class)
+            public class PanoramaRendererMixin {
+                @Inject(at = @At(value = "HEAD"), method = {"render(FF)V"}, cancellable = true)
+                public void render(float deltaTick, float alpha, CallbackInfo ci) {
+                    if (Minecraft.getInstance().level != null) {
+                        ci.cancel();
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("NoScreenPanorama.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.renderer.PanoramaRenderer;
+
+            public class NoScreenPanorama {
+                void draw(PanoramaRenderer panorama, float partialTicks, float alpha) {
+                    panorama.render(partialTicks, alpha);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val behavior = srcDir.resolve("TitleScreenBehavior.java").readText()
+        val mixin = mixinDir.resolve("PanoramaRendererMixin.java").readText()
+        val noScreen = srcDir.resolve("NoScreenPanorama.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(behavior.contains("panorama.render(guiGraphics, titleScreen.width, titleScreen.height, partialTicks, Mth.clamp(fadeAmount, 0.0F, 1.0F));"), behavior)
+        assertFalse(behavior.contains("panorama.render(partialTicks"), behavior)
+        assertTrue(mixin.contains("import net.minecraft.client.gui.GuiGraphics;"), mixin)
+        assertTrue(mixin.contains("method = {\"render(Lnet/minecraft/client/gui/GuiGraphics;IIFF)V\"}"), mixin)
+        assertTrue(mixin.contains("public void render(GuiGraphics guiGraphics, int width, int height, float deltaTick, float alpha, CallbackInfo ci)"), mixin)
+        assertTrue(noScreen.contains("panorama.render(partialTicks, alpha);"), noScreen)
+    }
+
+    @Test
     fun `migrates strict runtime compile API surfaces without mod-specific rules`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
