@@ -12321,6 +12321,7 @@ ${indent}}
         result = migrateRecipeHolderIdAndLocalMmlibApi(result)
         result = migrateRecipeBookCategoryFinderRecipeHolders(result)
         result = migrateLegacyCraftingRecipeBoundaries(result)
+        result = migrateRecipeHolderOptionalMapLambdaValueAccess(result)
         result = migrateMerchantOfferItemCosts(result)
         result = migrateItemUseDurationCalls(result)
         result = migrateLegacyItemExtensionAndProjectileApis(result)
@@ -17097,6 +17098,25 @@ ${indent}}"""
             result = withoutWorldlyContainerImport
         }
         return result
+    }
+
+    private fun migrateRecipeHolderOptionalMapLambdaValueAccess(source: String): String {
+        if (!source.contains("getRecipeFor(") || !source.contains(".map(")) return source
+        val id = """[A-Za-z_$][\w$]*"""
+        var changed = false
+        var result = Regex(
+            """(?s)(getRecipeFor\s*\([^;\r\n]*?\)\s*\.map\s*\(\s*\(?\s*($id)\s*\)?\s*->\s*)\2\.getId\s*\("""
+        ).replace(source) { match ->
+            changed = true
+            "${match.groupValues[1]}${match.groupValues[2]}.id("
+        }
+        result = Regex(
+            """(?s)(getRecipeFor\s*\([^;\r\n]*?\)\s*\.map\s*\(\s*\(?\s*($id)\s*\)?\s*->\s*)\2\.(?!value\s*\(\)|id\s*\()($id)\s*\("""
+        ).replace(result) { match ->
+            changed = true
+            "${match.groupValues[1]}${match.groupValues[2]}.value().${match.groupValues[3]}("
+        }
+        return if (changed) result else source
     }
 
     private fun migrateCachedCheckSingleStackRecipeHolderBoundaries(source: String): String {

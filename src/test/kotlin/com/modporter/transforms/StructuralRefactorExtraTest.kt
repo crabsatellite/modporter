@@ -17190,6 +17190,44 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates RecipeHolder optional map lambdas to recipe values`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RecipeHolderOptionalMapSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.inventory.CraftingContainer;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+
+            public class RecipeHolderOptionalMapSurface {
+                public ItemStack assemble(Level level, CraftingContainer craftingInventory) {
+                    return level.getRecipeManager().getRecipeFor(RecipeType.CRAFTING, craftingInventory, level)
+                            .map(recipe -> recipe.assemble(craftingInventory, level.registryAccess()))
+                            .orElse(ItemStack.EMPTY);
+                }
+
+                public ResourceLocation id(Level level, CraftingContainer craftingInventory) {
+                    return level.getRecipeManager().getRecipeFor(RecipeType.CRAFTING, craftingInventory, level)
+                            .map((recipe) -> recipe.getId())
+                            .orElseThrow();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("RecipeHolderOptionalMapSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains(".map(recipe -> recipe.value().assemble(craftingInventory.asCraftInput(), level.registryAccess()))"), migrated)
+        assertTrue(migrated.contains(".map((recipe) -> recipe.id())"), migrated)
+        assertFalse(migrated.contains("recipe.assemble(craftingInventory,"), migrated)
+        assertFalse(migrated.contains("recipe.getId()"), migrated)
+    }
+
+    @Test
     fun `empty project returns empty results`() {
         val projectDir = tempDir.resolve("empty-project")
         projectDir.createDirectories()
