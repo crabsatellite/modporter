@@ -4252,7 +4252,7 @@ class StructuralRefactorExtraTest {
         val result = StructuralRefactorPass().apply(projectDir)
         val migrated = tempDir.resolve("src/main/java/com/example/LibraryBlockLootSurface.java").readText()
 
-        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(result.changes.any { it.ruleId == "struct-block-loot-provider-121" })
         assertTrue(migrated.contains("public LibraryBlockLootSurface(HolderLookup.Provider registries)"), migrated)
         assertTrue(migrated.contains("super(Set.of(), FeatureFlags.REGISTRY.allFlags(), registries);"), migrated)
         assertTrue(migrated.contains("protected LibraryBlockLootSurface(Set<Item> items, FeatureFlagSet flags, HolderLookup.Provider registries)"), migrated)
@@ -8404,8 +8404,28 @@ class StructuralRefactorExtraTest {
                     return BlockStateRecipeBuilder.recipe(BlockStateIngredient.of(this.pair(ingredient, Map.of(BlockStateProperties.LEVEL, 0))), result, ExampleRecipeSerializers.ACCESSORY_FREEZABLE.get());
                 }
 
+                protected void buildConversion(Block candle, TagKey<Biome> biome) {
+                    this.convertPlacementWithProperties(candle, Map.of(BlockStateProperties.LEVEL, 0), candle, Map.of(BlockStateProperties.LEVEL, 1), biome);
+                }
+
                 protected BlockPropertyPair pair(Block block, Map<Property<?>, Comparable<?>> properties) {
                     return BlockPropertyPair.of(block, properties);
+                }
+            }
+        """.trimIndent())
+        providerDir.resolve("ExampleRecipeData.java").writeText("""
+            package com.example.data;
+
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.biome.Biome;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+
+            import java.util.Map;
+
+            public class ExampleRecipeData extends ExampleRecipeProvider {
+                protected void buildInherited(Block candle, TagKey<Biome> biome) {
+                    this.convertPlacementWithProperties(candle, Map.of(BlockStateProperties.LEVEL, 0), candle, Map.of(BlockStateProperties.LEVEL, 1), biome);
                 }
             }
         """.trimIndent())
@@ -8413,6 +8433,7 @@ class StructuralRefactorExtraTest {
         val result = StructuralRefactorPass().apply(tempDir)
         val builder = builderDir.resolve("BiomeParameterRecipeBuilder.java").readText()
         val provider = providerDir.resolve("ExampleRecipeProvider.java").readText()
+        val data = providerDir.resolve("ExampleRecipeData.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-recipe-builder-121" })
         assertTrue(builder.contains("import com.example.recipe.recipes.block.AbstractBiomeParameterRecipe;"), builder)
@@ -8432,12 +8453,17 @@ class StructuralRefactorExtraTest {
         assertTrue(provider.contains("Reference2ObjectArrayMap<Property<?>, Comparable<?>> resultProperties"), provider)
         assertTrue(provider.contains("this.pair(ingredient, Optional.of(ingredientProperties))"), provider)
         assertTrue(provider.contains("new Reference2ObjectArrayMap<>(new Property<?>[]{BlockStateProperties.LEVEL}, new Comparable<?>[]{0})"), provider)
+        assertTrue(provider.contains("this.convertPlacementWithProperties(candle, new Reference2ObjectArrayMap<>(new Property<?>[]{BlockStateProperties.LEVEL}, new Comparable<?>[]{0}), candle, new Reference2ObjectArrayMap<>(new Property<?>[]{BlockStateProperties.LEVEL}, new Comparable<?>[]{1}), biome);"), provider)
         assertTrue(provider.contains("BlockStateRecipeBuilder.recipe(BlockStateIngredient.of(this.pair(ingredient, Optional.of(new Reference2ObjectArrayMap<>"), provider)
         assertTrue(provider.contains("com.example.recipe.recipes.block.AccessoryFreezableRecipe::new"), provider)
         assertTrue(provider.contains("import it.unimi.dsi.fastutil.objects.Reference2ObjectArrayMap;"), provider)
         assertTrue(provider.contains("import java.util.Optional;"), provider)
         assertFalse(provider.contains("import java.util.Map;"), provider)
         assertFalse(provider.contains("ExampleRecipeSerializers.PLACEMENT_CONVERSION.get()"), provider)
+        assertTrue(data.contains("this.convertPlacementWithProperties(candle, new Reference2ObjectArrayMap<>(new Property<?>[]{BlockStateProperties.LEVEL}, new Comparable<?>[]{0}), candle, new Reference2ObjectArrayMap<>(new Property<?>[]{BlockStateProperties.LEVEL}, new Comparable<?>[]{1}), biome);"), data)
+        assertTrue(data.contains("import it.unimi.dsi.fastutil.objects.Reference2ObjectArrayMap;"), data)
+        assertTrue(data.contains("import net.minecraft.world.level.block.state.properties.Property;"), data)
+        assertFalse(data.contains("import java.util.Map;"), data)
     }
 
     @Test
@@ -12397,7 +12423,8 @@ class StructuralRefactorExtraTest {
         assertTrue(meleeAttackGoalSurface.contains("super.checkAndPerformAttack(target);"))
         assertTrue(apiBridgeSurface.contains("ResourceLocation.CODEC.listOf()"))
         assertTrue(apiBridgeSurface.contains("modelView.mulPose(source.last().pose());"))
-        assertTrue(apiBridgeSurface.contains("blockentity.loadWithComponents(tag, level.registryAccess());"))
+        assertTrue(apiBridgeSurface.contains("protected void loadAdditional(Level level, BlockPos pos, CompoundTag tag, HolderLookup.Provider registries)"), apiBridgeSurface)
+        assertTrue(apiBridgeSurface.contains("blockentity.loadWithComponents(tag, registries);"), apiBridgeSurface)
         assertTrue(apiBridgeSurface.contains("Tags.Items.TOOLS_BOW"))
         assertTrue(apiBridgeSurface.contains("Tags.Items.TOOLS_CROSSBOW"))
         assertTrue(apiBridgeSurface.contains("Tags.Items.TOOLS_FISHING_ROD"))

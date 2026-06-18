@@ -8281,6 +8281,22 @@ $fields
                     text = bannerPatternMigrated
                 }
 
+                val blockLootMigrated = migrateLegacyLootEnchantmentHolderCalls(
+                    migrateLegacyBlockLootSubProviderSource(text)
+                )
+                if (blockLootMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate block loot providers to HolderLookup-aware 1.21 constructors and enchantment holders",
+                        before = "BlockLootSubProvider(...); Enchantments.FORTUNE in loot functions",
+                        after = "BlockLootSubProvider(..., registries); registry lookup enchantment holder",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-block-loot-provider-121"
+                    ))
+                    text = blockLootMigrated
+                }
+
                 val vanilla121Migrated = migrateVanilla121ApiSource(
                     text,
                     mapCodecConstantOwners,
@@ -11476,7 +11492,12 @@ ${entries.joinToString(",\n")}
                     """(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*(?:net\.minecraft\.nbt\.)?CompoundTag\s+($id)$"""
                 ).find(parameter.trim().replace(Regex("""\s+"""), " "))?.groupValues?.get(1)
             }
-            val providerExpression = holderLookupProviderFromParameters(params) ?: "this.registryAccess()"
+            val providerExpression = holderLookupProviderFromParameters(params)
+                ?: entitySelfRegistryAccessExpression(classDeclaration, javaInheritanceIndex)
+            if (providerExpression == null) {
+                cursor = closeBrace + 1
+                continue
+            }
             val originalBody = result.substring(openBrace + 1, closeBrace)
             val tagNames = (parameterTags + Regex("""\b(?:net\.minecraft\.nbt\.)?CompoundTag\s+($id)\b""")
                 .findAll(originalBody)
@@ -11507,6 +11528,16 @@ ${entries.joinToString(",\n")}
         }
         return result
     }
+
+    private fun entitySelfRegistryAccessExpression(
+        classDeclaration: JavaClassDeclaration?,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String? =
+        if (javaClassExtendsAny(classDeclaration, javaEntityBaseTypes(), javaInheritanceIndex)) {
+            "this.registryAccess()"
+        } else {
+            null
+        }
 
     private fun migrateBaseContainerBlockEntityItemsSource(source: String): String {
         if (!source.contains("extends BaseContainerBlockEntity") ||
@@ -12245,11 +12276,11 @@ ${indent}}
         result = migrateLegacyAdvancementDatagenSource(result, criterionInstanceFactoryHints)
         result = migrateLegacyCriterionTriggerInstanceCallSites(result, criterionInstanceFactoryHints)
         result = migrateLegacyDatagenTagConstantsSource(result)
-        result = migrateLegacyComponentSerializationSource(result)
+        result = migrateLegacyComponentSerializationSource(result, javaInheritanceIndex)
         result = migrateLegacyNitrogenLanguageHelpersSource(result)
         result = migrateLegacyArmorMaterialsHolderSource(result)
         result = migrateGameProfileDisplayNameComponents(result)
-        result = migrateRegistryAccessEmptyFallbacks(result)
+        result = migrateRegistryAccessEmptyFallbacks(result, javaInheritanceIndex)
         result = migrateLegacyGameEventListenerSource(result)
         result = migrateLegacyNetworkBufferCodecsSource(result)
         result = migrateHolderValueMethodArgumentSource(result, holderValueParameterHints)
@@ -12315,7 +12346,7 @@ ${indent}}
         result = migrateLegacyEntityTypeSpawnCompoundTagSource(result)
         result = migrateEnchantmentLevelHolderLookups(result)
         result = migrateLegacySweepingDamageRatioCalls(result)
-        result = migrateLegacyEnchantmentHelperCalls(result)
+        result = migrateLegacyEnchantmentHelperCalls(result, javaInheritanceIndex)
         result = migrateLegacyEnchantmentTagChecks(result)
         result = migrateLegacyDamageBonusMobTypeCalls(result)
         result = migrateLegacyMobCustomDamageSourceAttacks(result)
@@ -12424,8 +12455,8 @@ ${indent}}
         result = migrateLegacyMeleeAttackGoalOverrides(result)
         result = migrateCustomGoalAttackReach(result)
         result = migrateLegacyParticleCullingOverrides(result)
-        result = migrateLegacyItemStackRegistrySerialization(result)
-        result = migrateLegacyBlockEntityLoadCalls(result)
+        result = migrateLegacyItemStackRegistrySerialization(result, javaInheritanceIndex)
+        result = migrateLegacyBlockEntityLoadCalls(result, javaInheritanceIndex)
         result = migrateLegacyStructureStartCustomLoads(result)
         result = migrateLegacyTooltipContextAndEntityDataSource(result)
         result = migrateClientLevelEntityInsertionCalls(result)
@@ -13881,6 +13912,7 @@ ${indent}}
         var changed = false
         var needsTesselator = false
         var needsRenderType = false
+        val mutableBuilderParameterMethods = collectMutableTesselatorBuilderParameterMethods(result)
 
         result = Regex("""MeshData\s+callBuildClouds\s*\(\s*BufferBuilder\s+($id)\s*,""")
             .replace(result) { match ->
@@ -13898,13 +13930,16 @@ ${indent}}
             val builder = match.groupValues[2]
             val callsBuildClouds = Regex("""callBuildClouds\s*\(\s*${Regex.escape(builder)}\s*,""").containsMatchIn(result)
             val startsTesselatorBuilder = Regex("""\b${Regex.escape(builder)}\s*=\s*Tesselator\.getInstance\(\)\.begin\(""").containsMatchIn(result)
+            val feedsMutableBuilderParameter = mutableBuilderParameterMethods.keys.any { methodName ->
+                sourceCallsJavaMethodWithArgument(result, methodName, builder)
+            }
             if (callsBuildClouds) {
                 result = result.replace(match.value, "")
                 result = Regex("""callBuildClouds\s*\(\s*${Regex.escape(builder)}\s*,""")
                     .replace(result, "callBuildClouds(Tesselator.getInstance(),")
                 changed = true
                 needsTesselator = true
-            } else if (startsTesselatorBuilder) {
+            } else if (startsTesselatorBuilder && feedsMutableBuilderParameter) {
                 val tesselator = "${builder}Tesselator"
                 result = result.replace(match.value, "${indent}Tesselator $tesselator = Tesselator.getInstance();\n")
                 mutableBuilderTesselators[builder] = tesselator
@@ -14025,6 +14060,52 @@ ${indent}}
             source.replace(declaration, "")
         } else {
             source
+        }
+    }
+
+    private fun collectMutableTesselatorBuilderParameterMethods(source: String): Map<String, String> {
+        val id = """[A-Za-z_$][\w$]*"""
+        val methods = linkedMapOf<String, String>()
+        val methodPattern = Regex("""(?m)(?:public|protected|private)\s+[^{;\r\n]+?\s+($id)\s*\([^)]*BufferBuilder\s+($id)[^)]*\)\s*\{""")
+        var cursor = 0
+        while (true) {
+            val method = methodPattern.find(source, cursor) ?: break
+            val methodName = method.groupValues[1]
+            val builderParam = method.groupValues[2]
+            val openBrace = source.indexOf('{', method.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = method.range.last + 1
+                continue
+            }
+            val body = source.substring(openBrace + 1, closeBrace)
+            if (Regex("""\b${Regex.escape(builderParam)}\s*=\s*Tesselator\.getInstance\(\)\.begin\(""").containsMatchIn(body)) {
+                methods[methodName] = builderParam
+            }
+            cursor = closeBrace + 1
+        }
+        return methods
+    }
+
+    private fun sourceCallsJavaMethodWithArgument(source: String, methodName: String, argument: String): Boolean {
+        var cursor = 0
+        val token = "$methodName("
+        while (true) {
+            val tokenIndex = source.indexOf(token, cursor)
+            if (tokenIndex < 0) return false
+            if (tokenIndex > 0 && (source[tokenIndex - 1].isLetterOrDigit() || source[tokenIndex - 1] == '_' || source[tokenIndex - 1] == '$')) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val openParen = tokenIndex + methodName.length
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (args.any { it.trim() == argument }) return true
+            cursor = closeParen + 1
         }
     }
 
@@ -18237,7 +18318,10 @@ ${indent}}"""
         return result
     }
 
-    private fun migrateLegacyEnchantmentHelperCalls(source: String): String {
+    private fun migrateLegacyEnchantmentHelperCalls(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
         if (!source.contains("Enchantments.") &&
             !source.contains("EnchantmentHelper.hasFrostWalker(") &&
             !source.contains("EnchantmentHelper.getTagEnchantmentLevel(")) {
@@ -18265,14 +18349,10 @@ ${indent}}"""
             return result
         }
 
-        val registryAccess = inferRegistryAccessExpression(result)
-        if (registryAccess != null) {
-            result = migrateLegacyEnchantmentLevelHelperCall(result, "getTagEnchantmentLevel", registryAccess)
-            result = migrateLegacyEnchantmentLevelHelperCall(result, "getItemEnchantmentLevel", registryAccess)
-        } else {
-            result = migrateLegacyEnchantmentResourceKeyHelperCall(result, "getTagEnchantmentLevel")
-            result = migrateLegacyEnchantmentResourceKeyHelperCall(result, "getItemEnchantmentLevel")
-        }
+        result = migrateLegacyEnchantmentLevelHelperCall(result, "getTagEnchantmentLevel", javaInheritanceIndex)
+        result = migrateLegacyEnchantmentLevelHelperCall(result, "getItemEnchantmentLevel", javaInheritanceIndex)
+        result = migrateLegacyEnchantmentResourceKeyHelperCall(result, "getTagEnchantmentLevel")
+        result = migrateLegacyEnchantmentResourceKeyHelperCall(result, "getItemEnchantmentLevel")
         return result
     }
 
@@ -18326,7 +18406,11 @@ ${indent}}"""
         return result
     }
 
-    private fun migrateLegacyEnchantmentLevelHelperCall(source: String, methodName: String, registryAccess: String): String {
+    private fun migrateLegacyEnchantmentLevelHelperCall(
+        source: String,
+        methodName: String,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String {
         val token = "EnchantmentHelper.$methodName("
         if (!source.contains(token)) return source
         val migrated = StringBuilder()
@@ -18343,7 +18427,13 @@ ${indent}}"""
             val stack = args.getOrNull(1)?.trim()
             val enchantmentMatch = enchantment?.let { Regex("""^Enchantments\.([A-Z0-9_]+)$""").find(it) }
             val resourceKeyMatch = enchantment?.let { Regex("""^((?:[A-Za-z_$][\w$]*\.)+[A-Z0-9_$]+)\.get\(\)$""").find(it) }
+            val registryAccess = registryAccessExpressionAt(source, tokenIndex, javaInheritanceIndex)
             if (args.size == 2 && enchantmentMatch != null && stack != null) {
+                if (registryAccess == null) {
+                    migrated.append(source, cursor, closeParen + 1)
+                    cursor = closeParen + 1
+                    continue
+                }
                 val enchantmentName = enchantmentMatch.groupValues[1]
                 migrated.append(source, cursor, tokenIndex)
                 migrated.append(
@@ -18357,6 +18447,11 @@ ${indent}}"""
                 continue
             }
             if (args.size == 2 && resourceKeyMatch != null && stack != null) {
+                if (registryAccess == null) {
+                    migrated.append(source, cursor, closeParen + 1)
+                    cursor = closeParen + 1
+                    continue
+                }
                 val enchantmentKey = resourceKeyMatch.groupValues[1]
                 migrated.append(source, cursor, tokenIndex)
                 migrated.append(
@@ -18409,31 +18504,6 @@ ${indent}}"""
         if (!changed) return source
         migrated.append(source, cursor, source.length)
         return migrated.toString()
-    }
-
-    private fun inferRegistryAccessExpression(source: String): String? {
-        topLevelSelfRegistryAccessExpression(source)?.let { return it }
-        val declarations = mutableListOf<String>()
-        listOf(
-            "RegistryAccess",
-            "ServerLevel",
-            "Level",
-            "WorldGenLevel",
-            "ServerLevelAccessor",
-            "LevelAccessor",
-            "LevelReader",
-            "Inventory",
-            "ServerPlayer",
-            "Player",
-            "LivingEntity",
-            "Entity",
-            "Mob"
-        ).forEach { type ->
-            Regex("""\b$type\s+([A-Za-z_$][\w$]*)\b""")
-                .findAll(source)
-                .forEach { declarations += "$type ${it.groupValues[1]}" }
-        }
-        return registryAccessFromParameters(declarations)
     }
 
     private fun registryAccessExpressionForEnclosingMethod(source: String, offset: Int): String? {
@@ -18510,62 +18580,14 @@ ${indent}}"""
         return providers.singleOrNull()
     }
 
-    private fun registryAccessExpressionAt(source: String, offset: Int): String? {
+    private fun registryAccessExpressionAt(
+        source: String,
+        offset: Int,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String? {
         val parameters = currentMethodParametersBeforeOffset(source, offset)
-        return holderLookupProviderFromParameters(parameters)
-            ?: registryAccessFromParameters(parameters)
-            ?: selfRegistryAccessExpression(source, offset)
-    }
-
-    private fun topLevelSelfRegistryAccessExpression(source: String): String? {
-        val typeMatch = Regex(
-            """(?m)^[ \t]*(?:(?:public|protected|private|abstract|final|static)\s+)*(?:class|record)\s+[A-Za-z_$][\w$]*\b([^{};]*)\{"""
-        ).find(source) ?: return null
-        return if (javaTypeHeaderExtendsRegistryAccessEntity(typeMatch.groupValues[1])) "this.registryAccess()" else null
-    }
-
-    private fun selfRegistryAccessExpression(source: String, offset: Int): String? {
-        val typePattern = Regex(
-            """(?m)^[ \t]*(?:(?:public|protected|private|abstract|final|static)\s+)*(?:class|record)\s+[A-Za-z_$][\w$]*\b([^{};]*)\{"""
-        )
-        val owner = typePattern.findAll(source)
-            .filter { it.range.first < offset }
-            .lastOrNull { match ->
-                val openBrace = match.range.last
-                val closeBrace = findMatchingBrace(source, openBrace)
-                closeBrace >= offset
-            }
-            ?: return null
-        return if (javaTypeHeaderExtendsRegistryAccessEntity(owner.groupValues[1])) "this.registryAccess()" else null
-    }
-
-    private fun javaTypeHeaderExtendsRegistryAccessEntity(rawHeader: String): Boolean {
-        val header = removeLeadingJavaTypeParameters(rawHeader).replace(Regex("""\s+"""), " ")
-        val parent = Regex("""\bextends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\b""")
-            .find(header)
-            ?.groupValues
-            ?.get(1)
-            ?.substringAfterLast('.')
-            ?: return false
-        return parent in setOf("Mob", "Monster", "LivingEntity", "Entity") ||
-            parent.endsWith("Entity") ||
-            parent.endsWith("Projectile")
-    }
-
-    private fun removeLeadingJavaTypeParameters(rawHeader: String): String {
-        val header = rawHeader.trimStart()
-        if (!header.startsWith("<")) return header
-        var depth = 0
-        for (index in header.indices) {
-            when (header[index]) {
-                '<' -> depth++
-                '>' -> {
-                    if (depth > 0) depth--
-                    if (depth == 0) return header.substring(index + 1)
-                }
-            }
-        }
-        return header
+        return registryAccessFromParameters(parameters)
+            ?: entitySelfRegistryAccessExpression(enclosingJavaClassDeclaration(source, offset), javaInheritanceIndex)
     }
 
     private fun migrateLegacyDamageBonusMobTypeCalls(source: String): String {
@@ -19645,24 +19667,23 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             .replace(source, "$1$2")
     }
 
-    private fun migrateLegacyItemStackRegistrySerialization(source: String): String {
+    private fun migrateLegacyItemStackRegistrySerialization(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
         if (!source.contains("ItemStack.parseOptional(") && !source.contains("ItemStack.of(") && !source.contains(".save()")) return source
         var result = source
-        val fallbackRegistryAccess = if (result.contains("readAdditionalSaveData(") || result.contains("addAdditionalSaveData(")) {
-            "this.registryAccess()"
-        } else {
-            inferRegistryAccessExpression(result) ?: return result
-        }
-        fun registryAccessAt(offset: Int): String {
-            return holderLookupProviderFromParameters(currentMethodParametersBeforeOffset(result, offset))
-                ?: fallbackRegistryAccess
-        }
+        fun registryAccessAt(offset: Int): String? =
+            registryAccessExpressionAt(result, offset, javaInheritanceIndex)
         val itemStackNames = Regex("""\bItemStack\s+([A-Za-z_$][\w$]*)\b""")
             .findAll(result)
             .map { it.groupValues[1] }
             .toSet()
         result = Regex("""ItemStack\.parseOptional\(\s*player\.registryAccess\(\)\s*,""")
-            .replace(result) { match -> "ItemStack.parseOptional(${registryAccessAt(match.range.first)}," }
+            .replace(result) { match ->
+                val registryAccess = registryAccessAt(match.range.first)
+                if (registryAccess == null) match.value else "ItemStack.parseOptional($registryAccess,"
+            }
         var itemStackOfCursor = 0
         while (true) {
             val tokenIndex = result.indexOf("ItemStack.of(", itemStackOfCursor)
@@ -19678,7 +19699,12 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 itemStackOfCursor = closeParen + 1
                 continue
             }
-            val replacement = "ItemStack.parseOptional(${registryAccessAt(tokenIndex)}, ${args[0].trim()})"
+            val registryAccess = registryAccessAt(tokenIndex)
+            if (registryAccess == null) {
+                itemStackOfCursor = closeParen + 1
+                continue
+            }
+            val replacement = "ItemStack.parseOptional($registryAccess, ${args[0].trim()})"
             result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
             itemStackOfCursor = tokenIndex + replacement.length
         }
@@ -19689,15 +19715,18 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 if (lastName !in itemStackNames) {
                     match.value
                 } else {
-                    "$receiver.save(${registryAccessAt(match.range.first)})"
+                    val registryAccess = registryAccessAt(match.range.first)
+                    if (registryAccess == null) match.value else "$receiver.save($registryAccess)"
                 }
             }
         return result
     }
 
-    private fun migrateLegacyBlockEntityLoadCalls(source: String): String {
+    private fun migrateLegacyBlockEntityLoadCalls(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
         if (!source.contains(".load(") || !source.contains("BlockEntity")) return source
-        val registryAccess = inferRegistryAccessExpression(source) ?: return source
         val variables = Regex("""\b(?:BlockEntity|[A-Za-z_$][\w$]*BlockEntity)\s+([A-Za-z_$][\w$]*)\b""")
             .findAll(source)
             .map { it.groupValues[1] }
@@ -19706,7 +19735,11 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         var result = source
         variables.forEach { variable ->
             result = Regex("""\b${Regex.escape(variable)}\.load\(\s*([A-Za-z_$][\w$]*)\s*\)""")
-                .replace(result, "$variable.loadWithComponents($1, $registryAccess)")
+                .replace(result) { match ->
+                    val registryAccess = registryAccessExpressionAt(result, match.range.first, javaInheritanceIndex)
+                        ?: return@replace match.value
+                    "$variable.loadWithComponents(${match.groupValues[1]}, $registryAccess)"
+                }
         }
         return result
     }
@@ -20591,7 +20624,10 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         return result
     }
 
-    private fun migrateLegacyComponentSerializationSource(source: String): String {
+    private fun migrateLegacyComponentSerializationSource(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
         if (!source.contains("Component.Serializer.toJson(") &&
             !source.contains("Component.Serializer.toJsonTree(") &&
             !source.contains("Component.Serializer.fromJson(")) {
@@ -20599,7 +20635,7 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         }
         var result = source
         result = rewriteJavaInvocationArgumentsWithOffset(result, "Component.Serializer.toJson") { args, offset ->
-            val registries = registryAccessExpressionAt(result, offset) ?: return@rewriteJavaInvocationArgumentsWithOffset null
+            val registries = registryAccessExpressionAt(result, offset, javaInheritanceIndex) ?: return@rewriteJavaInvocationArgumentsWithOffset null
             when {
                 args.size == 1 -> listOf(args[0], registries)
                 args.size == 2 && isRegistryAccessEmptyExpression(args[1]) -> listOf(args[0], registries)
@@ -20614,7 +20650,7 @@ public $className(Properties $propertiesName, WoodType $typeName) {
             }
         }
         result = rewriteJavaInvocationArgumentsWithOffset(result, "Component.Serializer.fromJson") { args, offset ->
-            val registries = registryAccessExpressionAt(result, offset) ?: return@rewriteJavaInvocationArgumentsWithOffset null
+            val registries = registryAccessExpressionAt(result, offset, javaInheritanceIndex) ?: return@rewriteJavaInvocationArgumentsWithOffset null
             when {
                 args.size == 1 -> listOf(args[0], registries)
                 args.size == 2 && isRegistryAccessEmptyExpression(args[1]) -> listOf(args[0], registries)
@@ -20682,7 +20718,10 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         return result
     }
 
-    private fun migrateRegistryAccessEmptyFallbacks(source: String): String {
+    private fun migrateRegistryAccessEmptyFallbacks(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
         if (!source.contains("RegistryAccess.EMPTY")) return source
         var result = source
         var cursor = 0
@@ -20690,7 +20729,7 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         while (cursor < result.length) {
             val index = result.indexOf(qualifiedEmpty, cursor)
             if (index < 0) break
-            val replacement = registryAccessExpressionAt(result, index)
+            val replacement = registryAccessExpressionAt(result, index, javaInheritanceIndex)
             if (replacement == null || replacement == qualifiedEmpty) {
                 cursor = index + qualifiedEmpty.length
                 continue
@@ -22691,7 +22730,7 @@ $methodBody
             return source
         }
         val hasRegistryContext = source.contains("this.registries") ||
-            Regex("""extends\s+(?:[A-Za-z_$][\w$]*\.)?[A-Za-z_$][\w$]*BlockLootSubProvider\b""").containsMatchIn(source)
+            Regex("""extends\s+(?:[A-Za-z_$][\w$]*\.)?(?:[A-Za-z_$][\w$]*)?BlockLootSubProvider\b""").containsMatchIn(source)
         if (!hasRegistryContext) return source
 
         val fortuneHolder = "this.registries.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.FORTUNE)"
@@ -22707,7 +22746,7 @@ $methodBody
 
     private fun migrateLegacyBlockLootSubProviderSource(source: String): String {
         if (!source.contains("BlockLootSubProvider")) return source
-        val className = Regex("""\bclass\s+([A-Za-z_$][\w$]*)\s+extends\s+(?:[A-Za-z_$][\w$]*\.)?[A-Za-z_$][\w$]*BlockLootSubProvider\b""")
+        val className = Regex("""\bclass\s+([A-Za-z_$][\w$]*)\s+extends\s+(?:[A-Za-z_$][\w$]*\.)?(?:[A-Za-z_$][\w$]*)?BlockLootSubProvider\b""")
             .find(source)
             ?.groupValues
             ?.get(1)
@@ -30580,9 +30619,15 @@ $writeLines
             .toSet() + migratedBiomeBuilderClasses
 
         if (registryFactories.isNotEmpty()) {
+            val propertyMapParameterPositions = collectNitrogenPropertyMapParameterPositions(javaFiles.map { it.readText() })
             for (file in javaFiles) {
                 val source = file.readText()
-                val migrated = migrateNitrogenRecipeBuilderCallSitesSource(source, registryFactories, biomeBuilderClasses)
+                val migrated = migrateNitrogenRecipeBuilderCallSitesSource(
+                    source,
+                    registryFactories,
+                    biomeBuilderClasses,
+                    propertyMapParameterPositions
+                )
                 if (migrated != source) {
                     changes.add(Change(
                         file = file,
@@ -30743,12 +30788,21 @@ public class ${builder.className} implements RecipeBuilder {
     private fun migrateNitrogenRecipeBuilderCallSitesSource(
         source: String,
         registryFactories: List<NitrogenRecipeFactoryReference>,
-        biomeBuilderClasses: Set<String>
+        biomeBuilderClasses: Set<String>,
+        projectPropertyMapParameterPositions: Map<String, Set<Int>> = emptyMap()
     ): String {
+        val propertyMapParameterPositions = mergeNitrogenPropertyMapParameterPositions(
+            projectPropertyMapParameterPositions,
+            collectNitrogenPropertyMapParameterPositions(source)
+        )
+        val containsPropertyMapCall = propertyMapParameterPositions.keys.any { methodName ->
+            Regex("""\b${Regex.escape(methodName)}\s*\(""").containsMatchIn(source)
+        }
         if (!source.contains("RecipeBuilder.recipe(") &&
             !biomeBuilderClasses.any { source.contains("$it.recipe(") } &&
             !source.contains("BlockPropertyPair.of(") &&
-            !source.contains(".pair(")) {
+            !source.contains(".pair(") &&
+            !containsPropertyMapCall) {
             return source
         }
 
@@ -30762,7 +30816,6 @@ public class ${builder.className} implements RecipeBuilder {
         val propertyVariables = Regex(
             """\b(?:Map|Reference2ObjectArrayMap)\s*<\s*Property\s*<\s*\?\s*>\s*,\s*Comparable\s*<\s*\?\s*>\s*>\s+([A-Za-z_$][\w$]*)"""
         ).findAll(source).map { it.groupValues[1] }.toSet()
-
         var result = source
         result = rewriteJavaCall(result, "recipe") { receiver, args ->
             if (args.isEmpty()) return@rewriteJavaCall null
@@ -30791,6 +30844,20 @@ public class ${builder.className} implements RecipeBuilder {
             "Reference2ObjectArrayMap<Property<?>, Comparable<?>>"
         )
 
+        propertyMapParameterPositions.forEach { (methodName, positions) ->
+            result = rewriteJavaInvocationArguments(result, methodName) { args ->
+                var changed = false
+                val migrated = args.toMutableList()
+                positions.forEach { index ->
+                    val arg = migrated.getOrNull(index) ?: return@forEach
+                    val propertyExpression = nitrogenPropertyMapDirectExpression(arg, propertyVariables) ?: return@forEach
+                    migrated[index] = propertyExpression
+                    changed = true
+                }
+                if (changed) migrated else null
+            }
+        }
+
         result = rewriteJavaCall(result, "pair") { receiver, args ->
             if (receiver != "this" || args.size != 2) return@rewriteJavaCall null
             val propertyExpression = nitrogenPropertyMapOptionalExpression(args[1], propertyVariables) ?: return@rewriteJavaCall null
@@ -30818,6 +30885,54 @@ public class ${builder.className} implements RecipeBuilder {
         return result
     }
 
+    private fun collectNitrogenPropertyMapParameterPositions(source: String): Map<String, Set<Int>> {
+        val positionsByMethod = linkedMapOf<String, MutableSet<Int>>()
+        val methodPattern = Regex(
+            """(?m)^[ \t]*(?:public|protected|private)\s+([\w<>\[\].?,\s]+?)\s+([A-Za-z_$][\w$]*)\s*\("""
+        )
+        methodPattern.findAll(source).forEach { match ->
+            val openParen = source.indexOf('(', match.range.last - 1)
+            if (openParen < 0) return@forEach
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen < 0) return@forEach
+            val returnType = match.groupValues[1].trim()
+            val methodName = match.groupValues[2]
+            if (returnType.substringAfterLast('.').contains("BlockPropertyPair")) return@forEach
+            val params = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            params.forEachIndexed { index, param ->
+                if (Regex("""\b(?:Map|Reference2ObjectArrayMap)\s*<\s*Property\s*<\s*\?\s*>\s*,\s*Comparable\s*<\s*\?\s*>\s*>""").containsMatchIn(param)) {
+                    positionsByMethod.getOrPut(methodName) { linkedSetOf() }.add(index)
+                }
+            }
+        }
+        return positionsByMethod.mapValues { it.value.toSet() }
+    }
+
+    private fun collectNitrogenPropertyMapParameterPositions(sources: Iterable<String>): Map<String, Set<Int>> {
+        val positionsByMethod = linkedMapOf<String, MutableSet<Int>>()
+        sources.forEach { source ->
+            collectNitrogenPropertyMapParameterPositions(source).forEach { (methodName, positions) ->
+                positionsByMethod.getOrPut(methodName) { linkedSetOf() }.addAll(positions)
+            }
+        }
+        return positionsByMethod.mapValues { it.value.toSet() }
+    }
+
+    private fun mergeNitrogenPropertyMapParameterPositions(
+        first: Map<String, Set<Int>>,
+        second: Map<String, Set<Int>>
+    ): Map<String, Set<Int>> {
+        if (first.isEmpty()) return second
+        if (second.isEmpty()) return first
+        val merged = linkedMapOf<String, MutableSet<Int>>()
+        listOf(first, second).forEach { map ->
+            map.forEach { (methodName, positions) ->
+                merged.getOrPut(methodName) { linkedSetOf() }.addAll(positions)
+            }
+        }
+        return merged.mapValues { it.value.toSet() }
+    }
+
     private fun nitrogenPropertyMapOptionalExpression(expression: String, propertyVariables: Set<String>): String? {
         val trimmed = expression.trim()
         if (trimmed in propertyVariables) return "Optional.of($trimmed)"
@@ -30828,6 +30943,14 @@ public class ${builder.className} implements RecipeBuilder {
         val keys = args.filterIndexed { index, _ -> index % 2 == 0 }.joinToString(", ")
         val values = args.filterIndexed { index, _ -> index % 2 == 1 }.joinToString(", ")
         return "Optional.of(new Reference2ObjectArrayMap<>(new Property<?>[]{$keys}, new Comparable<?>[]{$values}))"
+    }
+
+    private fun nitrogenPropertyMapDirectExpression(expression: String, propertyVariables: Set<String>): String? {
+        val trimmed = expression.trim()
+        if (trimmed in propertyVariables) return trimmed
+        val optionalExpression = nitrogenPropertyMapOptionalExpression(trimmed, propertyVariables) ?: return null
+        if (optionalExpression == "Optional.empty()") return "new Reference2ObjectArrayMap<>()"
+        return optionalExpression.removePrefix("Optional.of(").removeSuffix(")")
     }
 
     private fun migrateLegacyRecipeOutputBuilders(projectDir: Path, dryRun: Boolean): List<Change> {

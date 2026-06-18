@@ -253,6 +253,8 @@ class MappingCompletenessTest {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(
             "nearby registryAccess helper" to Regex("""inferRegistryAccessExpressionNear"""),
+            "whole-file registryAccess helper" to Regex("""\binferRegistryAccessExpression\b"""),
+            "name-suffix entity registryAccess inference" to Regex("""\.endsWith\("Entity"\)|\.endsWith\("Projectile"\)"""),
             "windowed registryAccess scan" to Regex("""offset\s*-\s*\d+[\s\S]{0,400}registryAccess\(\)"""),
             "last declaration registryAccess scan" to Regex("""lastOrNull\(\)[\s\S]{0,400}registryAccess\(\)"""),
             "registryAccess elvis fallback" to Regex("\\?:\\s*\"[^\"\\r\\n]*registryAccess\\(\\)\"")
