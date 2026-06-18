@@ -8112,6 +8112,20 @@ $fields
                     text = legacyHeartTypeSheetMigrated
                 }
 
+                val projectilePortalMigrated = migrateLegacyProjectilePortalBranchSource(text)
+                if (projectilePortalMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Remove legacy copied projectile portal branch that calls removed 1.20 portal APIs",
+                        before = "handleInsidePortal(...) and TheEndGatewayBlockEntity.teleportEntity(...) inside projectile hit scan",
+                        after = "Entity block-inside portal processing via checkInsideBlocks()",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-projectile-legacy-portal-branch"
+                    ))
+                    text = projectilePortalMigrated
+                }
+
                 val customDataMigrated = migrateCustomDataComponentsSource(text)
                 if (customDataMigrated != text) {
                     changes.add(Change(
@@ -11799,6 +11813,57 @@ ${indent}}
 		return 16 + (index * 2 + offset) * 9;
 	}
 """.trimEnd()
+
+    private fun migrateLegacyProjectilePortalBranchSource(source: String): String {
+        if (!source.contains("handleInsidePortal(") ||
+            !source.contains("TheEndGatewayBlockEntity.teleportEntity") ||
+            !source.contains("HitResult.Type.BLOCK")) {
+            return source
+        }
+
+        var result = source
+        var cursor = 0
+        val blockHitPattern = Regex("""if\s*\(\s*[A-Za-z_$][\w$]*\.getType\(\)\s*==\s*HitResult\.Type\.BLOCK\s*\)\s*\{""")
+        while (true) {
+            val match = blockHitPattern.find(result, cursor) ?: break
+            val openBrace = result.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            val isLegacyPortalBranch = body.contains("Blocks.NETHER_PORTAL") &&
+                body.contains("handleInsidePortal(") &&
+                body.contains("Blocks.END_GATEWAY") &&
+                body.contains("TheEndGatewayBlockEntity.canEntityTeleport") &&
+                body.contains("TheEndGatewayBlockEntity.teleportEntity")
+            if (!isLegacyPortalBranch) {
+                cursor = closeBrace + 1
+                continue
+            }
+            val removeEnd = (closeBrace + 1).let { end ->
+                var next = end
+                while (next < result.length && (result[next] == ' ' || result[next] == '\t')) next++
+                if (next < result.length && result[next] == '\r') next++
+                if (next < result.length && result[next] == '\n') next + 1 else end
+            }
+            result = result.substring(0, match.range.first) + result.substring(removeEnd)
+            cursor = match.range.first
+        }
+        if (result == source) return source
+        listOf(
+            "net.minecraft.core.BlockPos" to "BlockPos",
+            "net.minecraft.world.level.block.Blocks" to "Blocks",
+            "net.minecraft.world.level.block.entity.BlockEntity" to "BlockEntity",
+            "net.minecraft.world.level.block.entity.TheEndGatewayBlockEntity" to "TheEndGatewayBlockEntity",
+            "net.minecraft.world.level.block.state.BlockState" to "BlockState",
+            "net.minecraft.world.phys.BlockHitResult" to "BlockHitResult"
+        ).forEach { (importName, simpleName) ->
+            result = removeUnusedSimpleImport(result, importName, simpleName)
+        }
+        return cleanupRedundantBlankLines(result)
+    }
 
     private fun migrateCustomDataComponentsSource(source: String): String {
         var result = source

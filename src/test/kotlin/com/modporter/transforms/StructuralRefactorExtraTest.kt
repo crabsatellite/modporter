@@ -17100,6 +17100,66 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `removes legacy copied projectile portal branch with removed APIs`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LegacyProjectileSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.projectile.Projectile;
+            import net.minecraft.world.entity.projectile.ProjectileUtil;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Blocks;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.TheEndGatewayBlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.phys.BlockHitResult;
+            import net.minecraft.world.phys.HitResult;
+
+            public class LegacyProjectileSurface extends Projectile {
+                public LegacyProjectileSurface(EntityType<? extends LegacyProjectileSurface> type, Level level) {
+                    super(type, level);
+                }
+
+                public void tick() {
+                    HitResult result = ProjectileUtil.getHitResultOnMoveVector(this, this::canHitEntity);
+                    boolean flag = false;
+                    if (result.getType() == HitResult.Type.BLOCK) {
+                        BlockPos blockPos = ((BlockHitResult) result).getBlockPos();
+                        BlockState blockState = this.level().getBlockState(blockPos);
+                        if (blockState.is(Blocks.NETHER_PORTAL)) {
+                            this.handleInsidePortal(blockPos);
+                            flag = true;
+                        } else if (blockState.is(Blocks.END_GATEWAY)) {
+                            BlockEntity blockEntity = this.level().getBlockEntity(blockPos);
+                            if (blockEntity instanceof TheEndGatewayBlockEntity endGatewayBlockEntity && TheEndGatewayBlockEntity.canEntityTeleport(this)) {
+                                TheEndGatewayBlockEntity.teleportEntity(this.level(), blockPos, blockState, this, endGatewayBlockEntity);
+                            }
+                            flag = true;
+                        }
+                    }
+                    if (result.getType() != HitResult.Type.MISS && !flag && !net.neoforged.neoforge.event.EventHooks.onProjectileImpact(this, result)) {
+                        this.onHit(result);
+                    }
+                    this.checkInsideBlocks();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LegacyProjectileSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(migrated.contains("handleInsidePortal"), migrated)
+        assertFalse(migrated.contains("TheEndGatewayBlockEntity"), migrated)
+        assertFalse(migrated.contains("Blocks.NETHER_PORTAL"), migrated)
+        assertTrue(migrated.contains("if (result.getType() != HitResult.Type.MISS && !flag && !net.neoforged.neoforge.event.EventHooks.onProjectileImpact(this, result))"), migrated)
+        assertTrue(migrated.contains("this.checkInsideBlocks();"), migrated)
+    }
+
+    @Test
     fun `empty project returns empty results`() {
         val projectDir = tempDir.resolve("empty-project")
         projectDir.createDirectories()
