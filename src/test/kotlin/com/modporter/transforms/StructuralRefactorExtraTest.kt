@@ -9549,6 +9549,12 @@ class StructuralRefactorExtraTest {
                 void armor(ItemStack stack, ArmorItem armorItem) {
                     double value = stack.getAttributeModifiers(armorItem.getEquipmentSlot()).get(Attributes.ARMOR).stream().mapToDouble((attributeModifier) -> attributeModifier.getAmount() / 15).sum();
                 }
+
+                void weapon(ItemStack stack) {
+                    if (!stack.isEmpty() && !stack.getAttributeModifiers(EquipmentSlot.MAINHAND).isEmpty() && stack.getAttributeModifiers(EquipmentSlot.MAINHAND).containsKey(Attributes.ATTACK_DAMAGE) && !stack.getAttributeModifiers(EquipmentSlot.MAINHAND).get(Attributes.ATTACK_DAMAGE).isEmpty()) {
+                        double value = stack.getAttributeModifiers(EquipmentSlot.MAINHAND).get(Attributes.ATTACK_DAMAGE).stream().mapToDouble(AttributeModifier::getAmount).sum();
+                    }
+                }
             }
 
             class DamageEvent {
@@ -9576,7 +9582,11 @@ class StructuralRefactorExtraTest {
         assertTrue(commandSurface.contains("double amount = capability.getLifeModifier().amount();"), commandSurface)
         assertTrue(commandSurface.contains("boolean additive = capability.getLifeModifier().operation() == AttributeModifier.Operation.ADD_VALUE;"), commandSurface)
         assertTrue(commandSurface.contains("float amount = event.getAmount();"), commandSurface)
-        assertTrue(commandSurface.contains("mapToDouble((attributeModifier) -> attributeModifier.amount() / 15)"), commandSurface)
+        assertTrue(commandSurface.contains("stack.getAttributeModifiers().modifiers().stream().filter(modporterAttributeModifierEntry -> modporterAttributeModifierEntry.slot().test(armorItem.getEquipmentSlot()) && modporterAttributeModifierEntry.attribute().equals(Attributes.ARMOR)).map(modporterAttributeModifierEntry -> modporterAttributeModifierEntry.modifier()).mapToDouble((attributeModifier) -> attributeModifier.amount() / 15).sum()"), commandSurface)
+        assertTrue(commandSurface.contains("stack.getAttributeModifiers().modifiers().stream().filter(modporterAttributeModifierEntry -> modporterAttributeModifierEntry.slot().test(EquipmentSlot.MAINHAND)).findAny().isEmpty()"), commandSurface)
+        assertTrue(commandSurface.contains("stack.getAttributeModifiers().modifiers().stream().filter(modporterAttributeModifierEntry -> modporterAttributeModifierEntry.slot().test(EquipmentSlot.MAINHAND) && modporterAttributeModifierEntry.attribute().equals(Attributes.ATTACK_DAMAGE)).findAny().isPresent()"), commandSurface)
+        assertTrue(commandSurface.contains("AttributeModifier::amount"), commandSurface)
+        assertTrue(!commandSurface.contains("getAttributeModifiers(EquipmentSlot"), commandSurface)
     }
 
     @Test
@@ -17455,6 +17465,28 @@ class StructuralRefactorExtraTest {
                 }
             }
         """.trimIndent())
+        srcDir.resolve("CurioAttributeSurface.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import java.util.UUID;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.item.ItemStack;
+            import top.theillusivec4.curios.api.SlotContext;
+            import top.theillusivec4.curios.api.type.capability.ICurioItem;
+
+            public class CurioAttributeSurface implements ICurioItem {
+                @Override
+                public Multimap<Attribute, AttributeModifier> getAttributeModifiers(SlotContext slotContext, UUID uuid, ItemStack stack) {
+                    ImmutableMultimap.Builder<Attribute, AttributeModifier> builder = ImmutableMultimap.builder();
+                    builder.put(Attributes.ATTACK_DAMAGE, new AttributeModifier(uuid, "Damage", 1.0D, AttributeModifier.Operation.ADD_VALUE));
+                    return builder.build();
+                }
+            }
+        """.trimIndent())
         srcDir.resolve("ConstructorThisCallSurface.java").writeText("""
             package com.example;
 
@@ -17693,6 +17725,7 @@ class StructuralRefactorExtraTest {
 
         val strict = srcDir.resolve("StrictWarningSurface.java").readText()
         val curios = srcDir.resolve("CuriosSurface.java").readText()
+        val curioAttributes = srcDir.resolve("CurioAttributeSurface.java").readText()
         val constructorThisCall = srcDir.resolve("ConstructorThisCallSurface.java").readText()
         val nestedConstructorThisCall = srcDir.resolve("NestedConstructorThisCallSurface.java").readText()
         val constructorMethodReference = srcDir.resolve("ConstructorMethodReferenceSurface.java").readText()
@@ -17719,6 +17752,10 @@ class StructuralRefactorExtraTest {
         assertTrue(curios.contains("lazyHandler.get().getCurios();"), curios)
         assertFalse(curios.contains("LazyOptional"), curios)
         assertFalse(curios.contains(".resolve()"), curios)
+        assertTrue(curioAttributes.contains("import net.minecraft.core.Holder;"), curioAttributes)
+        assertTrue(curioAttributes.contains("public Multimap<Holder<Attribute>, AttributeModifier> getAttributeModifiers"), curioAttributes)
+        assertTrue(curioAttributes.contains("ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier> builder"), curioAttributes)
+        assertFalse(curioAttributes.contains("Multimap<Attribute, AttributeModifier>"), curioAttributes)
         assertTrue(Regex("""@SuppressWarnings\("this-escape"\)\s+public\s+ConstructorThisCallSurface""").containsMatchIn(constructorThisCall))
         assertTrue(Regex("""@SuppressWarnings\("this-escape"\)\s+public\s+LookGoal""").containsMatchIn(nestedConstructorThisCall))
         assertTrue(Regex("""@SuppressWarnings\("this-escape"\)\s+public\s+MoveGoal""").containsMatchIn(nestedConstructorThisCall))

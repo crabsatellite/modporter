@@ -12430,6 +12430,7 @@ ${indent}}
         result = migrateLegacyModelRenderPackedColorBodies(result)
         result = migrateLegacyRendererSetupRotations(result)
         result = migrateAttributeHolderApiArguments(result, attributeHolderAccessHints)
+        result = migrateItemStackAttributeModifierAccess(result)
         result = migrateLegacyServerDataConstructors(result)
         result = migrateLegacyConnectScreenStartConnectingCalls(result)
         result = migrateLegacySingleplayerWorldFlowSource(result)
@@ -12604,6 +12605,7 @@ ${indent}}
         result = migrateCommandSourceStackLevelAccess(result)
         result = migrateLegacyStaticFmlModEventBusAccess(result)
         result = migrateCuriosInventoryOptionalTypes(result)
+        result = migrateCuriosAttributeModifierHolderTypes(result)
         result = migrateLegacyOptionalValueCalls(result)
         if (result.contains("IEntityAdditionalSpawnData")) {
             result = result
@@ -13318,6 +13320,27 @@ ${indent}}
         result = removeImport(result, "net.neoforged.neoforge.common.util.LazyOptional")
         result = addImportIfMissing(result, "java.util.Optional")
         return result
+    }
+
+    private fun migrateCuriosAttributeModifierHolderTypes(source: String): String {
+        if (!source.contains("getAttributeModifiers") ||
+            !source.contains("AttributeModifier") ||
+            !source.contains("Multimap") ||
+            !source.contains("Attribute") ||
+            !Regex("""\b(?:ICurioItem|SlotContext)\b""").containsMatchIn(source)) {
+            return source
+        }
+
+        var result = source
+        result = Regex("""\bMultimap\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""")
+            .replace(result, "Multimap<Holder<Attribute>, AttributeModifier>")
+        result = Regex("""\bImmutableMultimap\.Builder\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""")
+            .replace(result, "ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier>")
+        result = Regex("""\bImmutableMultimap\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""")
+            .replace(result, "ImmutableMultimap<Holder<Attribute>, AttributeModifier>")
+
+        if (result == source) return source
+        return addImportIfMissing(result, "net.minecraft.core.Holder")
     }
 
     private fun migrateJeiRecipeCategoryBackgroundApi(source: String): String {
@@ -24665,6 +24688,102 @@ $methodBody
                 "${match.groupValues[1]}${match.groupValues[2]}.getDelegate()${match.groupValues[3]}"
         }
         return result
+    }
+
+    private fun migrateItemStackAttributeModifierAccess(source: String): String {
+        if (!source.contains(".getAttributeModifiers(")) return source
+        val migrated = StringBuilder()
+        var cursor = 0
+        var changed = false
+        val token = ".getAttributeModifiers("
+        while (cursor < source.length) {
+            val tokenIndex = source.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val receiverStart = findExpressionReceiverStart(source, tokenIndex)
+            val openParen = tokenIndex + ".getAttributeModifiers".length
+            val closeParen = findMatchingParen(source, openParen)
+            if (receiverStart < 0 || closeParen < 0) {
+                migrated.append(source, cursor, tokenIndex + token.length)
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (args.size != 1) {
+                migrated.append(source, cursor, closeParen + 1)
+                cursor = closeParen + 1
+                continue
+            }
+            val receiver = source.substring(receiverStart, tokenIndex).trim()
+            val slot = args[0].trim()
+            val after = source.substring(closeParen + 1)
+            var replacementEnd = closeParen + 1
+            val replacement = when {
+                after.startsWith(".isEmpty()") -> {
+                    replacementEnd = closeParen + 1 + ".isEmpty()".length
+                    "${itemAttributeModifierStream(receiver, slot)}.findAny().isEmpty()"
+                }
+                after.startsWith(".containsKey(") -> {
+                    val containsOpen = closeParen + 1 + ".containsKey".length
+                    val containsClose = findMatchingParen(source, containsOpen)
+                    if (containsClose < 0) null else {
+                        val containsArgs = splitTopLevelJavaArgs(source.substring(containsOpen + 1, containsClose))
+                        if (containsArgs.size != 1) null else {
+                            replacementEnd = containsClose + 1
+                            "${itemAttributeModifierStream(receiver, slot, containsArgs[0].trim())}.findAny().isPresent()"
+                        }
+                    }
+                }
+                after.startsWith(".get(") -> {
+                    val getOpen = closeParen + 1 + ".get".length
+                    val getClose = findMatchingParen(source, getOpen)
+                    if (getClose < 0) null else {
+                        val getArgs = splitTopLevelJavaArgs(source.substring(getOpen + 1, getClose))
+                        if (getArgs.size != 1) null else {
+                            val attribute = getArgs[0].trim()
+                            val afterGet = source.substring(getClose + 1)
+                            when {
+                                afterGet.startsWith(".isEmpty()") -> {
+                                    replacementEnd = getClose + 1 + ".isEmpty()".length
+                                    "${itemAttributeModifierStream(receiver, slot, attribute)}.findAny().isEmpty()"
+                                }
+                                afterGet.startsWith(".stream()") -> {
+                                    replacementEnd = getClose + 1 + ".stream()".length
+                                    "${itemAttributeModifierStream(receiver, slot, attribute)}.map(modporterAttributeModifierEntry -> modporterAttributeModifierEntry.modifier())"
+                                }
+                                else -> null
+                            }
+                        }
+                    }
+                }
+                else -> {
+                    "$receiver.getAttributeModifiers()"
+                }
+            }
+            if (replacement == null) {
+                migrated.append(source, cursor, closeParen + 1)
+                cursor = closeParen + 1
+                continue
+            }
+            migrated.append(source, cursor, receiverStart)
+            migrated.append(replacement)
+            cursor = replacementEnd
+            changed = true
+        }
+        if (!changed) return source
+        migrated.append(source, cursor, source.length)
+        var result = migrated.toString()
+            .replace("AttributeModifier::getAmount", "AttributeModifier::amount")
+        result = Regex("""(\(\s*([A-Za-z_$][\w$]*)\s*\)\s*->\s*)\2\.getAmount\(\)""")
+            .replace(result) { match -> "${match.groupValues[1]}${match.groupValues[2]}.amount()" }
+        result = Regex("""(\b([A-Za-z_$][\w$]*)\s*->\s*)\2\.getAmount\(\)""")
+            .replace(result) { match -> "${match.groupValues[1]}${match.groupValues[2]}.amount()" }
+        return result
+    }
+
+    private fun itemAttributeModifierStream(receiver: String, slot: String, attribute: String? = null): String {
+        val slotFilter = "modporterAttributeModifierEntry.slot().test($slot)"
+        val attributeFilter = attribute?.let { " && modporterAttributeModifierEntry.attribute().equals($it)" }.orEmpty()
+        return "$receiver.getAttributeModifiers().modifiers().stream().filter(modporterAttributeModifierEntry -> $slotFilter$attributeFilter)"
     }
 
     private fun migrateLegacyServerDataConstructors(source: String): String {
