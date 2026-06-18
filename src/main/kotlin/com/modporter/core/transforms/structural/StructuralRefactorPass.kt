@@ -15815,10 +15815,102 @@ $body
 
     private fun migrateLegacyEventBusPostBooleans(source: String): String {
         if (!source.contains("EVENT_BUS.post(")) return source
-        return rewriteJavaCall(source, "post") { receiver, args ->
+        var result = rewriteJavaCall(source, "post") { receiver, args ->
             if (!receiver.endsWith("EVENT_BUS") || args.size != 1) return@rewriteJavaCall null
             "$receiver.post(${args[0]}).isCanceled()"
         }
+        result = collapseDuplicateEventBusPostCancellationChecks(result)
+        return stripUnusedEventBusPostCancellationChecks(result)
+    }
+
+    private fun collapseDuplicateEventBusPostCancellationChecks(source: String): String {
+        var result = source
+        var cursor = 0
+        while (true) {
+            val call = findEventBusPostCall(result, cursor) ?: break
+            val chainEnds = trailingIsCanceledCallEnds(result, call.closeParen + 1)
+            if (chainEnds.size <= 1) {
+                cursor = call.closeParen + 1
+                continue
+            }
+            result = result.substring(0, chainEnds.first()) + result.substring(chainEnds.last())
+            cursor = chainEnds.first()
+        }
+        return result
+    }
+
+    private fun stripUnusedEventBusPostCancellationChecks(source: String): String {
+        var result = source
+        var cursor = 0
+        while (true) {
+            val call = findEventBusPostCall(result, cursor) ?: break
+            val chainEnds = trailingIsCanceledCallEnds(result, call.closeParen + 1)
+            if (chainEnds.isEmpty()) {
+                cursor = call.closeParen + 1
+                continue
+            }
+            val chainEnd = chainEnds.last()
+            val next = skipWhitespace(result, chainEnd)
+            if (next >= result.length || result[next] != ';' || !isStandaloneExpressionStart(result, call.receiverStart)) {
+                cursor = chainEnd
+                continue
+            }
+            result = result.substring(0, call.closeParen + 1) + result.substring(chainEnd)
+            cursor = call.closeParen + 1
+        }
+        return result
+    }
+
+    private data class EventBusPostCall(val receiverStart: Int, val closeParen: Int)
+
+    private fun findEventBusPostCall(source: String, start: Int): EventBusPostCall? {
+        val token = ".post("
+        var cursor = start
+        while (true) {
+            val tokenIndex = source.indexOf(token, cursor)
+            if (tokenIndex < 0) return null
+            val openParen = tokenIndex + "post".length + 1
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val receiverStart = findExpressionReceiverStart(source, tokenIndex)
+            if (receiverStart < 0 || receiverStart >= tokenIndex) {
+                cursor = closeParen + 1
+                continue
+            }
+            val receiver = source.substring(receiverStart, tokenIndex).trim()
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (receiver.endsWith("EVENT_BUS") && args.size == 1) {
+                return EventBusPostCall(receiverStart, closeParen)
+            }
+            cursor = closeParen + 1
+        }
+    }
+
+    private fun trailingIsCanceledCallEnds(source: String, start: Int): List<Int> {
+        val ends = mutableListOf<Int>()
+        var cursor = start
+        while (true) {
+            val dot = skipWhitespace(source, cursor)
+            if (!source.startsWith(".isCanceled", dot)) break
+            val openParen = skipWhitespace(source, dot + ".isCanceled".length)
+            if (openParen >= source.length || source[openParen] != '(') break
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen < 0 || source.substring(openParen + 1, closeParen).isNotBlank()) break
+            ends += closeParen + 1
+            cursor = closeParen + 1
+        }
+        return ends
+    }
+
+    private fun isStandaloneExpressionStart(source: String, expressionStart: Int): Boolean {
+        val lineStart = source.lastIndexOfAny(charArrayOf('\n', '\r'), expressionStart - 1).let { if (it < 0) 0 else it + 1 }
+        if (source.substring(lineStart, expressionStart).trim().isNotEmpty()) return false
+        var index = expressionStart - 1
+        while (index >= 0 && source[index].isWhitespace()) index--
+        return index < 0 || source[index] == ';' || source[index] == '{' || source[index] == '}'
     }
 
     private fun migrateLegacyFollowOwnerGoalConstructors(source: String): String {

@@ -14142,6 +14142,44 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `does not synthesize event bus cancellation checks for unused post results`() {
+        val projectDir = createFile("EventBusPostSurface.java", """
+            package com.example;
+
+            import net.neoforged.neoforge.common.NeoForge;
+
+            public class EventBusPostSurface {
+                public Object fireAndReturn(Object event) {
+                    NeoForge.EVENT_BUS.post(event);
+                    return event;
+                }
+
+                public Object fireLegacyChainedAndReturn(Object event) {
+                    NeoForge.EVENT_BUS.post(event).isCanceled();
+                    return event;
+                }
+
+                public boolean check(Object event) {
+                    return NeoForge.EVENT_BUS.post(event);
+                }
+
+                public boolean checkAlreadyMigrated(Object event) {
+                    return NeoForge.EVENT_BUS.post(event).isCanceled();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val transformed = tempDir.resolve("src/main/java/com/example/EventBusPostSurface.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("NeoForge.EVENT_BUS.post(event);\n        return event;"), transformed)
+        assertFalse(transformed.contains("NeoForge.EVENT_BUS.post(event).isCanceled();\n        return event;"), transformed)
+        assertTrue(transformed.contains("return NeoForge.EVENT_BUS.post(event).isCanceled();"), transformed)
+        assertFalse(transformed.contains(".isCanceled().isCanceled()"), transformed)
+    }
+
+    @Test
     fun `migrates advancement holder lookups display access and packet fallback`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
