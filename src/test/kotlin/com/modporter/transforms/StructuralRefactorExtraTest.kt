@@ -4154,6 +4154,81 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy ArmorMaterials codec owners to holder armor material types`() {
+        val projectDir = createFile("LegacyArmorMaterialModifier.java", """
+            package com.example;
+
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.world.item.ArmorMaterials;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+
+            public class LegacyArmorMaterialModifier {
+                public static final MapCodec<LegacyArmorMaterialModifier> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                    ItemStack.CODEC.fieldOf("stack").forGetter(modifier -> modifier.stack),
+                    ArmorMaterials.CODEC.fieldOf("armor_material").forGetter(modifier -> modifier.armorMaterial)
+                ).apply(instance, LegacyArmorMaterialModifier::new));
+
+                public final ItemStack stack;
+                public final ArmorMaterials armorMaterial;
+
+                public LegacyArmorMaterialModifier(LootItemCondition[] conditions, ItemStack stack, ArmorMaterials armorMaterial) {
+                    this.stack = stack;
+                    this.armorMaterial = armorMaterial;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/LegacyArmorMaterialModifier.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("BuiltInRegistries.ARMOR_MATERIAL.holderByNameCodec().fieldOf(\"armor_material\")"), migrated)
+        assertTrue(migrated.contains("public final Holder<ArmorMaterial> armorMaterial;"), migrated)
+        assertTrue(migrated.contains("public LegacyArmorMaterialModifier(LootItemCondition[] conditions, ItemStack stack, Holder<ArmorMaterial> armorMaterial)"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.core.registries.BuiltInRegistries;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.item.ArmorMaterial;"), migrated)
+        assertFalse(migrated.contains("ArmorMaterials.CODEC"), migrated)
+        assertFalse(migrated.contains("ArmorMaterials armorMaterial"), migrated)
+    }
+
+    @Test
+    fun `migrates legacy armor material override maps to holder keys`() {
+        val projectDir = createFile("LegacyTrimMaterialData.java", """
+            package com.example;
+
+            import java.util.Map;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.item.ArmorMaterials;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.armortrim.TrimMaterial;
+
+            public class LegacyTrimMaterialData {
+                public void register(Item ingredient, Map<ArmorMaterials, String> overrideArmorMaterials) {
+                    TrimMaterial.create(
+                        "example",
+                        ingredient,
+                        0.7F,
+                        Component.literal("Example"),
+                        overrideArmorMaterials
+                    );
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/LegacyTrimMaterialData.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("Map<Holder<ArmorMaterial>, String> overrideArmorMaterials"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.item.ArmorMaterial;"), migrated)
+        assertFalse(migrated.contains("Map<ArmorMaterials"), migrated)
+    }
+
+    @Test
     fun `migrates GameEventListener event holder signatures and comparisons`() {
         val projectDir = createFile("ListenerBE.java", """
             package com.example;

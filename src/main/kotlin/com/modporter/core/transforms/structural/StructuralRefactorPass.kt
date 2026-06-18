@@ -12229,6 +12229,7 @@ ${indent}}
         result = migrateLegacyDatagenTagConstantsSource(result)
         result = migrateLegacyComponentSerializationSource(result)
         result = migrateLegacyNitrogenLanguageHelpersSource(result)
+        result = migrateLegacyArmorMaterialsHolderSource(result)
         result = migrateGameProfileDisplayNameComponents(result)
         result = migrateRegistryAccessEmptyFallbacks(result)
         result = migrateLegacyGameEventListenerSource(result)
@@ -20621,6 +20622,26 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 null
             }
         }
+        return result
+    }
+
+    private fun migrateLegacyArmorMaterialsHolderSource(source: String): String {
+        if (!source.contains("ArmorMaterials.CODEC") && !source.contains("Map<ArmorMaterials")) return source
+        var result = source
+        var needsBuiltInRegistriesImport = false
+        if (result.contains("ArmorMaterials.CODEC")) {
+            result = result.replace("ArmorMaterials.CODEC", "BuiltInRegistries.ARMOR_MATERIAL.holderByNameCodec()")
+            needsBuiltInRegistriesImport = true
+        }
+        result = Regex("""\bArmorMaterials\s+([A-Za-z_$][\w$]*)""")
+            .replace(result, "Holder<ArmorMaterial> $1")
+        result = Regex("""\bMap\s*<\s*ArmorMaterials\s*,\s*String\s*>""")
+            .replace(result, "Map<Holder<ArmorMaterial>, String>")
+        result = addImportIfMissing(result, "net.minecraft.core.Holder")
+        if (needsBuiltInRegistriesImport) {
+            result = addImportIfMissing(result, "net.minecraft.core.registries.BuiltInRegistries")
+        }
+        result = addImportIfMissing(result, "net.minecraft.world.item.ArmorMaterial")
         return result
     }
 
