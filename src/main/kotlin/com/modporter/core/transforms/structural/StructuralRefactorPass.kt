@@ -7903,6 +7903,7 @@ $fields
         val inheritedRecipeStateAccessors = collectInheritedRecipeStateAccessors(javaFiles)
         val holderLookupCompoundTagMethods = collectHolderLookupCompoundTagMethods(javaFiles)
         val deferredHolderFields = collectDeferredHolderFields(srcDir)
+        val soundEventSupplierConstructors = collectSoundEventSupplierConstructors(javaFiles)
 
         javaFiles.forEach { javaFile ->
                 val original = javaFile.readText()
@@ -8297,6 +8298,23 @@ $fields
                         ruleId = "struct-block-loot-provider-121"
                     ))
                     text = blockLootMigrated
+                }
+
+                val soundEventSupplierMigrated = migrateLegacySoundEventSupplierLambdas(
+                    text,
+                    soundEventSupplierConstructors
+                )
+                if (soundEventSupplierMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate vanilla SoundEvents holder constants in legacy SoundEvent supplier constructor slots",
+                        before = "() -> SoundEvents.X passed to Supplier<SoundEvent> constructor parameters",
+                        after = "() -> SoundEvents.X.value() in proven legacy SoundEvent supplier slots",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-soundevent-supplier-lambdas"
+                    ))
+                    text = soundEventSupplierMigrated
                 }
 
                 val vanilla121Migrated = migrateVanilla121ApiSource(
@@ -25358,6 +25376,145 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
         if (cursor == 0) return source
         migrated.append(source, cursor, source.length)
         return migrated.toString()
+    }
+
+    private data class SoundEventSupplierConstructor(
+        val parameterCount: Int,
+        val supplierIndexes: Set<Int>
+    )
+
+    private fun collectSoundEventSupplierConstructors(javaFiles: List<Path>): Map<String, List<SoundEventSupplierConstructor>> {
+        val constructorsBySimpleName = linkedMapOf<String, MutableList<SoundEventSupplierConstructor>>()
+        val ownersBySimpleName = linkedMapOf<String, MutableSet<String>>()
+        val constructorPattern = Regex(
+            """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private)\s+)?([A-Za-z_$][\w$]*)\s*\(([^;{}]*)\)\s*(?:throws\s+[^{]+)?\{"""
+        )
+        val recordPattern = Regex(
+            """(?s)\brecord\s+([A-Za-z_$][\w$]*)\s*\((.*?)\)\s*(?:implements\s+[^{]+)?\{"""
+        )
+
+        javaFiles.forEach { javaFile ->
+            val source = runCatching { javaFile.readText() }.getOrNull() ?: return@forEach
+            val packageName = Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+                .find(source)
+                ?.groupValues
+                ?.get(1)
+                .orEmpty()
+            val declaredTypes = Regex("""\b(?:class|record)\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(source)
+                .map { it.groupValues[1] }
+                .toSet()
+            if (declaredTypes.isEmpty()) return@forEach
+
+            fun addConstructorHint(simpleName: String, paramsText: String) {
+                if (simpleName !in declaredTypes) return
+                val params = parseJavaParameters(paramsText)
+                val supplierIndexes = params.mapIndexedNotNull { index, param ->
+                    index.takeIf { isLegacySoundEventSupplierParameter(param.type) }
+                }.toSet()
+                if (supplierIndexes.isEmpty()) return
+                val qualifiedName = if (packageName.isBlank()) simpleName else "$packageName.$simpleName"
+                ownersBySimpleName.getOrPut(simpleName) { linkedSetOf() }.add(qualifiedName)
+                constructorsBySimpleName.getOrPut(simpleName) { mutableListOf() }
+                    .add(SoundEventSupplierConstructor(params.size, supplierIndexes))
+            }
+
+            constructorPattern.findAll(source).forEach { match ->
+                addConstructorHint(match.groupValues[1], match.groupValues[2])
+            }
+            recordPattern.findAll(source).forEach { match ->
+                addConstructorHint(match.groupValues[1], match.groupValues[2])
+            }
+        }
+
+        return constructorsBySimpleName.mapNotNull { (simpleName, constructors) ->
+            if ((ownersBySimpleName[simpleName]?.size ?: 0) != 1) {
+                null
+            } else {
+                simpleName to constructors.distinct()
+            }
+        }.toMap()
+    }
+
+    private fun isLegacySoundEventSupplierParameter(type: String): Boolean =
+        Regex("""(?:^|[^A-Za-z0-9_$])(?:java\.util\.function\.)?Supplier\s*<""").containsMatchIn(type) &&
+            Regex("""(?:^|[^A-Za-z0-9_$])(?:net\.minecraft\.sounds\.)?SoundEvent(?:$|[^A-Za-z0-9_$])""").containsMatchIn(type) &&
+            !Regex("""(?:^|[^A-Za-z0-9_$])(?:net\.minecraft\.core\.)?Holder(?:\.[A-Za-z_$][\w$]*)?\s*<""").containsMatchIn(type)
+
+    private fun migrateLegacySoundEventSupplierLambdas(
+        source: String,
+        constructors: Map<String, List<SoundEventSupplierConstructor>>
+    ): String {
+        if (!source.contains("SoundEvents.") || constructors.isEmpty()) return source
+
+        var result = source
+        constructors.keys.forEach { className ->
+            result = rewriteJavaNew(result, className) { args ->
+                val migratedArgs = migrateSoundEventSupplierConstructorArgs(args, constructors[className].orEmpty())
+                    ?: return@rewriteJavaNew null
+                "new $className(${migratedArgs.joinToString(", ") { it.trim() }})"
+            }
+        }
+
+        var cursor = 0
+        while (true) {
+            val tokenIndex = result.indexOf("super(", cursor)
+            if (tokenIndex < 0) break
+            if (tokenIndex > 0 && (result[tokenIndex - 1].isLetterOrDigit() || result[tokenIndex - 1] == '_' || result[tokenIndex - 1] == '.')) {
+                cursor = tokenIndex + "super(".length
+                continue
+            }
+            val classDeclaration = enclosingJavaClassDeclaration(result, tokenIndex)
+            val superClassName = classDeclaration?.directSuper?.substringAfterLast('.')
+            val superConstructors = superClassName?.let { constructors[it] }.orEmpty()
+            if (superConstructors.isEmpty()) {
+                cursor = tokenIndex + "super(".length
+                continue
+            }
+            val openParen = tokenIndex + "super".length
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + "super(".length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            val migratedArgs = migrateSoundEventSupplierConstructorArgs(args, superConstructors)
+            if (migratedArgs == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            val replacement = "super(${migratedArgs.joinToString(", ") { it.trim() }})"
+            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
+            cursor = tokenIndex + replacement.length
+        }
+
+        return result
+    }
+
+    private fun migrateSoundEventSupplierConstructorArgs(
+        args: List<String>,
+        constructors: List<SoundEventSupplierConstructor>
+    ): List<String>? {
+        val matchingConstructors = constructors.filter { it.parameterCount == args.size }
+        if (matchingConstructors.isEmpty()) return null
+        val supplierIndexSets = matchingConstructors.map { it.supplierIndexes }.distinct()
+        if (supplierIndexSets.size != 1) return null
+        val supplierIndexes = supplierIndexSets.single()
+        val migratedArgs = args.mapIndexed { index, arg ->
+            if (index in supplierIndexes) migrateVanillaSoundEventSupplierLambda(arg) else arg
+        }
+        return migratedArgs.takeIf { it != args }
+    }
+
+    private fun migrateVanillaSoundEventSupplierLambda(argument: String): String {
+        val match = Regex("""^\s*\(\s*\)\s*->\s*((?:net\.minecraft\.sounds\.)?SoundEvents\.([A-Z0-9_]+))\s*$""")
+            .find(argument)
+            ?: return argument
+        val soundName = match.groupValues[2]
+        if (!isVanillaHolderSoundEvent(soundName)) return argument
+        val leading = argument.takeWhile { it.isWhitespace() }
+        val trailing = argument.takeLastWhile { it.isWhitespace() }
+        return "${leading}() -> ${match.groupValues[1]}.value()$trailing"
     }
 
     private fun migrateLegacyHolderSoundEventPlaySoundArguments(source: String): String {

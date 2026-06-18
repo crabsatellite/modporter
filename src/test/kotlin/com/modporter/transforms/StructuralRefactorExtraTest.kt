@@ -14493,6 +14493,79 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates vanilla sound event constants only in proven legacy sound event supplier constructor slots`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AccessoryItem.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.minecraft.sounds.SoundEvent;
+
+            public class AccessoryItem {
+                public AccessoryItem(Supplier<? extends SoundEvent> sound) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("GlovesItem.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.minecraft.sounds.SoundEvent;
+
+            public class GlovesItem extends AccessoryItem {
+                public GlovesItem(String name, Supplier<? extends SoundEvent> sound) {
+                    super(sound);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("GoldGlovesItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.sounds.SoundEvents;
+
+            public class GoldGlovesItem extends GlovesItem {
+                public GoldGlovesItem() {
+                    super("gold", () -> SoundEvents.ARMOR_EQUIP_GOLD);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Items.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.minecraft.core.Holder;
+            import net.minecraft.sounds.SoundEvent;
+            import net.minecraft.sounds.SoundEvents;
+
+            public class Items {
+                Object chain = new GlovesItem("chain", () -> SoundEvents.ARMOR_EQUIP_CHAIN);
+                Object custom = new GlovesItem("custom", CustomSounds.CUSTOM_SOUND);
+                Object holder = new HolderConsumer(() -> SoundEvents.TRIDENT_THROW);
+                Object unproven = new UnprovenConsumer(() -> SoundEvents.GENERIC_EXPLODE);
+            }
+
+            class HolderConsumer {
+                HolderConsumer(Supplier<Holder<SoundEvent>> sound) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val gloves = srcDir.resolve("Items.java").readText()
+        val gold = srcDir.resolve("GoldGlovesItem.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(gold.contains("super(\"gold\", () -> SoundEvents.ARMOR_EQUIP_GOLD.value());"))
+        assertTrue(gloves.contains("new GlovesItem(\"chain\", () -> SoundEvents.ARMOR_EQUIP_CHAIN.value())"))
+        assertTrue(gloves.contains("new GlovesItem(\"custom\", CustomSounds.CUSTOM_SOUND);"))
+        assertTrue(gloves.contains("new HolderConsumer(() -> SoundEvents.TRIDENT_THROW);"))
+        assertTrue(gloves.contains("new UnprovenConsumer(() -> SoundEvents.GENERIC_EXPLODE);"))
+        assertFalse(gloves.contains("SoundEvents.TRIDENT_THROW.value()"))
+        assertFalse(gloves.contains("SoundEvents.GENERIC_EXPLODE.value()"))
+    }
+
+    @Test
     fun `migrates legacy sleeping time check event result API by event parameter type`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
