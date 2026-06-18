@@ -7735,6 +7735,11 @@ $fields
         val attributeModifierIdReferences = collectAttributeModifierIdReferences(javaFiles)
         val attributeModifierMethods = collectAttributeModifierMethods(javaFiles)
         val genericMethodReturnTypes = collectGenericMethodReturnTypes(javaFiles)
+        val attributeModifierIdMethodArguments = collectAttributeModifierIdMethodArguments(
+            javaFiles,
+            attributeModifierMethods,
+            genericMethodReturnTypes
+        )
         val attributeHolderAccessHints = collectAttributeHolderAccessHints(srcDir)
         val optionalCompoundRecipeTagOwners = collectLegacyOptionalCompoundRecipeTagOwners(javaFiles)
         val legacyCookingRecipeClasses = collectLegacyCookingRecipeClasses(javaFiles)
@@ -7985,6 +7990,7 @@ $fields
                     attributeModifierIdReferences,
                     attributeModifierMethods,
                     genericMethodReturnTypes,
+                    attributeModifierIdMethodArguments,
                     attributeHolderAccessHints,
                     optionalCompoundRecipeTagOwners
                 )
@@ -8310,6 +8316,118 @@ $fields
 
         (declaredMethods.keys + parents.keys).forEach { methodsFor(it) }
         return resolved.mapValues { it.value.toSet() }
+    }
+
+    private data class AttributeModifierIdMethodArgument(
+        val owner: String,
+        val methodName: String,
+        val parameterIndex: Int
+    )
+
+    private fun collectAttributeModifierIdMethodArguments(
+        javaFiles: List<Path>,
+        attributeModifierMethods: Map<String, Set<String>>,
+        genericMethodReturnTypes: Map<String, String>
+    ): Set<AttributeModifierIdMethodArgument> {
+        val hints = linkedSetOf<AttributeModifierIdMethodArgument>()
+        val id = """[A-Za-z_$][\w$]*"""
+        val callPattern = Regex("""(?:(($id(?:\.$id)*)|this)\s*\.\s*)?($id)\s*\(""")
+        val ignoredNames = setOf("if", "for", "while", "switch", "catch", "new", "return", "throw", "super", "this")
+
+        fun methodsForType(typeName: String, typeParameterBounds: Map<String, Set<String>>): Set<String> {
+            val simple = typeName.substringAfterLast('.')
+            val methods = linkedSetOf<String>()
+            methods += attributeModifierMethods[simple].orEmpty()
+            typeParameterBounds[simple].orEmpty().forEach { bound ->
+                methods += attributeModifierMethods[bound].orEmpty()
+            }
+            return methods
+        }
+
+        fun isAttributeModifierExpression(
+            expression: String,
+            scope: String,
+            ownerName: String,
+            variableTypes: Map<String, String>,
+            typeParameterBounds: Map<String, Set<String>>
+        ): Boolean {
+            val trimmed = expression.trim()
+            val directType = variableTypes[trimmed]
+            if (directType == "AttributeModifier" || "AttributeModifier" in typeParameterBounds[directType].orEmpty()) {
+                return true
+            }
+            val methodCall = Regex("""(?s)^(?:(.+)\.)?($id)\s*\(.*\)$""").matchEntire(trimmed)
+                ?: return false
+            val receiver = methodCall.groupValues[1].trim()
+            val methodName = methodCall.groupValues[2]
+            if (receiver.isBlank() || receiver == "this") {
+                return methodName in attributeModifierMethods[ownerName].orEmpty()
+            }
+            val receiverType = variableTypes[receiver]
+            if (receiverType != null && methodName in methodsForType(receiverType, typeParameterBounds)) {
+                return true
+            }
+            return methodName in attributeModifierMethods[receiver.substringAfterLast('.')].orEmpty()
+        }
+
+        fun attributeModifierIdReceiver(argument: String): String? {
+            val trimmed = argument.trim()
+            return when {
+                trimmed.endsWith(".id()") -> trimmed.removeSuffix(".id()").trim()
+                trimmed.endsWith(".getId()") -> trimmed.removeSuffix(".getId()").trim()
+                else -> null
+            }.takeIf { !it.isNullOrBlank() }
+        }
+
+        fun isAttributeModifierIdArgument(
+            argument: String,
+            scope: String,
+            ownerName: String,
+            variableTypes: Map<String, String>,
+            typeParameterBounds: Map<String, Set<String>>
+        ): Boolean {
+            val receiver = attributeModifierIdReceiver(argument) ?: return false
+            return isAttributeModifierExpression(receiver, scope, ownerName, variableTypes, typeParameterBounds)
+        }
+
+        fun callOwner(
+            receiver: String,
+            ownerName: String,
+            variableTypes: Map<String, String>
+        ): String? {
+            val trimmed = receiver.trim()
+            if (trimmed.isBlank() || trimmed == "this") return ownerName
+            if (trimmed == "super") return null
+            variableTypes[trimmed]?.let { return it.substringAfterLast('.') }
+            val simple = trimmed.substringAfterLast('.')
+            return if (simple.firstOrNull()?.isUpperCase() == true) simple else null
+        }
+
+        for (javaFile in javaFiles) {
+            val source = javaFile.readText()
+            if ((!source.contains(".id()") && !source.contains(".getId()")) || !source.contains("AttributeModifier")) continue
+            val ownerName = javaTopLevelTypeName(source) ?: continue
+            callPattern.findAll(source).forEach { match ->
+                val methodName = match.groupValues[3]
+                if (methodName in ignoredNames) return@forEach
+                val openParen = match.range.last
+                val closeParen = findMatchingParen(source, openParen)
+                if (closeParen < 0) return@forEach
+                val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+                if (args.none { it.contains(".id()") || it.contains(".getId()") }) return@forEach
+                val scope = enclosingMethodText(source, match.range.first) ?: source
+                val variableTypes = javaLocalVariableTypes(scope, genericMethodReturnTypes)
+                val typeParameterBounds = javaTypeParameterBounds(scope)
+                val receiver = match.groupValues[1]
+                val targetOwner = callOwner(receiver, ownerName, variableTypes) ?: return@forEach
+                args.forEachIndexed { index, argument ->
+                    if (isAttributeModifierIdArgument(argument, scope, ownerName, variableTypes, typeParameterBounds)) {
+                        hints += AttributeModifierIdMethodArgument(targetOwner, methodName, index)
+                    }
+                }
+            }
+        }
+        return hints
     }
 
     private fun collectGenericMethodReturnTypes(javaFiles: List<Path>): Map<String, String> {
@@ -10599,6 +10717,7 @@ ${entries.joinToString(",\n")}
         attributeModifierIdReferences: Set<String> = emptySet(),
         attributeModifierMethods: Map<String, Set<String>> = emptyMap(),
         genericMethodReturnTypes: Map<String, String> = emptyMap(),
+        attributeModifierIdMethodArguments: Set<AttributeModifierIdMethodArgument> = emptySet(),
         attributeHolderAccessHints: AttributeHolderAccessHints = AttributeHolderAccessHints(emptySet()),
         optionalCompoundRecipeTagOwners: Set<String> = emptySet()
     ): String {
@@ -10736,7 +10855,8 @@ ${entries.joinToString(",\n")}
             result,
             attributeModifierIdReferences,
             attributeModifierMethods,
-            genericMethodReturnTypes
+            genericMethodReturnTypes,
+            attributeModifierIdMethodArguments
         )
         result = migrateEntityRidingOffsetExpressions(result)
         result = migrateLegacyPassengerAttachmentOverrides(result)
@@ -16540,8 +16660,12 @@ ${indent}}"""
         source: String,
         crossFileAttributeModifierIds: Set<String> = emptySet(),
         attributeModifierMethods: Map<String, Set<String>> = emptyMap(),
-        genericMethodReturnTypes: Map<String, String> = emptyMap()
+        genericMethodReturnTypes: Map<String, String> = emptyMap(),
+        attributeModifierIdMethodArguments: Set<AttributeModifierIdMethodArgument> = emptySet()
     ): String {
+        val ownerName = javaTopLevelTypeName(source)
+        val hasAttributeModifierIdMethodArguments = ownerName != null &&
+            attributeModifierIdMethodArguments.any { it.owner == ownerName }
         if (source.contains("getDefaultAttributeModifiers(EquipmentSlot") &&
             source.contains("ImmutableMultimap") &&
             source.contains("new AttributeModifier(")) {
@@ -16552,7 +16676,8 @@ ${indent}}"""
             !source.contains(".hasModifier(") &&
             !source.contains(".removeModifier(") &&
             !source.contains(".getModifier(") &&
-            !source.contains(".addAttributeModifier(")) {
+            !source.contains(".addAttributeModifier(") &&
+            !hasAttributeModifierIdMethodArguments) {
             return source
         }
 
@@ -16567,7 +16692,6 @@ ${indent}}"""
             "net.minecraft.resources.ResourceLocation.fromNamespaceAndPath($namespace, \"$path\")"
 
         val idAliases = mutableMapOf<String, String>()
-        val ownerName = javaTopLevelTypeName(source)
         var result = source
 
         result = Regex("""\bUUID\s+([A-Z0-9_]*MODIFIER[A-Z0-9_]*)\s*=\s*UUID\.fromString\(\s*"[^"]+"\s*\)""")
@@ -16747,12 +16871,72 @@ ${indent}}"""
                 "$receiver.$methodName($idExpression)"
             }
         }
+        result = migrateAttributeModifierIdMethodParameterTypes(result, attributeModifierIdMethodArguments)
 
         val withoutUuidImport = removeImport(result, "java.util.UUID")
         if (!Regex("""\bUUID\b""").containsMatchIn(withoutUuidImport)) {
             result = withoutUuidImport
         }
         return result
+    }
+
+    private fun migrateAttributeModifierIdMethodParameterTypes(
+        source: String,
+        attributeModifierIdMethodArguments: Set<AttributeModifierIdMethodArgument>
+    ): String {
+        val ownerName = javaTopLevelTypeName(source) ?: return source
+        val ownerHints = attributeModifierIdMethodArguments
+            .filter { it.owner == ownerName }
+            .groupBy { it.methodName }
+            .mapValues { entry -> entry.value.map { it.parameterIndex }.toSet() }
+        if (ownerHints.isEmpty() || !source.contains("UUID")) return source
+
+        val id = """[A-Za-z_$][\w$]*"""
+        val migratedParameterNames = linkedSetOf<String>()
+        var changed = false
+        var result = Regex(
+            """(?m)^([ \t]*(?:(?:public|protected|private|static|final|default|abstract|synchronized)\s+)+[\w<>\[\].?,\s]+\s+($id)\s*\()([^;{}\r\n]*)\)"""
+        ).replace(source) { match ->
+            val methodName = match.groupValues[2]
+            val migratedIndexes = ownerHints[methodName] ?: return@replace match.value
+            val params = splitTopLevelJavaArgs(match.groupValues[3])
+            if (params.isEmpty()) return@replace match.value
+            var methodChanged = false
+            val migratedParams = params.mapIndexed { index, param ->
+                if (index !in migratedIndexes) return@mapIndexed param
+                val migrated = Regex(
+                    """((?:@[A-Za-z_$][\w$.]*(?:\([^)]*\))?\s+)*)((?:java\.util\.)?UUID)(\s+($id)\b)"""
+                ).replace(param) { paramMatch ->
+                    methodChanged = true
+                    migratedParameterNames += paramMatch.groupValues[4]
+                    "${paramMatch.groupValues[1]}ResourceLocation${paramMatch.groupValues[3]}"
+                }
+                migrated
+            }
+            if (!methodChanged) {
+                match.value
+            } else {
+                changed = true
+                "${match.groupValues[1]}${migratedParams.joinToString(", ")})"
+            }
+        }
+        if (!changed) return source
+
+        val idMaps = linkedSetOf<String>()
+        for (paramName in migratedParameterNames) {
+            val escaped = Regex.escape(paramName)
+            Regex("""\b($id)\s*\.\s*(?:put|get|containsKey|remove)\(\s*$escaped\b""")
+                .findAll(result)
+                .forEach { idMaps += it.groupValues[1] }
+        }
+        for (mapName in idMaps) {
+            result = Regex(
+                """\b((?:java\.util\.)?(?:Map|HashMap|LinkedHashMap|ConcurrentHashMap|ConcurrentMap)\s*<\s*)(?:java\.util\.)?UUID(\s*,[^;=\r\n>]*(?:>[^;=\r\n>]*)?\s+${Regex.escape(mapName)}\b)"""
+            ).replace(result) { match ->
+                "${match.groupValues[1]}ResourceLocation${match.groupValues[2]}"
+            }
+        }
+        return addImportIfMissing(result, "net.minecraft.resources.ResourceLocation")
     }
 
     private fun declaredAttributeModifierMethodNames(source: String): Set<String> {
@@ -16785,6 +16969,11 @@ ${indent}}"""
                 }
             }
         Regex("""\binstanceof\s+($typeExpression)\s+($id)\b""")
+            .findAll(source)
+            .forEach { match ->
+                types[match.groupValues[2]] = simpleTypeName(match.groupValues[1])
+            }
+        Regex("""\bfor\s*\(\s*($typeExpression)\s+($id)\s*:""")
             .findAll(source)
             .forEach { match ->
                 types[match.groupValues[2]] = simpleTypeName(match.groupValues[1])

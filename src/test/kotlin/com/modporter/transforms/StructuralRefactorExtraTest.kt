@@ -8264,6 +8264,69 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates methods and maps receiving attribute modifier ids without touching ordinary UUID state`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("Mount.java").writeText("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.UUID;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class Mount {
+                private static final HashMap<UUID, ResourceLocation> ID_TEXTURE_MAP = new HashMap<>();
+                private static final HashMap<UUID, String> PLAYER_NAMES = new HashMap<>();
+
+                public static void registerJumpOverlayTextureOverride(UUID attributeId, ResourceLocation location) {
+                    ID_TEXTURE_MAP.put(attributeId, location);
+                }
+
+                public static void registerJumpOverlayTextureOverride(AttributeModifier attribute, ResourceLocation location) {
+                    registerJumpOverlayTextureOverride(attribute.getId(), location);
+                }
+
+                public ResourceLocation getOverlayTexture(UUID attributeId) {
+                    ResourceLocation location = ID_TEXTURE_MAP.get(attributeId);
+                    return location == null ? ResourceLocation.fromNamespaceAndPath("example", "default") : location;
+                }
+
+                public String getPlayerName(UUID playerId) {
+                    return PLAYER_NAMES.get(playerId);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Overlay.java").writeText("""
+            package com.example;
+
+            import java.util.Set;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class Overlay {
+                ResourceLocation texture(Mount mount, Set<AttributeModifier> modifiers) {
+                    for (AttributeModifier modifier : modifiers) {
+                        return mount.getOverlayTexture(modifier.getId());
+                    }
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val mount = srcDir.resolve("Mount.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(mount.contains("private static final HashMap<ResourceLocation, ResourceLocation> ID_TEXTURE_MAP = new HashMap<>();"), mount)
+        assertTrue(mount.contains("public static void registerJumpOverlayTextureOverride(ResourceLocation attributeId, ResourceLocation location)"), mount)
+        assertTrue(mount.contains("public ResourceLocation getOverlayTexture(ResourceLocation attributeId)"), mount)
+        assertTrue(mount.contains("registerJumpOverlayTextureOverride(attribute.id(), location);"), mount)
+        assertTrue(mount.contains("private static final HashMap<UUID, String> PLAYER_NAMES = new HashMap<>();"), mount)
+        assertTrue(mount.contains("public String getPlayerName(UUID playerId)"), mount)
+    }
+
+    @Test
     fun `migrates additional vanilla 1_21 entity item recipe and particle API shapes`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
