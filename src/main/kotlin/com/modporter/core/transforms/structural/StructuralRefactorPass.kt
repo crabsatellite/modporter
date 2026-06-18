@@ -11313,6 +11313,7 @@ ${entries.joinToString(",\n")}
         result = migrateDeferredHolderCollectionVariance(result)
         result = migrateLegacyCommonHooksToolChecks(result)
         result = migrateWeightedEntryWrapperAccessors(result)
+        result = migrateLegacyLootEnchantmentHolderCalls(result)
         result = migrateLegacyBlockLootSubProviderSource(result)
         result = migrateLegacySpriteSourceProviderSource(result, spriteSourceProviderClasses)
         result = migrateDataPackRegistryMapCodecSource(result, mapCodecConstantOwners)
@@ -20989,6 +20990,27 @@ $methodBody
         return null
     }
 
+    private fun migrateLegacyLootEnchantmentHolderCalls(source: String): String {
+        if (!source.contains("Enchantments.FORTUNE") ||
+            !Regex("""(?:ApplyBonusCount\.add(?:Ore|Uniform|BonusBinomialDistribution)BonusCount|BonusLevelTableCondition\.bonusLevelFlatChance)\(\s*Enchantments\.FORTUNE""")
+                .containsMatchIn(source)) {
+            return source
+        }
+        val hasRegistryContext = source.contains("this.registries") ||
+            Regex("""extends\s+(?:[A-Za-z_$][\w$]*\.)?[A-Za-z_$][\w$]*BlockLootSubProvider\b""").containsMatchIn(source)
+        if (!hasRegistryContext) return source
+
+        val fortuneHolder = "this.registries.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.FORTUNE)"
+        val result = Regex(
+            """((?:ApplyBonusCount\.add(?:Ore|Uniform|BonusBinomialDistribution)BonusCount|BonusLevelTableCondition\.bonusLevelFlatChance)\(\s*)Enchantments\.FORTUNE"""
+        ).replace(source, "$1$fortuneHolder")
+        return if (result != source) {
+            addImportIfMissing(result, "net.minecraft.core.registries.Registries")
+        } else {
+            source
+        }
+    }
+
     private fun migrateLegacyBlockLootSubProviderSource(source: String): String {
         if (!source.contains("extends BlockLootSubProvider")) return source
         val className = Regex("""\bclass\s+([A-Za-z_$][\w$]*)\s+extends\s+BlockLootSubProvider\b""")
@@ -21032,10 +21054,6 @@ $methodBody
                 val body = if (openBrace >= 0 && closeBrace > openBrace) result.substring(openBrace + 1, closeBrace) else ""
                 if (body.contains("this.")) match.value else "protected static LootTable.Builder createShearsOnlyDrop("
             }
-        val fortuneHolder = "this.registries.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.FORTUNE)"
-        result = Regex(
-            """((?:ApplyBonusCount\.add(?:Ore|Uniform|BonusBinomialDistribution)BonusCount|BonusLevelTableCondition\.bonusLevelFlatChance)\(\s*)Enchantments\.FORTUNE"""
-        ).replace(result, "$1$fortuneHolder")
         return result
     }
 

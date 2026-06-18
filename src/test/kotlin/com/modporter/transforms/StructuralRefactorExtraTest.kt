@@ -11008,6 +11008,27 @@ class StructuralRefactorExtraTest {
                 }
             }
         """.trimIndent())
+        srcDir.resolve("LibraryBlockLootSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.enchantment.Enchantments;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.storage.loot.LootTable;
+            import net.minecraft.world.level.storage.loot.entries.LootItem;
+            import net.minecraft.world.level.storage.loot.functions.ApplyBonusCount;
+            import net.minecraft.world.level.storage.loot.predicates.BonusLevelTableCondition;
+
+            public class LibraryBlockLootSurface extends NitrogenBlockLootSubProvider {
+                private LootTable.Builder leaves(Block block) {
+                    return LootTable.lootTable()
+                        .withPool(net.minecraft.world.level.storage.loot.LootPool.lootPool()
+                            .add(LootItem.lootTableItem(Items.STICK)
+                                .when(BonusLevelTableCondition.bonusLevelFlatChance(Enchantments.FORTUNE, 0.1F))
+                                .apply(ApplyBonusCount.addUniformBonusCount(Enchantments.FORTUNE))));
+                }
+            }
+        """.trimIndent())
         srcDir.resolve("ResolvableProfileSkullSurface.java").writeText("""
             package com.example;
 
@@ -11814,6 +11835,7 @@ class StructuralRefactorExtraTest {
         val renderArrayColorSurface = srcDir.resolve("RenderArrayColorSurface.java").readText()
         val staticModBusSurface = srcDir.resolve("StaticModBusSurface.java").readText()
         val blockLootSurface = srcDir.resolve("BlockLootSurface.java").readText()
+        val libraryBlockLootSurface = srcDir.resolve("LibraryBlockLootSurface.java").readText()
         val resolvableProfileSkullSurface = srcDir.resolve("ResolvableProfileSkullSurface.java").readText()
         val legacyProfileTextureSurface = srcDir.resolve("LegacyProfileTextureSurface.java").readText()
         val toast = srcDir.resolve("LegacyToast.java").readText()
@@ -12054,12 +12076,16 @@ class StructuralRefactorExtraTest {
         assertTrue(!staticModBusSurface.contains("FMLJavaModLoadingContext"))
         assertTrue(blockLootSurface.contains("public BlockLootSurface(HolderLookup.Provider registries)"))
         assertTrue(blockLootSurface.contains("super(Set.of(), FeatureFlags.REGISTRY.allFlags(), registries);"))
+        assertTrue(blockLootSurface.contains("import net.minecraft.core.registries.Registries;"))
         assertTrue(blockLootSurface.contains("this.registries.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.FORTUNE)"))
         assertTrue(blockLootSurface.contains("HAS_SHEARS.or(this.hasSilkTouch())"))
         assertTrue(blockLootSurface.contains("protected LootTable.Builder createSilkTouchOrShearsDispatchTable"))
         assertTrue(blockLootSurface.contains("protected LootTable.Builder createShearsDispatchTable"))
         assertTrue(blockLootSurface.contains("protected static LootTable.Builder createShearsOnlyDrop"))
         assertTrue(!blockLootSurface.contains("HAS_SILK_TOUCH"))
+        assertTrue(libraryBlockLootSurface.contains("import net.minecraft.core.registries.Registries;"))
+        assertTrue(libraryBlockLootSurface.contains("BonusLevelTableCondition.bonusLevelFlatChance(this.registries.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.FORTUNE), 0.1F)"))
+        assertTrue(libraryBlockLootSurface.contains("ApplyBonusCount.addUniformBonusCount(this.registries.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.FORTUNE))"))
         assertTrue(legacySpriteSourceProviderSurface.contains("public LegacySpriteSourceProviderSurface(PackOutput output, CompletableFuture<HolderLookup.Provider> provider, ExistingFileHelper helper)"), legacySpriteSourceProviderSurface)
         assertTrue(legacySpriteSourceProviderSurface.contains("super(output, provider, ExampleMod.ID, helper);"), legacySpriteSourceProviderSurface)
         assertTrue(legacySpriteSourceProviderSurface.contains("protected void gather()"), legacySpriteSourceProviderSurface)
