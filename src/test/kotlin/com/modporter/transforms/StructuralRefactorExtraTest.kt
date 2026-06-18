@@ -15965,6 +15965,50 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates screen background rendered event overrides to new renderBackground signature`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DialogueScreen.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.screens.Screen;
+            import net.minecraft.network.chat.Component;
+            import net.neoforged.neoforge.client.event.ScreenEvent;
+            import net.neoforged.neoforge.common.NeoForge;
+
+            public class DialogueScreen extends Screen {
+                public DialogueScreen() {
+                    super(Component.empty());
+                }
+
+                /**
+                 * [CODE COPY] - {@link Screen#renderBackground(GuiGraphics)}.
+                 */
+                @Override
+                public void renderBackground(GuiGraphics guiGraphics) {
+                    if (this.getMinecraft().level != null) {
+                        NeoForge.EVENT_BUS.post(new ScreenEvent.BackgroundRendered(this, guiGraphics)).isCanceled().isCanceled();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val second = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("DialogueScreen.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-screen-background-rendered-event" })
+        assertFalse(second.changes.any { it.ruleId == "struct-screen-background-rendered-event" })
+        assertTrue(source.contains("public void renderBackground(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTicks) {\n    }"), source)
+        assertTrue(source.contains("Screen#renderBackground(GuiGraphics, int, int, float)"), source)
+        assertFalse(source.contains("ScreenEvent.BackgroundRendered"), source)
+        assertFalse(source.contains("NeoForge.EVENT_BUS"), source)
+        assertFalse(source.contains("import net.neoforged.neoforge.client.event.ScreenEvent;"), source)
+        assertFalse(source.contains("import net.neoforged.neoforge.common.NeoForge;"), source)
+    }
+
+    @Test
     fun `migrates strict warning surfaces by source shape without mod specific rules`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

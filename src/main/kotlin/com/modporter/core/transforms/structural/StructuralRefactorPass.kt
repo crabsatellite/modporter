@@ -8084,6 +8084,20 @@ $fields
                     text = holderAccessorMigrated
                 }
 
+                val screenBackgroundMigrated = migrateScreenBackgroundRenderedEventSource(text)
+                if (screenBackgroundMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate legacy screen background event overrides to the 1.21 renderBackground signature",
+                        before = "renderBackground(GuiGraphics) posting ScreenEvent.BackgroundRendered",
+                        after = "renderBackground(GuiGraphics, int, int, float) with no background draw",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-screen-background-rendered-event"
+                    ))
+                    text = screenBackgroundMigrated
+                }
+
                 val customDataMigrated = migrateCustomDataComponentsSource(text)
                 if (customDataMigrated != text) {
                     changes.add(Change(
@@ -11593,6 +11607,62 @@ ${entries.joinToString(",\n")}
             result = result.replace("$variable.getModelName()", "$variable.getSkin().model().id()")
         }
         result = result.replace("MobEffect effect = effectHolder;", "MobEffect effect = effectHolder.value();")
+        return result
+    }
+
+    private fun migrateScreenBackgroundRenderedEventSource(source: String): String {
+        if (!source.contains("ScreenEvent.BackgroundRendered") ||
+            !source.contains("renderBackground(GuiGraphics")) {
+            return source
+        }
+
+        var result = source
+        var cursor = 0
+        val methodPattern = Regex(
+            """(?m)^([ \t]*)@Override\s*\r?\n[ \t]*public\s+void\s+renderBackground\s*\(\s*GuiGraphics\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
+        )
+        while (true) {
+            val match = methodPattern.find(result, cursor) ?: break
+            val indent = match.groupValues[1]
+            val graphicsName = match.groupValues[2]
+            val openBrace = result.indexOf('{', match.range.last)
+            if (openBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            val eventOnlyBody = Regex(
+                """(?s)^\s*(?:if\s*\([^{}]+\)\s*\{\s*)?NeoForge\.EVENT_BUS\.post\(\s*new\s+ScreenEvent\.BackgroundRendered\(\s*this\s*,\s*${Regex.escape(graphicsName)}\s*\)\s*\)(?:\.isCanceled\(\))*\s*;\s*(?:\}\s*)?$"""
+            )
+            if (!eventOnlyBody.matches(body)) {
+                cursor = closeBrace + 1
+                continue
+            }
+
+            val removalStart = javaDeclarationStartWithLeadingMetadata(result, match.range.first)
+            val leadingMetadata = result.substring(removalStart, match.range.first)
+                .replace(
+                    "Screen#renderBackground(GuiGraphics)",
+                    "Screen#renderBackground(GuiGraphics, int, int, float)"
+                )
+            val replacement = """
+${leadingMetadata}${indent}@Override
+${indent}public void renderBackground(GuiGraphics $graphicsName, int mouseX, int mouseY, float partialTicks) {
+${indent}}
+""".trimStart('\n').trimEnd()
+            result = result.substring(0, removalStart) + replacement + result.substring(closeBrace + 1)
+            cursor = removalStart + replacement.length
+        }
+        if (result != source) {
+            result = removeUnusedSimpleImport(result, "net.neoforged.neoforge.common.NeoForge", "NeoForge")
+            result = removeUnusedSimpleImport(result, "net.neoforged.neoforge.client.event.ScreenEvent", "ScreenEvent")
+            result = cleanupRedundantBlankLines(result)
+        }
         return result
     }
 
