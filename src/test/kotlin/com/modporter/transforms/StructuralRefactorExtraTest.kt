@@ -9514,6 +9514,34 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates removed game profile display name component helper`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("WhitelistCommand.java").writeText("""
+            package com.example;
+
+            import com.mojang.authlib.GameProfile;
+            import net.minecraft.commands.CommandSourceStack;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.network.chat.ComponentUtils;
+
+            public class WhitelistCommand {
+                public void add(CommandSourceStack source, GameProfile gameProfile) {
+                    source.sendSuccess(() -> Component.translatable("commands.example.add.success", ComponentUtils.getDisplayName(gameProfile)), true);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val command = srcDir.resolve("WhitelistCommand.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(command.contains("Component.translatable(\"commands.example.add.success\", Component.literal(gameProfile.getName()))"), command)
+        assertFalse(command.contains("import net.minecraft.network.chat.ComponentUtils;"), command)
+        assertFalse(command.contains("ComponentUtils.getDisplayName"), command)
+    }
+
+    @Test
     fun `migrates strict runtime compile API surfaces without mod-specific rules`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

@@ -10771,6 +10771,7 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyCriterionTriggerInstanceCallSites(result, criterionInstanceFactoryHints)
         result = migrateLegacyDatagenTagConstantsSource(result)
         result = migrateLegacyComponentSerializationSource(result)
+        result = migrateGameProfileDisplayNameComponents(result)
         result = migrateRegistryAccessEmptyFallbacks(result)
         result = migrateLegacyGameEventListenerSource(result)
         result = migrateLegacyNetworkBufferCodecsSource(result)
@@ -18255,6 +18256,24 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 args.size == 2 && isRegistryAccessEmptyExpression(args[1]) -> listOf(args[0], registries)
                 else -> null
             }
+        }
+        return result
+    }
+
+    private fun migrateGameProfileDisplayNameComponents(source: String): String {
+        if (!source.contains("ComponentUtils.getDisplayName(")) return source
+
+        var result = rewriteJavaCall(source, "getDisplayName") { receiver, args ->
+            if (receiver != "ComponentUtils" || args.size != 1) return@rewriteJavaCall null
+            val profile = args[0].trim()
+            "Component.literal($profile.getName())"
+        }
+        if (result == source) return source
+
+        result = addImportIfMissing(result, "net.minecraft.network.chat.Component")
+        val withoutComponentUtils = removeImport(result, "net.minecraft.network.chat.ComponentUtils")
+        if (!Regex("""\bComponentUtils\b""").containsMatchIn(withoutComponentUtils)) {
+            result = withoutComponentUtils
         }
         return result
     }
