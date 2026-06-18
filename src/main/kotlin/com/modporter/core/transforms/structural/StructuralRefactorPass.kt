@@ -11982,13 +11982,28 @@ ${indent}}
     }
 
     private fun migrateDimensionSpecialEffectsCloudSignatureSource(source: String): String {
-        if (!source.contains("renderClouds(") || source.contains("modelViewMatrix, Matrix4f")) return source
+        if (!source.contains("renderClouds(")) return source
         var changed = false
-        val result = Regex(
+        var result = Regex(
             """renderClouds\s*\(\s*ClientLevel\s+([A-Za-z_$][\w$]*)\s*,\s*int\s+([A-Za-z_$][\w$]*)\s*,\s*float\s+([A-Za-z_$][\w$]*)\s*,\s*PoseStack\s+([A-Za-z_$][\w$]*)\s*,\s*double\s+([A-Za-z_$][\w$]*)\s*,\s*double\s+([A-Za-z_$][\w$]*)\s*,\s*double\s+([A-Za-z_$][\w$]*)\s*,\s*Matrix4f\s+([A-Za-z_$][\w$]*)\s*\)"""
         ).replace(source) { match ->
             changed = true
             "renderClouds(ClientLevel ${match.groupValues[1]}, int ${match.groupValues[2]}, float ${match.groupValues[3]}, PoseStack ${match.groupValues[4]}, double ${match.groupValues[5]}, double ${match.groupValues[6]}, double ${match.groupValues[7]}, Matrix4f modelViewMatrix, Matrix4f ${match.groupValues[8]})"
+        }
+        val cloudMethod = javaDeclaredMethodText(result, "renderClouds")
+        if (cloudMethod != null && cloudMethod.contains("Matrix4f modelViewMatrix") && !cloudMethod.contains(".mulPose(modelViewMatrix);")) {
+            val poseName = Regex("""PoseStack\s+([A-Za-z_$][\w$]*)""")
+                .find(cloudMethod)
+                ?.groupValues
+                ?.get(1)
+            if (poseName != null && cloudMethod.contains("$poseName.pushPose();")) {
+                val migratedMethod = cloudMethod.replaceFirst(
+                    "$poseName.pushPose();",
+                    "$poseName.pushPose();\n                $poseName.mulPose(modelViewMatrix);"
+                )
+                result = result.replace(cloudMethod, migratedMethod)
+                changed = true
+            }
         }
         return if (changed) result else source
     }
@@ -12228,6 +12243,7 @@ ${indent}}
         result = migrateRecipeBookGhostRecipeSource(result)
         result = migrateOptionalCompoundRecipeTagAccess(result, optionalCompoundRecipeTagOwners)
         result = migrateLegacyClientRenderingSource(result)
+        result = migrateLevelRendererCloudTesselatorSource(result)
         result = migrateLegacySkinManagerTextureLookups(result)
         result = migrateLegacyModelEventSource(result)
         result = migrateLegacyGuiLayerRegistrationSource(result)
@@ -13500,6 +13516,7 @@ ${indent}}
         }
         result = migrateTextureAtlasSpriteFloatCoordinateCalls(result)
         result = migrateVertexConsumerPoseNormals(result)
+        result = migrateLevelRendererCloudTesselatorSource(result)
         result = migrateLegacyTesselatorSource(result)
         result = migrateInventoryScreenEntityPreviewCalls(result)
         result = migratePanoramaRendererRenderApis(result)
@@ -13818,6 +13835,165 @@ ${indent}}
             cursor = method.range.first + rewrittenSignature.length + 1 + rewrittenBody.length
         }
         return result
+    }
+
+    private fun migrateLevelRendererCloudTesselatorSource(source: String): String {
+        if (!source.contains("callBuildClouds") &&
+            !source.contains("Tesselator.getInstance().getBuilder()") &&
+            !source.contains("getPositionTexColorNormalShader")) {
+            return source
+        }
+
+        val id = """[A-Za-z_$][\w$]*"""
+        var result = source
+        var changed = false
+        var needsTesselator = false
+        var needsRenderType = false
+
+        result = Regex("""MeshData\s+callBuildClouds\s*\(\s*BufferBuilder\s+($id)\s*,""")
+            .replace(result) { match ->
+                changed = true
+                needsTesselator = true
+                "MeshData callBuildClouds(Tesselator ${match.groupValues[1]},"
+            }
+
+        val getBuilderDeclarations = Regex(
+            """(?m)^([ \t]*)BufferBuilder\s+($id)\s*=\s*Tesselator\.getInstance\(\)\.getBuilder\(\)\s*;\s*\r?\n?"""
+        ).findAll(result).toList()
+        val mutableBuilderTesselators = linkedMapOf<String, String>()
+        for (match in getBuilderDeclarations) {
+            val indent = match.groupValues[1]
+            val builder = match.groupValues[2]
+            val callsBuildClouds = Regex("""callBuildClouds\s*\(\s*${Regex.escape(builder)}\s*,""").containsMatchIn(result)
+            val startsTesselatorBuilder = Regex("""\b${Regex.escape(builder)}\s*=\s*Tesselator\.getInstance\(\)\.begin\(""").containsMatchIn(result)
+            if (callsBuildClouds) {
+                result = result.replace(match.value, "")
+                result = Regex("""callBuildClouds\s*\(\s*${Regex.escape(builder)}\s*,""")
+                    .replace(result, "callBuildClouds(Tesselator.getInstance(),")
+                changed = true
+                needsTesselator = true
+            } else if (startsTesselatorBuilder) {
+                val tesselator = "${builder}Tesselator"
+                result = result.replace(match.value, "${indent}Tesselator $tesselator = Tesselator.getInstance();\n")
+                mutableBuilderTesselators[builder] = tesselator
+                changed = true
+                needsTesselator = true
+            } else {
+                result = removeUnusedTesselatorGetBuilderDeclaration(result, match.value, builder)
+                    .also { if (it != result) changed = true }
+            }
+        }
+
+        val migratedBuilderParameterMethods = linkedMapOf<String, String>()
+        val methodPattern = Regex("""(?m)(?:public|protected|private)\s+[^{;\r\n]+?\s+($id)\s*\([^)]*BufferBuilder\s+($id)[^)]*\)\s*\{""")
+        var cursor = 0
+        while (true) {
+            val method = methodPattern.find(result, cursor) ?: break
+            val methodName = method.groupValues[1]
+            val builderParam = method.groupValues[2]
+            val openBrace = result.indexOf('{', method.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = method.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            if (!Regex("""\b${Regex.escape(builderParam)}\s*=\s*Tesselator\.getInstance\(\)\.begin\(""").containsMatchIn(body)) {
+                cursor = closeBrace + 1
+                continue
+            }
+
+            val signature = result.substring(method.range.first, openBrace)
+            val rewrittenSignature = Regex("""\bBufferBuilder\s+${Regex.escape(builderParam)}\b""")
+                .replace(signature, "Tesselator tesselator")
+            var firstBegin = true
+            val rewrittenBody = Regex("""\b${Regex.escape(builderParam)}\s*=\s*Tesselator\.getInstance\(\)\.begin\(""")
+                .replace(body) {
+                    if (firstBegin) {
+                        firstBegin = false
+                        "BufferBuilder $builderParam = tesselator.begin("
+                    } else {
+                        "$builderParam = tesselator.begin("
+                    }
+                }
+            result = result.substring(0, method.range.first) +
+                rewrittenSignature +
+                result.substring(openBrace, openBrace + 1) +
+                rewrittenBody +
+                result.substring(closeBrace)
+            cursor = method.range.first + rewrittenSignature.length + 1 + rewrittenBody.length
+            migratedBuilderParameterMethods[methodName] = builderParam
+            changed = true
+            needsTesselator = true
+        }
+
+        mutableBuilderTesselators.forEach { (builder, tesselator) ->
+            var firstBegin = true
+            result = Regex("""\b${Regex.escape(builder)}\s*=\s*Tesselator\.getInstance\(\)\.begin\(""")
+                .replace(result) {
+                    if (firstBegin) {
+                        firstBegin = false
+                        "BufferBuilder $builder = $tesselator.begin("
+                    } else {
+                        "$builder = $tesselator.begin("
+                    }
+                }
+            for (methodName in migratedBuilderParameterMethods.keys) {
+                result = rewriteJavaInvocationArguments(result, methodName) { args ->
+                    val migrated = args.map { arg -> if (arg.trim() == builder) tesselator else arg }
+                    migrated.takeIf { it != args }
+                }
+            }
+        }
+
+        val cloudMaskPattern = Regex(
+            """(?s)if\s*\(\s*($id)\s*==\s*0\s*\)\s*\{\s*RenderSystem\.colorMask\s*\(\s*false\s*,\s*false\s*,\s*false\s*,\s*false\s*\)\s*;\s*\}\s*else\s*\{\s*RenderSystem\.colorMask\s*\(\s*true\s*,\s*true\s*,\s*true\s*,\s*true\s*\)\s*;\s*\}\s*ShaderInstance\s+($id)\s*=\s*RenderSystem\.getShader\(\)\s*;\s*([^;\r\n]+?\.drawWithShader\([^;]+?,\s*\2\s*\)\s*;)"""
+        )
+        result = cloudMaskPattern.replace(result) { match ->
+            changed = true
+            needsRenderType = true
+            val loopVar = match.groupValues[1]
+            val shaderVar = match.groupValues[2]
+            val drawCall = match.groupValues[3]
+            "RenderType rendertype = $loopVar == 0 ? RenderType.cloudsDepthOnly() : RenderType.clouds();\n" +
+                "                        rendertype.setupRenderState();\n" +
+                "                        ShaderInstance $shaderVar = RenderSystem.getShader();\n" +
+                "                        $drawCall\n" +
+                "                        rendertype.clearRenderState();"
+        }
+        if (needsRenderType) {
+            result = Regex("""(?m)^[ \t]*RenderSystem\.setShader\(GameRenderer::getPositionTexColorNormalShader\);\s*\r?\n""")
+                .replace(result, "")
+            result = Regex("""(?m)^[ \t]*RenderSystem\.setShaderTexture\(0,\s*CLOUDS_LOCATION\);\s*\r?\n""")
+                .replace(result, "")
+        }
+
+        if (!changed) return source
+        if (needsTesselator) {
+            result = addImportIfMissing(result, "com.mojang.blaze3d.vertex.Tesselator")
+            if (!Regex("""\bBufferBuilder\b""").containsMatchIn(removeImport(result, "com.mojang.blaze3d.vertex.BufferBuilder"))) {
+                result = removeImport(result, "com.mojang.blaze3d.vertex.BufferBuilder")
+            }
+        }
+        if (needsRenderType) {
+            result = addImportIfMissing(result, "net.minecraft.client.renderer.RenderType")
+        }
+        return result
+    }
+
+    private fun removeUnusedTesselatorGetBuilderDeclaration(source: String, declaration: String, builder: String): String {
+        val declarationStart = source.indexOf(declaration)
+        if (declarationStart < 0) return source
+        val methodStart = source.lastIndexOf('{', declarationStart)
+        val methodEnd = if (methodStart >= 0) findMatchingBrace(source, methodStart) else -1
+        if (methodStart < 0 || methodEnd <= methodStart) return source
+        val methodText = source.substring(methodStart + 1, methodEnd)
+        val withoutDeclaration = methodText.replace(declaration, "")
+        return if (!Regex("""\b${Regex.escape(builder)}\b""").containsMatchIn(withoutDeclaration)) {
+            source.replace(declaration, "")
+        } else {
+            source
+        }
     }
 
     private fun migrateLegacyModelEventSource(source: String): String {

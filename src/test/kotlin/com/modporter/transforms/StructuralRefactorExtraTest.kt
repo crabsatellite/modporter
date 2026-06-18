@@ -17321,6 +17321,9 @@ class StructuralRefactorExtraTest {
             public class DimensionCloudSignatureSurface {
                 @Override
                 public boolean renderClouds(ClientLevel level, int ticks, float partialTick, PoseStack poseStack, double camX, double camY, double camZ, Matrix4f projectionMatrix) {
+                    poseStack.pushPose();
+                    poseStack.translate(camX, camY, camZ);
+                    poseStack.popPose();
                     return false;
                 }
             }
@@ -17331,7 +17334,118 @@ class StructuralRefactorExtraTest {
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
         assertTrue(migrated.contains("renderClouds(ClientLevel level, int ticks, float partialTick, PoseStack poseStack, double camX, double camY, double camZ, Matrix4f modelViewMatrix, Matrix4f projectionMatrix)"), migrated)
+        assertTrue(migrated.contains("poseStack.mulPose(modelViewMatrix);"), migrated)
         assertFalse(migrated.contains("double camZ, Matrix4f projectionMatrix)"), migrated)
+    }
+
+    @Test
+    fun `migrates LevelRenderer cloud build invokers to Tesselator`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LevelRendererAccessor.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+            import com.mojang.blaze3d.vertex.MeshData;
+            import net.minecraft.client.renderer.LevelRenderer;
+            import net.minecraft.world.phys.Vec3;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.gen.Invoker;
+
+            @Mixin(LevelRenderer.class)
+            public interface LevelRendererAccessor {
+                @Invoker
+                MeshData callBuildClouds(BufferBuilder builder, double x, double y, double z, Vec3 cloudColor);
+            }
+        """.trimIndent())
+        srcDir.resolve("CloudRenderSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.systems.RenderSystem;
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+            import com.mojang.blaze3d.vertex.MeshData;
+            import com.mojang.blaze3d.vertex.Tesselator;
+            import com.mojang.blaze3d.vertex.VertexBuffer;
+            import net.minecraft.client.renderer.ShaderInstance;
+            import net.minecraft.client.renderer.GameRenderer;
+            import org.joml.Matrix4f;
+
+            public class CloudRenderSurface {
+                public void render(LevelRendererAccessor accessor, VertexBuffer cloudBuffer, Matrix4f pose, Matrix4f projectionMatrix, Object vec3) {
+                    BufferBuilder bufferbuilder = Tesselator.getInstance().getBuilder();
+                    MeshData renderedBuffer = accessor.callBuildClouds(bufferbuilder, 1.0D, 2.0D, 3.0D, (net.minecraft.world.phys.Vec3) vec3);
+                    cloudBuffer.upload(renderedBuffer);
+                    RenderSystem.setShader(GameRenderer::getPositionTexColorNormalShader);
+                    RenderSystem.setShaderTexture(0, CLOUDS_LOCATION);
+                    for (int i1 = 0; i1 < 2; ++i1) {
+                        if (i1 == 0) {
+                            RenderSystem.colorMask(false, false, false, false);
+                        } else {
+                            RenderSystem.colorMask(true, true, true, true);
+                        }
+
+                        ShaderInstance shaderInstance = RenderSystem.getShader();
+                        cloudBuffer.drawWithShader(pose, projectionMatrix, shaderInstance);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val accessor = srcDir.resolve("LevelRendererAccessor.java").readText()
+        val render = srcDir.resolve("CloudRenderSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(accessor.contains("import com.mojang.blaze3d.vertex.Tesselator;"), accessor)
+        assertTrue(accessor.contains("MeshData callBuildClouds(Tesselator builder, double x, double y, double z, Vec3 cloudColor);"), accessor)
+        assertFalse(accessor.contains("BufferBuilder builder"), accessor)
+        assertTrue(render.contains("accessor.callBuildClouds(Tesselator.getInstance(), 1.0D, 2.0D, 3.0D"), render)
+        assertFalse(render.contains("Tesselator.getInstance().getBuilder()"), render)
+        assertFalse(render.contains("getPositionTexColorNormalShader"), render)
+        assertTrue(render.contains("RenderType rendertype = i1 == 0 ? RenderType.cloudsDepthOnly() : RenderType.clouds();"), render)
+        assertTrue(render.contains("rendertype.setupRenderState();"), render)
+        assertTrue(render.contains("rendertype.clearRenderState();"), render)
+    }
+
+    @Test
+    fun `migrates mutable tesselator builder parameters to tesselator begin calls`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("MutableTesselatorSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+            import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+            import com.mojang.blaze3d.vertex.Tesselator;
+            import com.mojang.blaze3d.vertex.VertexFormat;
+
+            public class MutableTesselatorSurface {
+                public void render() {
+                    BufferBuilder bufferBuilder = Tesselator.getInstance().getBuilder();
+                    bufferBuilder = Tesselator.getInstance().begin(VertexFormat.Mode.TRIANGLE_FAN, DefaultVertexFormat.POSITION_COLOR);
+                    drawCelestialBodies(bufferBuilder);
+                }
+
+                private void drawCelestialBodies(BufferBuilder bufferBuilder) {
+                    bufferBuilder = Tesselator.getInstance().begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_TEX);
+                    bufferBuilder.addVertex(0.0F, 1.0F, 0.0F);
+                    bufferBuilder = Tesselator.getInstance().begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_TEX);
+                    bufferBuilder.addVertex(1.0F, 0.0F, 0.0F);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("MutableTesselatorSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("Tesselator bufferBuilderTesselator = Tesselator.getInstance();"), migrated)
+        assertTrue(migrated.contains("BufferBuilder bufferBuilder = bufferBuilderTesselator.begin(VertexFormat.Mode.TRIANGLE_FAN, DefaultVertexFormat.POSITION_COLOR);"), migrated)
+        assertTrue(migrated.contains("drawCelestialBodies(bufferBuilderTesselator);"), migrated)
+        assertTrue(migrated.contains("private void drawCelestialBodies(Tesselator tesselator)"), migrated)
+        assertTrue(migrated.contains("BufferBuilder bufferBuilder = tesselator.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_TEX);"), migrated)
+        assertTrue(migrated.contains("bufferBuilder = tesselator.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_TEX);"), migrated)
+        assertFalse(migrated.contains("Tesselator.getInstance().getBuilder()"), migrated)
     }
 
     @Test
