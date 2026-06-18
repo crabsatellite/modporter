@@ -13414,6 +13414,22 @@ ${entries.joinToString(",\n")}
         val owner: CumulusMenuOwner?
     )
 
+    private data class CumulusMenuReferenceMigration(
+        val source: String,
+        val obsoleteListeners: Set<CumulusMenuListenerReference>
+    )
+
+    private data class CumulusMenuListenerReference(
+        val simpleTypeName: String,
+        val qualifiedTypeName: String,
+        val methodName: String
+    )
+
+    private data class CumulusMenuHelperMethodRemoval(
+        val source: String,
+        val obsoleteListeners: Set<CumulusMenuListenerReference>
+    )
+
     private data class CumulusMenuRegistration(
         val start: Int,
         val end: Int,
@@ -13439,7 +13455,7 @@ ${entries.joinToString(",\n")}
         for (file in javaFiles) {
             val original = file.readText()
             val migration = migrateCumulusMenuDefinitionSource(projectDir, original)
-            migration.owner?.let { owners += it }
+            (migration.owner ?: discoverMigratedCumulusMenuOwner(migration.source))?.let { owners += it }
             if (migration.source != original) {
                 stagedSources[file] = migration.source
                 changes += Change(
@@ -13455,11 +13471,13 @@ ${entries.joinToString(",\n")}
         }
 
         if (owners.isNotEmpty()) {
+            val obsoleteListeners = linkedSetOf<CumulusMenuListenerReference>()
             for (file in javaFiles) {
                 val base = stagedSources[file] ?: file.readText()
-                val migrated = migrateCumulusMenuReferences(base, owners)
-                if (migrated != base) {
-                    stagedSources[file] = migrated
+                val migration = migrateCumulusMenuReferences(base, owners)
+                obsoleteListeners += migration.obsoleteListeners
+                if (migration.source != base) {
+                    stagedSources[file] = migration.source
                     changes += Change(
                         file = file,
                         line = 1,
@@ -13469,6 +13487,24 @@ ${entries.joinToString(",\n")}
                         confidence = Confidence.HIGH,
                         ruleId = "struct-cumulus-menu-api-121"
                     )
+                }
+            }
+            if (obsoleteListeners.isNotEmpty()) {
+                for (file in javaFiles) {
+                    val base = stagedSources[file] ?: file.readText()
+                    val migrated = removeCumulusObsoleteMenuListenerRegistrations(base, obsoleteListeners)
+                    if (migrated != base) {
+                        stagedSources[file] = migrated
+                        changes += Change(
+                            file = file,
+                            line = 1,
+                            description = "Remove Cumulus menu listener registrations replaced by entrypoints",
+                            before = "mod bus listener for MenuHelper.prepareMenu setup",
+                            after = "CumulusEntrypoint MenuInitializer registration",
+                            confidence = Confidence.HIGH,
+                            ruleId = "struct-cumulus-menu-api-121"
+                        )
+                    }
                 }
             }
         }
@@ -13736,16 +13772,20 @@ $body
         return insertBeforeLastClassBrace(source, method)
     }
 
-    private fun migrateCumulusMenuReferences(source: String, owners: List<CumulusMenuOwner>): String {
+    private fun migrateCumulusMenuReferences(source: String, owners: List<CumulusMenuOwner>): CumulusMenuReferenceMigration {
         var result = source
         for (owner in owners) {
             val ownerNames = listOf(owner.simpleName, owner.qualifiedName).distinct()
             for (ownerName in ownerNames) {
                 val escapedOwner = Regex.escape(ownerName)
-                result = Regex("""(?m)^[ \t]*$escapedOwner\.${Regex.escape(owner.registerFieldName)}\.register\([^;\r\n]*\);\s*\r?\n""")
-                    .replace(result, "")
+                if (owner.registerFieldName.isNotBlank()) {
+                    result = Regex("""(?m)^[ \t]*$escapedOwner\.${Regex.escape(owner.registerFieldName)}\.register\([^;\r\n]*\);\s*\r?\n""")
+                        .replace(result, "")
+                }
                 for (field in owner.menuFields) {
                     val escapedField = Regex.escape(field)
+                    result = Regex("""(?m)^[ \t]*[A-Za-z_$][\w$]*\.prepareMenu\(\s*$escapedOwner\.$escapedField(?:\.get\(\))?\s*\)\s*;\s*\r?\n""")
+                        .replace(result, "")
                     result = Regex("""\b$escapedOwner\.$escapedField\.get\(\)\.getMusic\(\)""")
                         .replace(result, "$ownerName.$field.music()")
                     result = Regex("""\b$escapedOwner\.$escapedField\.get\(\)\.toString\(\)""")
@@ -13755,13 +13795,175 @@ $body
                 }
             }
         }
+        val methodRemoval = removeEmptyCumulusMenuHelperSetupMethods(result)
+        result = methodRemoval.source
+        result = removeUnusedMenuHelperImport(result)
         result = Regex("""\bMenus\.MINECRAFT\.get\(\)\.getMusic\(\)""")
             .replace(result, "Menus.MINECRAFT.music()")
         result = Regex("""\bMenus\.MINECRAFT\.get\(\)\.toString\(\)""")
             .replace(result, "Menus.MINECRAFT.toString()")
         result = Regex("""\bMenus\.MINECRAFT\.get\(\)""")
             .replace(result, "Menus.MINECRAFT")
-        return result
+        return CumulusMenuReferenceMigration(result, methodRemoval.obsoleteListeners)
+    }
+
+    private fun discoverMigratedCumulusMenuOwner(source: String): CumulusMenuOwner? {
+        if (!source.contains("MenuInitializer") ||
+            !source.contains("registerMenus(") ||
+            !source.contains(".registerMenu(")) {
+            return null
+        }
+        val className = javaTopLevelTypeName(source) ?: return null
+        val fields = Regex(
+            """\b[A-Za-z_$][\w$]*\.registerMenu\(\s*ResourceLocation\.fromNamespaceAndPath\([^;]+?\)\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*;"""
+        ).findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (fields.isEmpty()) return null
+        val packageName = packageNameOf(source)
+        return CumulusMenuOwner(
+            simpleName = className,
+            qualifiedName = if (packageName.isBlank()) className else "$packageName.$className",
+            registerFieldName = "",
+            menuFields = fields
+        )
+    }
+
+    private fun removeEmptyCumulusMenuHelperSetupMethods(source: String): CumulusMenuHelperMethodRemoval {
+        var result = source
+        var cursor = 0
+        val obsoleteListeners = linkedSetOf<CumulusMenuListenerReference>()
+        val simpleTypeName = javaTopLevelTypeName(result)
+        val packageName = packageNameOf(result)
+        val methodPattern = Regex("""(?m)^[ \t]*(?:public|protected|private)\s+static\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*MenuHelper\s+[A-Za-z_$][\w$]*\s*\)\s*\{""")
+        while (true) {
+            val match = methodPattern.find(result, cursor) ?: break
+            val openBrace = result.indexOf('{', match.range.last)
+            if (openBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            if (body.isBlank()) {
+                val methodName = match.groupValues[1]
+                if (simpleTypeName != null) {
+                    obsoleteListeners += CumulusMenuListenerReference(
+                        simpleTypeName = simpleTypeName,
+                        qualifiedTypeName = if (packageName.isBlank()) simpleTypeName else "$packageName.$simpleTypeName",
+                        methodName = methodName
+                    )
+                }
+                val removalStart = javaDeclarationStartWithLeadingMetadata(result, match.range.first)
+                result = result.substring(0, removalStart).trimEnd() + "\n\n" + result.substring(closeBrace + 1).trimStart('\r', '\n')
+                result = Regex("""(?m)^[ \t]*[A-Za-z_$][\w$.]*\.addListener\(\s*[A-Za-z_$][\w$.]*::${Regex.escape(methodName)}\s*\)\s*;\s*\r?\n""")
+                    .replace(result, "")
+                cursor = 0
+            } else {
+                cursor = closeBrace + 1
+            }
+        }
+        return CumulusMenuHelperMethodRemoval(cleanupRedundantBlankLines(result), obsoleteListeners)
+    }
+
+    private fun javaDeclarationStartWithLeadingMetadata(source: String, declarationStart: Int): Int {
+        var start = declarationStart
+        while (start > 0) {
+            val previousLineEnd = source.lastIndexOf('\n', start - 2)
+            val lineStart = if (previousLineEnd < 0) 0 else previousLineEnd + 1
+            val line = source.substring(lineStart, start).trim()
+            if (!line.startsWith("@")) break
+            start = lineStart
+        }
+        val before = source.substring(0, start)
+        val trimmedBefore = before.trimEnd()
+        if (trimmedBefore.endsWith("*/")) {
+            val commentEnd = before.lastIndexOf("*/") + 2
+            val commentStart = before.lastIndexOf("/**", commentEnd - 2)
+            if (commentStart >= 0 && before.substring(commentEnd, start).isBlank()) {
+                start = commentStart
+            }
+        }
+        return start
+    }
+
+    private fun removeCumulusObsoleteMenuListenerRegistrations(
+        source: String,
+        obsoleteListeners: Set<CumulusMenuListenerReference>
+    ): String {
+        var result = source
+        var removedDirectInvocation = false
+        for (listener in obsoleteListeners) {
+            for (typeName in listOf(listener.simpleTypeName, listener.qualifiedTypeName).distinct()) {
+                result = Regex("""(?m)^[ \t]*[A-Za-z_$][\w$.]*\.addListener\(\s*${Regex.escape(typeName)}::${Regex.escape(listener.methodName)}\s*\)\s*;\s*\r?\n""")
+                    .replace(result, "")
+                val directInvocation = Regex("""(?m)^[ \t]*${Regex.escape(typeName)}\.${Regex.escape(listener.methodName)}\([^;\r\n]*\)\s*;\s*\r?\n""")
+                if (directInvocation.containsMatchIn(result)) {
+                    removedDirectInvocation = true
+                    result = directInvocation.replace(result, "")
+                }
+            }
+        }
+        if (removedDirectInvocation) {
+            result = removeEmptyCumulusObsoleteEventMethods(result)
+        }
+        result = removeUnusedSimpleImport(result, "com.aetherteam.cumulus.api.MenuHelper", "MenuHelper")
+        result = removeUnusedSimpleImport(result, "com.aetherteam.cumulus.client.MenuHelper", "MenuHelper")
+        result = removeUnusedSimpleImport(result, "com.aetherteam.cumulus.client.CumulusClient", "CumulusClient")
+        result = removeUnusedSimpleImport(result, "net.neoforged.bus.api.EventPriority", "EventPriority")
+        result = removeUnusedSimpleImport(result, "net.neoforged.bus.api.SubscribeEvent", "SubscribeEvent")
+        result = removeUnusedSimpleImport(result, "net.minecraftforge.eventbus.api.EventPriority", "EventPriority")
+        result = removeUnusedSimpleImport(result, "net.minecraftforge.eventbus.api.SubscribeEvent", "SubscribeEvent")
+        return cleanupRedundantBlankLines(result)
+    }
+
+    private fun removeEmptyCumulusObsoleteEventMethods(source: String): String {
+        var result = source
+        var cursor = 0
+        val methodPattern = Regex("""(?m)^[ \t]*(?:public|protected|private)\s+static\s+void\s+[A-Za-z_$][\w$]*\s*\([^)]*\)\s*\{""")
+        while (true) {
+            val match = methodPattern.find(result, cursor) ?: break
+            val openBrace = result.indexOf('{', match.range.last)
+            if (openBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            if (body.isBlank()) {
+                val removalStart = javaDeclarationStartWithLeadingMetadata(result, match.range.first)
+                val leadingMetadata = result.substring(removalStart, match.range.first)
+                if (leadingMetadata.contains("@SubscribeEvent") || leadingMetadata.contains("MenuHooks#")) {
+                    result = result.substring(0, removalStart).trimEnd() + "\n\n" + result.substring(closeBrace + 1).trimStart('\r', '\n')
+                    cursor = 0
+                } else {
+                    cursor = closeBrace + 1
+                }
+            } else {
+                cursor = closeBrace + 1
+            }
+        }
+        return cleanupRedundantBlankLines(result)
+    }
+
+    private fun removeUnusedMenuHelperImport(source: String): String {
+        val withoutImports = removeImport(
+            removeImport(source, "com.aetherteam.cumulus.api.MenuHelper"),
+            "com.aetherteam.cumulus.client.MenuHelper"
+        )
+        return if (!Regex("""\bMenuHelper\b""").containsMatchIn(withoutImports)) {
+            withoutImports
+        } else {
+            source
+        }
     }
 
     private fun cleanupRedundantBlankLines(source: String): String =

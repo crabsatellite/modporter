@@ -15725,6 +15725,7 @@ class StructuralRefactorExtraTest {
 
                 public ExampleMod(IEventBus modEventBus) {
                     ExampleMenus.MENUS.register(modEventBus);
+                    modEventBus.addListener(MenuHooks::setup);
                 }
             }
         """.trimIndent())
@@ -15755,6 +15756,27 @@ class StructuralRefactorExtraTest {
                 public static final DeferredHolder<Menu, Menu> SIMPLE = MENUS.register("simple", () -> new Menu(Menus.MINECRAFT_ICON, Component.literal("Simple"), new TitleScreen(), CUSTOM_CONDITION));
             }
         """.trimIndent())
+        srcDir.resolve("MenuHooks.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.cumulus.api.MenuHelper;
+            import net.minecraft.client.gui.screens.TitleScreen;
+
+            public class MenuHooks {
+                /**
+                 * Old Cumulus 1.x preparation hook.
+                 * @param menuHelper The old menu helper.
+                 */
+                public static void setup(MenuHelper menuHelper) {
+                    menuHelper.prepareMenu(ExampleMenus.CUSTOM.get());
+                    menuHelper.prepareMenu(ExampleMenus.SIMPLE.get());
+                }
+
+                public static TitleScreen passthrough(TitleScreen screen) {
+                    return screen;
+                }
+            }
+        """.trimIndent())
         srcDir.resolve("MenuUse.java").writeText("""
             package com.example;
 
@@ -15779,6 +15801,7 @@ class StructuralRefactorExtraTest {
         val second = StructuralRefactorPass().apply(tempDir)
         val menus = srcDir.resolve("ExampleMenus.java").readText()
         val mod = srcDir.resolve("ExampleMod.java").readText()
+        val hooks = srcDir.resolve("MenuHooks.java").readText()
         val use = srcDir.resolve("MenuUse.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-cumulus-menu-api-121" })
@@ -15798,9 +15821,116 @@ class StructuralRefactorExtraTest {
         assertFalse(menus.contains("Menu.Background"), menus)
         assertFalse(menus.contains("CUSTOM_CONDITION"), menus)
         assertFalse(mod.contains("ExampleMenus.MENUS.register"), mod)
+        assertFalse(mod.contains("MenuHooks::setup"), mod)
+        assertFalse(hooks.contains("prepareMenu"), hooks)
+        assertFalse(hooks.contains("MenuHelper"), hooks)
+        assertFalse(hooks.contains("void setup("), hooks)
+        assertTrue(hooks.contains("public static TitleScreen passthrough(TitleScreen screen)"), hooks)
         assertTrue(use.contains("return ExampleMenus.CUSTOM.music();"), use)
         assertTrue(use.contains("return Menus.MINECRAFT.music();"), use)
         assertTrue(use.contains("return ExampleMenus.CUSTOM.toString();"), use)
+    }
+
+    @Test
+    fun `removes stale Cumulus prepare hooks from already migrated menu initializers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                    modEventBus.addListener(MenuHooks::prepareCustomMenus);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMenus.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.cumulus.api.*;
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.resources.ResourceLocation;
+
+            @CumulusEntrypoint
+            public class ExampleMenus implements MenuInitializer {
+                public static final Menu CUSTOM = new Menu(Menus.MINECRAFT_ICON, Component.literal("Custom"), new TitleScreen());
+
+                @Override
+                public void registerMenus(MenuRegisterCallback callback) {
+                    callback.registerMenu(ResourceLocation.fromNamespaceAndPath("example", "custom"), CUSTOM);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("MenuListener.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.cumulus.api.MenuHelper;
+            import com.aetherteam.cumulus.client.CumulusClient;
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.neoforged.bus.api.EventPriority;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.client.event.ScreenEvent;
+
+            public class MenuListener {
+                /**
+                 * @see MenuHooks#prepareCustomMenus(MenuHelper)
+                 */
+                @SubscribeEvent(priority = EventPriority.HIGHEST)
+                public static void onGuiOpenHighest(ScreenEvent.Opening event) {
+                    MenuHooks.prepareCustomMenus(CumulusClient.MENU_HELPER);
+                }
+
+                @SubscribeEvent
+                public static void onGuiInitialize(ScreenEvent.Init.Post event) {
+                    TitleScreen screen = (TitleScreen) event.getScreen();
+                    MenuHooks.setCustomSplashText(screen);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("MenuHooks.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.cumulus.api.MenuHelper;
+            import net.minecraft.client.gui.screens.TitleScreen;
+
+            public class MenuHooks {
+                /**
+                 * Prepares registered custom menus in Cumulus 1.x.
+                 * @param menuHelper The old menu helper.
+                 */
+                public static void prepareCustomMenus(MenuHelper menuHelper) {
+                    menuHelper.prepareMenu(ExampleMenus.CUSTOM);
+                }
+
+                public static void setCustomSplashText(TitleScreen screen) {
+                    screen.init(null, 0, 0);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val second = StructuralRefactorPass().apply(tempDir)
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+        val listener = srcDir.resolve("MenuListener.java").readText()
+        val hooks = srcDir.resolve("MenuHooks.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-cumulus-menu-api-121" })
+        assertFalse(second.changes.any { it.ruleId == "struct-cumulus-menu-api-121" })
+        assertFalse(mod.contains("MenuHooks::prepareCustomMenus"), mod)
+        assertFalse(listener.contains("prepareCustomMenus"), listener)
+        assertFalse(listener.contains("MenuHelper"), listener)
+        assertFalse(listener.contains("CumulusClient"), listener)
+        assertFalse(listener.contains("EventPriority"), listener)
+        assertFalse(listener.contains("onGuiOpenHighest"), listener)
+        assertTrue(listener.contains("onGuiInitialize"), listener)
+        assertFalse(hooks.contains("prepareMenu"), hooks)
+        assertFalse(hooks.contains("MenuHelper"), hooks)
+        assertFalse(hooks.contains("prepareCustomMenus"), hooks)
+        assertTrue(hooks.contains("setCustomSplashText"), hooks)
     }
 
     @Test
