@@ -10946,6 +10946,7 @@ ${entries.joinToString(",\n")}
 
         if (result.contains("@Nullable CompoundTag") && result.contains("finalizeSpawn(ServerLevelAccessor")) {
             var finalizeSpawnMigrated = false
+            val removedFinalizeSpawnTags = linkedSetOf<String>()
             result = Regex(
                 """public\s+SpawnGroupData\s+finalizeSpawn\(\s*ServerLevelAccessor\s+(\w+)\s*,\s*DifficultyInstance\s+(\w+)\s*,\s*MobSpawnType\s+(\w+)\s*,\s*@Nullable\s+SpawnGroupData\s+(\w+)\s*,\s*@Nullable\s+CompoundTag\s+(\w+)\s*\)"""
             ).replace(result) { match ->
@@ -10954,9 +10955,11 @@ ${entries.joinToString(",\n")}
                 val difficultyName = match.groupValues[2]
                 val spawnTypeName = match.groupValues[3]
                 val spawnDataName = match.groupValues[4]
+                removedFinalizeSpawnTags.add(match.groupValues[5])
                 "public SpawnGroupData finalizeSpawn(ServerLevelAccessor $levelName, DifficultyInstance $difficultyName,\n            MobSpawnType $spawnTypeName, @Nullable SpawnGroupData $spawnDataName)"
             }
             if (finalizeSpawnMigrated) {
+                result = removeLegacyFinalizeSpawnTagGuards(result, removedFinalizeSpawnTags)
                 result = Regex(
                     """(\w+)\s*=\s*super\.finalizeSpawn\(\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*,\s*\1\s*,\s*(\w+)\s*\);"""
                 ).replace(result, "$1 = super.finalizeSpawn($2, $3, $4, $1);")
@@ -15576,7 +15579,6 @@ ${indent}}"""
         )
         val result = spawnPattern.replace(source) { match ->
             val methodRange = enclosingMethodRange(source, match.range.first) ?: return@replace match.value
-            val methodBody = source.substring(methodRange)
             val methodPrefix = source.substring(methodRange.first, match.range.first)
             val tagVariable = match.groupValues[6]
             if (!Regex("""\bCompoundTag\s+${Regex.escape(tagVariable)}\s*=""").containsMatchIn(methodPrefix)) {
@@ -15588,11 +15590,6 @@ ${indent}}"""
                 .distinct()
                 .toList()
             if (itemStackVariables.size != 1) return@replace match.value
-            val customNameVariable = Regex("""\bComponent\s+([A-Za-z_$][\w$]*)\s*=""")
-                .findAll(methodPrefix)
-                .map { it.groupValues[1] }
-                .distinct()
-                .singleOrNull()
             val indent = match.groupValues[1]
             val entityType = match.groupValues[2]
             val entityVariable = match.groupValues[3]
@@ -15603,17 +15600,16 @@ ${indent}}"""
             val spawnType = match.groupValues[9].trim()
             val shouldOffsetY = match.groupValues[10].trim()
             val shouldOffsetYMore = match.groupValues[11].trim()
-            val spawnStack = uniqueLocalNameInScope(methodBody, "entitySpawnStack")
+            val itemStackVariable = itemStackVariables.single()
             changed = true
             buildString {
-                appendLine("${indent}ItemStack $spawnStack = ${itemStackVariables.single()}.copyWithCount(1);")
-                appendLine("${indent}$spawnStack.set(net.minecraft.core.component.DataComponents.ENTITY_DATA, net.minecraft.world.item.component.CustomData.of($tagVariable));")
-                if (customNameVariable != null) {
-                    appendLine("${indent}if ($customNameVariable != null) {")
-                    appendLine("${indent}    $spawnStack.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, $customNameVariable);")
-                    appendLine("${indent}}")
-                }
-                append("${indent}$entityType $entityVariable = $spawnReceiver.spawn($level, $spawnStack, $player, $pos, $spawnType, $shouldOffsetY, $shouldOffsetYMore);")
+                appendLine("${indent}$entityType $entityVariable = $spawnReceiver.spawn($level,")
+                appendLine("${indent}        net.minecraft.world.entity.EntityType.appendDefaultStackConfig(consumerEntity -> {")
+                appendLine("${indent}            if ($tagVariable != null && consumerEntity instanceof net.minecraft.world.entity.LivingEntity livingEntity) {")
+                appendLine("${indent}                livingEntity.readAdditionalSaveData($tagVariable);")
+                appendLine("${indent}            }")
+                appendLine("${indent}        }, $level, $itemStackVariable, $player),")
+                append("${indent}        $pos, $spawnType, $shouldOffsetY, $shouldOffsetYMore);")
             }
         }
         return if (changed) result else source
@@ -16340,6 +16336,101 @@ ${indent}}"""
             result = addImportIfMissing(result, "net.minecraft.world.level.ServerLevelAccessor")
         }
         return result
+    }
+
+    private fun removeLegacyFinalizeSpawnTagGuards(source: String, tagNames: Set<String>): String {
+        if (tagNames.isEmpty() || !source.contains("finalizeSpawn(")) return source
+
+        var result = source
+        tagNames.forEach { tagName ->
+            result = Regex("""(?m)^[ \t]*\*\s*@param\s+${Regex.escape(tagName)}\b[^\r\n]*(?:\r?\n)?""")
+                .replace(result, "")
+        }
+
+        var changed: Boolean
+        do {
+            changed = false
+            val removals = mutableListOf<IntRange>()
+            val methodPattern = Regex(
+                """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|static|final|synchronized)\s+)*SpawnGroupData\s+finalizeSpawn\s*\([^;{}]*\)\s*\{"""
+            )
+
+            methodPattern.findAll(result).forEach { method ->
+                val methodOpen = result.indexOf('{', method.range.last)
+                val methodClose = if (methodOpen >= 0) findMatchingBrace(result, methodOpen) else -1
+                if (methodClose <= methodOpen) return@forEach
+
+                var cursor = methodOpen + 1
+                while (cursor in (methodOpen + 1) until methodClose) {
+                    val ifIndex = result.indexOf("if", cursor)
+                    if (ifIndex < 0 || ifIndex >= methodClose) break
+                    if (!isStandaloneJavaToken(result, ifIndex, "if")) {
+                        cursor = ifIndex + 2
+                        continue
+                    }
+                    val lineStart = result.lastIndexOf('\n', ifIndex).let { if (it < 0) 0 else it + 1 }
+                    if (result.substring(lineStart, ifIndex).any { it != ' ' && it != '\t' }) {
+                        cursor = ifIndex + 2
+                        continue
+                    }
+                    val conditionOpen = skipWhitespace(result, ifIndex + 2)
+                    if (conditionOpen >= result.length || result[conditionOpen] != '(') {
+                        cursor = ifIndex + 2
+                        continue
+                    }
+                    val conditionClose = findMatchingParen(result, conditionOpen)
+                    if (conditionClose < 0 || conditionClose >= methodClose) {
+                        cursor = ifIndex + 2
+                        continue
+                    }
+                    val condition = result.substring(conditionOpen + 1, conditionClose)
+                    if (!conditionHasLegacyFinalizeSpawnTagGuard(condition, tagNames)) {
+                        cursor = conditionClose + 1
+                        continue
+                    }
+                    val blockOpen = skipWhitespace(result, conditionClose + 1)
+                    if (blockOpen >= result.length || result[blockOpen] != '{') {
+                        cursor = conditionClose + 1
+                        continue
+                    }
+                    val blockClose = findMatchingBrace(result, blockOpen)
+                    if (blockClose < 0 || blockClose >= methodClose) {
+                        cursor = blockOpen + 1
+                        continue
+                    }
+
+                    var removeEnd = blockClose + 1
+                    if (removeEnd < result.length && result[removeEnd] == '\r') removeEnd++
+                    if (removeEnd < result.length && result[removeEnd] == '\n') removeEnd++
+                    removals.add(lineStart until removeEnd)
+                    cursor = removeEnd
+                }
+            }
+
+            if (removals.isNotEmpty()) {
+                val builder = StringBuilder(result)
+                removals.sortedByDescending { it.first }.forEach { range ->
+                    builder.delete(range.first, range.last + 1)
+                }
+                result = builder.toString()
+                changed = true
+            }
+        } while (changed)
+
+        return result
+    }
+
+    private fun conditionHasLegacyFinalizeSpawnTagGuard(condition: String, tagNames: Set<String>): Boolean =
+        tagNames.any { tagName ->
+            Regex("""(?<![\w$])${Regex.escape(tagName)}\s*!=\s*null(?![\w$])""").containsMatchIn(condition)
+        }
+
+    private fun isStandaloneJavaToken(source: String, index: Int, token: String): Boolean {
+        if (!source.startsWith(token, index)) return false
+        val before = source.getOrNull(index - 1)
+        val after = source.getOrNull(index + token.length)
+        return before?.let { !it.isLetterOrDigit() && it != '_' && it != '$' } != false &&
+            after?.let { !it.isLetterOrDigit() && it != '_' && it != '$' } != false
     }
 
     private fun rewriteLegacyFinalizeSpawnCalls(source: String): String {

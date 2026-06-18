@@ -6283,9 +6283,15 @@ class StructuralRefactorExtraTest {
             public class Minotaur {
                 Minotaur helper;
 
+                /**
+                 * @param tag legacy spawn data from the old EntityType#spawn overload
+                 */
                 @Override
                 public SpawnGroupData finalizeSpawn(ServerLevelAccessor accessor, DifficultyInstance difficulty,
                         MobSpawnType reason, @Nullable SpawnGroupData data, @Nullable CompoundTag tag) {
+                    if (tag != null) {
+                        this.applyLegacyTag(tag);
+                    }
                     data = super.finalizeSpawn(accessor, difficulty, reason, data, tag);
                     helper.finalizeSpawn(accessor, difficulty, MobSpawnType.NATURAL, data, tag);
                     populateDefaultEquipmentSlots(this.random, difficulty);
@@ -6307,6 +6313,9 @@ class StructuralRefactorExtraTest {
         assertTrue(transformed.contains("RandomSource randomsource = accessor.getRandom();"))
         assertTrue(transformed.contains("populateDefaultEquipmentEnchantments(accessor, randomsource, difficulty);"))
         assertTrue(!transformed.contains("@Nullable CompoundTag tag"))
+        assertTrue(!transformed.contains("@param tag"))
+        assertTrue(!transformed.contains("if (tag != null)"))
+        assertTrue(!transformed.contains("applyLegacyTag(tag)"))
     }
 
     @Test
@@ -7403,13 +7412,17 @@ class StructuralRefactorExtraTest {
         StructuralRefactorPass().apply(tempDir)
         val blockEntity = srcDir.resolve("IncubatorBlockEntity.java").readText()
 
-        assertTrue(blockEntity.contains("ItemStack entitySpawnStack = itemStack.copyWithCount(1);"), blockEntity)
-        assertTrue(blockEntity.contains("entitySpawnStack.set(net.minecraft.core.component.DataComponents.ENTITY_DATA, net.minecraft.world.item.component.CustomData.of(tag));"), blockEntity)
-        assertTrue(blockEntity.contains("entitySpawnStack.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, customName);"), blockEntity)
-        assertTrue(blockEntity.contains("Entity entity = entityType.spawn(serverLevel, entitySpawnStack, null, serverLevel.getSharedSpawnPos(), MobSpawnType.TRIGGERED, true, false);"), blockEntity)
+        assertTrue(blockEntity.contains("Entity entity = entityType.spawn(serverLevel,"), blockEntity)
+        assertTrue(blockEntity.contains("net.minecraft.world.entity.EntityType.appendDefaultStackConfig(consumerEntity -> {"), blockEntity)
+        assertTrue(blockEntity.contains("if (tag != null && consumerEntity instanceof net.minecraft.world.entity.LivingEntity livingEntity) {"), blockEntity)
+        assertTrue(blockEntity.contains("livingEntity.readAdditionalSaveData(tag);"), blockEntity)
+        assertTrue(blockEntity.contains("}, serverLevel, itemStack, null),"), blockEntity)
+        assertTrue(blockEntity.contains("serverLevel.getSharedSpawnPos(), MobSpawnType.TRIGGERED, true, false);"), blockEntity)
         assertTrue(blockEntity.contains("com.example.advancement.ExampleAdvancementTriggers.INCUBATION_TRIGGER.get().trigger(this.player, itemStack);"), blockEntity)
         assertFalse(blockEntity.contains("IncubationTrigger.INSTANCE"), blockEntity)
         assertFalse(blockEntity.contains("spawn(serverLevel, tag, null"), blockEntity)
+        assertFalse(blockEntity.contains("entitySpawnStack"), blockEntity)
+        assertFalse(blockEntity.contains("DataComponents.ENTITY_DATA"), blockEntity)
     }
 
     @Test
