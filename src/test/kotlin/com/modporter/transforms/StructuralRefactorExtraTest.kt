@@ -4384,6 +4384,28 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy neoforge leather item tag constant`() {
+        val projectDir = createFile("LegacyLeatherTagRecipe.java", """
+            package com.example;
+
+            import net.neoforged.neoforge.common.Tags;
+
+            public class LegacyLeatherTagRecipe {
+                Object oldTag = Tags.Items.LEATHER;
+                Object existingTag = Tags.Items.LEATHERS;
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/LegacyLeatherTagRecipe.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("Object oldTag = Tags.Items.LEATHERS;"), migrated)
+        assertTrue(migrated.contains("Object existingTag = Tags.Items.LEATHERS;"), migrated)
+        assertFalse(migrated.contains("LEATHERSS"), migrated)
+    }
+
+    @Test
     fun `migrates GameEventListener event holder signatures and comparisons`() {
         val projectDir = createFile("ListenerBE.java", """
             package com.example;

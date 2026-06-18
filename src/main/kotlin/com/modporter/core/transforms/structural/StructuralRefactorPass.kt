@@ -16130,7 +16130,7 @@ ${indent}}
 
     private fun migrateLegacyDatagenTagConstantsSource(source: String): String {
         if (!source.contains("ItemTags.") &&
-            !source.contains("Tags.Items.ARMORS_") &&
+            !source.contains("Tags.Items.") &&
             !source.contains("BuiltInRegistries.ENCHANTMENT")) {
             return source
         }
@@ -16141,6 +16141,7 @@ ${indent}}
         result = result.replace("Tags.Items.ARMORS_CHESTPLATES", "ItemTags.CHEST_ARMOR")
         result = result.replace("Tags.Items.ARMORS_LEGGINGS", "ItemTags.LEG_ARMOR")
         result = result.replace("Tags.Items.ARMORS_BOOTS", "ItemTags.FOOT_ARMOR")
+        result = Regex("""\bTags\.Items\.LEATHER\b""").replace(result, "Tags.Items.LEATHERS")
         result = Regex(
             """BuiltInRegistries\.ENCHANTMENT\.getResourceKey\(\s*(Enchantments\.[A-Z0-9_]+)\s*\)\.get\(\)"""
         ).replace(result, "$1")
