@@ -12295,6 +12295,7 @@ ${indent}}
         result = migrateMobSpawnEquipmentSignatures(result)
         result = migrateLegacyEnchantmentConstantNames(result)
         result = migrateLegacyAttachmentGetDataLazyOptionalReturns(result)
+        result = migrateAttachmentGetDataIfPresentSource(result)
         result = migrateLegacyEntityCapabilityOptionalChains(result)
         result = migrateLegacyAuthlibProfileFetchSource(result)
         result = migrateLegacyChunkGeneratorAsyncSignatures(result)
@@ -12446,6 +12447,7 @@ ${indent}}
         result = migrateMobEffectApplyEffectTickReturnSource(result)
         result = migrateLegacyProjectileEnchantmentPostEffectsSource(result, javaInheritanceIndex)
         result = migrateLegacyDoEnchantDamageEffectsSource(result)
+        result = migrateMobEffectApplicableEventSource(result)
         result = migrateLivingDamageEventBoundarySource(result)
 
         if (result.contains(".effects()") && result.contains("mapOfKeys(")) {
@@ -24751,6 +24753,53 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
         return result
     }
 
+    private fun migrateMobEffectApplicableEventSource(source: String): String {
+        if (!source.contains("MobEffectEvent.Applicable")) return source
+        var result = source
+        var cursor = 0
+        var changed = false
+        val constructor = "new MobEffectEvent.Applicable("
+        while (true) {
+            val start = result.indexOf(constructor, cursor)
+            if (start < 0) break
+            val openParen = start + constructor.length - 1
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = start + constructor.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            if (args.size == 2) {
+                val replacement = "new MobEffectEvent.Applicable(${args[0].trim()}, ${args[1].trim()}, null)"
+                result = result.substring(0, start) + replacement + result.substring(closeParen + 1)
+                cursor = start + replacement.length
+                changed = true
+            } else {
+                cursor = closeParen + 1
+            }
+        }
+
+        result = Regex("""NeoForge\.EVENT_BUS\.post\(([^;\r\n]+?)\)(?:\.isCanceled\(\))+;""")
+            .replace(result) { match ->
+                changed = true
+                "NeoForge.EVENT_BUS.post(${match.groupValues[1].trim()});"
+            }
+        val migratedResults = result
+            .replace("TriState.DEFAULT", "MobEffectEvent.Applicable.Result.DEFAULT")
+            .replace("TriState.TRUE", "MobEffectEvent.Applicable.Result.APPLY")
+            .replace("TriState.FALSE", "MobEffectEvent.Applicable.Result.DO_NOT_APPLY")
+        if (migratedResults != result) {
+            result = migratedResults
+            changed = true
+        }
+        if (!changed) return source
+        val withoutTriStateImport = removeImport(result, "net.neoforged.neoforge.common.util.TriState")
+        if (!Regex("""\bTriState\b""").containsMatchIn(withoutTriStateImport)) {
+            result = withoutTriStateImport
+        }
+        return result
+    }
+
     private fun mobEffectBooleanMethodNeedsTrailingTrue(body: String): Boolean {
         val trimmed = body.trimEnd()
         if (trimmed.isBlank()) return true
@@ -25384,6 +25433,71 @@ ${indent}}
                 "${match.groupValues[1]}return LazyOptional.ofNullable($expression);"
             }
         }
+    }
+
+    private fun migrateAttachmentGetDataIfPresentSource(source: String): String {
+        if (!source.contains(".getData(") || !source.contains(".ifPresent(")) return source
+        val receiverPattern = Regex("""((?:this|super|[A-Za-z_$][\w$]*)(?:\.[A-Za-z_$][\w$]*(?:\([^;\r\n{}]*\))?)*)\.getData\s*\(""")
+        var result = source
+        var cursor = 0
+        var changed = false
+        while (true) {
+            val match = receiverPattern.find(result, cursor) ?: break
+            val receiver = match.groupValues[1]
+            val dataOpen = result.indexOf('(', match.range.last - 1)
+            val dataClose = if (dataOpen >= 0) findMatchingParen(result, dataOpen) else -1
+            if (dataClose < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            var afterData = dataClose + 1
+            while (afterData < result.length && result[afterData].isWhitespace()) afterData++
+            if (!result.startsWith(".ifPresent", afterData)) {
+                cursor = dataClose + 1
+                continue
+            }
+            val ifPresentOpen = result.indexOf('(', afterData)
+            val ifPresentClose = if (ifPresentOpen >= 0) findMatchingParen(result, ifPresentOpen) else -1
+            if (ifPresentClose < 0) {
+                cursor = afterData + 1
+                continue
+            }
+            var statementEnd = ifPresentClose + 1
+            while (statementEnd < result.length && result[statementEnd].isWhitespace()) statementEnd++
+            if (statementEnd >= result.length || result[statementEnd] != ';') {
+                cursor = ifPresentClose + 1
+                continue
+            }
+
+            val lambda = result.substring(ifPresentOpen + 1, ifPresentClose)
+            val lambdaMatch = Regex("""^\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*->\s*\{""").find(lambda)
+            if (lambdaMatch == null) {
+                cursor = ifPresentClose + 1
+                continue
+            }
+            val lambdaBrace = lambda.indexOf('{', lambdaMatch.range.last)
+            val lambdaBraceClose = if (lambdaBrace >= 0) findMatchingBrace(lambda, lambdaBrace) else -1
+            if (lambdaBrace < 0 || lambdaBraceClose < 0) {
+                cursor = ifPresentClose + 1
+                continue
+            }
+            val attachmentKey = result.substring(dataOpen + 1, dataClose).trim()
+            val variable = lambdaMatch.groupValues[1]
+            val body = lambda.substring(lambdaBrace + 1, lambdaBraceClose)
+            val lineStart = result.lastIndexOf('\n', match.range.first).let { if (it < 0) 0 else it + 1 }
+            val indent = result.substring(lineStart, match.range.first).takeWhile { it == ' ' || it == '\t' }
+            val replacement = buildString {
+                append("${indent}if ($receiver.hasData($attachmentKey)) {")
+                append("\n${indent}    var $variable = $receiver.getData($attachmentKey);")
+                append(body)
+                if (!body.endsWith("\n") && !body.endsWith("\r\n")) append('\n')
+                append("$indent}")
+            }
+            result = result.substring(0, lineStart) + replacement + result.substring(statementEnd + 1)
+            cursor = lineStart + replacement.length
+            changed = true
+        }
+        return if (changed) result else source
     }
 
     private fun migrateLegacyEntityCapabilityOptionalChains(source: String): String {

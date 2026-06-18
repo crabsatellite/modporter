@@ -17449,6 +17449,71 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates attachment getData ifPresent to hasData guarded direct data`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AttachmentIfPresentSurface.java").writeText("""
+            package com.example;
+
+            public class AttachmentIfPresentSurface {
+                public void close(Level level) {
+                    level.getData(ExampleAttachments.TIME.get()).ifPresent((time) -> {
+                        time.setEnabled(false);
+                        if (time.shouldSync()) {
+                            time.sync(level);
+                        }
+                    });
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("AttachmentIfPresentSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("if (level.hasData(ExampleAttachments.TIME.get())) {"), migrated)
+        assertTrue(migrated.contains("var time = level.getData(ExampleAttachments.TIME.get());"), migrated)
+        assertTrue(migrated.contains("if (time.shouldSync()) {"), migrated)
+        assertFalse(migrated.contains(".ifPresent("), migrated)
+    }
+
+    @Test
+    fun `migrates MobEffect applicable event result API without dropping event dispatch`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("MobEffectApplicableSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.neoforged.neoforge.common.NeoForge;
+            import net.neoforged.neoforge.common.util.TriState;
+            import net.neoforged.neoforge.event.entity.living.MobEffectEvent;
+
+            public class MobEffectApplicableSurface {
+                public boolean canBeAffected(MobEffectInstance effectInstance) {
+                    MobEffectEvent.Applicable event = new MobEffectEvent.Applicable(this, effectInstance);
+                    NeoForge.EVENT_BUS.post(event).isCanceled().isCanceled();
+                    if (event.getResult() != TriState.DEFAULT) {
+                        return event.getResult() == TriState.TRUE;
+                    }
+                    return false;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("MobEffectApplicableSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("new MobEffectEvent.Applicable(this, effectInstance, null)"), migrated)
+        assertTrue(migrated.contains("NeoForge.EVENT_BUS.post(event);"), migrated)
+        assertTrue(migrated.contains("event.getResult() != MobEffectEvent.Applicable.Result.DEFAULT"), migrated)
+        assertTrue(migrated.contains("event.getResult() == MobEffectEvent.Applicable.Result.APPLY"), migrated)
+        assertFalse(migrated.contains("TriState"), migrated)
+        assertFalse(migrated.contains("isCanceled()"), migrated)
+    }
+
+    @Test
     fun `empty project returns empty results`() {
         val projectDir = tempDir.resolve("empty-project")
         projectDir.createDirectories()
