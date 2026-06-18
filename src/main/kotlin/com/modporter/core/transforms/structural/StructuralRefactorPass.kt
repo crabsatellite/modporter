@@ -7900,7 +7900,9 @@ $fields
         val optionalCompoundRecipeTagOwners = collectLegacyOptionalCompoundRecipeTagOwners(javaFiles)
         val legacyCookingRecipeClasses = collectLegacyCookingRecipeClasses(javaFiles)
         val javaInheritanceIndex = collectJavaInheritanceIndex(javaFiles)
+        val inheritedRecipeStateAccessors = collectInheritedRecipeStateAccessors(javaFiles)
         val holderLookupCompoundTagMethods = collectHolderLookupCompoundTagMethods(javaFiles)
+        val deferredHolderFields = collectDeferredHolderFields(srcDir)
 
         javaFiles.forEach { javaFile ->
                 val original = javaFile.readText()
@@ -8376,6 +8378,24 @@ $fields
                     text = cookingRecipeConstructorMigrated
                 }
 
+                val inheritedRecipeStateMigrated = migrateInheritedRecipeStateAccessSource(
+                    text,
+                    inheritedRecipeStateAccessors,
+                    javaInheritanceIndex
+                )
+                if (inheritedRecipeStateMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate inherited recipe state reads to proven accessors and AbstractCookingRecipe state",
+                        before = "serializer lambdas read private inherited fields or constructor-forwarded state fields",
+                        after = "serializer lambdas call existing accessors or AbstractCookingRecipe cooking-time state",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-inherited-recipe-state-access"
+                    ))
+                    text = inheritedRecipeStateMigrated
+                }
+
                 val deferredHolderMigrated = migrateDeferredHolderGenericsSource(text, deferredHolderRegistryBaseHints)
                 if (deferredHolderMigrated != text) {
                     changes.add(Change(
@@ -8388,6 +8408,20 @@ $fields
                         ruleId = "struct-deferredholder-generics"
                     ))
                     text = deferredHolderMigrated
+                }
+
+                val deferredHolderAccessMigrated = migrateDeferredHolderGetValueCalls(text, deferredHolderFields)
+                if (deferredHolderAccessMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate proven DeferredHolder getValue() calls to get()",
+                        before = "DeferredHolder field .getValue()",
+                        after = "DeferredHolder field .get()",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-deferredholder-getvalue"
+                    ))
+                    text = deferredHolderAccessMigrated
                 }
 
                 val deferredRegisterListenerMigrated = migrateDeferredRegisterListenerReferencesSource(text, deferredRegisterOwners)
@@ -8421,31 +8455,34 @@ $fields
                 if (text != original && !dryRun) {
                     javaFile.writeText(text)
                 }
-            }
+        }
 
         val resourceKeyLootTableOwners = collectResourceKeyLootTableFieldOwners(srcDir)
-        if (resourceKeyLootTableOwners.isNotEmpty()) {
-            Files.walk(srcDir)
-                .filter { it.toString().endsWith(".java") }
-                .forEach { javaFile ->
-                    val original = javaFile.readText()
-                    val migrated = migrateLootTableResourceKeyReferenceCreates(original, resourceKeyLootTableOwners)
-                    if (migrated != original) {
-                        changes.add(Change(
-                            file = javaFile,
-                            line = 0,
-                            description = "Remove redundant ResourceKey.create wrappers around loot table ResourceKey fields",
-                            before = "ResourceKey.create(Registries.LOOT_TABLE, owner.lootTable)",
-                            after = "owner.lootTable",
-                            confidence = Confidence.HIGH,
-                            ruleId = "struct-loot-table-resourcekey-reference"
-                        ))
-                        if (!dryRun) {
-                            javaFile.writeText(migrated)
-                        }
+        val resourceKeyLootTableFields = collectResourceKeyLootTableFields(srcDir)
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                val migrated = migrateLootTableResourceKeyReferenceCreates(
+                    original,
+                    resourceKeyLootTableOwners,
+                    resourceKeyLootTableFields
+                )
+                if (migrated != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Remove redundant ResourceKey.create wrappers around loot table ResourceKey expressions",
+                        before = "ResourceKey.create(Registries.LOOT_TABLE, ResourceKey<LootTable>)",
+                        after = "ResourceKey<LootTable>",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-loot-table-resourcekey-reference"
+                    ))
+                    if (!dryRun) {
+                        javaFile.writeText(migrated)
                     }
                 }
-        }
+            }
 
         return changes
     }
@@ -8461,8 +8498,29 @@ $fields
                 if (Regex("""\bResourceKey\s*<\s*LootTable\s*>\s+lootTable\b""").containsMatchIn(source)) {
                     owners += className
                 }
-            }
+        }
         return owners
+    }
+
+    private fun collectResourceKeyLootTableFields(srcDir: Path): Set<String> {
+        val fields = linkedSetOf<String>()
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val source = javaFile.readText()
+                if (!source.contains("ResourceKey<LootTable>")) return@forEach
+                val className = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+                val packageName = packageNameOf(source)
+                Regex(
+                    """(?m)\b(?:public|protected|private)\s+static\s+(?:final\s+)?ResourceKey\s*<\s*LootTable\s*>\s+([A-Z][A-Z0-9_]*)\b"""
+                ).findAll(source).forEach { match ->
+                    fields += "$className.${match.groupValues[1]}"
+                    if (packageName != null) {
+                        fields += "$packageName.$className.${match.groupValues[1]}"
+                    }
+                }
+            }
+        return fields
     }
 
     private fun collectMapCodecConstantOwners(srcDir: Path): Set<String> {
@@ -10663,7 +10721,13 @@ ${entries.joinToString(",\n")}
 
     private data class RecipeSerializerFactoryHints(
         val fieldToFactory: Map<String, String>,
-        val fieldToRecipeClass: Map<String, String>
+        val fieldToRecipeClass: Map<String, String>,
+        val fieldToFactoryInterface: Map<String, RecipeFactoryInterfaceHint> = emptyMap()
+    )
+
+    private data class RecipeFactoryInterfaceHint(
+        val type: String,
+        val params: List<JavaParameterInfo>
     )
 
     private data class RecipeTypeHints(
@@ -10801,6 +10865,7 @@ ${entries.joinToString(",\n")}
 
     private fun collectRecipeSerializerFactoryHints(srcDir: Path): RecipeSerializerFactoryHints {
         val packageByClass = linkedMapOf<String, String>()
+        val factoryInterfaceBySerializerClass = linkedMapOf<String, RecipeFactoryInterfaceHint>()
         Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
@@ -10816,15 +10881,19 @@ ${entries.joinToString(",\n")}
                             packageByClass.putIfAbsent(match.groupValues[1], "$packageName.${match.groupValues[1]}")
                         }
                     }
+                collectRecipeSerializerFactoryInterface(source, packageName)?.let { (serializerClass, hint) ->
+                    factoryInterfaceBySerializerClass[serializerClass] = hint
+                }
             }
 
         val fieldToFactory = linkedMapOf<String, String>()
         val fieldToRecipeClass = linkedMapOf<String, String>()
+        val fieldToFactoryInterface = linkedMapOf<String, RecipeFactoryInterfaceHint>()
         Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val source = javaFile.readText()
-                if (!source.contains("RecipeSerializer<")) return@forEach
+                if (!source.contains("RecipeSerializer<") && !source.contains("DeferredHolder")) return@forEach
                 val owner = Regex("""\bclass\s+([A-Za-z_$][\w$]*)\b""")
                     .find(source)
                     ?.groupValues
@@ -10838,9 +10907,61 @@ ${entries.joinToString(",\n")}
                     fieldToFactory["$owner.${match.groupValues[2]}"] = "$factoryClass::new"
                     fieldToRecipeClass["$owner.${match.groupValues[2]}"] = factoryClass
                 }
+                Regex(
+                    """\bDeferredHolder\s*<\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*<\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>\s*,\s*\1\s*<\s*\2\s*>\s*>\s+([A-Z][A-Z0-9_]*)\b"""
+                ).findAll(source).forEach { match ->
+                    val serializerClass = match.groupValues[1].substringAfterLast('.')
+                    val recipeClass = match.groupValues[2].substringAfterLast('.')
+                    val factoryClass = packageByClass[recipeClass] ?: match.groupValues[2]
+                    val field = "$owner.${match.groupValues[3]}"
+                    fieldToFactory[field] = "$factoryClass::new"
+                    fieldToRecipeClass[field] = factoryClass
+                    factoryInterfaceBySerializerClass[serializerClass]?.let { fieldToFactoryInterface[field] = it }
+                }
+                Regex(
+                    """\bDeferredHolder\s*<\s*RecipeSerializer\s*<\s*\?\s*>\s*,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*Recipe)\.Serializer\s*>\s+([A-Z][A-Z0-9_]*)\b"""
+                ).findAll(source).forEach { match ->
+                    val recipeClass = match.groupValues[1].substringAfterLast('.')
+                    val factoryClass = packageByClass[recipeClass] ?: match.groupValues[1]
+                    val field = "$owner.${match.groupValues[2]}"
+                    fieldToFactory[field] = "$factoryClass::new"
+                    fieldToRecipeClass[field] = factoryClass
+                }
             }
 
-        return RecipeSerializerFactoryHints(fieldToFactory, fieldToRecipeClass)
+        return RecipeSerializerFactoryHints(fieldToFactory, fieldToRecipeClass, fieldToFactoryInterface)
+    }
+
+    private fun collectRecipeSerializerFactoryInterface(
+        source: String,
+        packageName: String?
+    ): Pair<String, RecipeFactoryInterfaceHint>? {
+        if (!source.contains("implements RecipeSerializer<")) return null
+        val serializerClass = javaTopLevelTypeName(source) ?: return null
+        val constructor = Regex(
+            """(?s)\bpublic\s+${Regex.escape(serializerClass)}\s*\(([^)]*)\)"""
+        ).find(source) ?: return null
+        val firstParam = parseJavaParameters(constructor.groupValues[1]).firstOrNull() ?: return null
+        val rawFactoryType = firstParam.type
+        if (!rawFactoryType.contains("$serializerClass.")) return null
+        val nestedFactory = rawFactoryType
+            .substringAfter("$serializerClass.")
+            .substringBefore('<')
+            .trim()
+        if (nestedFactory.isBlank()) return null
+        val factoryBody = Regex(
+            """(?s)\binterface\s+${Regex.escape(nestedFactory)}\b[^{]*\{(.*?)\}"""
+        ).find(source)?.groupValues?.get(1) ?: return null
+        val createMethod = Regex("""\b[A-Za-z_$][\w$]*(?:\s*<[^;()]+>)?\s+create\s*\(([^)]*)\)\s*;""")
+            .find(factoryBody)
+            ?: return null
+        val params = parseJavaParameters(createMethod.groupValues[1])
+        if (params.isEmpty()) return null
+        val qualifiedSerializer = if (packageName == null) serializerClass else "$packageName.$serializerClass"
+        return serializerClass to RecipeFactoryInterfaceHint(
+            type = "$qualifiedSerializer.$nestedFactory<?>",
+            params = params
+        )
     }
 
     private fun collectRecipeTypeHints(srcDir: Path): RecipeTypeHints {
@@ -11079,6 +11200,24 @@ ${entries.joinToString(",\n")}
             }
         }
         return resolved
+    }
+
+    private fun collectDeferredHolderFields(srcDir: Path): Map<String, Set<String>> {
+        val fieldsByOwner = linkedMapOf<String, MutableSet<String>>()
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val source = javaFile.readText()
+                if (!source.contains("DeferredHolder")) return@forEach
+                val owner = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+                Regex(
+                    """(?m)\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?(?:net\.neoforged\.neoforge\.registries\.)?DeferredHolder\s*<[^;\r\n=]+>\s+([A-Za-z_$][\w$]*)\b"""
+                ).findAll(source)
+                    .forEach { match ->
+                        fieldsByOwner.getOrPut(owner) { linkedSetOf() } += match.groupValues[1]
+                    }
+            }
+        return fieldsByOwner
     }
 
     private fun migrateRecordComponentFieldAccessSource(
@@ -12402,6 +12541,7 @@ ${indent}}
         result = migrateLegacyFunctionalInterfaceMapCodecSource(result)
         result = migrateLegacyEventHooks121(result)
         result = migrateLegacyLootAndRegistryAccess(result)
+        result = migrateRegistrySetBuilderBuildPatchSource(result)
         result = migrateLegacyLootTableKeyFields(result)
         result = migrateLegacyDataAndComponentAccess(result)
         result = migrateLegacyHolderSoundEventPlaySoundArguments(result)
@@ -12449,6 +12589,7 @@ ${indent}}
         result = migrateLegacyEntityLootSubProviderSource(result)
         result = migrateLegacyLootFunctionSource(result)
         result = migrateLegacyLootTableSubProviderFactorySource(result)
+        result = migrateLegacyLootEnchantmentHolderCalls(result)
         result = migrateLegacyPackMetadataSectionSource(result)
         result = migrateFinalMapDecorationSubclassSource(result)
         result = migrateFinalMapDecorationSubclassUsageSource(result, finalMapDecorationClasses)
@@ -20953,6 +21094,27 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         }
     }
 
+    private fun migrateDeferredHolderGetValueCalls(
+        source: String,
+        deferredHolderFields: Map<String, Set<String>>
+    ): String {
+        if (!source.contains(".getValue()") || deferredHolderFields.isEmpty()) return source
+        var result = source
+        deferredHolderFields.forEach { (owner, fields) ->
+            fields.forEach { field ->
+                result = Regex("""\b${Regex.escape(owner)}\.${Regex.escape(field)}\.getValue\(\)""")
+                    .replace(result, "$owner.$field.get()")
+            }
+        }
+        val localOwner = classNameOfJavaSource(source)
+        val localFields = localOwner?.let { deferredHolderFields[it] }.orEmpty()
+        localFields.forEach { field ->
+            result = Regex("""\b${Regex.escape(field)}\.getValue\(\)""")
+                .replace(result, "$field.get()")
+        }
+        return result
+    }
+
     private fun migrateLegacyCommonHooksToolChecks(source: String): String {
         if (!source.contains("CommonHooks.isCorrectToolForDrops(")) return source
         var result = Regex(
@@ -22724,24 +22886,85 @@ $methodBody
     }
 
     private fun migrateLegacyLootEnchantmentHolderCalls(source: String): String {
-        if (!source.contains("Enchantments.FORTUNE") ||
-            !Regex("""(?:ApplyBonusCount\.add(?:Ore|Uniform|BonusBinomialDistribution)BonusCount|BonusLevelTableCondition\.bonusLevelFlatChance)\(\s*Enchantments\.FORTUNE""")
-                .containsMatchIn(source)) {
+        val needsFortuneHolder = source.contains("Enchantments.FORTUNE") &&
+            Regex("""(?:ApplyBonusCount\.add(?:Ore|Uniform|BonusBinomialDistribution)BonusCount|BonusLevelTableCondition\.bonusLevelFlatChance)\(\s*Enchantments\.FORTUNE""")
+                .containsMatchIn(source)
+        val needsRandomProvider = source.contains("EnchantRandomlyFunction.randomApplicableEnchantment()")
+        if (!needsFortuneHolder && !needsRandomProvider) {
             return source
         }
-        val hasRegistryContext = source.contains("this.registries") ||
-            Regex("""extends\s+(?:[A-Za-z_$][\w$]*\.)?(?:[A-Za-z_$][\w$]*)?BlockLootSubProvider\b""").containsMatchIn(source)
-        if (!hasRegistryContext) return source
 
-        val fortuneHolder = "this.registries.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.FORTUNE)"
-        val result = Regex(
-            """((?:ApplyBonusCount\.add(?:Ore|Uniform|BonusBinomialDistribution)BonusCount|BonusLevelTableCondition\.bonusLevelFlatChance)\(\s*)Enchantments\.FORTUNE"""
-        ).replace(source, "$1$fortuneHolder")
-        return if (result != source) {
-            addImportIfMissing(result, "net.minecraft.core.registries.Registries")
-        } else {
-            source
+        var result = migrateLootTableSubProviderHolderLookupState(source)
+        val providerExpression = inferHolderLookupProviderInstanceExpression(result) ?: return source
+        if (needsFortuneHolder) {
+            val fortuneHolder = "$providerExpression.holderOrThrow(Enchantments.FORTUNE)"
+            result = Regex(
+                """((?:ApplyBonusCount\.add(?:Ore|Uniform|BonusBinomialDistribution)BonusCount|BonusLevelTableCondition\.bonusLevelFlatChance)\(\s*)Enchantments\.FORTUNE"""
+            ).replace(result, "$1$fortuneHolder")
         }
+        if (needsRandomProvider) {
+            result = result.replace(
+                "EnchantRandomlyFunction.randomApplicableEnchantment()",
+                "EnchantRandomlyFunction.randomApplicableEnchantment($providerExpression)"
+            )
+        }
+        return result
+    }
+
+    private fun migrateLootTableSubProviderHolderLookupState(source: String): String {
+        if (!source.contains("HolderLookup.Provider") ||
+            !source.contains("implements LootTableSubProvider") ||
+            source.contains("record ") ||
+            source.contains("this.registries") ||
+            Regex("""\bHolderLookup\.Provider\s+registries\s*[;=]""").containsMatchIn(source)) {
+            return source
+        }
+        val classMatch = Regex("""(?s)\bclass\s+([A-Za-z_$][\w$]*)\b[^{;]*\bimplements\s+[^{};]*LootTableSubProvider\b[^{]*\{""")
+            .find(source)
+            ?: return source
+        if (source.substring(classMatch.range.first, classMatch.range.last + 1).contains("extends")) return source
+        val className = classMatch.groupValues[1]
+        val constructorMatch = Regex(
+            """(?s)\b(?:public|protected|private)?\s*${Regex.escape(className)}\s*\((.*?)\)\s*\{"""
+        ).find(source, classMatch.range.last)
+            ?: return source
+        val providerParam = splitTopLevelJavaArgs(constructorMatch.groupValues[1])
+            .mapNotNull(::parseJavaParameter)
+            .firstOrNull { (type, _) -> type.endsWith("HolderLookup.Provider") || type == "HolderLookup.Provider" }
+            ?: return source
+        val paramName = providerParam.second
+        if (Regex("""\bHolderLookup\.Provider\s+${Regex.escape(paramName)}\s*[;=]""").containsMatchIn(source)) {
+            return source
+        }
+
+        var result = source
+        val classOpenBrace = result.indexOf('{', classMatch.range.last)
+        if (classOpenBrace < 0) return source
+        val fieldLine = "\n    private final HolderLookup.Provider $paramName;\n"
+        result = result.substring(0, classOpenBrace + 1) + fieldLine + result.substring(classOpenBrace + 1)
+        val constructorOpenBrace = result.indexOf('{', constructorMatch.range.last + fieldLine.length)
+        if (constructorOpenBrace < 0) return source
+        val assignment = "\n        this.$paramName = $paramName;"
+        result = result.substring(0, constructorOpenBrace + 1) + assignment + result.substring(constructorOpenBrace + 1)
+        return result
+    }
+
+    private fun inferHolderLookupProviderInstanceExpression(source: String): String? {
+        if (Regex("""extends\s+(?:[A-Za-z_$][\w$]*\.)?(?:[A-Za-z_$][\w$]*)?BlockLootSubProvider\b""").containsMatchIn(source) ||
+            Regex("""extends\s+(?:[A-Za-z_$][\w$]*\.)?(?:[A-Za-z_$][\w$]*)?EntityLootSubProvider\b""").containsMatchIn(source)) {
+            return "this.registries"
+        }
+        Regex("""\brecord\s+[A-Za-z_$][\w$]*\s*\([^)]*\bHolderLookup\.Provider\s+([A-Za-z_$][\w$]*)""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.let { return "this.$it" }
+        Regex("""\b(?:private|protected|public)?\s*(?:final\s+)?HolderLookup\.Provider\s+([A-Za-z_$][\w$]*)\s*[;=]""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.let { return "this.$it" }
+        return null
     }
 
     private fun migrateLegacyBlockLootSubProviderSource(source: String): String {
@@ -23236,6 +23459,46 @@ $methodBody
             }
         }
         return if (changed) result else source
+    }
+
+    private fun migrateRegistrySetBuilderBuildPatchSource(source: String): String {
+        if (!source.contains(".buildPatch(") ||
+            !source.contains("DatapackBuiltinEntriesProvider") ||
+            !source.contains("extends DatapackBuiltinEntriesProvider")) {
+            return source
+        }
+        val builderFields = Regex(
+            """\b(?:public|protected|private)?\s*static\s+final\s+RegistrySetBuilder\s+([A-Za-z_$][\w$]*)\s*="""
+        ).findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (builderFields.isEmpty()) return source
+
+        var result = source
+        var changed = false
+        builderFields.forEach { builderField ->
+            val methodPattern = Regex(
+                """(?s)\n[ \t]*public\s+static\s+HolderLookup\.Provider\s+createLookup\s*\(\s*\)\s*\{\s*return\s+${Regex.escape(builderField)}\.buildPatch\s*\(\s*RegistryAccess\.fromRegistryOfRegistries\s*\(\s*BuiltInRegistries\.REGISTRY\s*\)\s*,\s*VanillaRegistries\.createLookup\s*\(\s*\)\s*\)\s*;\s*\}\s*"""
+            )
+            val migrated = methodPattern.replace(result, "\n")
+            if (migrated != result) {
+                changed = true
+                result = migrated
+            }
+        }
+        if (!changed) return source
+        listOf(
+            "net.minecraft.core.RegistryAccess",
+            "net.minecraft.core.registries.BuiltInRegistries",
+            "net.minecraft.data.registries.VanillaRegistries"
+        ).forEach { importName ->
+            val candidate = removeImport(result, importName)
+            val simpleName = importName.substringAfterLast('.')
+            if (!Regex("""\b${Regex.escape(simpleName)}\b""").containsMatchIn(candidate)) {
+                result = candidate
+            }
+        }
+        return result
     }
 
     private fun mapCodecCodecReferenceOwner(expression: String): String? {
@@ -25684,18 +25947,35 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
 
     private fun migrateLootTableResourceKeyReferenceCreates(
         source: String,
-        resourceKeyLootTableOwners: Set<String>
+        resourceKeyLootTableOwners: Set<String>,
+        resourceKeyLootTableFields: Set<String> = emptySet()
     ): String {
-        if (resourceKeyLootTableOwners.isEmpty() ||
+        val hasDefaultLootTableWrapper = source.contains(".getDefaultLootTable()")
+        if ((resourceKeyLootTableOwners.isEmpty() && resourceKeyLootTableFields.isEmpty() && !hasDefaultLootTableWrapper) ||
             !source.contains("ResourceKey.create(Registries.LOOT_TABLE") ||
-            !source.contains(".lootTable")) {
+            (!source.contains(".lootTable") &&
+                !hasDefaultLootTableWrapper &&
+                resourceKeyLootTableFields.none { source.contains(it.substringAfterLast('.', "")) })) {
             return source
         }
 
+        var result = source
+        result = Regex(
+            """ResourceKey\.create\(\s*Registries\.LOOT_TABLE\s*,\s*((?:[^()]|\([^()]*\))+?\.getDefaultLootTable\(\))\s*\)"""
+        ).replace(result, "$1")
+
+        if (resourceKeyLootTableFields.isNotEmpty()) {
+            val fieldPattern = resourceKeyLootTableFields.joinToString("|") { Regex.escape(it) }
+            result = Regex(
+                """ResourceKey\.create\(\s*Registries\.LOOT_TABLE\s*,\s*($fieldPattern)\s*\)"""
+            ).replace(result, "$1")
+        }
+
+        if (resourceKeyLootTableOwners.isEmpty()) return result
         val ownerPattern = resourceKeyLootTableOwners.joinToString("|") { Regex.escape(it) }
-        var result = Regex(
+        result = Regex(
             """ResourceKey\.create\(\s*Registries\.LOOT_TABLE\s*,\s*(($ownerPattern)(?:\.[A-Za-z_$][\w$]*)+\.lootTable)\s*\)"""
-        ).replace(source, "$1")
+        ).replace(result, "$1")
 
         val id = """[A-Za-z_$][\w$]*"""
         val ownerVariables = Regex("""\b(?:final\s+)?(?:$ownerPattern)\s+($id)\b""")
@@ -28855,6 +29135,169 @@ $encodeLines
         return cookingClasses
     }
 
+    private data class InheritedRecipeStateAccessor(
+        val owner: String,
+        val fieldName: String,
+        val fieldType: String,
+        val accessorName: String
+    )
+
+    private fun collectInheritedRecipeStateAccessors(javaFiles: List<Path>): List<InheritedRecipeStateAccessor> {
+        val accessors = mutableListOf<InheritedRecipeStateAccessor>()
+        javaFiles.forEach { javaFile ->
+            val source = runCatching { javaFile.readText() }.getOrNull() ?: return@forEach
+            collectJavaClassDeclarations(source).forEach { declaration ->
+                val body = source.substring(declaration.bodyRange.first + 1, declaration.bodyRange.last)
+                val privateFields = Regex(
+                    """(?m)^[ \t]*private\s+(?!static\b)(?:final\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?(?:\s*<[^;\r\n]+>)?(?:\[\])?)\s+([A-Za-z_$][\w$]*)\s*(?:=[^;\r\n]*)?;"""
+                ).findAll(body).map { match ->
+                    match.groupValues[2] to match.groupValues[1].trim()
+                }.toMap()
+                if (privateFields.isEmpty()) return@forEach
+
+                privateFields.forEach { (fieldName, fieldType) ->
+                    val methodPattern = Regex(
+                        """(?s)\b(?:public|protected)\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?(?:\s*<[^{};()]+>)?(?:\[\])?)\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{\s*return\s+(?:this\.)?${Regex.escape(fieldName)}\s*;\s*\}"""
+                    )
+                    methodPattern.findAll(body)
+                        .filter { simpleJavaTypeName(it.groupValues[1]) == simpleJavaTypeName(fieldType) }
+                        .forEach { method ->
+                            accessors += InheritedRecipeStateAccessor(
+                                owner = declaration.name,
+                                fieldName = fieldName,
+                                fieldType = fieldType,
+                                accessorName = method.groupValues[2]
+                            )
+                        }
+                }
+            }
+        }
+        return accessors.distinct()
+    }
+
+    private fun migrateInheritedRecipeStateAccessSource(
+        source: String,
+        inheritedAccessors: List<InheritedRecipeStateAccessor>,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String {
+        if (!source.contains(".") || (!source.contains("RecipeSerializer") && !source.contains("RecordCodecBuilder"))) {
+            return source
+        }
+        var result = source
+        collectJavaClassDeclarations(source).forEach { declaration ->
+            val applicableAccessors = inheritedAccessors.filter { accessor ->
+                javaInheritanceIndex.inherits(declaration.directSuper, setOf(accessor.owner)) &&
+                    !javaClassDeclaresField(source, declaration, accessor.fieldName)
+            }
+            applicableAccessors.forEach { accessor ->
+                result = replaceRecipeStateFieldReads(
+                    result,
+                    declaration,
+                    accessor.fieldName,
+                    accessorName = accessor.accessorName
+                )
+            }
+
+            forwardedAbstractCookingTimeParameters(source, declaration, javaInheritanceIndex)
+                .forEach { fieldName ->
+                    result = replaceRecipeStateFieldReads(
+                        result,
+                        declaration,
+                        fieldName,
+                        accessorName = "getCookingTime"
+                    )
+                }
+        }
+        return result
+    }
+
+    private fun replaceRecipeStateFieldReads(
+        source: String,
+        declaration: JavaClassDeclaration,
+        fieldName: String,
+        accessorName: String
+    ): String {
+        if (!source.contains(".$fieldName")) return source
+        val receivers = recipeStateReceiversForField(source, declaration, fieldName)
+        if (receivers.isEmpty()) return source
+        var result = source
+        receivers.forEach { receiver ->
+            result = Regex("""\b${Regex.escape(receiver)}\.${Regex.escape(fieldName)}\b""")
+                .replace(result, "$receiver.$accessorName()")
+        }
+        return result
+    }
+
+    private fun recipeStateReceiversForField(
+        source: String,
+        declaration: JavaClassDeclaration,
+        fieldName: String
+    ): Set<String> {
+        val body = source.substring(declaration.bodyRange.first + 1, declaration.bodyRange.last)
+        val id = """[A-Za-z_$][\w$]*"""
+        val receivers = linkedSetOf<String>()
+        Regex("""\b${Regex.escape(declaration.name)}(?:\s*<[^;{}()]+>)?\s+($id)\b""")
+            .findAll(body)
+            .forEach { receivers += it.groupValues[1] }
+        Regex("""\(\s*($id)\s*\)\s*->\s*\1\.${Regex.escape(fieldName)}\b""")
+            .findAll(body)
+            .forEach { receivers += it.groupValues[1] }
+        Regex("""\b($id)\s*->\s*\1\.${Regex.escape(fieldName)}\b""")
+            .findAll(body)
+            .forEach { receivers += it.groupValues[1] }
+        return receivers
+    }
+
+    private fun forwardedAbstractCookingTimeParameters(
+        source: String,
+        declaration: JavaClassDeclaration,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): Set<String> {
+        if (!javaClassExtendsAny(declaration, setOf("AbstractCookingRecipe"), javaInheritanceIndex)) {
+            return emptySet()
+        }
+        val body = source.substring(declaration.bodyRange.first + 1, declaration.bodyRange.last)
+        val forwarded = linkedSetOf<String>()
+        Regex("""(?s)\b(?:public|protected|private)\s+${Regex.escape(declaration.name)}\s*\(([^()]*)\)\s*\{""")
+            .findAll(body)
+            .forEach { constructor ->
+                val params = parseJavaParameters(constructor.groupValues[1])
+                val intParams = params
+                    .filter { simpleJavaTypeName(it.type) == "int" }
+                    .map { it.name }
+                    .toSet()
+                if (intParams.isEmpty()) return@forEach
+                val openBrace = body.indexOf('{', constructor.range.last - 1)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(body, openBrace) else -1
+                if (openBrace < 0 || closeBrace < 0) return@forEach
+                val constructorBody = body.substring(openBrace + 1, closeBrace)
+                val superMatch = Regex("""\bsuper\s*\(""").find(constructorBody) ?: return@forEach
+                val superOpen = superMatch.range.last
+                val superClose = findMatchingParen(constructorBody, superOpen)
+                if (superClose < 0) return@forEach
+                val superArgs = splitTopLevelJavaArgs(constructorBody.substring(superOpen + 1, superClose))
+                    .map { it.trim() }
+                val finalArg = superArgs.lastOrNull() ?: return@forEach
+                if (finalArg in intParams && !javaClassDeclaresField(source, declaration, finalArg)) {
+                    forwarded += finalArg
+                }
+            }
+        return forwarded
+    }
+
+    private fun javaClassDeclaresField(source: String, declaration: JavaClassDeclaration, fieldName: String): Boolean {
+        val body = source.substring(declaration.bodyRange.first + 1, declaration.bodyRange.last)
+        return Regex("""(?m)^[ \t]*(?:public|protected|private)\s+(?:static\s+)?(?:final\s+)?[A-Za-z_$][\w$]*(?:\s*<[^;\r\n]+>)?(?:\[\])?\s+${Regex.escape(fieldName)}\s*(?:=[^;\r\n]*)?;""")
+            .containsMatchIn(body)
+    }
+
+    private fun simpleJavaTypeName(type: String): String =
+        type.trim()
+            .replace(Regex("""<[^<>]*>"""), "")
+            .replace("...", "[]")
+            .substringAfterLast('.')
+            .trim()
+
     private fun legacyStructuredRecipeSerializerOptionalCompoundOwner(source: String): String? {
         val className = javaTopLevelTypeName(source) ?: return null
         if (!source.contains("implements RecipeSerializer<$className>") ||
@@ -31032,6 +31475,30 @@ public class ${builder.className} implements RecipeBuilder {
             }}
             .toList()
         val recipeConstructors = collectRecipeConstructors(javaFiles)
+        val recipeSerializerFactoryHints = collectRecipeSerializerFactoryHints(projectDir)
+
+        for (file in javaFiles) {
+            val original = file.readText()
+            var content = migrateRecipeSerializerFactoryCallSites(original, recipeSerializerFactoryHints)
+            content = migrateGenericCookingRecipeOutputBuilderSource(
+                content,
+                recipeSerializerFactoryHints
+            )
+            if (content != original) {
+                changes.add(Change(
+                    file = file,
+                    line = 0,
+                    description = "Migrate serializer-backed cooking builders to explicit recipe factories",
+                    before = "builder methods keep only a RecipeSerializer and emit Result adapters",
+                    after = "builder methods accept a serializer-derived factory and emit RecipeOutput recipe instances",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-recipe-builder-factory-output"
+                ))
+                if (!dryRun) {
+                    file.writeText(content)
+                }
+            }
+        }
 
         val acceptPattern = Regex(
             """(?s)([ \t]*)consumer\.accept\(\s*new\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.Result)\((.*?)\)\s*\);"""
@@ -31091,7 +31558,8 @@ public class ${builder.className} implements RecipeBuilder {
 
     private data class RecipeConstructorSignature(
         val className: String,
-        val params: List<JavaParameterInfo>
+        val params: List<JavaParameterInfo>,
+        val defaultsByParam: Map<String, String> = emptyMap()
     )
 
     private fun collectRecipeConstructors(javaFiles: List<Path>): Map<String, List<RecipeConstructorSignature>> {
@@ -31100,15 +31568,273 @@ public class ${builder.className} implements RecipeBuilder {
             val source = file.readText()
             val className = javaTopLevelTypeName(source) ?: return@forEach
             if (!className.endsWith("Recipe")) return@forEach
+            val constructorDefaults = recipeConstructorDefaults(source)
             Regex("""(?m)^[ \t]*public\s+${Regex.escape(className)}\s*\(([^()]*)\)""")
                 .findAll(source)
                 .forEach { match ->
+                    val params = parseJavaParameters(match.groupValues[1])
                     constructors.getOrPut(className) { mutableListOf() }
-                        .add(RecipeConstructorSignature(className, parseJavaParameters(match.groupValues[1])))
+                        .add(RecipeConstructorSignature(className, params, constructorDefaults.filterKeys { key ->
+                            params.any { it.name == key }
+                        }))
                 }
         }
         return constructors
     }
+
+    private fun recipeConstructorDefaults(source: String): Map<String, String> {
+        val imports = javaImportsBySimpleName(source)
+        val packageName = packageNameOf(source)
+        val defaults = linkedMapOf<String, String>()
+        Regex("""\.fieldOf\(\s*"([^"]+)"\s*\)\.orElse\(\s*([^)\r\n]+)\s*\)""")
+            .findAll(source)
+            .forEach { match ->
+                defaults[match.groupValues[1]] = qualifyJavaStaticExpression(
+                    match.groupValues[2].trim(),
+                    imports,
+                    packageName
+                )
+            }
+        return defaults
+    }
+
+    private fun javaImportsBySimpleName(source: String): Map<String, String> =
+        Regex("""(?m)^\s*import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+            .findAll(source)
+            .associate { match -> match.groupValues[1].substringAfterLast('.') to match.groupValues[1] }
+
+    private fun qualifyJavaStaticExpression(
+        expression: String,
+        imports: Map<String, String>,
+        packageName: String?
+    ): String {
+        val match = Regex("""^([A-Za-z_$][\w$]*)\.(.+)$""").find(expression) ?: return expression
+        val owner = match.groupValues[1]
+        val member = match.groupValues[2]
+        val qualifiedOwner = imports[owner] ?: packageName?.let { "$it.$owner" } ?: return expression
+        return "$qualifiedOwner.$member"
+    }
+
+    private fun migrateRecipeSerializerFactoryCallSites(
+        source: String,
+        recipeSerializerFactoryHints: RecipeSerializerFactoryHints
+    ): String {
+        if (recipeSerializerFactoryHints.fieldToFactory.isEmpty() || !source.contains(".generic(")) return source
+        var changed = false
+        val result = rewriteJavaCall(source, "generic") { receiver, args ->
+            if (receiver.isBlank() || receiver == "SimpleCookingRecipeBuilder" || args.size < 2) {
+                return@rewriteJavaCall null
+            }
+            val serializerExpression = normalizeRecipeSerializerExpression(args.last())
+            val factory = recipeSerializerFactoryHints.fieldToFactory[serializerExpression] ?: return@rewriteJavaCall null
+            changed = true
+            "$receiver.generic(${args.joinToString(", ") { it.trim() }}, $factory)"
+        }
+        return if (changed) result else source
+    }
+
+    private fun migrateGenericCookingRecipeOutputBuilderSource(
+        source: String,
+        recipeSerializerFactoryHints: RecipeSerializerFactoryHints
+    ): String {
+        if (!source.contains("implements RecipeBuilder") ||
+            !source.contains("RecipeSerializer<? extends AbstractCookingRecipe>") ||
+            !source.contains("class Result implements RecipeOutput") ||
+            !source.contains(".accept(new ")) {
+            return source
+        }
+        val className = javaTopLevelTypeName(source) ?: return source
+        val serializerField = Regex(
+            """private\s+final\s+RecipeSerializer\s*<\s*\?\s+extends\s+AbstractCookingRecipe\s*>\s+([A-Za-z_$][\w$]*)\s*;"""
+        ).find(source)?.groupValues?.get(1) ?: return source
+        val resultClassText = legacyRecipeOutputResultClassText(source) ?: return source
+        val resultConstructor = Regex("""public\s+Result\s*\(([^()]*)\)""")
+            .find(resultClassText)
+            ?: return source
+        val resultParams = parseJavaParameters(resultConstructor.groupValues[1])
+        val factoryHint = referencedRecipeFactoryInterfaces(source, recipeSerializerFactoryHints).singleOrNull()
+            ?: compatibleRecipeFactoryInterfaces(resultParams, recipeSerializerFactoryHints).singleOrNull()
+            ?: return source
+        val resultParamTypes = resultParams.associate { it.name to it.type }
+        val outputRecipeArgs = factoryHint.params.map { param ->
+            val resultParam = resultParams.firstOrNull { it.name == param.name } ?: return source
+            val sourceType = resultParamTypes[resultParam.name].orEmpty()
+            RecipeFactoryArgument(resultParam.name, migrateRecipeOutputResultArgument(resultParam.name, sourceType, param.type))
+        }
+
+        var result = source
+        result = Regex(
+            """private\s+final\s+RecipeSerializer\s*<\s*\?\s+extends\s+AbstractCookingRecipe\s*>\s+${Regex.escape(serializerField)}\s*;"""
+        ).replace(result, "private final ${factoryHint.type} factory;")
+
+        result = addFactoryParameterToBuilderConstructor(result, className, serializerField, factoryHint.type)
+        result = addFactoryParameterToStaticBuilderMethods(result, className, serializerField, factoryHint.type)
+        result = result.replace("this.$serializerField = $serializerField;", "this.factory = ${serializerField}Factory;")
+
+        val acceptPattern = Regex("""(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.accept\(\s*new\s+(?:${Regex.escape(className)}\.)?Result\s*\(""")
+        var cursor = 0
+        var changed = false
+        while (true) {
+            val match = acceptPattern.find(result, cursor) ?: break
+            val openParen = result.indexOf('(', match.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(result, openParen) else -1
+            if (openParen < 0 || closeParen < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val acceptClose = nextNonWhitespaceIndex(result, closeParen + 1)
+            if (acceptClose < 0 || result[acceptClose] != ')') {
+                cursor = closeParen + 1
+                continue
+            }
+            val semicolon = nextNonWhitespaceIndex(result, acceptClose + 1)
+            if (semicolon < 0 || result[semicolon] != ';') {
+                cursor = closeParen + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen)).map { it.trim() }
+            if (args.size != resultParams.size) {
+                cursor = closeParen + 1
+                continue
+            }
+            val argsByName = resultParams.mapIndexed { index, param -> param.name to args[index] }.toMap()
+            val idExpression = argsByName["id"] ?: argsByName["recipeId"]
+            if (idExpression == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            val advancement = argsByName["advancement"]
+            val advancementId = argsByName["advancementId"]
+            val advancementExpression = if (advancement != null && advancementId != null) {
+                "$advancement.build($advancementId)"
+            } else {
+                "null"
+            }
+            val factoryArgs = outputRecipeArgs.joinToString(", ") { argument ->
+                val expression = argsByName[argument.sourceName] ?: return@joinToString argument.expression
+                Regex("""\b${Regex.escape(argument.sourceName)}\b""").replace(argument.expression, expression)
+            }
+            val indent = match.groupValues[1]
+            val output = match.groupValues[2]
+            val replacement = "${indent}AbstractCookingRecipe recipe = this.factory.create($factoryArgs);\n" +
+                "${indent}$output.accept($idExpression, recipe, $advancementExpression);"
+            result = result.substring(0, match.range.first) + replacement + result.substring(semicolon + 1)
+            cursor = match.range.first + replacement.length
+            changed = true
+        }
+        if (!changed) return source
+        result = removeLegacyResultClass(result)
+        var withoutJsonObjectImport = removeImport(result, "com.google.gson.JsonObject")
+        if (!Regex("""\bJsonObject\b""").containsMatchIn(withoutJsonObjectImport)) {
+            result = withoutJsonObjectImport
+        }
+        var withoutJsonOpsImport = removeImport(result, "com.mojang.serialization.JsonOps")
+        if (!Regex("""\bJsonOps\b""").containsMatchIn(withoutJsonOpsImport)) {
+            result = withoutJsonOpsImport
+        }
+        result = removeImport(result, "java.util.function.Consumer")
+        if (result.contains("new ItemStack(")) {
+            result = addImportIfMissing(result, "net.minecraft.world.item.ItemStack")
+        }
+        return result
+    }
+
+    private data class RecipeFactoryArgument(
+        val sourceName: String,
+        val expression: String
+    )
+
+    private fun referencedRecipeFactoryInterfaces(
+        source: String,
+        recipeSerializerFactoryHints: RecipeSerializerFactoryHints
+    ): Set<RecipeFactoryInterfaceHint> =
+        Regex("""\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\.get\s*\(\s*\)""")
+            .findAll(source)
+            .mapNotNull { match ->
+                recipeSerializerFactoryHints.fieldToFactoryInterface[match.groupValues[1]]
+            }
+            .toSet()
+
+    private fun compatibleRecipeFactoryInterfaces(
+        resultParams: List<JavaParameterInfo>,
+        recipeSerializerFactoryHints: RecipeSerializerFactoryHints
+    ): Set<RecipeFactoryInterfaceHint> {
+        val resultParamNames = resultParams.map { it.name }.toSet()
+        return recipeSerializerFactoryHints.fieldToFactoryInterface.values
+            .filter { hint -> hint.params.all { it.name in resultParamNames } }
+            .toSet()
+    }
+
+    private fun addFactoryParameterToBuilderConstructor(
+        source: String,
+        className: String,
+        serializerParam: String,
+        factoryType: String
+    ): String =
+        Regex("""(?s)(public\s+${Regex.escape(className)}\s*\((?:[^()]|\([^()]*\))*RecipeSerializer\s*<\s*\?\s+extends\s+AbstractCookingRecipe\s*>\s+${Regex.escape(serializerParam)})(\s*\))""")
+            .replace(source) { match ->
+                if (match.groupValues[1].contains("${serializerParam}Factory")) {
+                    match.value
+                } else {
+                    "${match.groupValues[1]}, $factoryType ${serializerParam}Factory${match.groupValues[2]}"
+                }
+            }
+
+    private fun addFactoryParameterToStaticBuilderMethods(
+        source: String,
+        className: String,
+        serializerParam: String,
+        factoryType: String
+    ): String {
+        var result = source
+        val methodPattern = Regex(
+            """(?s)(public\s+static\s+${Regex.escape(className)}\s+[A-Za-z_$][\w$]*\s*\((?:[^()]|\([^()]*\))*RecipeSerializer\s*<\s*\?\s+extends\s+AbstractCookingRecipe\s*>\s+${Regex.escape(serializerParam)})(\s*\))"""
+        )
+        result = methodPattern.replace(result) { match ->
+            if (match.groupValues[1].contains("${serializerParam}Factory")) {
+                match.value
+            } else {
+                "${match.groupValues[1]}, $factoryType ${serializerParam}Factory${match.groupValues[2]}"
+            }
+        }
+        return addFactoryArgumentToConstructorCalls(result, className, serializerParam)
+    }
+
+    private fun addFactoryArgumentToConstructorCalls(
+        source: String,
+        className: String,
+        serializerParam: String
+    ): String {
+        var result = source
+        var cursor = 0
+        val token = "new $className("
+        while (true) {
+            val tokenIndex = result.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + "new $className".length
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            val serializerIndex = args.indexOfFirst { it.trim() == serializerParam }
+            if (serializerIndex < 0 || args.any { it.trim() == "${serializerParam}Factory" }) {
+                cursor = closeParen + 1
+                continue
+            }
+            val migrated = args.toMutableList()
+            migrated.add(serializerIndex + 1, "${serializerParam}Factory")
+            val replacement = "new $className(${migrated.joinToString(", ") { it.trim() }})"
+            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
+            cursor = tokenIndex + replacement.length
+        }
+        return result
+    }
+
+    private fun normalizeRecipeSerializerExpression(expression: String): String =
+        expression.trim()
+            .removeSuffix(".get()")
 
     private fun migrateConstructableRecipeOutputResultAdapters(
         source: String,
@@ -31168,11 +31894,13 @@ public class ${builder.className} implements RecipeBuilder {
         }
         if (!changed) return source
         result = removeLegacyResultClass(result)
-        if (!Regex("""\bJsonObject\b""").containsMatchIn(result)) {
-            result = removeImport(result, "com.google.gson.JsonObject")
+        val withoutJsonObjectImport = removeImport(result, "com.google.gson.JsonObject")
+        if (!Regex("""\bJsonObject\b""").containsMatchIn(withoutJsonObjectImport)) {
+            result = withoutJsonObjectImport
         }
-        if (!Regex("""\bJsonOps\b""").containsMatchIn(result)) {
-            result = removeImport(result, "com.mojang.serialization.JsonOps")
+        val withoutJsonOpsImport = removeImport(result, "com.mojang.serialization.JsonOps")
+        if (!Regex("""\bJsonOps\b""").containsMatchIn(withoutJsonOpsImport)) {
+            result = withoutJsonOpsImport
         }
         if (result.contains("Optional.ofNullable(")) {
             result = addImportIfMissing(result, "java.util.Optional")
@@ -31193,9 +31921,15 @@ public class ${builder.className} implements RecipeBuilder {
     ): RecipeOutputResultConstruction? {
         val resultParamTypes = resultParams.associate { it.name to it.type }
         val constructorArgs = constructor.params.map { param ->
-            val expression = argsByName[param.name] ?: return null
+            val expression = argsByName[param.name]
+                ?: constructor.defaultsByParam[param.name]
+                ?: return null
             val sourceType = resultParamTypes[param.name].orEmpty()
-            migrateRecipeOutputResultArgument(expression, sourceType, param.type)
+            if (param.name in argsByName) {
+                migrateRecipeOutputResultArgument(expression, sourceType, param.type)
+            } else {
+                expression
+            }
         }
         val idExpression = argsByName["id"] ?: argsByName["recipeId"] ?: return null
         val advancement = argsByName["advancement"]
@@ -31217,6 +31951,8 @@ public class ${builder.className} implements RecipeBuilder {
         val sourceSimple = sourceType.substringBefore('<').substringAfterLast('.').trim()
         return if (targetSimple == "Optional" && sourceSimple != "Optional") {
             "Optional.ofNullable($expression)"
+        } else if (targetSimple == "ItemStack" && sourceSimple == "Item") {
+            "new ItemStack($expression)"
         } else {
             expression
         }

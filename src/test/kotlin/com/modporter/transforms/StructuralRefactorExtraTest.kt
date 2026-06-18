@@ -4075,6 +4075,532 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `custom cooking serializers read inherited recipe state through structural accessors`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BookCategory.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+
+            public enum BookCategory {
+                REPAIR;
+
+                public static final Codec<BookCategory> CODEC = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("AbstractSpecialCookingRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.CookingBookCategory;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeType;
+
+            public abstract class AbstractSpecialCookingRecipe extends AbstractCookingRecipe {
+                private final BookCategory category;
+
+                protected AbstractSpecialCookingRecipe(RecipeType<?> recipeType, String group, BookCategory category, Ingredient ingredient, ItemStack result, float experience, int cookingTime) {
+                    super(recipeType, group, CookingBookCategory.MISC, ingredient, result, experience, cookingTime);
+                    this.category = category;
+                }
+
+                public BookCategory bookCategory() {
+                    return this.category;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RepairRecipe.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.network.RegistryFriendlyByteBuf;
+            import net.minecraft.network.codec.StreamCodec;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class RepairRecipe extends AbstractSpecialCookingRecipe {
+                private final Ingredient ingredient;
+
+                public RepairRecipe(String group, BookCategory category, Ingredient ingredient, int repairTime) {
+                    super(ExampleRecipeTypes.REPAIRING.get(), group, category, ingredient, ingredient.getItems()[0], 0.0F, repairTime);
+                    this.ingredient = ingredient;
+                }
+
+                public static class Serializer implements RecipeSerializer<RepairRecipe> {
+                    private static final MapCodec<RepairRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                            Codec.STRING.optionalFieldOf("group", "").forGetter(AbstractCookingRecipe::getGroup),
+                            BookCategory.CODEC.fieldOf("category").forGetter((recipe) -> recipe.category),
+                            Ingredient.CODEC_NONEMPTY.fieldOf("ingredient").forGetter((recipe) -> recipe.ingredient),
+                            Codec.INT.fieldOf("repairTime").orElse(500).forGetter((recipe) -> recipe.repairTime)
+                    ).apply(instance, RepairRecipe::new));
+
+                    public StreamCodec<RegistryFriendlyByteBuf, RepairRecipe> streamCodec() {
+                        return StreamCodec.of(this::toNetwork, this::fromNetwork);
+                    }
+
+                    private RepairRecipe fromNetwork(RegistryFriendlyByteBuf buffer) {
+                        return null;
+                    }
+
+                    private void toNetwork(RegistryFriendlyByteBuf buffer, RepairRecipe recipe) {
+                        buffer.writeEnum(recipe.category);
+                        buffer.writeVarInt(recipe.repairTime);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val recipe = srcDir.resolve("RepairRecipe.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-inherited-recipe-state-access" })
+        assertTrue(recipe.contains("BookCategory.CODEC.fieldOf(\"category\").forGetter((recipe) -> recipe.bookCategory())"), recipe)
+        assertTrue(recipe.contains("Codec.INT.fieldOf(\"repairTime\").orElse(500).forGetter((recipe) -> recipe.getCookingTime())"), recipe)
+        assertTrue(recipe.contains("buffer.writeEnum(recipe.bookCategory());"), recipe)
+        assertTrue(recipe.contains("buffer.writeVarInt(recipe.getCookingTime());"), recipe)
+        assertFalse(recipe.contains("recipe.category"), recipe)
+        assertFalse(recipe.contains("recipe.repairTime"), recipe)
+    }
+
+    @Test
+    fun `legacy recipe output adapters use codec defaults for omitted constructor parameters`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BookCategory.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+
+            public enum BookCategory {
+                UNKNOWN;
+
+                public static final Codec<BookCategory> CODEC = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("DefaultedRecipe.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class DefaultedRecipe {
+                public DefaultedRecipe(String group, BookCategory category, Ingredient ingredient, int time) {
+                }
+
+                public static class Serializer implements RecipeSerializer<DefaultedRecipe> {
+                    private static final MapCodec<DefaultedRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                            Codec.STRING.optionalFieldOf("group", "").forGetter((recipe) -> ""),
+                            BookCategory.CODEC.fieldOf("category").orElse(BookCategory.UNKNOWN).forGetter((recipe) -> BookCategory.UNKNOWN),
+                            Ingredient.CODEC_NONEMPTY.fieldOf("ingredient").forGetter((recipe) -> null),
+                            Codec.INT.fieldOf("time").orElse(200).forGetter((recipe) -> 200)
+                    ).apply(instance, DefaultedRecipe::new));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("DefaultedRecipeBuilder.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class DefaultedRecipeBuilder {
+                private final Ingredient ingredient;
+                private final int time;
+                private final Advancement.Builder advancement;
+                private final ResourceLocation advancementId;
+
+                public DefaultedRecipeBuilder(Ingredient ingredient, int time, Advancement.Builder advancement, ResourceLocation advancementId) {
+                    this.ingredient = ingredient;
+                    this.time = time;
+                    this.advancement = advancement;
+                    this.advancementId = advancementId;
+                }
+
+                public void save(RecipeOutput output, ResourceLocation id) {
+                    output.accept(new DefaultedRecipeBuilder.Result(id, "", this.ingredient, this.time, this.advancement, this.advancementId));
+                }
+
+                public static class Result implements RecipeOutput {
+                    private final ResourceLocation id;
+                    private final String group;
+                    private final Ingredient ingredient;
+                    private final int time;
+                    private final Advancement.Builder advancement;
+                    private final ResourceLocation advancementId;
+
+                    public Result(ResourceLocation id, String group, Ingredient ingredient, int time, Advancement.Builder advancement, ResourceLocation advancementId) {
+                        this.id = id;
+                        this.group = group;
+                        this.ingredient = ingredient;
+                        this.time = time;
+                        this.advancement = advancement;
+                        this.advancementId = advancementId;
+                    }
+
+                    public RecipeSerializer<DefaultedRecipe> getType() {
+                        return ExampleSerializers.DEFAULTED.get();
+                    }
+
+                    public void serializeRecipeData(JsonObject json) {
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleSerializers.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleSerializers {
+                public static final DeferredHolder<RecipeSerializer<?>, DefaultedRecipe.Serializer> DEFAULTED = null;
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val builder = srcDir.resolve("DefaultedRecipeBuilder.java").readText()
+
+        assertTrue(builder.contains("output.accept(id, new DefaultedRecipe(\"\", com.example.BookCategory.UNKNOWN, this.ingredient, this.time), this.advancement.build(this.advancementId));"), builder)
+        assertFalse(builder.contains("class Result"), builder)
+        assertFalse(builder.contains("JsonObject"), builder)
+    }
+
+    @Test
+    fun `serializer backed cooking builders migrate to factory based recipe output`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BookCategory.java").writeText("""
+            package com.example;
+
+            public enum BookCategory {
+                HEATED
+            }
+        """.trimIndent())
+        srcDir.resolve("SpecialCookingSerializer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class SpecialCookingSerializer<T extends AbstractCookingRecipe> implements RecipeSerializer<T> {
+                private final SpecialCookingSerializer.CookieBaker<T> factory;
+
+                public SpecialCookingSerializer(SpecialCookingSerializer.CookieBaker<T> factory, int defaultCookingTime) {
+                    this.factory = factory;
+                }
+
+                public interface CookieBaker<T extends AbstractCookingRecipe> {
+                    T create(String group, BookCategory category, Ingredient ingredient, ItemStack result, float experience, int cookingTime);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("HeatedRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeType;
+
+            public class HeatedRecipe extends AbstractCookingRecipe {
+                public HeatedRecipe(String group, BookCategory category, Ingredient ingredient, ItemStack result, float experience, int cookingTime) {
+                    super((RecipeType<?>) null, group, null, ingredient, result, experience, cookingTime);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleSerializers.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleSerializers {
+                public static final DeferredHolder<SpecialCookingSerializer<HeatedRecipe>, SpecialCookingSerializer<HeatedRecipe>> HEATED = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("SpecialCookingRecipeBuilder.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.advancements.AdvancementRewards;
+            import net.minecraft.advancements.AdvancementRequirements;
+            import net.minecraft.advancements.Criterion;
+            import net.minecraft.advancements.critereon.RecipeUnlockedTrigger;
+            import net.minecraft.data.recipes.RecipeBuilder;
+            import net.minecraft.data.recipes.RecipeCategory;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.level.ItemLike;
+
+            import java.util.LinkedHashMap;
+            import java.util.Map;
+
+            public class SpecialCookingRecipeBuilder implements RecipeBuilder {
+                private final RecipeCategory recipeCategory;
+                private final BookCategory category;
+                private final Item result;
+                private final Ingredient ingredient;
+                private final float experience;
+                private final int cookingTime;
+                private final Map<String, Criterion<?>> criteria = new LinkedHashMap<>();
+                private String group;
+                private final RecipeSerializer<? extends AbstractCookingRecipe> serializer;
+
+                public SpecialCookingRecipeBuilder(RecipeCategory recipeCategory, BookCategory category, ItemLike result, Ingredient ingredient, float experience, int cookingTime, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
+                    this.recipeCategory = recipeCategory;
+                    this.category = category;
+                    this.result = result.asItem();
+                    this.ingredient = ingredient;
+                    this.experience = experience;
+                    this.cookingTime = cookingTime;
+                    this.serializer = serializer;
+                }
+
+                public static SpecialCookingRecipeBuilder generic(Ingredient ingredient, RecipeCategory recipeCategory, ItemLike result, float experience, int cookingTime, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
+                    return new SpecialCookingRecipeBuilder(recipeCategory, BookCategory.HEATED, result, ingredient, experience, cookingTime, serializer);
+                }
+
+                public RecipeBuilder unlockedBy(String name, Criterion<?> criterion) {
+                    this.criteria.put(name, criterion);
+                    return this;
+                }
+
+                public RecipeBuilder group(String group) {
+                    this.group = group;
+                    return this;
+                }
+
+                public Item getResult() {
+                    return this.result;
+                }
+
+                public void save(RecipeOutput output, ResourceLocation id) {
+                    Advancement.Builder advancement = output.advancement().addCriterion("has_the_recipe", RecipeUnlockedTrigger.unlocked(id)).rewards(AdvancementRewards.Builder.recipe(id)).requirements(AdvancementRequirements.Strategy.OR);
+                    this.criteria.forEach(advancement::addCriterion);
+                    output.accept(new SpecialCookingRecipeBuilder.Result(id, this.group == null ? "" : this.group, this.category, this.ingredient, this.result, this.experience, this.cookingTime, advancement, id.withPrefix("recipes/" + this.recipeCategory.getFolderName() + "/"), this.serializer));
+                }
+
+                static class Result implements RecipeOutput {
+                    private final ResourceLocation id;
+                    private final String group;
+                    private final BookCategory category;
+                    private final Ingredient ingredient;
+                    private final Item result;
+                    private final float experience;
+                    private final int cookingTime;
+                    private final Advancement.Builder advancement;
+                    private final ResourceLocation advancementId;
+                    private final RecipeSerializer<? extends AbstractCookingRecipe> serializer;
+
+                    public Result(ResourceLocation id, String group, BookCategory category, Ingredient ingredient, Item result, float experience, int cookingTime, Advancement.Builder advancement, ResourceLocation advancementId, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
+                        this.id = id;
+                        this.group = group;
+                        this.category = category;
+                        this.ingredient = ingredient;
+                        this.result = result;
+                        this.experience = experience;
+                        this.cookingTime = cookingTime;
+                        this.advancement = advancement;
+                        this.advancementId = advancementId;
+                        this.serializer = serializer;
+                    }
+
+                    public void serializeRecipeData(JsonObject json) {
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleProvider.java").writeText("""
+            package com.example;
+
+            import net.minecraft.data.recipes.RecipeCategory;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.crafting.Ingredient;
+
+            public class ExampleProvider {
+                public void build() {
+                    SpecialCookingRecipeBuilder.generic(Ingredient.of(Items.BEEF), RecipeCategory.FOOD, Items.COOKED_BEEF, 0.3F, 200, ExampleSerializers.HEATED.get());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val builder = srcDir.resolve("SpecialCookingRecipeBuilder.java").readText()
+        val provider = srcDir.resolve("ExampleProvider.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-recipe-builder-factory-output" })
+        assertTrue(builder.contains("private final com.example.SpecialCookingSerializer.CookieBaker<?> factory;"), builder)
+        assertTrue(builder.contains("RecipeSerializer<? extends AbstractCookingRecipe> serializer, com.example.SpecialCookingSerializer.CookieBaker<?> serializerFactory"), builder)
+        assertTrue(builder.contains("this.factory = serializerFactory;"), builder)
+        assertTrue(builder.contains("AbstractCookingRecipe recipe = this.factory.create(this.group == null ? \"\" : this.group, this.category, this.ingredient, new ItemStack(this.result), this.experience, this.cookingTime);"), builder)
+        assertTrue(builder.contains("output.accept(id, recipe, advancement.build(id.withPrefix(\"recipes/\" + this.recipeCategory.getFolderName() + \"/\")));"), builder)
+        assertTrue(builder.contains("import net.minecraft.world.item.ItemStack;"), builder)
+        assertFalse(builder.contains("class Result"), builder)
+        assertTrue(provider.contains("ExampleSerializers.HEATED.get(), com.example.HeatedRecipe::new"), provider)
+    }
+
+    @Test
+    fun `datagen registry and loot table key wrappers migrate by declared key structure`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LootKeys.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.storage.loot.LootTable;
+
+            public class LootKeys {
+                public static final ResourceKey<LootTable> BONUS = ResourceKey.create(Registries.LOOT_TABLE, ResourceLocation.fromNamespaceAndPath("example", "bonus"));
+            }
+        """.trimIndent())
+        srcDir.resolve("LootProvider.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.storage.loot.LootTable;
+            import net.minecraft.world.level.storage.loot.entries.NestedLootTable;
+
+            public class LootProvider {
+                public void add(ResourceLocation id) {
+                    NestedLootTable.lootTableReference(ResourceKey.create(Registries.LOOT_TABLE, LootKeys.BONUS));
+                    NestedLootTable.lootTableReference(ResourceKey.create(Registries.LOOT_TABLE, id));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RegistrySets.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.core.RegistrySetBuilder;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.registries.VanillaRegistries;
+            import net.neoforged.neoforge.common.data.DatapackBuiltinEntriesProvider;
+
+            import java.util.Collections;
+            import java.util.concurrent.CompletableFuture;
+
+            public class RegistrySets extends DatapackBuiltinEntriesProvider {
+                public static final RegistrySetBuilder BUILDER = new RegistrySetBuilder();
+
+                public RegistrySets(PackOutput output, CompletableFuture<HolderLookup.Provider> registries) {
+                    super(output, registries, BUILDER, Collections.singleton("example"));
+                }
+
+                public static HolderLookup.Provider createLookup() {
+                    return BUILDER.buildPatch(RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY), VanillaRegistries.createLookup());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val lootProvider = srcDir.resolve("LootProvider.java").readText()
+        val registrySets = srcDir.resolve("RegistrySets.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-loot-table-resourcekey-reference" })
+        assertTrue(lootProvider.contains("NestedLootTable.lootTableReference(LootKeys.BONUS);"), lootProvider)
+        assertTrue(lootProvider.contains("NestedLootTable.lootTableReference(ResourceKey.create(Registries.LOOT_TABLE, id));"), lootProvider)
+        assertFalse(registrySets.contains("createLookup()"), registrySets)
+        assertFalse(registrySets.contains("buildPatch("), registrySets)
+        assertFalse(registrySets.contains("RegistryAccess.fromRegistryOfRegistries"), registrySets)
+        assertFalse(registrySets.contains("BuiltInRegistries"), registrySets)
+        assertFalse(registrySets.contains("VanillaRegistries"), registrySets)
+    }
+
+    @Test
+    fun `loot provider holder lookups and deferred holders migrate from proven structure`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleBlocks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleBlocks {
+                public static final DeferredHolder<Block, Block> GEM_BLOCK = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleFeatureStates.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class ExampleFeatureStates {
+                public static final BlockState GEM = ExampleBlocks.GEM_BLOCK.getValue().defaultBlockState();
+                public BlockState passThrough(BlockState state) {
+                    return state.setValue(null, state.getValue(null));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleEntityLoot.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.data.loot.LootTableSubProvider;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.world.item.enchantment.Enchantments;
+            import net.minecraft.world.level.storage.loot.LootPool;
+            import net.minecraft.world.level.storage.loot.LootTable;
+            import net.minecraft.world.level.storage.loot.entries.LootItem;
+            import net.minecraft.world.level.storage.loot.entries.NestedLootTable;
+            import net.minecraft.world.level.storage.loot.functions.ApplyBonusCount;
+            import net.minecraft.world.level.storage.loot.functions.EnchantRandomlyFunction;
+
+            import java.util.function.BiConsumer;
+
+            public class ExampleEntityLoot implements LootTableSubProvider {
+                public void generate(BiConsumer<ResourceKey<LootTable>, LootTable.Builder> builder) {
+                    LootPool.lootPool()
+                        .add(LootItem.lootTableItem(null).apply(EnchantRandomlyFunction.randomApplicableEnchantment()))
+                        .add(LootItem.lootTableItem(null).apply(ApplyBonusCount.addOreBonusCount(Enchantments.FORTUNE)))
+                        .add(NestedLootTable.lootTableReference(ResourceKey.create(Registries.LOOT_TABLE, ExampleEntityTypes.COW.get().getDefaultLootTable())));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val featureStates = srcDir.resolve("ExampleFeatureStates.java").readText()
+        val entityLoot = srcDir.resolve("ExampleEntityLoot.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredholder-getvalue" })
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(result.changes.any { it.ruleId == "struct-loot-table-resourcekey-reference" })
+        assertTrue(featureStates.contains("ExampleBlocks.GEM_BLOCK.get().defaultBlockState()"), featureStates)
+        assertTrue(featureStates.contains("state.getValue(null)"), featureStates)
+        assertTrue(entityLoot.contains("private final HolderLookup.Provider registries;"), entityLoot)
+        assertTrue(entityLoot.contains("this.registries = registries;"), entityLoot)
+        assertTrue(entityLoot.contains("EnchantRandomlyFunction.randomApplicableEnchantment(this.registries)"), entityLoot)
+        assertTrue(entityLoot.contains("ApplyBonusCount.addOreBonusCount(this.registries.holderOrThrow(Enchantments.FORTUNE))"), entityLoot)
+        assertTrue(entityLoot.contains("NestedLootTable.lootTableReference(ExampleEntityTypes.COW.get().getDefaultLootTable())"), entityLoot)
+        assertFalse(entityLoot.contains("ResourceKey.create(Registries.LOOT_TABLE, ExampleEntityTypes.COW.get().getDefaultLootTable())"), entityLoot)
+    }
+
+    @Test
     fun `mmlib recipe id tracking reads ids from holder tracked recipe id`() {
         val projectDir = createFile("CookingPotBlockEntity.java", """
             package com.example;
@@ -12800,16 +13326,14 @@ class StructuralRefactorExtraTest {
         assertTrue(!staticModBusSurface.contains("FMLJavaModLoadingContext"))
         assertTrue(blockLootSurface.contains("public BlockLootSurface(HolderLookup.Provider registries)"))
         assertTrue(blockLootSurface.contains("super(Set.of(), FeatureFlags.REGISTRY.allFlags(), registries);"))
-        assertTrue(blockLootSurface.contains("import net.minecraft.core.registries.Registries;"))
-        assertTrue(blockLootSurface.contains("this.registries.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.FORTUNE)"))
+        assertTrue(blockLootSurface.contains("this.registries.holderOrThrow(Enchantments.FORTUNE)"))
         assertTrue(blockLootSurface.contains("HAS_SHEARS.or(this.hasSilkTouch())"))
         assertTrue(blockLootSurface.contains("protected LootTable.Builder createSilkTouchOrShearsDispatchTable"))
         assertTrue(blockLootSurface.contains("protected LootTable.Builder createShearsDispatchTable"))
         assertTrue(blockLootSurface.contains("protected static LootTable.Builder createShearsOnlyDrop"))
         assertTrue(!blockLootSurface.contains("HAS_SILK_TOUCH"))
-        assertTrue(libraryBlockLootSurface.contains("import net.minecraft.core.registries.Registries;"))
-        assertTrue(libraryBlockLootSurface.contains("BonusLevelTableCondition.bonusLevelFlatChance(this.registries.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.FORTUNE), 0.1F)"))
-        assertTrue(libraryBlockLootSurface.contains("ApplyBonusCount.addUniformBonusCount(this.registries.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.FORTUNE))"))
+        assertTrue(libraryBlockLootSurface.contains("BonusLevelTableCondition.bonusLevelFlatChance(this.registries.holderOrThrow(Enchantments.FORTUNE), 0.1F)"))
+        assertTrue(libraryBlockLootSurface.contains("ApplyBonusCount.addUniformBonusCount(this.registries.holderOrThrow(Enchantments.FORTUNE))"))
         assertTrue(legacySpriteSourceProviderSurface.contains("public LegacySpriteSourceProviderSurface(PackOutput output, CompletableFuture<HolderLookup.Provider> provider, ExistingFileHelper helper)"), legacySpriteSourceProviderSurface)
         assertTrue(legacySpriteSourceProviderSurface.contains("super(output, provider, ExampleMod.ID, helper);"), legacySpriteSourceProviderSurface)
         assertTrue(legacySpriteSourceProviderSurface.contains("protected void gather()"), legacySpriteSourceProviderSurface)

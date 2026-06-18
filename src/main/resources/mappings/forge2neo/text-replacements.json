@@ -1316,6 +1316,14 @@
       "isRegex": true
     },
     {
+      "id": "tags-items-glass-colorless-plural",
+      "pattern": "Tags\\.Items\\.GLASS_COLORLESS\\b",
+      "replacement": "Tags.Items.GLASS_BLOCKS_COLORLESS",
+      "description": "Tags.Items.GLASS_COLORLESS -> GLASS_BLOCKS_COLORLESS in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "tags-items-string-plural",
       "pattern": "Tags\\.Items\\.STRING\\b",
       "replacement": "Tags.Items.STRINGS",
@@ -1360,6 +1368,14 @@
       "pattern": "Tags\\.Blocks\\.GLASS\\b",
       "replacement": "Tags.Blocks.GLASS_BLOCKS",
       "description": "Tags.Blocks.GLASS -> GLASS_BLOCKS in NeoForge 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "tags-blocks-glass-colorless-plural",
+      "pattern": "Tags\\.Blocks\\.GLASS_COLORLESS\\b",
+      "replacement": "Tags.Blocks.GLASS_BLOCKS_COLORLESS",
+      "description": "Tags.Blocks.GLASS_COLORLESS -> GLASS_BLOCKS_COLORLESS in NeoForge 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },

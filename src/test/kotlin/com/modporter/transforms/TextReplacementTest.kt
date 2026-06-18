@@ -49,6 +49,29 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `colorless glass tag constants use renamed glass block constants`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.neoforged.neoforge.common.Tags;
+
+            public class TestMod {
+                Object blockTag = Tags.Blocks.GLASS_COLORLESS;
+                Object itemTag = Tags.Items.GLASS_COLORLESS;
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+        assertTrue(transformed.contains("Tags.Blocks.GLASS_BLOCKS_COLORLESS"), transformed)
+        assertTrue(transformed.contains("Tags.Items.GLASS_BLOCKS_COLORLESS"), transformed)
+        assertFalse(transformed.contains("GLASS_COLORLESS"), transformed)
+    }
+
+    @Test
     fun `class renames are applied correctly`() {
         val projectDir = createTestFile("""
             MinecraftForge.EVENT_BUS.register(this);
