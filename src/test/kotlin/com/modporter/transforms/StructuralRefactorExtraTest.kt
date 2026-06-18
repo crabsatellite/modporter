@@ -8975,6 +8975,12 @@ class StructuralRefactorExtraTest {
                     return false;
                 }
 
+                @Override
+                public void remove(Entity.RemovalReason reason) {
+                    this.setRemoved(reason);
+                    this.invalidateCaps();
+                }
+
                 public void invalidate(BlockEntity blockEntity) {
                     blockEntity.invalidateCaps();
                 }
@@ -9142,6 +9148,8 @@ class StructuralRefactorExtraTest {
         assertTrue(entityOverrideShapes.contains("public boolean canChangeDimensions(Level from, Level to)"))
         assertTrue(entityOverrideShapes.contains("public boolean canBeLeashed()"))
         assertFalse(entityOverrideShapes.contains("canBeLeashed(Player"))
+        assertTrue(entityOverrideShapes.contains("this.setRemoved(reason);"))
+        assertFalse(entityOverrideShapes.contains("this.invalidateCapabilities();"), entityOverrideShapes)
         assertTrue(entityOverrideShapes.contains("blockEntity.invalidateCapabilities();"))
         assertTrue(attackGoals.contains("return target != null && this.mob.isWithinMeleeAttackRange(target);"))
         assertTrue(attackGoals.contains("this.checkAndPerformAttack(livingentity);"))
@@ -9743,6 +9751,11 @@ class StructuralRefactorExtraTest {
 
                 public boolean canEat(ItemStack stack) {
                     return stack.getItem().has(net.minecraft.core.component.DataComponents.FOOD);
+                }
+
+                public ItemStack banner(ItemStack bannerStack) {
+                    bannerStack.hideTooltipPart(ItemStack.TooltipPart.ADDITIONAL);
+                    return bannerStack;
                 }
             }
         """.trimIndent())
@@ -11691,6 +11704,8 @@ class StructuralRefactorExtraTest {
         assertTrue(surfaces.contains("registry.get(ExampleEnchantments.DESTRUCTION)"))
         assertTrue(surfaces.contains("state.getValue(ACTIVE) && snowOnState.getValue(LAYERS) > 0"), surfaces)
         assertTrue(surfaces.contains("return stack.has(net.minecraft.core.component.DataComponents.FOOD);"))
+        assertTrue(surfaces.contains("bannerStack.set(DataComponents.HIDE_ADDITIONAL_TOOLTIP, Unit.INSTANCE);"), surfaces)
+        assertTrue(surfaces.contains("import net.minecraft.util.Unit;"), surfaces)
         assertTrue(surfaces.contains("EnchantmentHelper.hasTag(living.getItemBySlot(EquipmentSlot.FEET), EnchantmentTags.PREVENTS_ICE_MELTING)"))
         assertTrue(surfaces.contains("EnchantmentHelper.modifyDamage(serverlevel, this.getWeaponItem(), entity, damagesource, f)"))
         assertTrue(surfaces.contains("float f1 = this.getKnockback(entity, damagesource);"))
@@ -11704,6 +11719,8 @@ class StructuralRefactorExtraTest {
         assertTrue(!surfaces.contains("getFireAspect"))
         assertTrue(!surfaces.contains("maybeDisableShield"))
         assertTrue(!surfaces.contains("doEnchantDamageEffects"))
+        assertFalse(surfaces.contains("hideTooltipPart"), surfaces)
+        assertFalse(surfaces.contains("TooltipPart"), surfaces)
         assertTrue(legacyEnchantmentComponentSurface.contains("ItemEnchantments.Mutable inputEnchantments = new ItemEnchantments.Mutable(input.getOrDefault(net.minecraft.core.component.DataComponents.ENCHANTMENTS, ItemEnchantments.EMPTY));"), legacyEnchantmentComponentSurface)
         assertTrue(legacyEnchantmentComponentSurface.contains("inputEnchantments.removeIf(enchantment -> !result.supportsEnchantment(enchantment));"), legacyEnchantmentComponentSurface)
         assertTrue(legacyEnchantmentComponentSurface.contains("EnchantmentHelper.setEnchantments(result, inputEnchantments.toImmutable());"), legacyEnchantmentComponentSurface)
@@ -13146,6 +13163,122 @@ class StructuralRefactorExtraTest {
         assertTrue(event.contains("checkTooFar(rightClickBlock, new Object())"))
         assertTrue(!event.contains("void route(PlayerInteractEvent event)"), event)
         assertTrue(spawnEgg.contains("spawnEggItem.getType(stack) == expected"))
+    }
+
+    @Test
+    fun `migrates legacy abstract arrow constructor knockback and enchantment hooks structurally`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DartSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.damagesource.DamageSource;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.projectile.AbstractArrow;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.phys.EntityHitResult;
+            import net.minecraft.world.phys.Vec3;
+
+            import java.util.function.Supplier;
+
+            public abstract class DartSurface extends AbstractArrow {
+                private final Supplier<Item> pickupItem;
+
+                protected DartSurface(EntityType<? extends DartSurface> type, Level level, LivingEntity shooter, Supplier<Item> pickupItem) {
+                    super(type, shooter, level);
+                    this.pickupItem = pickupItem;
+                }
+
+                @Override
+                protected ItemStack getPickupItem() {
+                    return new ItemStack(this.pickupItem.get());
+                }
+
+                protected void onHitEntity(EntityHitResult result) {
+                    Entity entity = result.getEntity();
+                    Entity owner = this.getOwner();
+                    DamageSource damageSource;
+                    if (owner == null) {
+                        damageSource = this.damageSources().arrow(this, this);
+                    } else {
+                        damageSource = this.damageSources().arrow(this, owner);
+                    }
+                    if (entity instanceof LivingEntity livingentity) {
+                        if (this.getKnockback() > 0) {
+                            double d0 = Math.max(0.0D, 1.0D - livingentity.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.KNOCKBACK_RESISTANCE));
+                            Vec3 vec3 = this.getDeltaMovement().multiply(1.0, 0.0, 1.0).normalize().scale((double) this.getKnockback() * 0.6 * d0);
+                            if (vec3.lengthSqr() > 0.0D) {
+                                livingentity.push(vec3.x, 0.1D, vec3.z);
+                            }
+                        }
+
+                        if (!this.level().isClientSide() && owner instanceof LivingEntity) {
+                            EnchantmentHelper.doPostHurtEffects(livingentity, owner);
+                            EnchantmentHelper.doPostDamageEffects((LivingEntity)owner, livingentity);
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val dart = srcDir.resolve("DartSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(dart.contains("super(type, shooter, level, new ItemStack(pickupItem.get()), null);"), dart)
+        assertTrue(dart.contains("protected ItemStack getDefaultPickupItem()"), dart)
+        assertTrue(dart.contains("this.doKnockback(livingentity, damageSource);"), dart)
+        assertTrue(dart.contains("EnchantmentHelper.doPostAttackEffectsWithItemSource(serverlevel, livingentity, damageSource, this.getWeaponItem());"), dart)
+        assertTrue(dart.contains("import net.minecraft.server.level.ServerLevel;"), dart)
+        assertFalse(dart.contains("getKnockback()"), dart)
+        assertFalse(dart.contains("doPostHurtEffects"), dart)
+        assertFalse(dart.contains("doPostDamageEffects"), dart)
+    }
+
+    @Test
+    fun `migrates legacy doEnchant damage effects from method scoped damage source`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExploderSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.damagesource.DamageSource;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.level.Level;
+
+            public class ExploderSurface extends Mob {
+                protected ExploderSurface(EntityType<? extends Mob> type, Level level) {
+                    super(type, level);
+                }
+
+                public void explodeAt(LivingEntity entity) {
+                    DamageSource damageSource = this.damageSources().mobAttack(this);
+                    if (entity.hurt(damageSource, 1.0F)) {
+                        if (this.level() instanceof ServerLevel level) {
+                            level.broadcastEntityEvent(this, (byte) 4);
+                        }
+
+                        this.doEnchantDamageEffects(this, entity);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val exploder = srcDir.resolve("ExploderSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(exploder.contains("EnchantmentHelper.doPostAttackEffects(serverLevel, entity, damageSource);"), exploder)
+        assertTrue(exploder.contains("import net.minecraft.world.item.enchantment.EnchantmentHelper;"), exploder)
+        assertFalse(exploder.contains("doEnchantDamageEffects"), exploder)
     }
 
     @Test

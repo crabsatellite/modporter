@@ -10892,9 +10892,12 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyForgeBusBindingCalls(result)
         result = migrateLegacyFollowOwnerGoalConstructors(result)
         result = migrateLegacyItemStackHurtSource(result)
+        result = migrateLegacyTooltipPartHiding(result)
         result = migrateLegacyBlockSourceCoordinateAccessors(result)
         result = migrateLegacyProjectileDispenseBehaviorSource(result)
         result = migrateLegacyAbstractArrowPickupItemSource(result)
+        result = migrateLegacyAbstractArrowConstructors(result, javaInheritanceIndex)
+        result = migrateLegacyAbstractArrowKnockbackSource(result, javaInheritanceIndex)
         result = migrateLegacyEntityArmorSlotAccessSource(result)
         result = migrateLegacyAbstractHurtingProjectilePowerFields(result)
         result = migrateEntityEffectColorParticleTrailCalls(result)
@@ -11077,6 +11080,7 @@ ${entries.joinToString(",\n")}
         result = migrateItemUseDurationCalls(result)
         result = migrateLegacyItemExtensionAndProjectileApis(result)
         result = migrateMobEffectApplyEffectTickReturnSource(result)
+        result = migrateLegacyProjectileEnchantmentPostEffectsSource(result, javaInheritanceIndex)
         result = migrateLegacyDoEnchantDamageEffectsSource(result)
         result = migrateLivingDamageEventBoundarySource(result)
 
@@ -14973,6 +14977,182 @@ ${indent}}
             .replace(source, "protected ItemStack getDefaultPickupItem()")
     }
 
+    private fun migrateLegacyTooltipPartHiding(source: String): String {
+        if (!source.contains(".hideTooltipPart(") || !source.contains("ItemStack.TooltipPart.ADDITIONAL")) return source
+
+        var changed = false
+        var result = rewriteJavaCall(source, "hideTooltipPart") { receiver, args ->
+            if (args.size != 1 || args[0].trim() != "ItemStack.TooltipPart.ADDITIONAL") {
+                return@rewriteJavaCall null
+            }
+            changed = true
+            "$receiver.set(DataComponents.HIDE_ADDITIONAL_TOOLTIP, Unit.INSTANCE)"
+        }
+        if (!changed) return source
+        result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
+        result = addImportIfMissing(result, "net.minecraft.util.Unit")
+        return result
+    }
+
+    private fun parseJavaConstructorParameters(parameters: String): List<JavaParameter> =
+        splitTopLevelJavaArgs(parameters).mapNotNull { parameter ->
+            val normalized = parameter
+                .replace(Regex("""@\w+(?:\([^)]*\))?\s*"""), "")
+                .replace(Regex("""\bfinal\s+"""), "")
+                .trim()
+            val match = Regex("""^(.+?)\s+([A-Za-z_$][\w$]*)$""").find(normalized) ?: return@mapNotNull null
+            JavaParameter(match.groupValues[1].trim(), match.groupValues[2])
+        }
+
+    private fun JavaParameter.simpleTypeName(): String =
+        type.substringBefore('<').substringAfterLast('.').trim()
+
+    private fun JavaParameter.isLevelParameter(): Boolean =
+        simpleTypeName() == "Level"
+
+    private fun JavaParameter.isLivingEntityParameter(): Boolean =
+        simpleTypeName() == "LivingEntity"
+
+    private fun JavaParameter.isItemStackParameter(): Boolean =
+        simpleTypeName() == "ItemStack"
+
+    private fun JavaParameter.isItemSupplierParameter(): Boolean =
+        simpleTypeName() == "Supplier" && Regex("""\bItem\b""").containsMatchIn(type)
+
+    private fun migrateLegacyAbstractArrowConstructors(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
+        if (!source.contains("super(") || !source.contains("AbstractArrow")) return source
+
+        var result = source
+        var cursor = 0
+        var changed = false
+        var needsItemStack = false
+        val constructorPattern = Regex(
+            """(?m)^[ \t]*(?:public|protected|private)\s+([A-Za-z_$][\w$]*)\s*\(([^;{}]*)\)\s*(?:throws\s+[^{]+)?\{"""
+        )
+        while (true) {
+            val match = constructorPattern.find(result, cursor) ?: break
+            val classDeclaration = enclosingJavaClassDeclaration(result, match.range.first)
+            if (classDeclaration?.name != match.groupValues[1] ||
+                !javaClassExtendsAny(classDeclaration, setOf("AbstractArrow"), javaInheritanceIndex)) {
+                cursor = match.range.last + 1
+                continue
+            }
+
+            val parameters = parseJavaConstructorParameters(match.groupValues[2])
+            val constructorOpenBrace = result.indexOf('{', match.range.last)
+            val constructorCloseBrace = if (constructorOpenBrace >= 0) findMatchingBrace(result, constructorOpenBrace) else -1
+            if (constructorOpenBrace < 0 || constructorCloseBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+
+            val superIndex = result.indexOf("super(", constructorOpenBrace + 1)
+            if (superIndex < 0 || superIndex > constructorCloseBrace) {
+                cursor = constructorCloseBrace + 1
+                continue
+            }
+            val superOpenParen = superIndex + "super".length
+            val superCloseParen = findMatchingParen(result, superOpenParen)
+            if (superCloseParen < 0 || superCloseParen > constructorCloseBrace) {
+                cursor = constructorCloseBrace + 1
+                continue
+            }
+            val semicolonIndex = nextNonWhitespaceIndex(result, superCloseParen + 1)
+            if (semicolonIndex < 0 || result[semicolonIndex] != ';') {
+                cursor = superCloseParen + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(superOpenParen + 1, superCloseParen))
+            if (args.size != 3) {
+                cursor = semicolonIndex + 1
+                continue
+            }
+
+            val ownerArg = args[1].trim()
+            val levelArg = args[2].trim()
+            val ownerParameter = parameters.firstOrNull { it.name == ownerArg && it.isLivingEntityParameter() }
+            val levelParameter = parameters.firstOrNull { it.name == levelArg && it.isLevelParameter() }
+            if (ownerParameter == null || levelParameter == null) {
+                cursor = semicolonIndex + 1
+                continue
+            }
+
+            val pickupSupplier = parameters.firstOrNull { it.name !in args && it.isItemSupplierParameter() }
+            val pickupStack = parameters.firstOrNull { it.name !in args && it.isItemStackParameter() }
+            val pickupExpression = when {
+                pickupSupplier != null -> {
+                    needsItemStack = true
+                    "new ItemStack(${pickupSupplier.name}.get())"
+                }
+                pickupStack != null -> pickupStack.name
+                else -> {
+                    cursor = semicolonIndex + 1
+                    continue
+                }
+            }
+            val weaponStack = parameters.firstOrNull {
+                it.name != pickupStack?.name &&
+                    it.name != pickupSupplier?.name &&
+                    it.isItemStackParameter() &&
+                    Regex("""(?i)(weapon|fired)""").containsMatchIn(it.name)
+            }?.name ?: "null"
+
+            val replacement = "super(${args[0].trim()}, $ownerArg, $levelArg, $pickupExpression, $weaponStack);"
+            result = result.substring(0, superIndex) + replacement + result.substring(semicolonIndex + 1)
+            cursor = superIndex + replacement.length
+            changed = true
+        }
+
+        return if (changed && needsItemStack) addImportIfMissing(result, "net.minecraft.world.item.ItemStack") else result
+    }
+
+    private fun migrateLegacyAbstractArrowKnockbackSource(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
+        if (!source.contains("this.getKnockback()") || !source.contains("AbstractArrow")) return source
+
+        var result = source
+        var cursor = 0
+        val ifPattern = Regex("""if\s*\(\s*this\.getKnockback\(\)\s*>\s*0\s*\)\s*\{""")
+        while (true) {
+            val match = ifPattern.find(result, cursor) ?: break
+            val classDeclaration = enclosingJavaClassDeclaration(result, match.range.first)
+            if (!javaClassExtendsAny(classDeclaration, setOf("AbstractArrow"), javaInheritanceIndex)) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val openBrace = result.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val block = result.substring(openBrace + 1, closeBrace)
+            val livingVariable = Regex("""\b([A-Za-z_$][\w$]*)\.push\s*\(""")
+                .find(block)
+                ?.groupValues
+                ?.get(1)
+            val methodRange = enclosingMethodRange(result, match.range.first)
+            val methodPrefix = methodRange?.let { result.substring(it.first, match.range.first) }
+            val damageSource = methodPrefix?.let(::lastDamageSourceVariable)
+            if (livingVariable == null || damageSource == null || !block.contains("this.getKnockback()")) {
+                cursor = closeBrace + 1
+                continue
+            }
+
+            val statementStart = result.lastIndexOf('\n', match.range.first).let { if (it < 0) 0 else it + 1 }
+            val indent = result.substring(statementStart, match.range.first).takeWhile { it == ' ' || it == '\t' }
+            val replacement = "${indent}this.doKnockback($livingVariable, $damageSource);"
+            result = result.substring(0, statementStart) + replacement + result.substring(closeBrace + 1)
+            cursor = statementStart + replacement.length
+        }
+        return result
+    }
+
     private fun migrateLegacyEntityArmorSlotAccessSource(source: String): String {
         if (!source.contains(".getArmorSlots()")) return source
         val entityVars = Regex("""\bEntity\s+([A-Za-z_$][\w$]*)\b""")
@@ -17402,6 +17582,7 @@ protected Vec3 getPassengerAttachmentPoint(Entity entity, EntityDimensions dimen
         var needsVec3 = false
 
         result = migrateLegacyEyeHeightOverrides(result, javaInheritanceIndex)
+        result = removeLegacyEntityRemoveCapabilityInvalidation(result, javaInheritanceIndex)
 
         if (result.contains("canChangeDimensions()")) {
             result = Regex("""\b(public|protected)\s+boolean\s+canChangeDimensions\s*\(\s*\)""")
@@ -17456,6 +17637,47 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         if (needsLevel) result = addImportIfMissing(result, "net.minecraft.world.level.Level")
         if (needsEntity) result = addImportIfMissing(result, "net.minecraft.world.entity.Entity")
         if (needsVec3) result = addImportIfMissing(result, "net.minecraft.world.phys.Vec3")
+        return result
+    }
+
+    private fun removeLegacyEntityRemoveCapabilityInvalidation(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
+        if (!source.contains("remove(") ||
+            (!source.contains("invalidateCaps()") && !source.contains("invalidateCapabilities()"))) {
+            return source
+        }
+
+        var result = source
+        var cursor = 0
+        val removePattern = Regex(
+            """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:public|protected)\s+void\s+remove\s*\(\s*(?:Entity\.)?RemovalReason\s+[A-Za-z_$][\w$]*\s*\)\s*\{"""
+        )
+        while (true) {
+            val match = removePattern.find(result, cursor) ?: break
+            val classDeclaration = enclosingJavaClassDeclaration(result, match.range.first)
+            if (!javaClassExtendsAny(classDeclaration, javaEntityBaseTypes(), javaInheritanceIndex)) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val openBrace = result.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            val rewrittenBody = Regex(
+                """(?m)^[ \t]*(?:this|super)\.invalidate(?:Caps|Capabilities)\(\);\s*\r?\n?"""
+            ).replace(body, "")
+            if (rewrittenBody == body) {
+                cursor = closeBrace + 1
+                continue
+            }
+            result = result.substring(0, openBrace + 1) + rewrittenBody + result.substring(closeBrace)
+            cursor = openBrace + 1 + rewrittenBody.length
+        }
         return result
     }
 
@@ -23312,6 +23534,101 @@ ${indent}}
         return "$baseName$index"
     }
 
+    private fun migrateLegacyProjectileEnchantmentPostEffectsSource(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
+        if (!source.contains("EnchantmentHelper.doPostHurtEffects(") ||
+            !source.contains("EnchantmentHelper.doPostDamageEffects(") ||
+            !source.contains("AbstractArrow")) {
+            return source
+        }
+
+        var result = source
+        var cursor = 0
+        var changed = false
+        val hurtToken = "EnchantmentHelper.doPostHurtEffects("
+        val damageToken = "EnchantmentHelper.doPostDamageEffects("
+        while (true) {
+            val hurtIndex = result.indexOf(hurtToken, cursor)
+            if (hurtIndex < 0) break
+            val classDeclaration = enclosingJavaClassDeclaration(result, hurtIndex)
+            if (!javaClassExtendsAny(classDeclaration, setOf("AbstractArrow"), javaInheritanceIndex)) {
+                cursor = hurtIndex + hurtToken.length
+                continue
+            }
+
+            val hurtOpenParen = hurtIndex + "EnchantmentHelper.doPostHurtEffects".length
+            val hurtCloseParen = findMatchingParen(result, hurtOpenParen)
+            if (hurtCloseParen < 0) {
+                cursor = hurtIndex + hurtToken.length
+                continue
+            }
+            val hurtArgs = splitTopLevelJavaArgs(result.substring(hurtOpenParen + 1, hurtCloseParen))
+            val hurtSemicolon = nextNonWhitespaceIndex(result, hurtCloseParen + 1)
+            if (hurtArgs.size != 2 || hurtSemicolon < 0 || result[hurtSemicolon] != ';') {
+                cursor = hurtCloseParen + 1
+                continue
+            }
+
+            val damageIndex = nextNonWhitespaceIndex(result, hurtSemicolon + 1)
+            if (damageIndex < 0 || !result.startsWith(damageToken, damageIndex)) {
+                cursor = hurtSemicolon + 1
+                continue
+            }
+            val damageOpenParen = damageIndex + "EnchantmentHelper.doPostDamageEffects".length
+            val damageCloseParen = findMatchingParen(result, damageOpenParen)
+            if (damageCloseParen < 0) {
+                cursor = damageIndex + damageToken.length
+                continue
+            }
+            val damageArgs = splitTopLevelJavaArgs(result.substring(damageOpenParen + 1, damageCloseParen))
+            val damageSemicolon = nextNonWhitespaceIndex(result, damageCloseParen + 1)
+            if (damageArgs.size != 2 || damageSemicolon < 0 || result[damageSemicolon] != ';') {
+                cursor = damageCloseParen + 1
+                continue
+            }
+
+            val target = hurtArgs[0].trim()
+            if (damageArgs[1].trim() != target ||
+                normalizeLegacyLivingEntityCast(damageArgs[0]) != hurtArgs[1].trim()) {
+                cursor = damageSemicolon + 1
+                continue
+            }
+
+            val methodRange = enclosingMethodRange(result, hurtIndex)
+            val methodPrefix = methodRange?.let { result.substring(it.first, hurtIndex) }
+            val methodText = methodRange?.let { result.substring(it) }
+            val damageSource = methodPrefix?.let(::lastDamageSourceVariable)
+            if (damageSource == null || methodText == null) {
+                cursor = damageSemicolon + 1
+                continue
+            }
+
+            val statementStart = result.lastIndexOf('\n', hurtIndex).let { if (it < 0) 0 else it + 1 }
+            val indent = result.substring(statementStart, hurtIndex).takeWhile { it == ' ' || it == '\t' }
+            val serverLevel = uniqueLocalNameInScope(methodText, "serverlevel")
+            val replacement = """${indent}if (this.level() instanceof ServerLevel $serverLevel) {
+$indent    EnchantmentHelper.doPostAttackEffectsWithItemSource($serverLevel, $target, $damageSource, this.getWeaponItem());
+$indent}"""
+            result = result.substring(0, statementStart) + replacement + result.substring(damageSemicolon + 1)
+            cursor = statementStart + replacement.length
+            changed = true
+        }
+
+        return if (changed) addImportIfMissing(result, "net.minecraft.server.level.ServerLevel") else result
+    }
+
+    private fun normalizeLegacyLivingEntityCast(expression: String): String =
+        Regex("""^\(\s*LivingEntity\s*\)\s*""").replace(expression.trim(), "").trim()
+
+    private fun lastDamageSourceVariable(prefix: String): String? =
+        Regex("""\bDamageSource\s+([A-Za-z_$][\w$]*)\s*(?:=|;)""")
+            .findAll(prefix)
+            .lastOrNull()
+            ?.groupValues
+            ?.get(1)
+
     private fun migrateLegacyDoEnchantDamageEffectsSource(source: String): String {
         if (!source.contains(".doEnchantDamageEffects(")) return source
 
@@ -23398,7 +23715,8 @@ $indent}"""
     }
 
     private fun inferDamageSourceForDoEnchantDamageEffects(source: String, callStatementStart: Int, targetExpression: String): String? {
-        val methodStart = source.lastIndexOf('{', callStatementStart).let { if (it < 0) 0 else it + 1 }
+        val methodStart = enclosingMethodRange(source, callStatementStart)?.first
+            ?: source.lastIndexOf('{', callStatementStart).let { if (it < 0) 0 else it + 1 }
         val prefix = source.substring(methodStart, callStatementStart)
         val token = "$targetExpression.hurt("
         var cursor = 0
