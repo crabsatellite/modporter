@@ -17428,7 +17428,7 @@ ${indent}}
 
     private fun migrateLegacyAbstractHurtingProjectilePowerFields(source: String): String {
         if (!source.contains(".xPower") && !source.contains(".yPower") && !source.contains(".zPower")) return source
-        return Regex(
+        var result = Regex(
             """(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.xPower\s*=\s*([A-Za-z_$][\w$]*)\.x\(\)\s*\*\s*([^;\r\n]+);\s*\r?\n\1\2\.yPower\s*=\s*\3\.y\(\)\s*\*\s*\4;\s*\r?\n\1\2\.zPower\s*=\s*\3\.z\(\)\s*\*\s*\4;"""
         ).replace(source) { match ->
             val indent = match.groupValues[1]
@@ -17436,6 +17436,59 @@ ${indent}}
             val scale = match.groupValues[4].trim()
             "${indent}$projectile.accelerationPower = $scale;"
         }
+        result = migrateAbstractHurtingProjectileCopiedTickPowerReads(result)
+        result = migrateAbstractHurtingProjectileScaledPowerTriplets(result)
+        return result
+    }
+
+    private fun migrateAbstractHurtingProjectileCopiedTickPowerReads(source: String): String {
+        if (!Regex("""\bextends\s+(?:AbstractHurtingProjectile|Fireball|LargeFireball|SmallFireball|DragonFireball)\b""").containsMatchIn(source)) {
+            return source
+        }
+        return Regex("""\b([A-Za-z_$][\w$]*)\.add\(\s*this\.xPower\s*,\s*this\.yPower\s*,\s*this\.zPower\s*\)""")
+            .replace(source) { match ->
+                val vector = match.groupValues[1]
+                "$vector.add($vector.normalize().scale(this.accelerationPower))"
+            }
+    }
+
+    private fun migrateAbstractHurtingProjectileScaledPowerTriplets(source: String): String {
+        val pattern = Regex(
+            """(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.xPower\s*\*=\s*([^;\r\n]+);\s*\r?\n\1\2\.yPower\s*\*=\s*\3;\s*\r?\n\1\2\.zPower\s*\*=\s*\3;"""
+        )
+        return pattern.replace(source) { match ->
+            val indent = match.groupValues[1]
+            val projectile = match.groupValues[2]
+            val scale = match.groupValues[3].trim()
+            if (!hasMatchingAbstractHurtingProjectileMotionScale(source, match.range.first, projectile, scale)) {
+                return@replace match.value
+            }
+            "${indent}$projectile.accelerationPower *= ${absoluteScaleExpression(scale)};"
+        }
+    }
+
+    private fun hasMatchingAbstractHurtingProjectileMotionScale(source: String, beforeOffset: Int, projectile: String, scale: String): Boolean {
+        val prefix = source.substring(0, beforeOffset)
+        val projectileOwner = Regex("""\b([A-Za-z_$][\w$]*)\s+instanceof\s+AbstractHurtingProjectile\s+${Regex.escape(projectile)}\b""")
+            .findAll(prefix)
+            .lastOrNull()
+            ?.groupValues
+            ?.get(1)
+            ?: projectile.takeIf { javaDeclaredSimpleTypeSets(source)[it] == setOf("AbstractHurtingProjectile") }
+            ?: return false
+        val owner = Regex.escape(projectileOwner)
+        val escapedScale = Regex.escape(scale)
+        return Regex("""\b$owner\.setDeltaMovement\s*\(\s*$owner\.getDeltaMovement\(\)\.scale\s*\(\s*$escapedScale\s*\)\s*\)\s*;""")
+            .containsMatchIn(prefix)
+    }
+
+    private fun absoluteScaleExpression(scale: String): String {
+        val trimmed = scale.trim()
+        val numeric = Regex("""^-\s*(\d+(?:\.\d+)?(?:[dDfF])?)$""").matchEntire(trimmed)
+        if (numeric != null) return numeric.groupValues[1]
+        val parenthesizedNumeric = Regex("""^\(\s*-\s*(\d+(?:\.\d+)?(?:[dDfF])?)\s*\)$""").matchEntire(trimmed)
+        if (parenthesizedNumeric != null) return parenthesizedNumeric.groupValues[1]
+        return if (trimmed.startsWith("-")) "Math.abs($trimmed)" else trimmed
     }
 
     private fun migrateEntityEffectColorParticleTrailCalls(source: String): String {
@@ -21631,7 +21684,7 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
     }
 
     private fun migrateLargeFireballVec3Constructors(source: String): String {
-        if (!source.contains("LargeFireball")) return source
+        if (!source.contains("LargeFireball") && !source.contains("Fireball") && !source.contains("AbstractHurtingProjectile")) return source
         var changed = false
         var result = Regex("""new\s+LargeFireball\(\s*([^,\r\n]+)\s*,\s*([^,\r\n]+)\s*,\s*([^,\r\n]+)\s*,\s*([^,\r\n]+)\s*,\s*([^,\r\n]+)\s*,\s*([^)]+?)\s*\)""")
             .replace(source) { match ->
@@ -21655,6 +21708,24 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
                     val z = match.groupValues[5].trim()
                     val power = match.groupValues[6].trim()
                     "super($level, $owner, new Vec3($x, $y, $z), $power)"
+                }
+        }
+        if (Regex("""\bextends\s+(?:Fireball|AbstractHurtingProjectile)\b""").containsMatchIn(source)) {
+            val declaredTypes = javaDeclaredSimpleTypeSets(result)
+            result = Regex("""super\(\s*([^,\r\n]+)\s*,\s*([^,\r\n]+)\s*,\s*([^,\r\n]+)\s*,\s*([^,\r\n]+)\s*,\s*([^,\r\n]+)\s*,\s*([^)]+?)\s*\)""")
+                .replace(result) { match ->
+                    val type = match.groupValues[1].trim()
+                    val owner = match.groupValues[2].trim()
+                    val ownerTypes = declaredTypes[owner.substringBefore('.').trim()].orEmpty()
+                    if (ownerTypes.none { it == "LivingEntity" || it == "Player" }) {
+                        return@replace match.value
+                    }
+                    changed = true
+                    val x = match.groupValues[3].trim()
+                    val y = match.groupValues[4].trim()
+                    val z = match.groupValues[5].trim()
+                    val level = match.groupValues[6].trim()
+                    "super($type, $owner, new Vec3($x, $y, $z), $level)"
                 }
         }
         return if (changed) addImportIfMissing(result, "net.minecraft.world.phys.Vec3") else source

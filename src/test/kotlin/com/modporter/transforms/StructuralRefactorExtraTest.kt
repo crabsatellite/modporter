@@ -14684,6 +14684,7 @@ class StructuralRefactorExtraTest {
             package com.example;
 
             import net.minecraft.world.entity.projectile.AbstractHurtingProjectile;
+            import net.minecraft.world.entity.projectile.Projectile;
             import net.minecraft.world.phys.Vec3;
 
             public class HurtingProjectileSurface {
@@ -14691,6 +14692,40 @@ class StructuralRefactorExtraTest {
                     projectile.xPower = rebound.x() * 0.1D;
                     projectile.yPower = rebound.y() * 0.1D;
                     projectile.zPower = rebound.z() * 0.1D;
+                }
+
+                public void deflect(Projectile projectile) {
+                    projectile.setDeltaMovement(projectile.getDeltaMovement().scale(-0.25));
+                    if (projectile instanceof AbstractHurtingProjectile hurting) {
+                        hurting.xPower *= -0.25;
+                        hurting.yPower *= -0.25;
+                        hurting.zPower *= -0.25;
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CopiedHurtingProjectileTick.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.projectile.Fireball;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.phys.Vec3;
+
+            public class CopiedHurtingProjectileTick extends Fireball {
+                public CopiedHurtingProjectileTick(EntityType<? extends CopiedHurtingProjectileTick> type, LivingEntity owner, double x, double y, double z, Level level) {
+                    super(type, owner, x, y, z, level);
+                }
+
+                public CopiedHurtingProjectileTick(EntityType<? extends CopiedHurtingProjectileTick> type, double x, double y, double z, Vec3 movement, Level level) {
+                    super(type, x, y, z, movement, level);
+                }
+
+                public void tick() {
+                    Vec3 vec3 = this.getDeltaMovement();
+                    float f = 0.8F;
+                    this.setDeltaMovement(vec3.add(this.xPower, this.yPower, this.zPower).scale(f));
                 }
             }
         """.trimIndent())
@@ -14741,6 +14776,7 @@ class StructuralRefactorExtraTest {
         val projectile = srcDir.resolve("ProjectileSurface.java").readText()
         val trail = srcDir.resolve("TrailSurface.java").readText()
         val hurtingProjectile = srcDir.resolve("HurtingProjectileSurface.java").readText()
+        val copiedTick = srcDir.resolve("CopiedHurtingProjectileTick.java").readText()
         val event = srcDir.resolve("EventSurface.java").readText()
         val spawnEgg = srcDir.resolve("SpawnEggSurface.java").readText()
 
@@ -14779,7 +14815,12 @@ class StructuralRefactorExtraTest {
         assertTrue(projectile.contains("EnchantmentHelper.doPostAttackEffects(serverLevel, result.getEntity(), postAttackDamageSource);"))
         assertTrue(trail.contains("ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, (float) r, (float) g, (float) b), 5"))
         assertTrue(hurtingProjectile.contains("projectile.accelerationPower = 0.1D;"))
+        assertTrue(hurtingProjectile.contains("hurting.accelerationPower *= 0.25;"))
         assertTrue(!hurtingProjectile.contains("xPower"))
+        assertTrue(copiedTick.contains("super(type, owner, new Vec3(x, y, z), level);"))
+        assertTrue(copiedTick.contains("super(type, x, y, z, movement, level);"))
+        assertTrue(copiedTick.contains("vec3.add(vec3.normalize().scale(this.accelerationPower)).scale(f)"))
+        assertTrue(!copiedTick.contains("xPower"))
         assertTrue(event.contains("event.setUseBlock(TriState.FALSE);"))
         assertTrue(event.contains("private static void checkTooFar(ICancellableEvent event, Object target)"))
         assertTrue(event.contains("public void route(PlayerInteractEvent.RightClickBlock rightClickBlock)"))
