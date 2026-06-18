@@ -2971,6 +2971,88 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy vanilla advancement criterion constructors without trigger fallback`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+
+        srcDir.resolve("LegacyAdvancementData.java").writeText("""
+            package com.example;
+
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.advancements.CriteriaTriggers;
+            import net.minecraft.advancements.critereon.BlockPredicate;
+            import net.minecraft.advancements.critereon.ContextAwarePredicate;
+            import net.minecraft.advancements.critereon.EntityPredicate;
+            import net.minecraft.advancements.critereon.InventoryChangeTrigger;
+            import net.minecraft.advancements.critereon.ItemPredicate;
+            import net.minecraft.advancements.critereon.ItemUsedOnLocationTrigger;
+            import net.minecraft.advancements.critereon.LocationPredicate;
+            import net.minecraft.advancements.critereon.MatchTool;
+            import net.minecraft.advancements.critereon.MinMaxBounds;
+            import net.minecraft.advancements.critereon.NbtPredicate;
+            import net.minecraft.advancements.critereon.PlayerTrigger;
+            import net.minecraft.advancements.critereon.StartRidingTrigger;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.storage.loot.predicates.LocationCheck;
+
+            public class LegacyAdvancementData {
+                public void generate() {
+                    CompoundTag moaTag = new CompoundTag();
+                    Advancement.Builder.advancement()
+                        .addCriterion("ride", StartRidingTrigger.TriggerInstance.playerStartsRiding(EntityPredicate.Builder.entity().vehicle(EntityPredicate.Builder.entity().of(ExampleTypes.MOA).nbt(new NbtPredicate(moaTag)).build())))
+                        .addCriterion("sleep", new PlayerTrigger.TriggerInstance(CriteriaTriggers.SLEPT_IN_BED.getId(), EntityPredicate.wrap(EntityPredicate.Builder.entity().located(LocationPredicate.Builder.location()).build())))
+                        .addCriterion("custom", itemUsedOnLocationCheckAbove(LocationPredicate.Builder.location().setBlock(BlockPredicate.Builder.block().of(ExampleBlocks.GRASS)), LocationPredicate.Builder.location(), ItemPredicate.Builder.item()))
+                        .addCriterion("stack_components", ItemUsedOnLocationTrigger.TriggerInstance.itemUsedOnBlock(LocationPredicate.Builder.location(), ItemPredicate.Builder.item().hasNbt(ExampleItems.banner().getTag())));
+
+                    Advancement.Builder.advancement()
+                        .addCriterion("many_items", new InventoryChangeTrigger.TriggerInstance(ContextAwarePredicate.ANY, MinMaxBounds.Ints.atLeast(10), MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, new ItemPredicate[0]));
+                }
+
+                private static ItemUsedOnLocationTrigger.TriggerInstance itemUsedOnLocationCheckAbove(LocationPredicate.Builder location, LocationPredicate.Builder above, ItemPredicate.Builder item) {
+                    ContextAwarePredicate contextawarepredicate = ContextAwarePredicate.create(LocationCheck.checkLocation(location).build(), LocationCheck.checkLocation(above, BlockPos.ZERO.above()).build(), MatchTool.toolMatches(item).build());
+                    return new ItemUsedOnLocationTrigger.TriggerInstance(CriteriaTriggers.ITEM_USED_ON_BLOCK.getId(), ContextAwarePredicate.ANY, contextawarepredicate);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyRecipeUnlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.advancements.critereon.ContextAwarePredicate;
+            import net.minecraft.advancements.critereon.InventoryChangeTrigger;
+            import net.minecraft.advancements.critereon.ItemPredicate;
+            import net.minecraft.advancements.critereon.MinMaxBounds;
+
+            public class LegacyRecipeUnlock {
+                public void build() {
+                    Advancement.Builder.advancement()
+                        .addCriterion("many_items", new InventoryChangeTrigger.TriggerInstance(ContextAwarePredicate.ANY, MinMaxBounds.Ints.atLeast(10), MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, new ItemPredicate[0]));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LegacyAdvancementData.java").readText()
+        val recipeUnlock = srcDir.resolve("LegacyRecipeUnlock.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("EntityPredicate.Builder.entity().vehicle(EntityPredicate.Builder.entity().of(ExampleTypes.MOA).nbt(new NbtPredicate(moaTag)))"), migrated)
+        assertTrue(migrated.contains("CriteriaTriggers.SLEPT_IN_BED.createCriterion(new PlayerTrigger.TriggerInstance(java.util.Optional.of(EntityPredicate.wrap(EntityPredicate.Builder.entity().located(LocationPredicate.Builder.location()).build()))))"), migrated)
+        assertTrue(migrated.contains("private static Criterion<ItemUsedOnLocationTrigger.TriggerInstance> itemUsedOnLocationCheckAbove"), migrated)
+        assertTrue(migrated.contains("return CriteriaTriggers.ITEM_USED_ON_BLOCK.createCriterion(new ItemUsedOnLocationTrigger.TriggerInstance(java.util.Optional.empty(), java.util.Optional.of(contextawarepredicate)));"), migrated)
+        assertTrue(migrated.contains("DataComponentPredicate.allOf(ExampleItems.banner().getComponents())"), migrated)
+        assertTrue(migrated.contains("CriteriaTriggers.INVENTORY_CHANGED.createCriterion(new InventoryChangeTrigger.TriggerInstance(java.util.Optional.empty(), new InventoryChangeTrigger.TriggerInstance.Slots(MinMaxBounds.Ints.atLeast(10), MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY), java.util.List.of()))"), migrated)
+        assertFalse(migrated.contains("ContextAwarePredicate.ANY"), migrated)
+        assertFalse(migrated.contains("CriteriaTriggers.ITEM_USED_ON_BLOCK.getId()"), migrated)
+        assertFalse(migrated.contains("new PlayerTrigger.TriggerInstance(CriteriaTriggers.SLEPT_IN_BED.getId()"), migrated)
+        assertFalse(migrated.contains("ExampleItems.banner().getTag()"), migrated)
+        assertFalse(migrated.contains("CriteriaTriggers.TICK.createCriterion"), migrated)
+        assertTrue(recipeUnlock.contains("import net.minecraft.advancements.CriteriaTriggers;"), recipeUnlock)
+        assertTrue(recipeUnlock.contains("CriteriaTriggers.INVENTORY_CHANGED.createCriterion(new InventoryChangeTrigger.TriggerInstance(java.util.Optional.empty(), new InventoryChangeTrigger.TriggerInstance.Slots(MinMaxBounds.Ints.atLeast(10), MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY), java.util.List.of()))"), recipeUnlock)
+    }
+
+    @Test
     fun `migrates transparent block beacon color and legacy plant APIs`() {
         val blockDir = tempDir.resolve("src/main/java/com/example/block")
         blockDir.createDirectories()

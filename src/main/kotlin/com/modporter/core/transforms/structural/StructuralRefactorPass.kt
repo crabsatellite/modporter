@@ -16241,6 +16241,11 @@ ${indent}}
             val migratedArg = removeTrailingBuildCall(propertiesArg, "StatePropertiesPredicate.Builder")
             if (migratedArg != propertiesArg) "$receiver.setProperties($migratedArg)" else null
         }
+        listOf("vehicle", "passenger", "targetedEntity").forEach { methodName ->
+            result = rewriteJavaCall(result, methodName) { receiver, args ->
+                migrateEntityPredicateBuilderReceiverCall(receiver, methodName, args)
+            }
+        }
 
         result = Regex("""new\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.Instance)\(\s*ContextAwarePredicate\.ANY\s*\)""")
             .replace(result, "new $1(java.util.Optional.empty())")
@@ -16248,17 +16253,32 @@ ${indent}}
             result = Regex("""new\s+${Regex.escape(instanceType)}\(\s*(?:java\.util\.)?Optional\.empty\(\)\s*\)""")
                 .replace(result, factoryCall)
         }
-        result = rewriteJavaNew(result, "PlayerTrigger.TriggerInstance") { args ->
-            if (args.size == 2 && args[0].contains("CriteriaTriggers.")) {
-                "new PlayerTrigger.TriggerInstance(java.util.Optional.of(${args[1].trim()}))"
+        result = migrateLegacyItemUsedOnLocationTriggerConstructorReturns(result)
+        result = rewriteJavaNew(result, "ItemUsedOnLocationTrigger.TriggerInstance") { args ->
+            if (args.size == 3 && legacyCriteriaTriggerExpression(args[0]) != null) {
+                "new ItemUsedOnLocationTrigger.TriggerInstance(${legacyOptionalContextAwarePredicate(args[1])}, ${legacyOptionalContextAwarePredicate(args[2])})"
             } else {
                 null
             }
         }
-        result = Regex("""(?m)^([ \t]*)return\s+new\s+PlayerTrigger\.TriggerInstance\((.*)\)\s*;""")
-            .replace(result) { match ->
-                "${match.groupValues[1]}return CriteriaTriggers.TICK.createCriterion(new PlayerTrigger.TriggerInstance(${match.groupValues[2]}));"
+        result = rewriteJavaNew(result, "PlayerTrigger.TriggerInstance") { args ->
+            val trigger = if (args.size == 2) legacyCriteriaTriggerExpression(args[0]) else null
+            if (trigger != null) {
+                "$trigger.createCriterion(new PlayerTrigger.TriggerInstance(${legacyOptionalContextAwarePredicate(args[1])}))"
+            } else {
+                null
             }
+        }
+        result = rewriteJavaNew(result, "InventoryChangeTrigger.TriggerInstance") { args ->
+            if (args.size == 5) {
+                "CriteriaTriggers.INVENTORY_CHANGED.createCriterion(new InventoryChangeTrigger.TriggerInstance(" +
+                    "${legacyOptionalContextAwarePredicate(args[0])}, " +
+                    "new InventoryChangeTrigger.TriggerInstance.Slots(${args[1].trim()}, ${args[2].trim()}, ${args[3].trim()}), " +
+                    "${legacyItemPredicateArrayListExpression(args[4])}))"
+            } else {
+                null
+            }
+        }
         result = rewriteJavaInvocationArguments(result, "PlayerTrigger.TriggerInstance.located") { args ->
             if (args.size == 1) {
                 val arg = args[0].trim()
@@ -16280,6 +16300,11 @@ ${indent}}
             result = rewriteJavaCall(result, "hasNbt") { receiver, args ->
                 val tagArg = args.singleOrNull()?.trim() ?: return@rewriteJavaCall null
                 "$receiver.hasComponents(DataComponentPredicate.builder().expect(DataComponents.CUSTOM_DATA, CustomData.of($tagArg)).build())"
+            }
+            result = rewriteJavaCall(result, "hasComponents") { receiver, args ->
+                val componentPredicate = args.singleOrNull()?.trim() ?: return@rewriteJavaCall null
+                val migrated = migrateCustomDataPredicateFromStackTag(componentPredicate)
+                if (migrated != null) "$receiver.hasComponents($migrated)" else null
             }
             result = addImportIfMissing(result, "net.minecraft.core.component.DataComponentPredicate")
             result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
@@ -16318,7 +16343,98 @@ ${indent}}
                 result = withoutAdvancementImport
             }
         }
+        if (result.contains("Criterion<")) {
+            result = addImportIfMissing(result, "net.minecraft.advancements.Criterion")
+        }
+        if (result.contains("CriteriaTriggers.")) {
+            result = addImportIfMissing(result, "net.minecraft.advancements.CriteriaTriggers")
+        }
         return result
+    }
+
+    private fun migrateEntityPredicateBuilderReceiverCall(receiver: String, methodName: String, args: List<String>): String? {
+        val arg = args.singleOrNull()?.trim() ?: return null
+        val migratedArg = removeTrailingBuildCall(arg, "EntityPredicate.Builder")
+        if (migratedArg == arg) return null
+        return "$receiver.$methodName($migratedArg)"
+    }
+
+    private fun migrateLegacyItemUsedOnLocationTriggerConstructorReturns(source: String): String {
+        if (!source.contains("new ItemUsedOnLocationTrigger.TriggerInstance(")) return source
+        var changed = false
+        var result = Regex("""(?m)^([ \t]*)return\s+new\s+ItemUsedOnLocationTrigger\.TriggerInstance\((.*)\)\s*;""")
+            .replace(source) { match ->
+                val args = splitTopLevelJavaArgs(match.groupValues[2])
+                val trigger = if (args.size == 3) legacyCriteriaTriggerExpression(args[0]) else null
+                if (trigger == null) {
+                    match.value
+                } else {
+                    changed = true
+                    "${match.groupValues[1]}return $trigger.createCriterion(new ItemUsedOnLocationTrigger.TriggerInstance(${legacyOptionalContextAwarePredicate(args[1])}, ${legacyOptionalContextAwarePredicate(args[2])}));"
+                }
+            }
+        if (!changed) return source
+        result = Regex("""(?m)^([ \t]*(?:private|protected|public)\s+(?:static\s+)?)ItemUsedOnLocationTrigger\.TriggerInstance(\s+[A-Za-z_$][\w$]*\s*\()""")
+            .replace(result, "$1Criterion<ItemUsedOnLocationTrigger.TriggerInstance>$2")
+        return result
+    }
+
+    private fun legacyCriteriaTriggerExpression(expression: String): String? {
+        val trimmed = expression.trim()
+        return Regex("""^((?:net\.minecraft\.advancements\.)?CriteriaTriggers\.[A-Z0-9_]+)(?:\.getId\(\))?$""")
+            .matchEntire(trimmed)
+            ?.groupValues
+            ?.get(1)
+    }
+
+    private fun legacyOptionalContextAwarePredicate(expression: String): String {
+        val trimmed = expression.trim()
+        return when {
+            trimmed == "ContextAwarePredicate.ANY" -> "java.util.Optional.empty()"
+            trimmed.startsWith("java.util.Optional.") || trimmed.startsWith("Optional.") -> trimmed
+            else -> "java.util.Optional.of($trimmed)"
+        }
+    }
+
+    private fun legacyItemPredicateArrayListExpression(expression: String): String {
+        val trimmed = expression.trim()
+        if (Regex("""new\s+ItemPredicate\s*\[\s*0\s*]""").matches(trimmed)) {
+            return "java.util.List.of()"
+        }
+        Regex("""(?s)new\s+ItemPredicate\s*\[\s*]\s*\{(.*)}""")
+            .matchEntire(trimmed)
+            ?.let { match ->
+                val items = match.groupValues[1].trim()
+                return if (items.isBlank()) "java.util.List.of()" else "java.util.List.of($items)"
+            }
+        return "java.util.Arrays.asList($trimmed)"
+    }
+
+    private fun migrateCustomDataPredicateFromStackTag(expression: String): String? {
+        val expectToken = ".expect("
+        val expectIndex = expression.indexOf(expectToken)
+        if (expectIndex < 0) return null
+        if (!expression.substring(0, expectIndex).trim().endsWith("DataComponentPredicate.builder()")) return null
+        val expectOpen = expectIndex + expectToken.length - 1
+        val expectClose = findMatchingParen(expression, expectOpen)
+        if (expectClose < 0) return null
+        if (expression.substring(expectClose + 1).trim() != ".build()") return null
+        val expectArgs = splitTopLevelJavaArgs(expression.substring(expectOpen + 1, expectClose))
+        if (expectArgs.size != 2) return null
+        if (!expectArgs[0].trim().endsWith("DataComponents.CUSTOM_DATA")) return null
+
+        val value = expectArgs[1].trim()
+        val ofToken = "CustomData.of("
+        val ofIndex = value.indexOf(ofToken)
+        if (ofIndex < 0) return null
+        val ofOpen = ofIndex + ofToken.length - 1
+        val ofClose = findMatchingParen(value, ofOpen)
+        if (ofClose < 0 || value.substring(ofClose + 1).trim().isNotEmpty()) return null
+        val tagExpression = value.substring(ofOpen + 1, ofClose).trim()
+        if (!tagExpression.endsWith(".getTag()")) return null
+        val stackExpression = tagExpression.removeSuffix(".getTag()").trim()
+        if (stackExpression.isBlank()) return null
+        return "DataComponentPredicate.allOf($stackExpression.getComponents())"
     }
 
     private fun migrateLegacyCriterionTriggerInstanceCallSites(
