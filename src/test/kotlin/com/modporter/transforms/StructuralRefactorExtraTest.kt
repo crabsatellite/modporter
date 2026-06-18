@@ -4229,6 +4229,38 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates indirect block loot subprovider constructors to holder lookup registries`() {
+        val projectDir = createFile("LibraryBlockLootSurface.java", """
+            package com.example;
+
+            import java.util.Set;
+            import net.minecraft.world.flag.FeatureFlagSet;
+            import net.minecraft.world.flag.FeatureFlags;
+            import net.minecraft.world.item.Item;
+
+            public class LibraryBlockLootSurface extends NitrogenBlockLootSubProvider {
+                public LibraryBlockLootSurface() {
+                    super(Set.of(), FeatureFlags.REGISTRY.allFlags());
+                }
+
+                protected LibraryBlockLootSurface(Set<Item> items, FeatureFlagSet flags) {
+                    super(items, flags);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/LibraryBlockLootSurface.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("public LibraryBlockLootSurface(HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("super(Set.of(), FeatureFlags.REGISTRY.allFlags(), registries);"), migrated)
+        assertTrue(migrated.contains("protected LibraryBlockLootSurface(Set<Item> items, FeatureFlagSet flags, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("super(items, flags, registries);"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.core.HolderLookup;"), migrated)
+    }
+
+    @Test
     fun `migrates GameEventListener event holder signatures and comparisons`() {
         val projectDir = createFile("ListenerBE.java", """
             package com.example;

@@ -22679,18 +22679,21 @@ $methodBody
     }
 
     private fun migrateLegacyBlockLootSubProviderSource(source: String): String {
-        if (!source.contains("extends BlockLootSubProvider")) return source
-        val className = Regex("""\bclass\s+([A-Za-z_$][\w$]*)\s+extends\s+BlockLootSubProvider\b""")
+        if (!source.contains("BlockLootSubProvider")) return source
+        val className = Regex("""\bclass\s+([A-Za-z_$][\w$]*)\s+extends\s+(?:[A-Za-z_$][\w$]*\.)?[A-Za-z_$][\w$]*BlockLootSubProvider\b""")
             .find(source)
             ?.groupValues
             ?.get(1)
             ?: return source
         var result = source
-        val constructorPattern = Regex("""(?s)public\s+${Regex.escape(className)}\s*\(\s*\)\s*\{\s*super\s*\((.*?)\)\s*;\s*\}""")
+        val constructorPattern = Regex("""(?s)((?:public|protected)\s+)${Regex.escape(className)}\s*\((.*?)\)\s*\{\s*super\s*\((.*?)\)\s*;\s*\}""")
         result = constructorPattern.replace(result) { match ->
-            val args = splitTopLevelJavaArgs(match.groupValues[1])
+            val params = splitTopLevelJavaArgs(match.groupValues[2])
+            if (params.any { it.contains("HolderLookup.Provider") }) return@replace match.value
+            val args = splitTopLevelJavaArgs(match.groupValues[3])
             if (args.size == 2) {
-                "public $className(HolderLookup.Provider registries) {\n\t\tsuper(${args[0]}, ${args[1]}, registries);\n\t}"
+                val newParams = (params + "HolderLookup.Provider registries").joinToString(", ")
+                "${match.groupValues[1]}$className($newParams) {\n\t\tsuper(${args[0]}, ${args[1]}, registries);\n\t}"
             } else {
                 match.value
             }
