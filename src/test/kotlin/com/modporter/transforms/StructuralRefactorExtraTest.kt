@@ -8740,6 +8740,7 @@ class StructuralRefactorExtraTest {
         dataDir.resolve("LootProvider.java").writeText("""
             package com.example.data;
 
+            import com.example.ExampleLoot;
             import net.minecraft.data.loot.LootTableSubProvider;
             import net.minecraft.resources.ResourceLocation;
             import net.minecraft.world.level.storage.loot.LootTable;
@@ -8751,7 +8752,24 @@ class StructuralRefactorExtraTest {
                 public void generate(BiConsumer<ResourceLocation, LootTable.Builder> register) {
                     ResourceLocation id = ResourceLocation.fromNamespaceAndPath("example", "demo");
                     register.accept(id, LootTable.lootTable());
+                    register.accept(ExampleLoot.ADVANCEMENT_REWARD, LootTable.lootTable());
                     NestedLootTable.lootTableReference(id);
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("KeyOnlyLootProvider.java").writeText("""
+            package com.example.data;
+
+            import com.example.ExampleLoot;
+            import net.minecraft.data.loot.LootTableSubProvider;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.storage.loot.LootTable;
+            import java.util.function.BiConsumer;
+
+            public class KeyOnlyLootProvider implements LootTableSubProvider {
+                @Override
+                public void generate(BiConsumer<ResourceLocation, LootTable.Builder> register) {
+                    register.accept(ExampleLoot.ADVANCEMENT_REWARD, LootTable.lootTable());
                 }
             }
         """.trimIndent())
@@ -8785,6 +8803,71 @@ class StructuralRefactorExtraTest {
 
                 public static Set<ResourceLocation> allBuiltin() {
                     return MOD_LOOT_TABLES;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleLoot.java").writeText("""
+            package com.example;
+
+            import java.util.Collections;
+            import java.util.HashSet;
+            import java.util.Set;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleLoot {
+                private static final Set<ResourceLocation> LOOT_TABLES = new HashSet<>();
+                public static final Set<ResourceLocation> IMMUTABLE_LOOT_TABLES = Collections.unmodifiableSet(LOOT_TABLES);
+                public static final ResourceLocation ENTITY_DROP = register("entities/demo");
+                public static final ResourceLocation ADVANCEMENT_REWARD = register("advancements/demo");
+
+                private static ResourceLocation register(String id) {
+                    return register(ExampleMod.prefix(id));
+                }
+
+                private static ResourceLocation register(ResourceLocation id) {
+                    if (LOOT_TABLES.add(id)) {
+                        return id;
+                    }
+                    throw new IllegalArgumentException(id + " duplicate");
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RuntimeLootUser.java").writeText("""
+            package com.example;
+
+            import net.minecraft.advancements.AdvancementRewards;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.level.storage.loot.LootTable;
+            import net.neoforged.neoforge.common.loot.LootTableIdCondition;
+            import java.util.Optional;
+
+            public class RuntimeLootUser {
+                public ResourceLocation getLootLocation() {
+                    return ExampleLoot.ENTITY_DROP;
+                }
+
+                public void spawn(ServerLevel level) {
+                    LootTable table = level.getServer().getLootData().getLootTable(this.getLootLocation());
+                }
+
+                public AdvancementRewards rewards() {
+                    return new AdvancementRewards(0, new ResourceLocation[]{ExampleLoot.ADVANCEMENT_REWARD}, new ResourceLocation[0], Optional.empty());
+                }
+
+                public Object condition() {
+                    return LootTableIdCondition.builder(ExampleLoot.ENTITY_DROP);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LootLocationOnly.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+
+            public class LootLocationOnly {
+                public ResourceLocation getLootLocation() {
+                    return ExampleLoot.ENTITY_DROP;
                 }
             }
         """.trimIndent())
@@ -9120,7 +9203,11 @@ class StructuralRefactorExtraTest {
         val handler = networkDir.resolve("NetworkHandler.java").readText()
         val common = srcDir.resolve("Common121.java").readText()
         val loot = dataDir.resolve("LootProvider.java").readText()
+        val keyOnlyLoot = dataDir.resolve("KeyOnlyLootProvider.java").readText()
         val lootIds = srcDir.resolve("LootIds.java").readText()
+        val exampleLoot = srcDir.resolve("ExampleLoot.java").readText()
+        val runtimeLoot = srcDir.resolve("RuntimeLootUser.java").readText()
+        val lootLocationOnly = srcDir.resolve("LootLocationOnly.java").readText()
         val fluidInterfaces = srcDir.resolve("FluidInterfaces.java").readText()
         val variantSpawner = srcDir.resolve("VariantSpawnerBlock.java").readText()
         val namedVariant = srcDir.resolve("NamedVariant.java").readText()
@@ -9159,12 +9246,27 @@ class StructuralRefactorExtraTest {
         assertTrue(common.contains("CollisionContext.empty()"))
         assertTrue(loot.contains("BiConsumer<ResourceKey<LootTable>, LootTable.Builder>"))
         assertTrue(loot.contains("register.accept(ResourceKey.create(Registries.LOOT_TABLE, id), LootTable.lootTable())"))
+        assertTrue(loot.contains("register.accept(ExampleLoot.ADVANCEMENT_REWARD, LootTable.lootTable())"))
+        assertFalse(loot.contains("ResourceKey.create(Registries.LOOT_TABLE, ExampleLoot.ADVANCEMENT_REWARD)"))
         assertTrue(loot.contains("NestedLootTable.lootTableReference(ResourceKey.create(Registries.LOOT_TABLE, id))"))
+        assertTrue(keyOnlyLoot.contains("import net.minecraft.resources.ResourceKey;"))
+        assertTrue(keyOnlyLoot.contains("BiConsumer<ResourceKey<LootTable>, LootTable.Builder>"))
+        assertTrue(keyOnlyLoot.contains("register.accept(ExampleLoot.ADVANCEMENT_REWARD, LootTable.lootTable())"))
         assertTrue(lootIds.contains("Set<ResourceKey<LootTable>> MOD_LOOT_TABLES"))
         assertTrue(lootIds.contains("public static final ResourceKey<LootTable> ENTITY_DROP = register(\"entities/demo\")"))
         assertTrue(lootIds.contains("this.lootTable = ResourceKey.create(Registries.LOOT_TABLE, ExampleMod.prefix(path))"))
         assertTrue(lootIds.contains("private static ResourceKey<LootTable> register(String id)"))
         assertTrue(lootIds.contains("private static ResourceKey<LootTable> register(ResourceKey<LootTable> id)"))
+        assertTrue(exampleLoot.contains("Set<ResourceKey<LootTable>> LOOT_TABLES"))
+        assertTrue(exampleLoot.contains("public static final ResourceKey<LootTable> ENTITY_DROP = register(\"entities/demo\")"))
+        assertTrue(exampleLoot.contains("public static final Set<ResourceKey<LootTable>> IMMUTABLE_LOOT_TABLES"))
+        assertTrue(runtimeLoot.contains("public ResourceKey<LootTable> getLootLocation()"))
+        assertTrue(runtimeLoot.contains("level.getServer().reloadableRegistries().getLootTable(this.getLootLocation())"))
+        assertTrue(runtimeLoot.contains("new AdvancementRewards(0, java.util.List.of(ExampleLoot.ADVANCEMENT_REWARD), java.util.List.of(), Optional.empty())"))
+        assertTrue(runtimeLoot.contains("LootTableIdCondition.builder(ExampleLoot.ENTITY_DROP.location())"))
+        assertFalse(runtimeLoot.contains("new ResourceLocation[]{ExampleLoot.ADVANCEMENT_REWARD}"))
+        assertTrue(lootLocationOnly.contains("public ResourceKey<LootTable> getLootLocation()"))
+        assertFalse(lootLocationOnly.contains("import net.minecraft.resources.ResourceLocation;"))
         assertTrue(fluidInterfaces.contains("pickupBlock(Player player, LevelAccessor level, BlockPos pos, BlockState state)"))
         assertTrue(fluidInterfaces.contains("canPlaceLiquid(Player player, BlockGetter level, BlockPos pos, BlockState state, Fluid fluid)"))
         assertTrue(variantSpawner.contains("com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec"))
