@@ -10644,6 +10644,8 @@ ${entries.joinToString(",\n")}
         }
         result = migrateEntityDimensionsRecordAccessors(result)
         result = migrateFinalLivingEntityDimensionsOverrides(result)
+        result = migrateSaddleableEquipSaddleSignature(result)
+        result = migrateMthTrigonometryFloatArguments(result)
         result = migrateAdvancementRequirementsStrategySource(result)
         result = migrateLegacyAdvancementHolderApis(result)
         result = migrateLegacyAdvancementDatagenSource(result, criterionInstanceFactoryHints)
@@ -11322,6 +11324,7 @@ ${entries.joinToString(",\n")}
         result = migrateCuriosHelperRemovalApis(result)
         result = migrateJeiRecipeCategoryBackgroundApi(result)
         result = migrateRequiredRemovalWarningAnnotations(result)
+        result = migrateMthTrigonometryFloatArguments(result)
         return result
     }
 
@@ -11562,39 +11565,46 @@ ${entries.joinToString(",\n")}
         }
 
     private fun migrateFinalLivingEntityDimensionsOverrides(source: String): String {
-        if (!source.contains("getDimensions(Pose") || !source.contains("extends ")) return source
-        val classHeader = Regex("""\bclass\s+[A-Za-z_$][\w$]*(?:\s*<[^>{}]+>)?\s+extends\s+([A-Za-z_$][\w$.]*)""")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
-            ?.substringAfterLast('.')
-            ?: return source
-        val livingEntityBaseNames = setOf(
-            "LivingEntity",
-            "Mob",
-            "PathfinderMob",
-            "Monster",
-            "FlyingMob",
-            "Animal",
-            "AgeableMob",
-            "TamableAnimal",
-            "AbstractHorse",
-            "Raider",
-            "WaterAnimal",
-            "AbstractVillager",
-            "Villager",
-            "Zombie",
-            "AbstractSkeleton",
-            "AbstractGolem"
-        )
-        if (classHeader !in livingEntityBaseNames) return source
+        if (!source.contains("getDimensions(Pose") || !source.contains("@Override")) return source
 
-        var result = Regex("""\bpublic\s+EntityDimensions\s+getDimensions\s*\(\s*Pose\s+([A-Za-z_$][\w$]*)\s*\)""")
+        var result = Regex("""\b(public|protected)\s+EntityDimensions\s+getDimensions\s*\(\s*Pose\s+([A-Za-z_$][\w$]*)\s*\)""")
             .replace(source) { match ->
-                "protected EntityDimensions getDefaultDimensions(Pose ${match.groupValues[1]})"
+                "${match.groupValues[1]} EntityDimensions getDefaultDimensions(Pose ${match.groupValues[2]})"
             }
         if (result != source) {
             result = result.replace("super.getDimensions(", "super.getDefaultDimensions(")
+        }
+        return result
+    }
+
+    private fun migrateSaddleableEquipSaddleSignature(source: String): String {
+        if (!source.contains("equipSaddle(") || !source.contains("SoundSource")) return source
+        var changed = false
+        val result = Regex(
+            """public\s+void\s+equipSaddle\(\s*((?:@(?:[\w.]+\.)?Nullable\s+)?)((?:net\.minecraft\.sounds\.)?SoundSource)\s+([A-Za-z_$][\w$]*)\s*\)"""
+        ).replace(source) { match ->
+            changed = true
+            val nullable = match.groupValues[1]
+            val soundType = match.groupValues[2]
+            val soundName = match.groupValues[3]
+            "public void equipSaddle(ItemStack stack, $nullable$soundType $soundName)"
+        }
+        return if (changed) addImportIfMissing(result, "net.minecraft.world.item.ItemStack") else source
+    }
+
+    private fun migrateMthTrigonometryFloatArguments(source: String): String {
+        if (!source.contains("Mth.sin(") && !source.contains("Mth.cos(")) return source
+        val doubleVariables = Regex("""\bdouble\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (doubleVariables.isEmpty()) return source
+
+        var result = source
+        for (variable in doubleVariables) {
+            val escaped = Regex.escape(variable)
+            result = Regex("""\bMth\.sin\(\s*$escaped\s*\)""").replace(result, "Mth.sin((float) $variable)")
+            result = Regex("""\bMth\.cos\(\s*$escaped\s*\)""").replace(result, "Mth.cos((float) $variable)")
         }
         return result
     }

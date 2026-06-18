@@ -8342,12 +8342,92 @@ class StructuralRefactorExtraTest {
         assertTrue(transformed.contains(".map(recipe -> recipe.value().getResultItem(level.registryAccess()))"))
         assertTrue(!transformed.contains("new SimpleContainer(stack)"))
         assertTrue(!transformed.contains("import net.minecraft.world.SimpleContainer;"))
-        assertTrue(transformed.contains("protected EntityDimensions getDefaultDimensions(Pose pose)"))
+        assertTrue(transformed.contains("public EntityDimensions getDefaultDimensions(Pose pose)"))
         assertTrue(transformed.contains("super.getDefaultDimensions(pose).scale(2.0F)"))
         assertTrue(transformed.contains("public ResourceKey<LootTable> getDefaultLootTable()"))
         assertTrue(transformed.contains("new LargeFireball(level, shooter, new Vec3(d2, d3, d4).normalize(), 1)"))
         assertTrue(transformed.contains("ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, red, green, blue), false, tx, ty, tz, 0.0D, 0.0D, 0.0D"))
         assertTrue(!transformed.contains("public EntityDimensions getDimensions(Pose pose)"))
+    }
+
+    @Test
+    fun `migrates saddle and dimensions overrides through custom entity parents`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("MountBase.java").writeText("""
+            package com.example;
+
+            import javax.annotation.Nullable;
+            import net.minecraft.sounds.SoundSource;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.Saddleable;
+            import net.minecraft.world.entity.animal.Animal;
+            import net.minecraft.world.level.Level;
+
+            public abstract class MountBase extends Animal implements Saddleable {
+                protected MountBase(EntityType<? extends Animal> type, Level level) {
+                    super(type, level);
+                }
+
+                @Override
+                public void equipSaddle(@Nullable SoundSource soundCategory) {
+                    this.setSaddled(true);
+                    if (soundCategory != null) {
+                        this.level().playSound(null, this, null, soundCategory, 0.5F, 1.0F);
+                    }
+                }
+
+                abstract void setSaddled(boolean value);
+            }
+        """.trimIndent())
+        srcDir.resolve("WingedMount.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityDimensions;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.Pose;
+            import net.minecraft.world.entity.animal.Animal;
+            import net.minecraft.world.level.Level;
+
+            public class WingedMount extends MountBase {
+                public WingedMount(EntityType<? extends Animal> type, Level level) {
+                    super(type, level);
+                }
+
+                @Override
+                public EntityDimensions getDimensions(Pose pose) {
+                    EntityDimensions dimensions = super.getDimensions(pose);
+                    return this.isBaby() ? dimensions.scale(1.0F, 0.5F) : dimensions;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TrigShape.java").writeText("""
+            package com.example;
+
+            import net.minecraft.util.Mth;
+
+            public class TrigShape {
+                void splash(double angle, double radius) {
+                    double x = Mth.sin(angle) * radius;
+                    double z = Mth.cos(angle) * radius;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val mountBase = srcDir.resolve("MountBase.java").readText()
+        val wingedMount = srcDir.resolve("WingedMount.java").readText()
+        val trigShape = srcDir.resolve("TrigShape.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(mountBase.contains("import net.minecraft.world.item.ItemStack;"), mountBase)
+        assertTrue(mountBase.contains("public void equipSaddle(ItemStack stack, @Nullable SoundSource soundCategory)"), mountBase)
+        assertFalse(mountBase.contains("public void equipSaddle(@Nullable SoundSource soundCategory)"), mountBase)
+        assertTrue(wingedMount.contains("public EntityDimensions getDefaultDimensions(Pose pose)"), wingedMount)
+        assertTrue(wingedMount.contains("EntityDimensions dimensions = super.getDefaultDimensions(pose);"), wingedMount)
+        assertFalse(wingedMount.contains("public EntityDimensions getDimensions(Pose pose)"), wingedMount)
+        assertTrue(trigShape.contains("double x = Mth.sin((float) angle) * radius;"), trigShape)
+        assertTrue(trigShape.contains("double z = Mth.cos((float) angle) * radius;"), trigShape)
     }
 
     @Test
