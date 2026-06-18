@@ -17214,7 +17214,47 @@ ${indent}}"""
         result = Regex(
             """\b([A-Za-z_$][\w$]*)\.getY\(\)\s*-\s*\1\.getMyRidingOffset\(\)\s*\+\s*\1\.getBbHeight\(\)\s*/\s*2"""
         ).replace(result) { match -> "${match.groupValues[1]}.getBoundingBox().getCenter().y" }
+        if (result.contains(".getMyRidingOffset()") && sourceDeclaresEntityDerivedType(result)) {
+            result = rewriteJavaCallWithOffset(result, "getMyRidingOffset") { receiver, args, callOffset ->
+                if (args.isNotEmpty()) return@rewriteJavaCallWithOffset null
+                val normalizedReceiver = receiver.trim()
+                if (normalizedReceiver == "this" || normalizedReceiver == "super") return@rewriteJavaCallWithOffset null
+                val methodText = enclosingMethodText(result, callOffset) ?: return@rewriteJavaCallWithOffset null
+                val methodHeader = methodText.substringBefore("{")
+                if (Regex("""\bstatic\b""").containsMatchIn(methodHeader)) return@rewriteJavaCallWithOffset null
+                "(-$normalizedReceiver.getVehicleAttachmentPoint(this).y)"
+            }
+            result = Regex("""\+\s*\(-([^;\r\n]+?\.getVehicleAttachmentPoint\(this\)\.y)\)""")
+                .replace(result, "- $1")
+            result = Regex("""-\s*\(-([^;\r\n]+?\.getVehicleAttachmentPoint\(this\)\.y)\)""")
+                .replace(result, "+ $1")
+        }
         return result
+    }
+
+    private fun sourceDeclaresEntityDerivedType(source: String): Boolean {
+        val entityBaseTypes = setOf(
+            "Entity",
+            "LivingEntity",
+            "Mob",
+            "PathfinderMob",
+            "Monster",
+            "AgeableMob",
+            "Animal",
+            "TamableAnimal",
+            "AbstractHorse",
+            "AbstractMinecart",
+            "Boat",
+            "Projectile",
+            "ThrowableProjectile",
+            "AbstractArrow"
+        )
+        return Regex(
+            """\bclass\s+[A-Za-z_$][\w$]*(?:\s*<[^>{}]+>)?\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\b"""
+        ).findAll(source).any { match ->
+            val base = match.groupValues[1].substringAfterLast('.')
+            base in entityBaseTypes
+        }
     }
 
     private fun migrateLegacyPassengerAttachmentOverrides(source: String): String {

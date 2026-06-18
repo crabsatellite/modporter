@@ -6690,6 +6690,55 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates entity riding offset call sites only with explicit vehicle context`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("Whirlwind.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.level.Level;
+
+            public class Whirlwind extends Mob {
+                protected Whirlwind(EntityType<? extends Mob> type, Level level) {
+                    super(type, level);
+                }
+
+                public double lift(Entity entity) {
+                    return (float) entity.getY() - entity.getMyRidingOffset() * 0.6F;
+                }
+
+                public double seat(Entity passenger) {
+                    return this.getY() + this.getPassengersRidingOffset() + passenger.getMyRidingOffset();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Renderer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.Entity;
+
+            public class Renderer {
+                public float offset(Entity entity) {
+                    return (float) entity.getMyRidingOffset();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val entity = srcDir.resolve("Whirlwind.java").readText()
+        val renderer = srcDir.resolve("Renderer.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(entity.contains("return (float) entity.getY() + entity.getVehicleAttachmentPoint(this).y * 0.6F;"), entity)
+        assertTrue(entity.contains("return this.getY() + this.getPassengersRidingOffset() - passenger.getVehicleAttachmentPoint(this).y;"), entity)
+        assertFalse(entity.contains("getMyRidingOffset"), entity)
+        assertTrue(renderer.contains("entity.getMyRidingOffset()"), renderer)
+    }
+
+    @Test
     fun `migrates record accessors advancement strategy and synced data buffers`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
