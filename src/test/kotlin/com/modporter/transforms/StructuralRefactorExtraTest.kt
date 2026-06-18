@@ -17160,6 +17160,36 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates colored cutout layer helper RGB floats to packed color`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ColoredLayerSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import net.minecraft.client.model.EntityModel;
+            import net.minecraft.client.renderer.MultiBufferSource;
+            import net.minecraft.client.renderer.entity.layers.RenderLayer;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public class ColoredLayerSurface {
+                public <T extends LivingEntity> void render(EntityModel<T> parent, EntityModel<T> model, ResourceLocation texture, PoseStack poseStack, MultiBufferSource buffer, int packedLight, T entity, float limbSwing, float limbSwingAmount, float ageInTicks, float netHeadYaw, float headPitch, float partialTicks, float red, float green, float blue) {
+                    RenderLayer.coloredCutoutModelCopyLayerRender(parent, model, texture, poseStack, buffer, packedLight, entity, limbSwing, limbSwingAmount, ageInTicks, netHeadYaw, headPitch, partialTicks, red, green, blue);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ColoredLayerSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.util.FastColor;"), migrated)
+        assertTrue(migrated.contains("RenderLayer.coloredCutoutModelCopyLayerRender(parent, model, texture, poseStack, buffer, packedLight, entity, limbSwing, limbSwingAmount, ageInTicks, netHeadYaw, headPitch, partialTicks, FastColor.ARGB32.colorFromFloat(1.0F, red, green, blue));"), migrated)
+        assertFalse(migrated.contains("partialTicks, red, green, blue);"), migrated)
+    }
+
+    @Test
     fun `empty project returns empty results`() {
         val projectDir = tempDir.resolve("empty-project")
         projectDir.createDirectories()

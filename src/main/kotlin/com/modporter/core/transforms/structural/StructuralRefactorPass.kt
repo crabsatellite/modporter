@@ -8126,6 +8126,20 @@ $fields
                     text = projectilePortalMigrated
                 }
 
+                val coloredLayerMigrated = migrateColoredCutoutModelCopyLayerRenderSource(text)
+                if (coloredLayerMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate RenderLayer colored cutout helper RGB float arguments to packed ARGB color",
+                        before = "coloredCutoutModelCopyLayerRender(..., red, green, blue)",
+                        after = "coloredCutoutModelCopyLayerRender(..., FastColor.ARGB32.colorFromFloat(1.0F, red, green, blue))",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-colored-cutout-layer-packed-color"
+                    ))
+                    text = coloredLayerMigrated
+                }
+
                 val customDataMigrated = migrateCustomDataComponentsSource(text)
                 if (customDataMigrated != text) {
                     changes.add(Change(
@@ -11863,6 +11877,18 @@ ${indent}}
             result = removeUnusedSimpleImport(result, importName, simpleName)
         }
         return cleanupRedundantBlankLines(result)
+    }
+
+    private fun migrateColoredCutoutModelCopyLayerRenderSource(source: String): String {
+        if (!source.contains("coloredCutoutModelCopyLayerRender(")) return source
+        var changed = false
+        val result = rewriteJavaInvocationArguments(source, "coloredCutoutModelCopyLayerRender") { args ->
+            if (args.size != 16) return@rewriteJavaInvocationArguments null
+            val color = "FastColor.ARGB32.colorFromFloat(1.0F, ${args[13].trim()}, ${args[14].trim()}, ${args[15].trim()})"
+            changed = true
+            args.take(13) + color
+        }
+        return if (changed) addImportIfMissing(result, "net.minecraft.util.FastColor") else source
     }
 
     private fun migrateCustomDataComponentsSource(source: String): String {
