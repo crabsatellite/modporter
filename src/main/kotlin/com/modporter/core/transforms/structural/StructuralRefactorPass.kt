@@ -12528,6 +12528,11 @@ ${indent}}
                 .replace("event.getSkin(\"slim\")", "event.getSkin(PlayerSkin.Model.SLIM)")
             needsPlayerSkin = true
         }
+        val skinLoopMigrated = migrateLegacyAddLayersSkinNameLoopsSource(result)
+        if (skinLoopMigrated != result) {
+            result = skinLoopMigrated
+            needsPlayerSkin = true
+        }
 
         result = Regex("""new\s+MerchantOffer\(\s*new\s+ItemStack\((Items\.\w+),\s*(\d+)\),""")
             .replace(result) { match ->
@@ -12680,6 +12685,38 @@ ${indent}}
         }
         if (result.contains("import org.jetbrains.annotations.Nullable;") && result.contains("import javax.annotation.Nullable;")) {
             result = removeImport(result, "javax.annotation.Nullable")
+        }
+        return result
+    }
+
+    private fun migrateLegacyAddLayersSkinNameLoopsSource(source: String): String {
+        if (!source.contains(".getSkin(") || !source.contains("String")) return source
+        var result = source
+        var cursor = 0
+        val declarationPattern = Regex(
+            """(?s)(?:final\s+)?String\s*\[\]\s+([A-Za-z_$][\w$]*)\s*=\s*(?:new\s+String\s*\[\]\s*)?\{\s*"default"\s*,\s*"slim"\s*}\s*;\s*for\s*\(\s*String\s+([A-Za-z_$][\w$]*)\s*:\s*\1\s*\)\s*\{"""
+        )
+        while (true) {
+            val match = declarationPattern.find(result, cursor) ?: break
+            val loopVariable = match.groupValues[2]
+            val openBrace = result.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            val eventVariable = Regex("""\b([A-Za-z_$][\w$]*)\.getSkin\(\s*${Regex.escape(loopVariable)}\s*\)""")
+                .find(body)
+                ?.groupValues
+                ?.get(1)
+            if (eventVariable == null) {
+                cursor = closeBrace + 1
+                continue
+            }
+            val replacement = "for (PlayerSkin.Model $loopVariable : $eventVariable.getSkins()) {"
+            result = result.substring(0, match.range.first) + replacement + result.substring(openBrace + 1)
+            cursor = match.range.first + replacement.length
         }
         return result
     }
@@ -13604,7 +13641,10 @@ ${indent}}
                 ?.get(1)
                 ?.trim()
 
-        result = result.replace("List<Map.Entry<ResourceLocation, BakedModel>>", "List<Map.Entry<ModelResourceLocation, BakedModel>>")
+        if (result.contains("ModelEvent.ModifyBakingResult") && result.contains(".getModels()")) {
+            result = Regex("""Map\.Entry\s*<\s*ResourceLocation\s*,\s*BakedModel\s*>""")
+                .replace(result, "Map.Entry<ModelResourceLocation, BakedModel>")
+        }
         result = Regex("""(\b[A-Za-z_$][\w$]*\.getKey\(\))\.getNamespace\(\)""")
             .replace(result, "$1.id().getNamespace()")
         result = Regex("""(\b[A-Za-z_$][\w$]*\.getKey\(\))\.getPath\(\)""")
@@ -13653,6 +13693,9 @@ ${indent}}
         }
         if (needsResourceLocation) {
             result = addImportIfMissing(result, "net.minecraft.resources.ResourceLocation")
+        }
+        if (result.contains("ModelResourceLocation")) {
+            result = addImportIfMissing(result, "net.minecraft.client.resources.model.ModelResourceLocation")
         }
         return result
     }

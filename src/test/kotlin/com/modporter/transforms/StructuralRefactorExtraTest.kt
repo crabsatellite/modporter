@@ -10432,6 +10432,11 @@ class StructuralRefactorExtraTest {
                 public static void bake(ModelEvent.ModifyBakingResult event) {
                     List<Map.Entry<ResourceLocation, BakedModel>> models = event.getModels().entrySet().stream()
                             .filter(entry -> entry.getKey().getNamespace().equals(ExampleMod.ID) && entry.getKey().getPath().contains("leaves")).toList();
+                    for (Map.Entry<ResourceLocation, BakedModel> entry : event.getModels().entrySet()) {
+                        if (entry.getKey().getNamespace().equals(ExampleMod.ID)) {
+                            models.add(entry);
+                        }
+                    }
                     models.forEach(entry -> event.getModels().put(entry.getKey(), new WrappedModel(entry.getValue())));
                 }
 
@@ -11988,6 +11993,7 @@ class StructuralRefactorExtraTest {
         assertTrue(lossyCompoundSurface.contains("this.arm.xRot += (float) (Math.PI * 1.25);"))
         assertTrue(modelEventSurface.contains("event.register(ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, \"example_loader\"), ExampleLoader.INSTANCE);"))
         assertTrue(modelEventSurface.contains("List<Map.Entry<ModelResourceLocation, BakedModel>> models"))
+        assertTrue(modelEventSurface.contains("for (Map.Entry<ModelResourceLocation, BakedModel> entry : event.getModels().entrySet())"))
         assertTrue(modelEventSurface.contains("entry.getKey().id().getNamespace()"))
         assertTrue(modelEventSurface.contains("entry.getKey().id().getPath()"))
         assertTrue(modelEventSurface.contains("event.register(ModelResourceLocation.standalone(ExampleMod.prefix(\"block/surface\")))"))
@@ -17017,6 +17023,80 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("private static int modporterLegacyHeartTypeX(net.minecraft.client.gui.Gui.HeartType heartType, boolean halfHeart, boolean blinking)"), migrated)
         assertTrue(migrated.contains("return 16 + (index * 2 + offset) * 9;"), migrated)
         assertFalse(migrated.contains(".getX("), migrated)
+    }
+
+    @Test
+    fun `migrates legacy add layer skin name loops to PlayerSkin models`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AddLayersSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.renderer.entity.player.PlayerRenderer;
+            import net.neoforged.neoforge.client.event.EntityRenderersEvent;
+
+            public class AddLayersSurface {
+                public static void add(EntityRenderersEvent.AddLayers event) {
+                    String[] types = new String[]{"default", "slim"};
+                    for (String type : types) {
+                        PlayerRenderer playerRenderer = event.getSkin(type);
+                        if (playerRenderer != null) {
+                            playerRenderer.addLayer(new ExampleLayer(playerRenderer));
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("AddLayersSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.client.resources.PlayerSkin;"), migrated)
+        assertTrue(migrated.contains("for (PlayerSkin.Model type : event.getSkins()) {"), migrated)
+        assertTrue(migrated.contains("PlayerRenderer playerRenderer = event.getSkin(type);"), migrated)
+        assertFalse(migrated.contains("String[] types"), migrated)
+        assertFalse(migrated.contains("for (String type"), migrated)
+    }
+
+    @Test
+    fun `migrates ModifyBakingResult model entry loops to model resource locations`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ModelBakeSurface.java").writeText("""
+            package com.example;
+
+            import java.util.ArrayList;
+            import java.util.List;
+            import java.util.Map;
+            import net.minecraft.client.resources.model.BakedModel;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.neoforge.client.event.ModelEvent;
+
+            public class ModelBakeSurface {
+                public static void bake(ModelEvent.ModifyBakingResult event) {
+                    List<Map.Entry<ResourceLocation, BakedModel>> models = new ArrayList<>();
+                    for (Map.Entry<ResourceLocation, BakedModel> entry : event.getModels().entrySet()) {
+                        if (entry.getKey().getNamespace().equals(ExampleMod.ID)) {
+                            String path = entry.getKey().getPath();
+                            models.add(entry);
+                        }
+                    }
+                    models.forEach(entry -> event.getModels().put(entry.getKey(), new WrappedModel(entry.getValue())));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ModelBakeSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.client.resources.model.ModelResourceLocation;"), migrated)
+        assertTrue(migrated.contains("List<Map.Entry<ModelResourceLocation, BakedModel>> models = new ArrayList<>();"), migrated)
+        assertTrue(migrated.contains("for (Map.Entry<ModelResourceLocation, BakedModel> entry : event.getModels().entrySet())"), migrated)
+        assertTrue(migrated.contains("entry.getKey().id().getNamespace().equals(ExampleMod.ID)"), migrated)
+        assertTrue(migrated.contains("String path = entry.getKey().id().getPath();"), migrated)
+        assertFalse(migrated.contains("Map.Entry<ResourceLocation, BakedModel>"), migrated)
     }
 
     @Test
