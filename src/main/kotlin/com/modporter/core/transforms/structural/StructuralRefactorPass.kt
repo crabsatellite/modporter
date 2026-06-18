@@ -10650,6 +10650,7 @@ ${entries.joinToString(",\n")}
             result = bindingCurseMigrated
             needsEnchantmentEffectComponents = true
         }
+        result = migrateRecipeBookGhostRecipeSource(result)
         result = migrateLegacyClientRenderingSource(result)
         result = migrateLegacySkinManagerTextureLookups(result)
         result = migrateLegacyModelEventSource(result)
@@ -20864,6 +20865,44 @@ $methodBody
         if (cursor == 0) return source
         migrated.append(source, cursor, source.length)
         return migrated.toString()
+    }
+
+    private fun migrateRecipeBookGhostRecipeSource(source: String): String {
+        if (!source.contains("setupGhostRecipe") || !source.contains("Recipe<?>")) return source
+        val id = """[A-Za-z_$][\w$]*"""
+        val signaturePattern = Regex(
+            """public\s+void\s+setupGhostRecipe\s*\(\s*Recipe\s*<\s*\?\s*>\s+($id)\s*,\s*List\s*<\s*Slot\s*>\s+($id)\s*\)"""
+        )
+        val migrated = StringBuilder()
+        var cursor = 0
+        var changed = false
+        while (cursor < source.length) {
+            val match = signaturePattern.find(source, cursor) ?: break
+            val openBrace = source.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                migrated.append(source, cursor, match.range.last + 1)
+                cursor = match.range.last + 1
+                continue
+            }
+            val recipeVar = match.groupValues[1]
+            migrated.append(source, cursor, match.range.first)
+            migrated.append(match.value.replace(Regex("""Recipe\s*<\s*\?\s*>"""), "RecipeHolder<?>"))
+            migrated.append(source, match.range.last + 1, openBrace + 1)
+            val body = source.substring(openBrace + 1, closeBrace)
+                .replace(Regex("""\b${Regex.escape(recipeVar)}\.getIngredients\(\)"""), "$recipeVar.value().getIngredients()")
+            migrated.append(body)
+            migrated.append("}")
+            cursor = closeBrace + 1
+            changed = true
+        }
+        if (!changed) return source
+        migrated.append(source, cursor, source.length)
+        var result = migrated.toString()
+        result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeHolder")
+        val withoutRecipeImport = removeImport(result, "net.minecraft.world.item.crafting.Recipe")
+        result = if (hasSimpleTypeReference(withoutRecipeImport, "Recipe")) result else withoutRecipeImport
+        return result
     }
 
     private fun migrateMeleeAttackGoalReachOverrides(source: String): String {

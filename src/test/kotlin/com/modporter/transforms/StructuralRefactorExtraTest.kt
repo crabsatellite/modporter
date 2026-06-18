@@ -4346,6 +4346,46 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates recipe book ghost recipe holder override without broad recipe rewrites`() {
+        val projectDir = createFile("IncubatorRecipeBookComponent.java", """
+            package com.example;
+
+            import net.minecraft.client.gui.screens.recipebook.RecipeBookComponent;
+            import net.minecraft.world.inventory.Slot;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.Recipe;
+
+            import java.util.List;
+
+            public class IncubatorRecipeBookComponent extends RecipeBookComponent {
+                @Override
+                public void setupGhostRecipe(Recipe<?> recipe, List<Slot> slots) {
+                    this.ghostRecipe.setRecipe(recipe);
+                    Ingredient ingredient = recipe.getIngredients().get(0);
+                    Slot slot = slots.get(0);
+                    this.ghostRecipe.addIngredient(ingredient, slot.x, slot.y);
+                }
+
+                public Ingredient inspectUnrelatedRecipe(Recipe<?> recipe) {
+                    return recipe.getIngredients().get(0);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/IncubatorRecipeBookComponent.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("import net.minecraft.world.item.crafting.RecipeHolder;"))
+        assertTrue(migrated.contains("public void setupGhostRecipe(RecipeHolder<?> recipe, List<Slot> slots)"))
+        assertTrue(migrated.contains("this.ghostRecipe.setRecipe(recipe);"))
+        assertTrue(migrated.contains("Ingredient ingredient = recipe.value().getIngredients().get(0);"))
+        assertTrue(migrated.contains("public Ingredient inspectUnrelatedRecipe(Recipe<?> recipe)"))
+        assertTrue(migrated.contains("return recipe.getIngredients().get(0);"))
+    }
+
+    @Test
     fun `migrates custom recipe serializer and deferred holder generics`() {
         val projectDir = createFile("CustomFluidCraftingRecipe.java", """
             package com.example;
