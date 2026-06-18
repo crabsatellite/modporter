@@ -9973,6 +9973,10 @@ class StructuralRefactorExtraTest {
                     boolean grief = EventHooks.getMobGriefingEvent(level, entity);
                     EventHooks.onFinalizeSpawn(mob, accessor, accessor.getCurrentDifficultyAt(pos), MobSpawnType.SPAWNER, null, null);
                     AABB box = new AABB(pos.above(16), pos.above(16).offset(1, 1, 1));
+                    Vec3 min = new Vec3(0.0D, 1.0D, 2.0D);
+                    Vec3 max = Vec3.ZERO;
+                    AABB vecBox = AABB.encapsulatingFullBlocks(min, max);
+                    AABB alreadyVecBox = new AABB(min, max);
                     BuiltInRegistries.BLOCK.tags().getTag(tag).getRandomElement(level.getRandom()).get().defaultBlockState();
                     int size = container.size();
                     entity.gameEvent(GameEvent.ENTITY_ROAR);
@@ -10483,6 +10487,9 @@ class StructuralRefactorExtraTest {
         assertTrue(common.contains("EventHooks.canEntityGrief(level, entity)"))
         assertTrue(common.contains("EventHooks.finalizeMobSpawn(mob, accessor, accessor.getCurrentDifficultyAt(pos), MobSpawnType.SPAWNER, null)"))
         assertTrue(common.contains("AABB.encapsulatingFullBlocks(pos.above(16), pos.above(16).offset(1, 1, 1))"))
+        assertTrue(common.contains("AABB vecBox = new AABB(min, max);"))
+        assertTrue(common.contains("AABB alreadyVecBox = new AABB(min, max);"))
+        assertFalse(common.contains("AABB.encapsulatingFullBlocks(min, max)"))
         assertTrue(common.contains("BuiltInRegistries.BLOCK.getRandomElementOf(tag, level.getRandom()).map(holder -> holder.value().defaultBlockState()).orElseGet(Blocks.AIR::defaultBlockState)"))
         assertTrue(common.contains("container.getContainerSize()"))
         assertTrue(common.contains("GameEvent.ENTITY_ACTION"))

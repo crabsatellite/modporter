@@ -24913,6 +24913,7 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
             }
         }
         result = migrateAabbBlockPosPairConstructors(result)
+        result = migrateAabbVec3EncapsulatingFullBlocks(result)
         if (result.contains("BucketPickup") || result.contains("LiquidBlockContainer") || result.contains("pickupBlock(") || result.contains("canPlaceLiquid(")) {
             val beforeLiquidInterfaces = result
             result = Regex(
@@ -25338,6 +25339,7 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
 
     private fun migrateAabbBlockPosPairConstructors(source: String): String {
         if (!source.contains("new AABB(")) return source
+        val declaredTypes = javaDeclaredSimpleTypeSets(source)
         val migrated = StringBuilder()
         var cursor = 0
         var changed = false
@@ -25349,8 +25351,7 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
             val closeParen = findMatchingParen(source, openParen)
             if (closeParen < 0) break
             val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
-            if (args.size == 2 &&
-                args.none { Regex("""^\s*[-+]?\d""").containsMatchIn(it) || it.contains("new Vec3") || it.contains("Vec3.") }) {
+            if (args.size == 2 && args.all { isAabbBlockPosExpression(it, declaredTypes) }) {
                 migrated.append(source, cursor, tokenIndex)
                 migrated.append("AABB.encapsulatingFullBlocks(${args[0].trim()}, ${args[1].trim()})")
                 cursor = closeParen + 1
@@ -25363,6 +25364,63 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
         if (!changed) return source
         migrated.append(source, cursor, source.length)
         return migrated.toString()
+    }
+
+    private fun migrateAabbVec3EncapsulatingFullBlocks(source: String): String {
+        if (!source.contains("AABB.encapsulatingFullBlocks(")) return source
+        val declaredTypes = javaDeclaredSimpleTypeSets(source)
+        return rewriteJavaCall(source, "encapsulatingFullBlocks") { receiver, args ->
+            if (receiver != "AABB" || args.size != 2) return@rewriteJavaCall null
+            if (!args.all { isAabbVec3Expression(it, declaredTypes) }) return@rewriteJavaCall null
+            "new AABB(${args[0].trim()}, ${args[1].trim()})"
+        }
+    }
+
+    private fun javaDeclaredSimpleTypeSets(source: String): Map<String, Set<String>> {
+        val id = """[A-Za-z_$][\w$]*"""
+        val typeExpression = """(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*(?:\s*<[^;=(){}]*>)?(?:\s*\[\])?"""
+        val declarations = linkedMapOf<String, MutableSet<String>>()
+        fun simpleTypeName(type: String): String =
+            type.replace(Regex("""<[^<>]*>"""), "")
+                .trim()
+                .removeSuffix("[]")
+                .substringAfterLast('.')
+
+        Regex("""\b($typeExpression)\s+($id)\b(?=\s*(?:[,;)=]))""")
+            .findAll(source)
+            .forEach { match ->
+                val type = simpleTypeName(match.groupValues[1])
+                val name = match.groupValues[2]
+                if (type !in setOf("void", "return", "new", "if", "for", "while", "switch")) {
+                    declarations.getOrPut(name) { linkedSetOf() } += type
+                }
+            }
+        Regex("""\binstanceof\s+($typeExpression)\s+($id)\b""")
+            .findAll(source)
+            .forEach { match ->
+                declarations.getOrPut(match.groupValues[2]) { linkedSetOf() } += simpleTypeName(match.groupValues[1])
+            }
+        Regex("""\bfor\s*\(\s*($typeExpression)\s+($id)\s*:""")
+            .findAll(source)
+            .forEach { match ->
+                declarations.getOrPut(match.groupValues[2]) { linkedSetOf() } += simpleTypeName(match.groupValues[1])
+            }
+        return declarations
+    }
+
+    private fun isAabbBlockPosExpression(expression: String, declaredTypes: Map<String, Set<String>>): Boolean {
+        val trimmed = expression.trim()
+        if (trimmed.contains("Vec3") || Regex("""^\s*[-+]?\d""").containsMatchIn(trimmed)) return false
+        if (trimmed.startsWith("new BlockPos(") || trimmed.startsWith("BlockPos.")) return true
+        val root = trimmed.substringBefore('.').trim()
+        return declaredTypes[root] == setOf("BlockPos")
+    }
+
+    private fun isAabbVec3Expression(expression: String, declaredTypes: Map<String, Set<String>>): Boolean {
+        val trimmed = expression.trim()
+        if (trimmed.startsWith("new Vec3(") || trimmed.startsWith("Vec3.")) return true
+        val root = trimmed.substringBefore('.').trim()
+        return declaredTypes[root] == setOf("Vec3")
     }
 
     private fun migrateGlobalLootModifierCodecs(source: String): String {
