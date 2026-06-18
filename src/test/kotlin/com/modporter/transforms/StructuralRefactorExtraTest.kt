@@ -11836,6 +11836,8 @@ class StructuralRefactorExtraTest {
         assertTrue(rendererSetupSurface.contains("protected void setupRotations(T entity, PoseStack stack, float ageInTicks, float rotationYaw, float scale, float partialTicks)"))
         assertTrue(rendererSetupSurface.contains("super.setupRotations(entity, stack, ageInTicks, rotationYaw, scale, partialTicks);"))
         assertTrue(commandSourceStackSurface.contains("source.getLevel().getSeed();"))
+        assertTrue(itemStackSerializationSurface.contains("protected void readAdditionalSaveData(CompoundTag tag)"))
+        assertTrue(itemStackSerializationSurface.contains("protected void addAdditionalSaveData(CompoundTag tag)"))
         assertTrue(itemStackSerializationSurface.contains("ItemStack.parseOptional(this.registryAccess(), tag.getCompound(\"Stack\"))"))
         assertTrue(itemStackSerializationSurface.contains("this.stack.save(this.registryAccess())"))
         assertTrue(meleeAttackGoalSurface.contains("protected void checkAndPerformAttack(LivingEntity target)"))
@@ -12076,6 +12078,90 @@ class StructuralRefactorExtraTest {
         assertTrue(transformed.contains("craftingRecipe.assemble(this.craftMatrix.asCraftInput(), this.player.level().registryAccess())"), transformed)
         assertTrue(transformed.contains("import net.minecraft.world.item.crafting.CraftingInput;"), transformed)
         assertFalse(transformed.contains("Recipe<? super CraftingContainer>"), transformed)
+    }
+
+    @Test
+    fun `migrates entity additional save data provider delegates structurally`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AetherBossMob.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.entity.BossMob;
+
+            public interface AetherBossMob<T> extends BossMob<T> {
+            }
+        """.trimIndent())
+        srcDir.resolve("BossEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.RegistryFriendlyByteBuf;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            public abstract class BossEntity extends Mob implements AetherBossMob<BossEntity> {
+                private ItemStack stack;
+
+                protected BossEntity(EntityType<? extends Mob> type, Level level) {
+                    super(type, level);
+                }
+
+                @Override
+                protected void addAdditionalSaveData(CompoundTag tag) {
+                    super.addAdditionalSaveData(tag);
+                    this.addBossSaveData(tag);
+                    this.addLocalSaveData(tag);
+                    tag.put("Stack", this.stack.save());
+                }
+
+                @Override
+                protected void readAdditionalSaveData(CompoundTag tag) {
+                    super.readAdditionalSaveData(tag);
+                    this.readBossSaveData(tag);
+                    this.readLocalSaveData(tag);
+                    this.stack = ItemStack.of(tag.getCompound("Stack"));
+                }
+
+                public void writeSpawnData(RegistryFriendlyByteBuf buffer) {
+                    CompoundTag spawnTag = new CompoundTag();
+                    this.addBossSaveData(spawnTag);
+                    buffer.writeNbt(spawnTag);
+                }
+
+                public void readSpawnData(RegistryFriendlyByteBuf data) {
+                    CompoundTag spawnTag = data.readNbt();
+                    if (spawnTag != null) {
+                        this.readBossSaveData(spawnTag);
+                    }
+                }
+
+                private void addLocalSaveData(CompoundTag tag) {
+                }
+
+                private void readLocalSaveData(CompoundTag tag) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val boss = srcDir.resolve("BossEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(boss.contains("protected void addAdditionalSaveData(CompoundTag tag)"), boss)
+        assertTrue(boss.contains("protected void readAdditionalSaveData(CompoundTag tag)"), boss)
+        assertTrue(boss.contains("super.addAdditionalSaveData(tag);"), boss)
+        assertTrue(boss.contains("this.addBossSaveData(tag, this.registryAccess());"), boss)
+        assertTrue(boss.contains("super.readAdditionalSaveData(tag);"), boss)
+        assertTrue(boss.contains("this.readBossSaveData(tag, this.registryAccess());"), boss)
+        assertTrue(boss.contains("tag.put(\"Stack\", this.stack.save(this.registryAccess()));"), boss)
+        assertTrue(boss.contains("this.stack = ItemStack.parseOptional(this.registryAccess(), tag.getCompound(\"Stack\"));"), boss)
+        assertTrue(boss.contains("this.addBossSaveData(spawnTag, this.registryAccess());"), boss)
+        assertTrue(boss.contains("this.readBossSaveData(spawnTag, this.registryAccess());"), boss)
+        assertTrue(boss.contains("this.addLocalSaveData(tag);"), boss)
+        assertTrue(boss.contains("this.readLocalSaveData(tag);"), boss)
     }
 
     @Test

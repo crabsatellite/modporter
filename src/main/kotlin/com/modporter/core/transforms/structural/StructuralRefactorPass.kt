@@ -7831,6 +7831,7 @@ $fields
         val optionalCompoundRecipeTagOwners = collectLegacyOptionalCompoundRecipeTagOwners(javaFiles)
         val legacyCookingRecipeClasses = collectLegacyCookingRecipeClasses(javaFiles)
         val javaInheritanceIndex = collectJavaInheritanceIndex(javaFiles)
+        val holderLookupCompoundTagMethods = collectHolderLookupCompoundTagMethods(javaFiles)
 
         javaFiles.forEach { javaFile ->
                 val original = javaFile.readText()
@@ -7862,6 +7863,24 @@ $fields
                         ruleId = "struct-blockentity-holderlookup"
                     ))
                     text = blockEntityMigrated
+                }
+
+                val entitySaveDataMigrated = migrateEntityAdditionalSaveDataHolderLookupSource(
+                    text,
+                    javaInheritanceIndex,
+                    holderLookupCompoundTagMethods
+                )
+                if (entitySaveDataMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate Entity save-data methods' provider-aware CompoundTag delegate calls",
+                        before = "provider-aware CompoundTag delegate called with one argument",
+                        after = "provider-aware CompoundTag delegate called with Entity registry access provider",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-entity-save-data-holderlookup"
+                    ))
+                    text = entitySaveDataMigrated
                 }
 
                 val baseContainerMigrated = migrateBaseContainerBlockEntityItemsSource(text)
@@ -10434,6 +10453,93 @@ ${entries.joinToString(",\n")}
 
         if (needsHolderLookup || result != source) {
             result = addImportIfMissing(result, "net.minecraft.core.HolderLookup")
+        }
+        return result
+    }
+
+    private fun collectHolderLookupCompoundTagMethods(javaFiles: List<Path>): Set<String> {
+        val id = """[A-Za-z_$][\w$]*"""
+        val pattern = Regex(
+            """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|default|static|final|abstract)\s+)*void\s+($id)\s*\(\s*(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*(?:net\.minecraft\.nbt\.)?CompoundTag\s+$id\s*,\s*(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*(?:net\.minecraft\.core\.)?HolderLookup\.Provider\s+$id\s*\)"""
+        )
+        val texts = javaFiles.asSequence()
+            .map { runCatching { it.readText() }.getOrDefault("") }
+            .toList()
+        val projectDeclared = texts.asSequence()
+            .flatMap { pattern.findAll(it).map { match -> match.groupValues[1] } }
+            .toSet()
+        val nitrogenBossMobMethods = if (texts.any { it.contains("com.aetherteam.nitrogen.entity.BossMob") }) {
+            setOf("addBossSaveData", "readBossSaveData")
+        } else {
+            emptySet()
+        }
+        return projectDeclared + nitrogenBossMobMethods
+    }
+
+    private fun migrateEntityAdditionalSaveDataHolderLookupSource(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex,
+        holderLookupCompoundTagMethods: Set<String>
+    ): String {
+        if (holderLookupCompoundTagMethods.none { source.contains("$it(") }) return source
+
+        val id = """[A-Za-z_$][\w$]*"""
+        val methodPattern = Regex(
+            """(?m)^([ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|final|synchronized)\s+)+[A-Za-z_$][\w$<>\[\].?,\s]*\s+$id\s*)\(([^()]*)\)\s*\{"""
+        )
+        var result = source
+        var cursor = 0
+        while (true) {
+            val match = methodPattern.find(result, cursor) ?: break
+            if (Regex("""\bstatic\b""").containsMatchIn(match.groupValues[1])) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val classDeclaration = enclosingJavaClassDeclaration(result, match.range.first)
+            if (!javaClassExtendsAny(classDeclaration, javaEntityBaseTypes(), javaInheritanceIndex)) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val openBrace = result.indexOf('{', match.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val params = splitTopLevelJavaArgs(match.groupValues[2])
+            val parameterTags = params.mapNotNull { parameter ->
+                Regex(
+                    """(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*(?:net\.minecraft\.nbt\.)?CompoundTag\s+($id)$"""
+                ).find(parameter.trim().replace(Regex("""\s+"""), " "))?.groupValues?.get(1)
+            }
+            val providerExpression = holderLookupProviderFromParameters(params) ?: "this.registryAccess()"
+            val originalBody = result.substring(openBrace + 1, closeBrace)
+            val tagNames = (parameterTags + Regex("""\b(?:net\.minecraft\.nbt\.)?CompoundTag\s+($id)\b""")
+                .findAll(originalBody)
+                .map { it.groupValues[1] })
+                .toSet()
+            if (tagNames.isEmpty()) {
+                cursor = closeBrace + 1
+                continue
+            }
+            var body = originalBody
+            for (delegateName in holderLookupCompoundTagMethods) {
+                body = Regex("""(?<![.\w$])((?:this|super)\.)?${Regex.escape(delegateName)}\(\s*($id)\s*\)""")
+                    .replace(body) { callMatch ->
+                        val tagName = callMatch.groupValues[2]
+                        if (tagName in tagNames) {
+                            "${callMatch.groupValues[1]}$delegateName($tagName, $providerExpression)"
+                        } else {
+                            callMatch.value
+                        }
+                    }
+            }
+            if (body != originalBody) {
+                result = result.substring(0, openBrace + 1) + body + result.substring(closeBrace)
+                cursor = openBrace + 1 + body.length
+            } else {
+                cursor = closeBrace + 1
+            }
         }
         return result
     }
@@ -17712,19 +17818,40 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
     private fun migrateLegacyItemStackRegistrySerialization(source: String): String {
         if (!source.contains("ItemStack.parseOptional(") && !source.contains("ItemStack.of(") && !source.contains(".save()")) return source
         var result = source
-        val registryAccess = if (result.contains("readAdditionalSaveData(") || result.contains("addAdditionalSaveData(")) {
+        val fallbackRegistryAccess = if (result.contains("readAdditionalSaveData(") || result.contains("addAdditionalSaveData(")) {
             "this.registryAccess()"
         } else {
             inferRegistryAccessExpression(result) ?: return result
+        }
+        fun registryAccessAt(offset: Int): String {
+            return holderLookupProviderFromParameters(currentMethodParametersBeforeOffset(result, offset))
+                ?: fallbackRegistryAccess
         }
         val itemStackNames = Regex("""\bItemStack\s+([A-Za-z_$][\w$]*)\b""")
             .findAll(result)
             .map { it.groupValues[1] }
             .toSet()
         result = Regex("""ItemStack\.parseOptional\(\s*player\.registryAccess\(\)\s*,""")
-            .replace(result, "ItemStack.parseOptional($registryAccess,")
-        result = Regex("""ItemStack\.of\(\s*([A-Za-z_$][\w$]*)\s*\)""")
-            .replace(result, "ItemStack.parseOptional($registryAccess, $1)")
+            .replace(result) { match -> "ItemStack.parseOptional(${registryAccessAt(match.range.first)}," }
+        var itemStackOfCursor = 0
+        while (true) {
+            val tokenIndex = result.indexOf("ItemStack.of(", itemStackOfCursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + "ItemStack.of".length
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                itemStackOfCursor = tokenIndex + "ItemStack.of(".length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            if (args.size != 1) {
+                itemStackOfCursor = closeParen + 1
+                continue
+            }
+            val replacement = "ItemStack.parseOptional(${registryAccessAt(tokenIndex)}, ${args[0].trim()})"
+            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
+            itemStackOfCursor = tokenIndex + replacement.length
+        }
         result = Regex("""\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*(?:\(\))?)*)\.save\(\s*\)""")
             .replace(result) { match ->
                 val receiver = match.groupValues[1]
@@ -17732,7 +17859,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 if (lastName !in itemStackNames) {
                     match.value
                 } else {
-                    "$receiver.save($registryAccess)"
+                    "$receiver.save(${registryAccessAt(match.range.first)})"
                 }
             }
         return result
