@@ -7709,6 +7709,93 @@ $fields
 """
     }
 
+    private data class JavaClassDeclaration(
+        val name: String,
+        val directSuper: String,
+        val bodyRange: IntRange
+    )
+
+    private data class JavaInheritanceIndex(
+        private val directSuperByClass: Map<String, String>
+    ) {
+        fun inherits(directSuper: String, baseTypes: Set<String>): Boolean {
+            var current = directSuper.substringAfterLast('.')
+            val visited = mutableSetOf<String>()
+            while (current.isNotBlank() && visited.add(current)) {
+                if (current in baseTypes) return true
+                current = directSuperByClass[current]?.substringAfterLast('.') ?: return false
+            }
+            return false
+        }
+
+        companion object {
+            val EMPTY = JavaInheritanceIndex(emptyMap())
+        }
+    }
+
+    private fun collectJavaInheritanceIndex(javaFiles: List<Path>): JavaInheritanceIndex {
+        val directSuperByClass = linkedMapOf<String, String>()
+        javaFiles.forEach { javaFile ->
+            collectJavaClassDeclarations(javaFile.readText()).forEach { declaration ->
+                directSuperByClass.putIfAbsent(declaration.name, declaration.directSuper)
+            }
+        }
+        return JavaInheritanceIndex(directSuperByClass)
+    }
+
+    private fun collectJavaClassDeclarations(source: String): List<JavaClassDeclaration> {
+        val classPattern = Regex(
+            """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*class\s+([A-Za-z_$][\w$]*)(?:\s*<[^>{}]+>)?\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\b[^{]*\{"""
+        )
+        return classPattern.findAll(source).mapNotNull { match ->
+            val openBrace = source.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                null
+            } else {
+                JavaClassDeclaration(
+                    name = match.groupValues[1],
+                    directSuper = match.groupValues[2],
+                    bodyRange = openBrace..closeBrace
+                )
+            }
+        }.toList()
+    }
+
+    private fun enclosingJavaClassDeclaration(source: String, index: Int): JavaClassDeclaration? =
+        collectJavaClassDeclarations(source)
+            .filter { index in it.bodyRange }
+            .minByOrNull { it.bodyRange.last - it.bodyRange.first }
+
+    private fun javaClassExtendsAny(
+        declaration: JavaClassDeclaration?,
+        baseTypes: Set<String>,
+        inheritanceIndex: JavaInheritanceIndex
+    ): Boolean = declaration?.let { inheritanceIndex.inherits(it.directSuper, baseTypes) } == true
+
+    private fun javaLivingEntityBaseTypes(): Set<String> = setOf(
+        "LivingEntity",
+        "Mob",
+        "PathfinderMob",
+        "Monster",
+        "Slime",
+        "MagmaCube",
+        "AgeableMob",
+        "Animal",
+        "TamableAnimal",
+        "AbstractHorse",
+        "Player"
+    )
+
+    private fun javaEntityBaseTypes(): Set<String> = javaLivingEntityBaseTypes() + setOf(
+        "Entity",
+        "AbstractMinecart",
+        "Boat",
+        "Projectile",
+        "ThrowableProjectile",
+        "AbstractArrow"
+    )
+
     private fun migrateCommonNeoForge121Apis(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
         val srcDir = projectDir.resolve("src/main/java")
@@ -7743,6 +7830,7 @@ $fields
         val attributeHolderAccessHints = collectAttributeHolderAccessHints(srcDir)
         val optionalCompoundRecipeTagOwners = collectLegacyOptionalCompoundRecipeTagOwners(javaFiles)
         val legacyCookingRecipeClasses = collectLegacyCookingRecipeClasses(javaFiles)
+        val javaInheritanceIndex = collectJavaInheritanceIndex(javaFiles)
 
         javaFiles.forEach { javaFile ->
                 val original = javaFile.readText()
@@ -7992,7 +8080,8 @@ $fields
                     genericMethodReturnTypes,
                     attributeModifierIdMethodArguments,
                     attributeHolderAccessHints,
-                    optionalCompoundRecipeTagOwners
+                    optionalCompoundRecipeTagOwners,
+                    javaInheritanceIndex
                 )
                 if (vanilla121Migrated != text) {
                     changes.add(Change(
@@ -10719,7 +10808,8 @@ ${entries.joinToString(",\n")}
         genericMethodReturnTypes: Map<String, String> = emptyMap(),
         attributeModifierIdMethodArguments: Set<AttributeModifierIdMethodArgument> = emptySet(),
         attributeHolderAccessHints: AttributeHolderAccessHints = AttributeHolderAccessHints(emptySet()),
-        optionalCompoundRecipeTagOwners: Set<String> = emptySet()
+        optionalCompoundRecipeTagOwners: Set<String> = emptySet(),
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
     ): String {
         var result = source
         var needsEntityTypeTags = false
@@ -10762,7 +10852,7 @@ ${entries.joinToString(",\n")}
             result = result.replace("Mob.getEquipmentSlotForItem(", "this.getEquipmentSlotForItem(")
         }
         result = migrateEntityDimensionsRecordAccessors(result)
-        result = migrateFinalLivingEntityDimensionsOverrides(result)
+        result = migrateFinalLivingEntityDimensionsOverrides(result, javaInheritanceIndex)
         result = migrateSaddleableEquipSaddleSignature(result)
         result = migrateMthTrigonometryFloatArguments(result)
         result = migrateAdvancementRequirementsStrategySource(result)
@@ -10859,9 +10949,9 @@ ${entries.joinToString(",\n")}
             genericMethodReturnTypes,
             attributeModifierIdMethodArguments
         )
-        result = migrateEntityRidingOffsetExpressions(result)
+        result = migrateEntityRidingOffsetExpressions(result, javaInheritanceIndex)
         result = migrateLegacyPassengerAttachmentOverrides(result)
-        result = migrateLegacyEntityOverrideSignatures(result)
+        result = migrateLegacyEntityOverrideSignatures(result, javaInheritanceIndex)
         result = migrateLegacyEntityStepHeightOverrides(result)
         result = migrateLossyCompoundAssignments(result)
         result = migrateLegacyEntityTypeAabbCalls(result)
@@ -11686,15 +11776,39 @@ ${entries.joinToString(",\n")}
                 (methodText.contains("IModIngredientRegistration") && methodText.contains(".register("))
         }
 
-    private fun migrateFinalLivingEntityDimensionsOverrides(source: String): String {
+    private fun migrateFinalLivingEntityDimensionsOverrides(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
         if (!source.contains("getDimensions(Pose") || !source.contains("@Override")) return source
 
-        var result = Regex("""\b(public|protected)\s+EntityDimensions\s+getDimensions\s*\(\s*Pose\s+([A-Za-z_$][\w$]*)\s*\)""")
-            .replace(source) { match ->
-                "${match.groupValues[1]} EntityDimensions getDefaultDimensions(Pose ${match.groupValues[2]})"
+        var result = source
+        var cursor = 0
+        val signaturePattern = Regex("""\b(public|protected)\s+EntityDimensions\s+getDimensions\s*\(\s*Pose\s+([A-Za-z_$][\w$]*)\s*\)""")
+        while (true) {
+            val match = signaturePattern.find(result, cursor) ?: break
+            val classDeclaration = enclosingJavaClassDeclaration(result, match.range.first)
+            if (!javaClassExtendsAny(classDeclaration, javaLivingEntityBaseTypes(), javaInheritanceIndex)) {
+                cursor = match.range.last + 1
+                continue
             }
-        if (result != source) {
-            result = result.replace("super.getDimensions(", "super.getDefaultDimensions(")
+            val openBrace = result.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace <= openBrace) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val signature = result.substring(match.range.first, openBrace)
+            val rewrittenSignature = signaturePattern.replace(signature) { signatureMatch ->
+                "${signatureMatch.groupValues[1]} EntityDimensions getDefaultDimensions(Pose ${signatureMatch.groupValues[2]})"
+            }
+            val rewrittenBody = result.substring(openBrace, closeBrace + 1)
+                .replace("super.getDimensions(", "super.getDefaultDimensions(")
+            result = result.substring(0, match.range.first) +
+                rewrittenSignature +
+                rewrittenBody +
+                result.substring(closeBrace + 1)
+            cursor = match.range.first + rewrittenSignature.length + rewrittenBody.length
         }
         return result
     }
@@ -17206,7 +17320,10 @@ ${indent}}"""
         return modifierPathName(normalized.removeSuffix("_MODIFIER"))
     }
 
-    private fun migrateEntityRidingOffsetExpressions(source: String): String {
+    private fun migrateEntityRidingOffsetExpressions(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
         var result = source
         result = Regex(
             """new\s+Vec3\s*\(\s*([A-Za-z_$][\w$]*)\.getX\(\)\s*,\s*\1\.getY\(\)\s*-\s*\1\.getMyRidingOffset\(\)\s*\+\s*\1\.getBbHeight\(\)\s*/\s*2\s*,\s*\1\.getZ\(\)\s*\)"""
@@ -17214,7 +17331,7 @@ ${indent}}"""
         result = Regex(
             """\b([A-Za-z_$][\w$]*)\.getY\(\)\s*-\s*\1\.getMyRidingOffset\(\)\s*\+\s*\1\.getBbHeight\(\)\s*/\s*2"""
         ).replace(result) { match -> "${match.groupValues[1]}.getBoundingBox().getCenter().y" }
-        if (result.contains(".getMyRidingOffset()") && sourceDeclaresEntityDerivedType(result)) {
+        if (result.contains(".getMyRidingOffset()") && sourceDeclaresEntityDerivedType(result, javaInheritanceIndex)) {
             result = rewriteJavaCallWithOffset(result, "getMyRidingOffset") { receiver, args, callOffset ->
                 if (args.isNotEmpty()) return@rewriteJavaCallWithOffset null
                 val normalizedReceiver = receiver.trim()
@@ -17232,28 +17349,15 @@ ${indent}}"""
         return result
     }
 
-    private fun sourceDeclaresEntityDerivedType(source: String): Boolean {
-        val entityBaseTypes = setOf(
-            "Entity",
-            "LivingEntity",
-            "Mob",
-            "PathfinderMob",
-            "Monster",
-            "AgeableMob",
-            "Animal",
-            "TamableAnimal",
-            "AbstractHorse",
-            "AbstractMinecart",
-            "Boat",
-            "Projectile",
-            "ThrowableProjectile",
-            "AbstractArrow"
-        )
+    private fun sourceDeclaresEntityDerivedType(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): Boolean {
+        val entityBaseTypes = javaEntityBaseTypes()
         return Regex(
-            """\bclass\s+[A-Za-z_$][\w$]*(?:\s*<[^>{}]+>)?\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\b"""
+            """\bclass\s+([A-Za-z_$][\w$]*)(?:\s*<[^>{}]+>)?\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\b"""
         ).findAll(source).any { match ->
-            val base = match.groupValues[1].substringAfterLast('.')
-            base in entityBaseTypes
+            javaInheritanceIndex.inherits(match.groupValues[2], entityBaseTypes)
         }
     }
 
@@ -17288,13 +17392,16 @@ protected Vec3 getPassengerAttachmentPoint(Entity entity, EntityDimensions dimen
         return result
     }
 
-    private fun migrateLegacyEntityOverrideSignatures(source: String): String {
+    private fun migrateLegacyEntityOverrideSignatures(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
         var result = source
         var needsLevel = false
         var needsEntity = false
         var needsVec3 = false
 
-        result = migrateLegacyEyeHeightOverrides(result)
+        result = migrateLegacyEyeHeightOverrides(result, javaInheritanceIndex)
 
         if (result.contains("canChangeDimensions()")) {
             result = Regex("""\b(public|protected)\s+boolean\s+canChangeDimensions\s*\(\s*\)""")
@@ -17302,6 +17409,11 @@ protected Vec3 getPassengerAttachmentPoint(Entity entity, EntityDimensions dimen
                     needsLevel = true
                     "${match.groupValues[1]} boolean canChangeDimensions(Level from, Level to)"
                 }
+        }
+
+        if (result.contains("canBeLeashed(")) {
+            result = Regex("""\b(public|protected)\s+boolean\s+canBeLeashed\s*\(\s*Player\s+[A-Za-z_$][\w$]*\s*\)""")
+                .replace(result) { match -> "${match.groupValues[1]} boolean canBeLeashed()" }
         }
 
         if (result.contains("getMyRidingOffset()") && !result.contains("getVehicleAttachmentPoint(")) {
@@ -18756,7 +18868,10 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         return result
     }
 
-    private fun migrateLegacyEyeHeightOverrides(source: String): String {
+    private fun migrateLegacyEyeHeightOverrides(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
         if (!source.contains("getStandingEyeHeight(") && !source.contains("getEyeHeight(Pose")) return source
         var result = source
         var cursor = 0
@@ -18780,29 +18895,104 @@ public $className(Properties $propertiesName, WoodType $typeName) {
             val poseName = match.groupValues[2]
             val dimensionsName = match.groupValues.getOrNull(3).orEmpty()
             var eyeExpression = returnMatch.groupValues[1].trim()
+            val classDeclaration = enclosingJavaClassDeclaration(result, match.range.first)
+            val livingEntityTarget = match.groupValues[1] == "getStandingEyeHeight" ||
+                javaClassExtendsAny(classDeclaration, javaLivingEntityBaseTypes(), javaInheritanceIndex)
+            val targetMethodName = if (livingEntityTarget) "getDefaultDimensions" else "getDimensions"
+            val targetAccess = if (livingEntityTarget) "protected" else "public"
+            val superDimensionsCall = "super.$targetMethodName($poseName)"
             if (dimensionsName.isNotBlank()) {
                 eyeExpression = Regex("""\b${Regex.escape(dimensionsName)}\.height\(\)""")
-                    .replace(eyeExpression, "super.getDefaultDimensions($poseName).height()")
+                    .replace(eyeExpression, "$superDimensionsCall.height()")
             }
             eyeExpression = eyeExpression
-                .replace(Regex("""super\.getStandingEyeHeight\s*\(\s*${Regex.escape(poseName)}\s*,\s*[A-Za-z_$][\w$]*\s*\)"""), "super.getDefaultDimensions($poseName).eyeHeight()")
-                .replace(Regex("""super\.getEyeHeight\s*\(\s*${Regex.escape(poseName)}\s*\)"""), "super.getDefaultDimensions($poseName).eyeHeight()")
-                .replace(Regex("""this\.getBbHeight\s*\(\s*\)"""), "super.getDefaultDimensions($poseName).height()")
+                .replace(Regex("""super\.getStandingEyeHeight\s*\(\s*${Regex.escape(poseName)}\s*,\s*[A-Za-z_$][\w$]*\s*\)"""), "$superDimensionsCall.eyeHeight()")
+                .replace(Regex("""super\.getEyeHeight\s*\(\s*${Regex.escape(poseName)}\s*\)"""), "$superDimensionsCall.eyeHeight()")
+                .replace(Regex("""this\.getBbHeight\s*\(\s*\)"""), "$superDimensionsCall.height()")
 
-            val replacement = if (Regex("""\bgetDefaultDimensions\s*\(\s*Pose\s+""").containsMatchIn(result)) {
-                ""
-            } else {
-                """
-@Override
-protected EntityDimensions getDefaultDimensions(Pose $poseName) {
-		return super.getDefaultDimensions($poseName).withEyeHeight($eyeExpression);
-	}
-                """.trimIndent()
+            val withoutLegacyMethod = result.removeRange(match.range.first, closeBrace + 1)
+            val targetExistsOutsideMethod = Regex("""\b$targetMethodName\s*\(\s*Pose\s+""")
+                .containsMatchIn(withoutLegacyMethod)
+            if (targetExistsOutsideMethod) {
+                val merged = mergeLegacyEyeHeightIntoExistingDimensionsMethod(
+                    withoutLegacyMethod,
+                    classDeclaration?.name,
+                    targetMethodName,
+                    poseName,
+                    dimensionsName,
+                    returnMatch.groupValues[1].trim()
+                )
+                if (merged != null) {
+                    result = merged
+                    cursor = match.range.first.coerceAtMost(result.length)
+                    continue
+                }
+                cursor = closeBrace + 1
+                continue
             }
+
+            val replacement = """
+@Override
+$targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
+		return $superDimensionsCall.withEyeHeight($eyeExpression);
+	}
+            """.trimIndent()
             result = result.substring(0, match.range.first) + replacement + result.substring(closeBrace + 1)
             cursor = match.range.first + replacement.length
         }
         return if (result != source) addImportIfMissing(result, "net.minecraft.world.entity.EntityDimensions") else result
+    }
+
+    private fun mergeLegacyEyeHeightIntoExistingDimensionsMethod(
+        source: String,
+        className: String?,
+        targetMethodName: String,
+        legacyPoseName: String,
+        legacyDimensionsName: String,
+        legacyEyeExpression: String
+    ): String? {
+        val methodPattern = Regex(
+            """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:public|protected)\s+EntityDimensions\s+$targetMethodName\s*\(\s*Pose\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
+        )
+        for (match in methodPattern.findAll(source)) {
+            val targetClass = enclosingJavaClassDeclaration(source, match.range.first)
+            if (className != null && targetClass?.name != className) continue
+            val openBrace = source.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (openBrace < 0 || closeBrace <= openBrace) continue
+            val methodText = source.substring(match.range.first, closeBrace + 1)
+            val returnMatches = Regex("""return\s+(.+?);""", RegexOption.DOT_MATCHES_ALL)
+                .findAll(methodText)
+                .toList()
+            if (returnMatches.size != 1) continue
+            val returnMatch = returnMatches.single()
+            val returnedDimensions = returnMatch.groupValues[1].trim()
+            val localName = uniqueLocalNameInScope(methodText, "dimensions")
+            val targetPoseName = match.groupValues[1]
+            var eyeExpression = legacyEyeExpression
+            if (legacyPoseName != targetPoseName) {
+                eyeExpression = Regex("""\b${Regex.escape(legacyPoseName)}\b""").replace(eyeExpression, targetPoseName)
+            }
+            if (legacyDimensionsName.isNotBlank()) {
+                eyeExpression = Regex("""\b${Regex.escape(legacyDimensionsName)}\.height\(\)""")
+                    .replace(eyeExpression, "$localName.height()")
+            }
+            eyeExpression = eyeExpression
+                .replace(Regex("""super\.getStandingEyeHeight\s*\(\s*${Regex.escape(targetPoseName)}\s*,\s*[A-Za-z_$][\w$]*\s*\)"""), "$localName.eyeHeight()")
+                .replace(Regex("""super\.getEyeHeight\s*\(\s*${Regex.escape(targetPoseName)}\s*\)"""), "$localName.eyeHeight()")
+                .replace(Regex("""this\.getBbHeight\s*\(\s*\)"""), "$localName.height()")
+
+            val returnStart = returnMatch.range.first
+            val lineStart = methodText.lastIndexOf('\n', returnStart).let { if (it < 0) 0 else it + 1 }
+            val indent = methodText.substring(lineStart, returnStart).takeWhile { it == ' ' || it == '\t' }
+            val rewrittenReturn = "${indent}EntityDimensions $localName = $returnedDimensions;\n" +
+                "${indent}return $localName.withEyeHeight($eyeExpression);"
+            val rewrittenMethod = methodText.replaceRange(returnMatch.range, rewrittenReturn)
+            return source.substring(0, match.range.first) +
+                rewrittenMethod +
+                source.substring(closeBrace + 1)
+        }
+        return null
     }
 
     private fun migrateDefaultLootTableResourceKeys(source: String): String {

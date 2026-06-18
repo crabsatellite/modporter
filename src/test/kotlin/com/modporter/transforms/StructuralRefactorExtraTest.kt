@@ -8946,6 +8946,7 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.entity.EntityDimensions;
             import net.minecraft.world.entity.EntityType;
             import net.minecraft.world.entity.Pose;
+            import net.minecraft.world.entity.player.Player;
             import net.minecraft.world.level.Level;
             import net.minecraft.world.level.block.entity.BlockEntity;
 
@@ -8955,8 +8956,8 @@ class StructuralRefactorExtraTest {
                 }
 
                 @Override
-                protected float getStandingEyeHeight(Pose pose, EntityDimensions size) {
-                    return this.isShiftKeyDown() ? 0.5F : super.getStandingEyeHeight(pose, size);
+                protected float getEyeHeight(Pose pose, EntityDimensions size) {
+                    return this.isShiftKeyDown() ? 0.5F : super.getEyeHeight(pose);
                 }
 
                 @Override
@@ -8969,8 +8970,32 @@ class StructuralRefactorExtraTest {
                     return false;
                 }
 
+                @Override
+                public boolean canBeLeashed(Player player) {
+                    return false;
+                }
+
                 public void invalidate(BlockEntity blockEntity) {
                     blockEntity.invalidateCaps();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LivingOverrideShapes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityDimensions;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.entity.Pose;
+
+            public abstract class LivingOverrideShapes extends Mob {
+                @Override
+                protected EntityDimensions getDefaultDimensions(Pose pose) {
+                    return EntityDimensions.fixed(1.0F, 2.0F);
+                }
+
+                @Override
+                protected float getStandingEyeHeight(Pose pose, EntityDimensions size) {
+                    return size.height() * 0.9F;
                 }
             }
         """.trimIndent())
@@ -9047,6 +9072,7 @@ class StructuralRefactorExtraTest {
         val throwGoal = srcDir.resolve("ThrowGoal.java").readText()
         val legacyRiderBlock = srcDir.resolve("LegacyRiderBlock.java").readText()
         val entityOverrideShapes = srcDir.resolve("EntityOverrideShapes.java").readText()
+        val livingOverrideShapes = srcDir.resolve("LivingOverrideShapes.java").readText()
         val attackGoals = srcDir.resolve("AttackGoals.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-packet-payload" }, "changes=${result.changes} errors=${result.errors}")
@@ -9104,11 +9130,18 @@ class StructuralRefactorExtraTest {
         assertTrue(legacyRiderBlock.contains("return new Vec3(0.0F, 2.25D, 0.4F);"))
         assertTrue(!legacyRiderBlock.contains("positionRider("))
         assertTrue(!legacyRiderBlock.contains("getPassengersRidingOffset"))
-        assertTrue(entityOverrideShapes.contains("protected EntityDimensions getDefaultDimensions(Pose pose)"))
-        assertTrue(entityOverrideShapes.contains("super.getDefaultDimensions(pose).withEyeHeight(this.isShiftKeyDown() ? 0.5F : super.getDefaultDimensions(pose).eyeHeight())"))
+        assertTrue(entityOverrideShapes.contains("public EntityDimensions getDimensions(Pose pose)"))
+        assertTrue(entityOverrideShapes.contains("super.getDimensions(pose).withEyeHeight(this.isShiftKeyDown() ? 0.5F : super.getDimensions(pose).eyeHeight())"))
+        assertFalse(entityOverrideShapes.contains("getDefaultDimensions(Pose pose)"))
+        assertTrue(livingOverrideShapes.contains("protected EntityDimensions getDefaultDimensions(Pose pose)"))
+        assertTrue(livingOverrideShapes.contains("EntityDimensions dimensions = EntityDimensions.fixed(1.0F, 2.0F);"))
+        assertTrue(livingOverrideShapes.contains("return dimensions.withEyeHeight(dimensions.height() * 0.9F);"))
+        assertFalse(livingOverrideShapes.contains("getStandingEyeHeight("))
         assertTrue(entityOverrideShapes.contains("public Vec3 getVehicleAttachmentPoint(Entity vehicle)"))
         assertTrue(entityOverrideShapes.contains("return new Vec3(0.0D, -0.25D, 0.0D);"))
         assertTrue(entityOverrideShapes.contains("public boolean canChangeDimensions(Level from, Level to)"))
+        assertTrue(entityOverrideShapes.contains("public boolean canBeLeashed()"))
+        assertFalse(entityOverrideShapes.contains("canBeLeashed(Player"))
         assertTrue(entityOverrideShapes.contains("blockEntity.invalidateCapabilities();"))
         assertTrue(attackGoals.contains("return target != null && this.mob.isWithinMeleeAttackRange(target);"))
         assertTrue(attackGoals.contains("this.checkAndPerformAttack(livingentity);"))
