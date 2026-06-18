@@ -4342,6 +4342,48 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates indirect recipe provider constructors to holder lookup registries`() {
+        val projectDir = createFile("LibraryRecipeProvider.java", """
+            package com.example;
+
+            import net.minecraft.data.PackOutput;
+
+            public class LibraryRecipeProvider extends NitrogenRecipeProvider {
+                public LibraryRecipeProvider(PackOutput output, String id) {
+                    super(output, id);
+                }
+            }
+        """.trimIndent())
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.resolve("LegacyData.java").writeText("""
+            package com.example;
+
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class LegacyData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput output = generator.getPackOutput();
+                    generator.addProvider(event.includeServer(), new LibraryRecipeProvider(output, "example"));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val provider = srcDir.resolve("LibraryRecipeProvider.java").readText()
+        val data = srcDir.resolve("LegacyData.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(provider.contains("public LibraryRecipeProvider(PackOutput output, CompletableFuture<HolderLookup.Provider> lookupProvider, String id)"), provider)
+        assertTrue(provider.contains("super(output, lookupProvider, id);"), provider)
+        assertTrue(provider.contains("import net.minecraft.core.HolderLookup;"), provider)
+        assertTrue(provider.contains("import java.util.concurrent.CompletableFuture;"), provider)
+        assertTrue(data.contains("new LibraryRecipeProvider(output, event.getLookupProvider(), \"example\")"), data)
+    }
+
+    @Test
     fun `migrates GameEventListener event holder signatures and comparisons`() {
         val projectDir = createFile("ListenerBE.java", """
             package com.example;

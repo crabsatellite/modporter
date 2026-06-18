@@ -10768,7 +10768,7 @@ ${entries.joinToString(",\n")}
         fun resolvesToRecipeProvider(className: String, seen: Set<String> = emptySet()): Boolean {
             if (className in seen) return false
             val parent = parentByClass[className] ?: return false
-            if (parent == "RecipeProvider") return true
+            if (parent == "RecipeProvider" || parent.endsWith("RecipeProvider")) return true
             return resolvesToRecipeProvider(parent, seen + className)
         }
 
@@ -22904,9 +22904,10 @@ $methodBody
                     val closeParen = findMatchingParen(result, openParen)
                     if (closeParen < 0) break
                     val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
-                    if (args.none { it.trim() == providerExpression } && args.size == 1) {
+                    if (args.none { it.trim() == providerExpression } && args.isNotEmpty()) {
                         val outputArg = args.firstOrNull()?.trim() ?: "output"
-                        val replacement = "new $className($outputArg, $providerExpression)"
+                        val replacementArgs = (listOf(outputArg, providerExpression) + args.drop(1).map { it.trim() }).joinToString(", ")
+                        val replacement = "new $className($replacementArgs)"
                         result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
                         cursor = tokenIndex + replacement.length
                         changed = true
