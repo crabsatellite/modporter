@@ -8160,12 +8160,18 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.level.Level;
             import net.minecraft.world.level.block.entity.SkullBlockEntity;
             import net.minecraft.world.level.block.state.BlockState;
+            import top.theillusivec4.curios.api.CuriosApi;
+            import top.theillusivec4.curios.api.SlotContext;
 
             public class CommonApiShapes {
                 void damage(ItemStack stack, Player player, InteractionHand hand) {
                     stack.hurtAndBreak(1, player, (user) -> {
                         user.onEquippedItemBroken(hand);
                     });
+                }
+
+                void curioDamage(ItemStack stack, Player player, SlotContext slotContext) {
+                    stack.hurtAndBreak(1, player, wearer -> CuriosApi.broadcastCurioBreakEvent(slotContext));
                 }
 
                 Recipe<?> recipe(Level level, FurnaceLike furnace) {
@@ -8219,12 +8225,37 @@ class StructuralRefactorExtraTest {
                 void sendParticles(Object particle, double x, double y, double z, int count, double dx, double dy, double dz, double speed);
             }
         """.trimIndent())
+        srcDir.resolve("CurioOnlyDamage.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import top.theillusivec4.curios.api.CuriosApi;
+            import top.theillusivec4.curios.api.SlotContext;
+
+            public class CurioOnlyDamage {
+                void damage(ItemStack stack, Player player, SlotContext slotContext) {
+                    stack.hurtAndBreak(1, player, wearer -> CuriosApi.broadcastCurioBreakEvent(slotContext));
+                }
+            }
+        """.trimIndent())
 
         val result = StructuralRefactorPass().apply(tempDir)
         val transformed = srcDir.resolve("CommonApiShapes.java").readText()
+        val curioOnly = srcDir.resolve("CurioOnlyDamage.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
         assertTrue(transformed.contains("stack.hurtAndBreak(1, player, net.minecraft.world.entity.LivingEntity.getSlotForHand(hand));"))
+        assertTrue(transformed.contains("if (player.level() instanceof ServerLevel serverLevel)"))
+        assertTrue(transformed.contains("stack.hurtAndBreak(1, serverLevel, player, brokenItem -> {"))
+        assertTrue(transformed.contains("CuriosApi.broadcastCurioBreakEvent(slotContext);"))
+        assertTrue(transformed.contains("import net.minecraft.server.level.ServerLevel;"))
+        assertTrue(!transformed.contains("wearer -> CuriosApi"))
+        assertTrue(curioOnly.contains("if (player.level() instanceof ServerLevel serverLevel)"))
+        assertTrue(curioOnly.contains("stack.hurtAndBreak(1, serverLevel, player, brokenItem -> {"))
+        assertTrue(curioOnly.contains("CuriosApi.broadcastCurioBreakEvent(slotContext);"))
+        assertTrue(curioOnly.contains("import net.minecraft.server.level.ServerLevel;"))
+        assertTrue(!curioOnly.contains("wearer -> CuriosApi"))
         assertTrue(!transformed.contains("onEquippedItemBroken"))
         assertTrue(transformed.contains("new SingleRecipeInput(furnace.getItem(0))"))
         assertTrue(transformed.contains(".map(RecipeHolder::value).orElse(null)"))

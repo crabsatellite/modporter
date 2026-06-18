@@ -17524,7 +17524,7 @@ ${indent}}
     }
 
     private fun migrateHurtAndBreakEquipmentSlotSource(source: String): String {
-        if (!source.contains(".hurtAndBreak(") || !source.contains("onEquippedItemBroken") && !source.contains("broadcastBreakEvent")) {
+        if (!source.contains(".hurtAndBreak(")) {
             return source
         }
 
@@ -17544,17 +17544,23 @@ ${indent}}
             val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
             val callback = args.getOrNull(2)?.let(::parseBreakCallback)
             val breakCall = callback?.let { findBreakCallbackCall(it.body, it.parameter) }
-            if (args.size == 3 && callback != null && breakCall != null) {
+            if (args.size == 3 && callback != null) {
                 val amount = args[0].trim()
                 val entity = args[1].trim()
-                val slot = normalizeBreakSlotExpression(breakCall.slotExpression) {
-                    needsEquipmentSlot = true
-                }
-                if (breakCall.isOnlyStatement) {
+                if (breakCall != null && breakCall.isOnlyStatement) {
+                    val slot = normalizeBreakSlotExpression(breakCall.slotExpression) {
+                        needsEquipmentSlot = true
+                    }
                     migrated.append(source, cursor, tokenIndex)
                     migrated.append(".hurtAndBreak($amount, $entity, $slot)")
                     cursor = closeParen + 1
                     changed = true
+                    continue
+                }
+
+                if (breakCall == null && callbackReferencesParameter(callback.body, callback.parameter)) {
+                    migrated.append(source, cursor, closeParen + 1)
+                    cursor = closeParen + 1
                     continue
                 }
 
@@ -17569,9 +17575,16 @@ ${indent}}
                 if (receiver.isNotEmpty() &&
                     prefix.substring(indent.length).trim() == receiver &&
                     semicolonOffset != null) {
-                    val callbackBody = migrateBreakCallbackBody(callback.body, callback.parameter, entity, slot, "brokenItem") {
-                        needsEquipmentSlot = true
-                    }
+                    val callbackBody = if (breakCall != null) {
+                        val slot = normalizeBreakSlotExpression(breakCall.slotExpression) {
+                            needsEquipmentSlot = true
+                        }
+                        migrateBreakCallbackBody(callback.body, callback.parameter, entity, slot, "brokenItem") {
+                            needsEquipmentSlot = true
+                        }
+                    } else {
+                        callback.body
+                    }.let(::ensureCallbackBlockStatements)
                     val indentedBody = callbackBody
                         .lines()
                         .map { line -> if (line.isBlank()) line else "$indent        ${line.trim()}" }
@@ -17610,6 +17623,15 @@ ${indent}}"""
     private data class BreakCallback(val parameter: String, val body: String)
 
     private data class BreakCallbackCall(val slotExpression: String, val isOnlyStatement: Boolean)
+
+    private fun callbackReferencesParameter(body: String, parameter: String): Boolean =
+        Regex("""\b${Regex.escape(parameter)}\b""").containsMatchIn(body)
+
+    private fun ensureCallbackBlockStatements(body: String): String {
+        val trimmed = body.trim()
+        if (trimmed.isEmpty() || trimmed.endsWith(";") || trimmed.endsWith("}")) return trimmed
+        return "$trimmed;"
+    }
 
     private fun parseBreakCallback(lambda: String): BreakCallback? {
         val match = Regex("""(?s)^\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*->\s*(.*?)\s*$""")
