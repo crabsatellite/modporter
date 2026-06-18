@@ -10588,6 +10588,7 @@ ${entries.joinToString(",\n")}
         var needsRandomSource = false
         var needsServerLevel = false
         var needsVanillaEnchantmentProviders = false
+        var needsEnchantmentEffectComponents = false
         var needsDatagenSupplier = false
         var needsDatagenBlockHelpers = false
         var needsRegistryFriendlyByteBuf = false
@@ -10632,6 +10633,11 @@ ${entries.joinToString(",\n")}
         result = migrateAttributeHolderApiArguments(result, attributeHolderAccessHints)
         result = migrateLegacyServerDataConstructors(result)
         result = migrateLegacyConnectScreenStartConnectingCalls(result)
+        val bindingCurseMigrated = migrateLegacyBindingCurseChecks(result)
+        if (bindingCurseMigrated != result) {
+            result = bindingCurseMigrated
+            needsEnchantmentEffectComponents = true
+        }
         result = migrateLegacyClientRenderingSource(result)
         result = migrateLegacySkinManagerTextureLookups(result)
         result = migrateLegacyModelEventSource(result)
@@ -11242,6 +11248,7 @@ ${entries.joinToString(",\n")}
         if (needsRandomSource) result = addImportIfMissing(result, "net.minecraft.util.RandomSource")
         if (needsServerLevel) result = addImportIfMissing(result, "net.minecraft.server.level.ServerLevel")
         if (needsVanillaEnchantmentProviders) result = addImportIfMissing(result, "net.minecraft.world.item.enchantment.providers.VanillaEnchantmentProviders")
+        if (needsEnchantmentEffectComponents) result = addImportIfMissing(result, "net.minecraft.world.item.enchantment.EnchantmentEffectComponents")
         if (needsDatagenSupplier) result = addImportIfMissing(result, "java.util.function.Supplier")
         if (needsRegistryFriendlyByteBuf) result = addImportIfMissing(result, "net.minecraft.network.RegistryFriendlyByteBuf")
         if (needsEntityWithComplexSpawn) result = addImportIfMissing(result, "net.neoforged.neoforge.entity.IEntityWithComplexSpawn")
@@ -20814,6 +20821,37 @@ $methodBody
         return migrateMethodCalls(source, "ConnectScreen.startConnecting") { args ->
             if (args.size == 5) args + "null" else args
         }
+    }
+
+    private fun migrateLegacyBindingCurseChecks(source: String): String {
+        val token = "EnchantmentHelper.hasBindingCurse"
+        if (!source.contains(token)) return source
+        val migrated = StringBuilder()
+        var cursor = 0
+        while (cursor < source.length) {
+            val tokenIndex = source.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + token.length
+            if (openParen >= source.length || source[openParen] != '(') {
+                migrated.append(source, cursor, openParen)
+                cursor = openParen
+                continue
+            }
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen < 0) break
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (args.size != 1) {
+                migrated.append(source, cursor, closeParen + 1)
+                cursor = closeParen + 1
+                continue
+            }
+            migrated.append(source, cursor, tokenIndex)
+            migrated.append("EnchantmentHelper.has(${args[0].trim()}, EnchantmentEffectComponents.PREVENT_ARMOR_CHANGE)")
+            cursor = closeParen + 1
+        }
+        if (cursor == 0) return source
+        migrated.append(source, cursor, source.length)
+        return migrated.toString()
     }
 
     private fun migrateMeleeAttackGoalReachOverrides(source: String): String {

@@ -4268,6 +4268,7 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.entity.player.Player;
             import net.minecraft.world.item.ItemStack;
             import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
             import net.minecraft.world.item.trading.MerchantOffer;
             import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;
 
@@ -4278,6 +4279,7 @@ class StructuralRefactorExtraTest {
                     if (player.getMobType() == MobType.UNDEAD) {}
                     new MerchantOffer(new ItemStack(Items.EMERALD, 10), new ItemStack(Items.DIRT), 16, 2, 0.05F);
                     int color = net.minecraft.world.item.alchemy.PotionUtils.getColor(stack);
+                    boolean locked = EnchantmentHelper.hasBindingCurse(stack);
                 }
 
                 void attr(Player player, Attribute attribute, ResourceLocation modifierName, boolean add, double value, AttributeModifier.Operation operation) {
@@ -4324,6 +4326,8 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("player.getType().is(EntityTypeTags.UNDEAD)"))
         assertTrue(migrated.contains("new ItemCost(Items.EMERALD, 10)"))
         assertTrue(migrated.contains("stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"))
+        assertTrue(migrated.contains("EnchantmentHelper.has(stack, EnchantmentEffectComponents.PREVENT_ARMOR_CHANGE)"))
+        assertTrue(migrated.contains("import net.minecraft.world.item.enchantment.EnchantmentEffectComponents;"))
         assertTrue(migrated.contains("Holder<Attribute> attribute"))
         assertTrue(migrated.contains("new AttributeModifier(modifierName, value, AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL)"))
         assertTrue(migrated.contains("attributeInstance.hasModifier(modifier.id())"))
