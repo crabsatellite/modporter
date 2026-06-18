@@ -24780,6 +24780,15 @@ public class $className<T extends $recipeBase> extends BlockStateRecipeSerialize
             }
         }
         if (craftingContainerVariables.isNotEmpty()) {
+            result = rewriteJavaInvocationArguments(result, "getRecipeFor") { args ->
+                if (args.size >= 3 && args[0].trim() == "RecipeType.CRAFTING") {
+                    val migrated = args.toMutableList()
+                    migrated[1] = craftingInputArgument(args[1])
+                    migrated.takeIf { it != args }
+                } else {
+                    null
+                }
+            }
             result = rewriteJavaInvocationArguments(result, "getRecipesFor") { args ->
                 if (args.size >= 3 && args[0].trim() == "RecipeType.CRAFTING") {
                     val migrated = args.toMutableList()
@@ -24805,6 +24814,50 @@ public class $className<T extends $recipeBase> extends BlockStateRecipeSerialize
                     "for (RecipeHolder<CraftingRecipe> ${recipeVar}Holder : ${match.groupValues[2]}) {\n\t\t\tCraftingRecipe $recipeVar = ${recipeVar}Holder.value();"
                 }
         }
+
+        val recipeMatchesHolderVariables = mutableSetOf<String>()
+        result = Regex(
+            """(?m)(public\s+boolean\s+recipeMatches\s*\()\s*Recipe\s*<\s*\?\s+super\s+CraftingContainer\s*>\s+($id)\s*(\))"""
+        ).replace(result) { match ->
+            val recipeVar = match.groupValues[2]
+            recipeMatchesHolderVariables.add(recipeVar)
+            needsRecipeHolder = true
+            "${match.groupValues[1]}RecipeHolder<CraftingRecipe> $recipeVar${match.groupValues[3]}"
+        }
+        for (recipeVar in recipeMatchesHolderVariables) {
+            result = rewriteJavaCall(result, "matches") { receiver, args ->
+                if (receiver != recipeVar || args.size != 2) return@rewriteJavaCall null
+                val migratedInput = craftingInputArgument(args[0])
+                if (migratedInput == args[0]) return@rewriteJavaCall null
+                needsCraftingInput = true
+                "$recipeVar.value().matches(${migratedInput.trim()}, ${args[1].trim()})"
+            }
+        }
+
+        val recipeHolderLocalAssignments = mutableMapOf<String, String>()
+        result = Regex("""(?m)^([ \t]*)CraftingRecipe\s+($id)\s*=\s*($id)\.get\(\)\s*;""")
+            .replace(result) { match ->
+                val optionalName = match.groupValues[3]
+                val optionalHolderPattern = Regex(
+                    """\bOptional\s*<\s*RecipeHolder\s*<\s*CraftingRecipe\s*>\s*>\s+${Regex.escape(optionalName)}\b"""
+                )
+                if (!optionalHolderPattern.containsMatchIn(result)) return@replace match.value
+                val indent = match.groupValues[1]
+                val recipeVar = match.groupValues[2]
+                val holderVar = "${recipeVar}Holder"
+                recipeHolderLocalAssignments[recipeVar] = holderVar
+                needsRecipeHolder = true
+                "${indent}RecipeHolder<CraftingRecipe> $holderVar = $optionalName.get();\n${indent}CraftingRecipe $recipeVar = $holderVar.value();"
+            }
+        for ((recipeVar, holderVar) in recipeHolderLocalAssignments) {
+            result = rewriteJavaInvocationArguments(result, "setRecipeUsed") { args ->
+                val migrated = args.map { arg ->
+                    if (arg.trim() == recipeVar) holderVar else arg
+                }
+                migrated.takeIf { it != args }
+            }
+        }
+
         val filteredHolderListPattern = Regex(
             """(?s)List<($id)>\s+($id)\s*=\s*([^;]*getAllRecipesFor\([^;]*\))\s*;\s*\2\s*=\s*\2\.stream\(\)\.filter\(\s*($id)\s*->\s*(.*?)\)\s*(?://[^\r\n]*)?\s*\.collect\(Collectors\.toList\(\)\)\s*;"""
         )
@@ -24949,13 +25002,14 @@ List<$recipeType> $listName = $recipeCall.stream()
             result = result.replace(originalChooseRecipeMethod, replacement)
             needsRecipeHolder = true
         }
-        result = Regex("""\b($id)\.assemble\(\s*($id)\s*,""")
+        result = Regex("""\b($id)\.assemble\(\s*((?:this\.)?$id)\s*,""")
             .replace(result) { match ->
                 val receiver = match.groupValues[1]
                 val input = match.groupValues[2]
-                if (result.contains("CraftingContainer $input")) {
+                val migratedInput = craftingInputArgument(input)
+                if (migratedInput != input) {
                     needsCraftingInput = true
-                    "$receiver.assemble($input.asCraftInput(),"
+                    "$receiver.assemble(${migratedInput.trim()},"
                 } else {
                     match.value
                 }

@@ -12014,6 +12014,71 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates crafting menu recipe holder and input boundaries`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CraftingMenuSurface.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+            import net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket;
+            import net.minecraft.server.MinecraftServer;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.inventory.CraftingContainer;
+            import net.minecraft.world.inventory.RecipeBookMenu;
+            import net.minecraft.world.inventory.ResultContainer;
+            import net.minecraft.world.inventory.TransientCraftingContainer;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.CraftingRecipe;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeHolder;
+            import net.minecraft.world.item.crafting.RecipeType;
+
+            public abstract class CraftingMenuSurface extends RecipeBookMenu<CraftingContainer> {
+                private final Player player;
+                private final CraftingContainer craftMatrix = new TransientCraftingContainer(this, 2, 2);
+                private final ResultContainer craftResult = new ResultContainer();
+
+                @Override
+                public boolean recipeMatches(Recipe<? super CraftingContainer> recipe) {
+                    return recipe.matches(this.craftMatrix, this.player.level());
+                }
+
+                public void slotsChanged(Container container) {
+                    MinecraftServer server = this.player.level().getServer();
+                    if (server == null) return;
+                    Optional<RecipeHolder<CraftingRecipe>> recipe = server.getRecipeManager().getRecipeFor(RecipeType.CRAFTING, this.craftMatrix, this.player.level());
+                    if (recipe.isPresent()) {
+                        ServerPlayer playerMP = (ServerPlayer) this.player;
+                        ItemStack itemStack = ItemStack.EMPTY;
+                        CraftingRecipe craftingRecipe = recipe.get();
+                        if (this.craftResult.setRecipeUsed(this.player.level(), playerMP, craftingRecipe)) {
+                            itemStack = craftingRecipe.assemble(this.craftMatrix, this.player.level().registryAccess());
+                        }
+                        playerMP.connection.send(new ClientboundContainerSetSlotPacket(this.containerId, this.incrementStateId(), 0, itemStack));
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("CraftingMenuSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(transformed.contains("public boolean recipeMatches(RecipeHolder<CraftingRecipe> recipe)"), transformed)
+        assertTrue(transformed.contains("return recipe.value().matches(this.craftMatrix.asCraftInput(), this.player.level());"), transformed)
+        assertTrue(transformed.contains("getRecipeFor(RecipeType.CRAFTING, this.craftMatrix.asCraftInput(), this.player.level())"), transformed)
+        assertTrue(transformed.contains("RecipeHolder<CraftingRecipe> craftingRecipeHolder = recipe.get();"), transformed)
+        assertTrue(transformed.contains("CraftingRecipe craftingRecipe = craftingRecipeHolder.value();"), transformed)
+        assertTrue(transformed.contains("setRecipeUsed(this.player.level(), playerMP, craftingRecipeHolder)"), transformed)
+        assertTrue(transformed.contains("craftingRecipe.assemble(this.craftMatrix.asCraftInput(), this.player.level().registryAccess())"), transformed)
+        assertTrue(transformed.contains("import net.minecraft.world.item.crafting.CraftingInput;"), transformed)
+        assertFalse(transformed.contains("Recipe<? super CraftingContainer>"), transformed)
+    }
+
+    @Test
     fun `migrates legacy ITeleporter portal info flow to dimension transitions`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
