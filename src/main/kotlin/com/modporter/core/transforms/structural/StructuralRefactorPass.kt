@@ -10909,6 +10909,7 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyCreativeTabEnchantmentInstances(result)
         result = migrateLegacyHolderAccessors(result)
         result = migrateLegacyItemConstructorsAndProperties(result)
+        result = migrateArmorMaterialHolderFields(result)
         result = migrateLegacyCustomRecipeSource(result)
         result = migrateContainerSizeCallsForDeclaredContainerScopes(result)
         result = migrateDeclaredCollectionGetSizeCalls(result)
@@ -11936,7 +11937,8 @@ ${entries.joinToString(",\n")}
             !source.contains("BufferUploader.drawWithShader(") &&
             !source.contains("Tesselator.getInstance()") &&
             !source.contains("InventoryScreen.renderEntityInInventory") &&
-            !source.contains("PanoramaRenderer")
+            !source.contains("PanoramaRenderer") &&
+            !source.contains("ArmorTrim.getTrim(")
         ) {
             return source
         }
@@ -11975,6 +11977,7 @@ ${entries.joinToString(",\n")}
         result = migrateLegacyTesselatorSource(result)
         result = migrateInventoryScreenEntityPreviewCalls(result)
         result = migratePanoramaRendererRenderApis(result)
+        result = migrateArmorTrimComponentRendering(result)
         val vertexConsumerVariables = Regex("""\bVertexConsumer\s+([A-Za-z_$][\w$]*)\b""")
             .findAll(result)
             .map { it.groupValues[1] }
@@ -11990,6 +11993,49 @@ ${entries.joinToString(",\n")}
             .replace(result) { match -> ".setUv2(${match.groupValues[1].trim()}, ${match.groupValues[2].trim()})" }
 
         return if (needsBufferUploader) addImportIfMissing(result, "com.mojang.blaze3d.vertex.BufferUploader") else result
+    }
+
+    private fun migrateArmorTrimComponentRendering(source: String): String {
+        if (!source.contains("ArmorTrim.getTrim(")) return source
+
+        var result = Regex(
+            """ArmorTrim\.getTrim\s*\(\s*([^,]+)\s*,\s*([^)]+?)\s*\)\.ifPresent\s*\("""
+        ).replace(source) { match ->
+            val stack = match.groupValues[2].trim()
+            "java.util.Optional.ofNullable($stack.get(DataComponents.TRIM)).ifPresent("
+        }
+        if (result == source) return source
+
+        var cursor = 0
+        val lambdaPattern = Regex("""java\.util\.Optional\.ofNullable\([^;\r\n]*DataComponents\.TRIM[^;\r\n]*\)\.ifPresent\s*\(\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*->\s*\{""")
+        while (true) {
+            val match = lambdaPattern.find(result, cursor) ?: break
+            val trimVariable = match.groupValues[1]
+            val openBrace = result.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (closeBrace <= openBrace) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            val migratedBody = body.replace(
+                "Sheets.armorTrimsSheet()",
+                "Sheets.armorTrimsSheet($trimVariable.pattern().value().decal())"
+            )
+            if (migratedBody != body) {
+                result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
+                cursor = openBrace + 1 + migratedBody.length
+            } else {
+                cursor = closeBrace + 1
+            }
+        }
+
+        result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
+        val withoutArmorTrimImport = removeImport(result, "net.minecraft.world.item.armortrim.ArmorTrim")
+        if (!Regex("""\bArmorTrim\b""").containsMatchIn(withoutArmorTrimImport)) {
+            result = withoutArmorTrimImport
+        }
+        return result
     }
 
     private data class JavaParameter(val type: String, val name: String)
@@ -21973,6 +22019,49 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
             if (isItemStackReceiver) "$receiver.getUseDuration(${args[0].trim()})" else null
         }
         return result
+    }
+
+    private fun migrateArmorMaterialHolderFields(source: String): String {
+        if (!source.contains("ArmorMaterial") || !source.contains(" material")) return source
+        val declaresMaterialField = Regex(
+            """(?m)^([ \t]*(?:public|protected|private)\s+(?:static\s+)?(?:final\s+)?)ArmorMaterial\s+material\s*;"""
+        ).containsMatchIn(source)
+        if (!declaresMaterialField) return source
+        if (!source.contains("this.material.") &&
+            !source.contains(" material.") &&
+            !source.contains("getMaterial()")) {
+            return source
+        }
+
+        var result = source
+        result = Regex("""(?m)^([ \t]*(?:public|protected|private)\s+(?:static\s+)?(?:final\s+)?)ArmorMaterial\s+material\s*;""")
+            .replace(result, "$1Holder<ArmorMaterial> material;")
+        result = Regex("""\bArmorMaterial\s+material\b""")
+            .replace(result, "Holder<ArmorMaterial> material")
+        result = Regex("""\bpublic\s+ArmorMaterial\s+getMaterial\s*\(\s*\)""")
+            .replace(result, "public Holder<ArmorMaterial> getMaterial()")
+
+        result = result
+            .replace(".material.getEnchantmentValue()", ".material.value().enchantmentValue()")
+            .replace(".material.getRepairIngredient()", ".material.value().repairIngredient().get()")
+            .replace(".material.getToughness()", ".material.value().toughness()")
+            .replace(".material.getKnockbackResistance()", ".material.value().knockbackResistance()")
+            .replace(".material.getEquipSound()", ".material.value().equipSound().value()")
+
+        val materialVariables = Regex("""\bHolder\s*<\s*ArmorMaterial\s*>\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(result)
+            .map { it.groupValues[1] }
+            .toSet()
+        for (variable in materialVariables) {
+            val escaped = Regex.escape(variable)
+            result = Regex("""\b$escaped\.getEnchantmentValue\(\)""").replace(result, "$variable.value().enchantmentValue()")
+            result = Regex("""\b$escaped\.getRepairIngredient\(\)""").replace(result, "$variable.value().repairIngredient().get()")
+            result = Regex("""\b$escaped\.getToughness\(\)""").replace(result, "$variable.value().toughness()")
+            result = Regex("""\b$escaped\.getKnockbackResistance\(\)""").replace(result, "$variable.value().knockbackResistance()")
+            result = Regex("""\b$escaped\.getEquipSound\(\)""").replace(result, "$variable.value().equipSound().value()")
+        }
+
+        return if (result != source) addImportIfMissing(result, "net.minecraft.core.Holder") else source
     }
 
     private fun migrateLegacyItemExtensionAndProjectileApis(source: String): String {

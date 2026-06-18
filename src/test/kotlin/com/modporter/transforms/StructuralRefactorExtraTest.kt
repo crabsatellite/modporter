@@ -9378,6 +9378,108 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates armor trim rendering to item component without dropping trim model logic`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("GloveRenderer.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import net.minecraft.client.renderer.MultiBufferSource;
+            import net.minecraft.client.renderer.Sheets;
+            import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.ArmorMaterial;
+            import net.minecraft.world.item.armortrim.ArmorTrim;
+
+            public class GloveRenderer {
+                private final Atlas armorTrimAtlas = new Atlas();
+                private final GloveModel finalTrimModel = new GloveModel();
+
+                public void render(LivingEntity livingEntity, ItemStack stack, MultiBufferSource buffer, PoseStack poseStack, int packedLight, ArmorMaterial material) {
+                    ArmorTrim.getTrim(livingEntity.level().registryAccess(), stack).ifPresent((trim) -> {
+                        TextureAtlasSprite textureAtlasSprite = this.armorTrimAtlas.getSprite(trim.outerTexture(material));
+                        VertexConsumer trimConsumer = textureAtlasSprite.wrap(buffer.getBuffer(Sheets.armorTrimsSheet()));
+                        this.finalTrimModel.renderToBuffer(poseStack, trimConsumer, packedLight);
+                    });
+                }
+
+                static class Atlas {
+                    TextureAtlasSprite getSprite(Object location) { return null; }
+                }
+
+                static class GloveModel {
+                    void renderToBuffer(PoseStack poseStack, VertexConsumer consumer, int light) {}
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val renderer = srcDir.resolve("GloveRenderer.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(renderer.contains("import net.minecraft.core.component.DataComponents;"), renderer)
+        assertFalse(renderer.contains("import net.minecraft.world.item.armortrim.ArmorTrim;"), renderer)
+        assertTrue(renderer.contains("java.util.Optional.ofNullable(stack.get(DataComponents.TRIM)).ifPresent((trim) -> {"), renderer)
+        assertTrue(renderer.contains("Sheets.armorTrimsSheet(trim.pattern().value().decal())"), renderer)
+        assertTrue(renderer.contains("this.finalTrimModel.renderToBuffer(poseStack, trimConsumer, packedLight);"), renderer)
+        assertFalse(renderer.contains("ArmorTrim.getTrim"), renderer)
+    }
+
+    @Test
+    fun `migrates armor material fields to holders with value accessors`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("MaterialAccessoryItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.sounds.SoundEvent;
+            import net.minecraft.world.item.ArmorMaterial;
+            import net.minecraft.world.item.ItemStack;
+
+            public class MaterialAccessoryItem {
+                protected final ArmorMaterial material;
+
+                public MaterialAccessoryItem(ArmorMaterial material) {
+                    this.material = material;
+                }
+
+                public int getEnchantmentValue() {
+                    return this.material.getEnchantmentValue();
+                }
+
+                public boolean isValidRepairItem(ItemStack stack) {
+                    return this.material.getRepairIngredient().test(stack);
+                }
+
+                public SoundEvent equipSound() {
+                    return this.material.getEquipSound();
+                }
+
+                public ArmorMaterial getMaterial() {
+                    return this.material;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val item = srcDir.resolve("MaterialAccessoryItem.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(item.contains("import net.minecraft.core.Holder;"), item)
+        assertTrue(item.contains("protected final Holder<ArmorMaterial> material;"), item)
+        assertTrue(item.contains("public MaterialAccessoryItem(Holder<ArmorMaterial> material)"), item)
+        assertTrue(item.contains("return this.material.value().enchantmentValue();"), item)
+        assertTrue(item.contains("return this.material.value().repairIngredient().get().test(stack);"), item)
+        assertTrue(item.contains("return this.material.value().equipSound().value();"), item)
+        assertTrue(item.contains("public Holder<ArmorMaterial> getMaterial()"), item)
+        assertFalse(item.contains("material.getEnchantmentValue()"), item)
+        assertFalse(item.contains("material.getRepairIngredient()"), item)
+    }
+
+    @Test
     fun `migrates strict runtime compile API surfaces without mod-specific rules`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
