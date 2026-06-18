@@ -21401,6 +21401,17 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
                 result = withoutNeoForgeMod
             }
         }
+        if (result.contains("NeoForgeMod.STEP_HEIGHT_ADDITION.get()") ||
+            result.contains("net.neoforged.neoforge.common.NeoForgeMod.STEP_HEIGHT_ADDITION.get()")) {
+            result = result
+                .replace("net.neoforged.neoforge.common.NeoForgeMod.STEP_HEIGHT_ADDITION.get()", "Attributes.STEP_HEIGHT")
+                .replace("NeoForgeMod.STEP_HEIGHT_ADDITION.get()", "Attributes.STEP_HEIGHT")
+            needsAttributes = true
+            val withoutNeoForgeMod = removeImport(result, "net.neoforged.neoforge.common.NeoForgeMod")
+            if (!Regex("""\bNeoForgeMod\b""").containsMatchIn(withoutNeoForgeMod)) {
+                result = withoutNeoForgeMod
+            }
+        }
         result = migrateAabbBlockPosPairConstructors(result)
         if (result.contains("BucketPickup") || result.contains("LiquidBlockContainer") || result.contains("pickupBlock(") || result.contains("canPlaceLiquid(")) {
             val beforeLiquidInterfaces = result

@@ -8626,6 +8626,7 @@ class StructuralRefactorExtraTest {
                     boolean skull = stack.is(Tags.Items.HEADS);
                     AttributeInstance reach = entity instanceof net.minecraft.world.entity.player.Player player ? player.getAttribute(NeoForgeMod.BLOCK_REACH.get()) : null;
                     AttributeInstance gravity = entity.getAttribute(net.neoforged.neoforge.common.NeoForgeMod.ENTITY_GRAVITY.get());
+                    AttributeInstance step = entity.getAttribute(NeoForgeMod.STEP_HEIGHT_ADDITION.get());
                     boolean grief = EventHooks.getMobGriefingEvent(level, entity);
                     EventHooks.onFinalizeSpawn(mob, accessor, accessor.getCurrentDifficultyAt(pos), MobSpawnType.SPAWNER, null, null);
                     AABB box = new AABB(pos.above(16), pos.above(16).offset(1, 1, 1));
@@ -9014,6 +9015,9 @@ class StructuralRefactorExtraTest {
         assertTrue(common.contains("stack.is(ItemTags.SKULLS)"))
         assertTrue(common.contains("Attributes.BLOCK_INTERACTION_RANGE"))
         assertTrue(common.contains("entity.getAttribute(Attributes.GRAVITY)"))
+        assertTrue(common.contains("entity.getAttribute(Attributes.STEP_HEIGHT)"))
+        assertFalse(common.contains("STEP_HEIGHT_ADDITION"))
+        assertFalse(common.contains("NeoForgeMod"))
         assertTrue(common.contains("EventHooks.canEntityGrief(level, entity)"))
         assertTrue(common.contains("EventHooks.finalizeMobSpawn(mob, accessor, accessor.getCurrentDifficultyAt(pos), MobSpawnType.SPAWNER, null)"))
         assertTrue(common.contains("AABB.encapsulatingFullBlocks(pos.above(16), pos.above(16).offset(1, 1, 1))"))
