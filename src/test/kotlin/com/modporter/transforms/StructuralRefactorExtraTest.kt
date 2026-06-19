@@ -4506,10 +4506,11 @@ class StructuralRefactorExtraTest {
         srcDir.resolve("ExampleSerializers.java").writeText("""
             package com.example;
 
+            import net.minecraft.world.item.crafting.RecipeSerializer;
             import net.neoforged.neoforge.registries.DeferredHolder;
 
             public class ExampleSerializers {
-                public static final DeferredHolder<SpecialCookingSerializer<HeatedRecipe>, SpecialCookingSerializer<HeatedRecipe>> HEATED = null;
+                public static final DeferredHolder<RecipeSerializer<?>, SpecialCookingSerializer<HeatedRecipe>> HEATED = null;
             }
         """.trimIndent())
         srcDir.resolve("SpecialCookingRecipeBuilder.java").writeText("""

@@ -11557,6 +11557,17 @@ ${entries.joinToString(",\n")}
                     factoryInterfaceBySerializerClass[serializerClass]?.let { fieldToFactoryInterface[field] = it }
                 }
                 Regex(
+                    """\bDeferredHolder\s*<\s*RecipeSerializer\s*<\s*\?\s*>\s*,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*<\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>\s*>\s+([A-Z][A-Z0-9_]*)\b"""
+                ).findAll(source).forEach { match ->
+                    val serializerClass = match.groupValues[1].substringAfterLast('.')
+                    val recipeClass = match.groupValues[2].substringAfterLast('.')
+                    val factoryClass = packageByClass[recipeClass] ?: match.groupValues[2]
+                    val field = "$owner.${match.groupValues[3]}"
+                    fieldToFactory[field] = "$factoryClass::new"
+                    fieldToRecipeClass[field] = factoryClass
+                    factoryInterfaceBySerializerClass[serializerClass]?.let { fieldToFactoryInterface[field] = it }
+                }
+                Regex(
                     """\bDeferredHolder\s*<\s*RecipeSerializer\s*<\s*\?\s*>\s*,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*Recipe)\.Serializer\s*>\s+([A-Z][A-Z0-9_]*)\b"""
                 ).findAll(source).forEach { match ->
                     val recipeClass = match.groupValues[1].substringAfterLast('.')
