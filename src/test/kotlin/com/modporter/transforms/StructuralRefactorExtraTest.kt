@@ -20972,6 +20972,154 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates Optional getValue and MapCodec serialization calls structurally`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("MapCodecOptionalSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Dynamic;
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import java.util.Optional;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.nbt.NbtOps;
+            import net.minecraft.nbt.Tag;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class MapCodecOptionalSurface {
+                private static final Logger LOGGER = new Logger();
+
+                public void migrate(CompoundTag tag, Optional<BlockState> state) {
+                    Properties parsed = Properties.CODEC.parse(new Dynamic<Tag>(NbtOps.INSTANCE, tag.get("Properties"))).getOrThrow(true, LOGGER::error);
+                    Properties.CODEC.encodeStart(NbtOps.INSTANCE, parsed).getOrThrow(true, LOGGER::error);
+                    if (state.getValue().isAir()) {
+                        BlockState next = state.getValue();
+                    }
+                }
+
+                public static class Properties {
+                    public static final MapCodec<Properties> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group().apply(instance, Properties::new));
+                }
+
+                private static class Logger {
+                    void error(String message) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("MapCodecOptionalSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("Properties.CODEC.codec().parse(new Dynamic<Tag>(NbtOps.INSTANCE, tag.get(\"Properties\"))).promotePartial(LOGGER::error).getOrThrow(IllegalStateException::new)"), migrated)
+        assertTrue(migrated.contains("Properties.CODEC.codec().encodeStart(NbtOps.INSTANCE, parsed).promotePartial(LOGGER::error).getOrThrow(IllegalStateException::new)"), migrated)
+        assertTrue(migrated.contains("if (state.get().isAir())"), migrated)
+        assertTrue(migrated.contains("BlockState next = state.get();"), migrated)
+        assertFalse(migrated.contains("state.getValue()"), migrated)
+        assertFalse(migrated.contains("getOrThrow(true"), migrated)
+    }
+
+    @Test
+    fun `migrates registry-required codecs to MapCodec without unsafe wrappers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ProcessorRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ProcessorRegistry {
+                public static final DeferredRegister<StructureProcessorType<?>> STRUCTURE_PROCESSOR_TYPES = DeferredRegister.create(BuiltInRegistries.STRUCTURE_PROCESSOR, "example");
+                public static final DeferredHolder<StructureProcessorType<?>, StructureProcessorType<ExampleProcessor>> EXAMPLE = STRUCTURE_PROCESSOR_TYPES.register("example", () -> () -> ExampleProcessor.CODEC);
+                public static final DeferredHolder<StructureProcessorType<?>, StructureProcessorType<UnitProcessor>> UNIT = STRUCTURE_PROCESSOR_TYPES.register("unit", () -> () -> UnitProcessor.CODEC);
+                public static final DeferredHolder<StructureProcessorType<?>, StructureProcessorType<AgeProcessor>> AGE = STRUCTURE_PROCESSOR_TYPES.register("age", () -> () -> AgeProcessor.CODEC);
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleProcessor.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessor;
+
+            public class ExampleProcessor extends StructureProcessor {
+                public static final Codec<ExampleProcessor> CODEC = RecordCodecBuilder.create(instance -> instance.group().apply(instance, ExampleProcessor::new));
+            }
+        """.trimIndent())
+        srcDir.resolve("UnitProcessor.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessor;
+
+            public class UnitProcessor extends StructureProcessor {
+                public static final UnitProcessor INSTANCE = new UnitProcessor();
+                public static final Codec<UnitProcessor> CODEC = Codec.unit(UnitProcessor.INSTANCE);
+            }
+        """.trimIndent())
+        srcDir.resolve("AgeProcessor.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessor;
+
+            public class AgeProcessor extends StructureProcessor {
+                private final float mossiness;
+
+                public AgeProcessor(float mossiness) {
+                    this.mossiness = mossiness;
+                }
+
+                public static final Codec<AgeProcessor> CODEC = Codec.FLOAT.fieldOf("mossiness").xmap(AgeProcessor::new, value -> value.mossiness).codec();
+            }
+        """.trimIndent())
+        srcDir.resolve("PlacementRegistry.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.core.Registry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifier;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+
+            public class PlacementRegistry {
+                public static <P extends PlacementModifier> PlacementModifierType<P> register(ResourceLocation name, Codec<P> codec) {
+                    return Registry.register(BuiltInRegistries.PLACEMENT_MODIFIER_TYPE, name, () -> codec);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val processor = srcDir.resolve("ExampleProcessor.java").readText()
+        val unitProcessor = srcDir.resolve("UnitProcessor.java").readText()
+        val ageProcessor = srcDir.resolve("AgeProcessor.java").readText()
+        val placement = srcDir.resolve("PlacementRegistry.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(processor.contains("import com.mojang.serialization.MapCodec;"), processor)
+        assertTrue(processor.contains("public static final MapCodec<ExampleProcessor> CODEC = RecordCodecBuilder.<ExampleProcessor>mapCodec("), processor)
+        assertFalse(processor.contains("import com.mojang.serialization.Codec;"), processor)
+        assertFalse(processor.contains("assumeMapUnsafe"), processor)
+        assertTrue(unitProcessor.contains("import com.mojang.serialization.MapCodec;"), unitProcessor)
+        assertTrue(unitProcessor.contains("public static final MapCodec<UnitProcessor> CODEC = MapCodec.unit(UnitProcessor.INSTANCE);"), unitProcessor)
+        assertFalse(unitProcessor.contains("import com.mojang.serialization.Codec;"), unitProcessor)
+        assertTrue(ageProcessor.contains("import com.mojang.serialization.MapCodec;"), ageProcessor)
+        assertTrue(ageProcessor.contains("public static final MapCodec<AgeProcessor> CODEC = Codec.FLOAT.fieldOf(\"mossiness\").xmap(AgeProcessor::new, value -> value.mossiness);"), ageProcessor)
+        assertTrue(ageProcessor.contains("import com.mojang.serialization.Codec;"), ageProcessor)
+        assertFalse(ageProcessor.contains(".codec();"), ageProcessor)
+        assertTrue(placement.contains("import com.mojang.serialization.MapCodec;"), placement)
+        assertTrue(placement.contains("PlacementModifierType<P> register(ResourceLocation name, MapCodec<P> codec)"), placement)
+        assertFalse(Regex("""(?<!Map)\bCodec\s*<\s*P\s*>\s+codec""").containsMatchIn(placement), placement)
+        assertFalse(placement.contains("import com.mojang.serialization.Codec;"), placement)
+    }
+
+    @Test
     fun `empty project returns empty results`() {
         val projectDir = tempDir.resolve("empty-project")
         projectDir.createDirectories()

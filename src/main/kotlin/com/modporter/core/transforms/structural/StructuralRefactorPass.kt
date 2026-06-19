@@ -7893,6 +7893,7 @@ $fields
             .toList()
         val recordComponents = collectJavaRecordComponents(srcDir)
         val mapCodecConstantOwners = collectMapCodecConstantOwners(srcDir)
+        val mapCodecRequiredOwners = collectMapCodecRequiredOwners(srcDir)
         val codecConstantOwners = collectCodecConstantOwners(srcDir)
         val spriteSourceProviderClasses = collectSpriteSourceProviderClasses(srcDir)
         val finalMapDecorationClasses = collectFinalMapDecorationSubclassClasses(srcDir)
@@ -8348,6 +8349,7 @@ $fields
                 val vanilla121Migrated = migrateVanilla121ApiSource(
                     text,
                     mapCodecConstantOwners,
+                    mapCodecRequiredOwners,
                     codecConstantOwners,
                     spriteSourceProviderClasses,
                     finalMapDecorationClasses,
@@ -8601,6 +8603,30 @@ $fields
         if (!source.contains("MapCodec") || !source.contains("CODEC")) return emptySet()
         return Regex(
             """\b(?:com\.mojang\.serialization\.)?MapCodec\s*<\s*(?:\?\s+extends\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>\s+CODEC\b"""
+        ).findAll(source)
+            .map { it.groupValues[1].substringAfterLast('.') }
+            .toSet()
+    }
+
+    private fun collectMapCodecRequiredOwners(srcDir: Path): Set<String> {
+        val owners = linkedSetOf<String>()
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                owners += collectMapCodecRequiredOwnersFromSource(javaFile.readText())
+            }
+        return owners
+    }
+
+    private fun collectMapCodecRequiredOwnersFromSource(source: String): Set<String> {
+        if (!source.contains(".CODEC") || !source.contains(".register(")) return emptySet()
+        val mapCodecRegistrySurface = source.contains("StructureProcessorType") ||
+            source.contains("PlacementModifierType") ||
+            source.contains("StructurePlacementType") ||
+            source.contains("StructureType")
+        if (!mapCodecRegistrySurface) return emptySet()
+        return Regex(
+            """(?s)\.register\s*\((?:(?!;).)*?\(\)\s*->\s*(?:\(\)\s*->\s*)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.CODEC"""
         ).findAll(source)
             .map { it.groupValues[1].substringAfterLast('.') }
             .toSet()
@@ -13030,6 +13056,7 @@ ${indent}}
     private fun migrateVanilla121ApiSource(
         source: String,
         mapCodecConstantOwners: Set<String> = emptySet(),
+        mapCodecRequiredOwners: Set<String> = emptySet(),
         codecConstantOwners: Set<String> = emptySet(),
         spriteSourceProviderClasses: Set<String> = emptySet(),
         finalMapDecorationClasses: Set<String> = emptySet(),
@@ -13117,6 +13144,7 @@ ${indent}}
         result = migrateMapDecorationRecordSource(result)
         result = migrateLegacyMapItemApis(result)
         result = migrateLegacyBlockStatePropertyGetCalls(result)
+        result = migrateJavaOptionalGetValueCalls(result)
         result = migrateLegacyModelRenderPackedColorBodies(result)
         result = migrateLegacyRendererSetupRotations(result)
         result = migrateAttributeHolderApiArguments(result, attributeHolderAccessHints)
@@ -13234,10 +13262,11 @@ ${indent}}
         result = migrateLegacyBannerPatternConstructors(result)
         result = migrateLegacyWallSignBlockCodecSource(result)
         result = migrateLegacyPacketDistributorSends(result)
-        result = migrateRequiredMapCodecConstants(result)
+        result = migrateRequiredMapCodecConstants(result, mapCodecRequiredOwners)
         val effectiveMapCodecConstantOwners = mapCodecConstantOwners + collectMapCodecConstantOwnersFromSource(result)
         result = migrateRegistryFileCodecMapCodecSource(result, effectiveMapCodecConstantOwners)
         result = migrateLegacyFunctionalInterfaceMapCodecSource(result)
+        result = migrateMapCodecRegistryFactorySignatures(result)
         result = migrateLegacyEventHooks121(result)
         result = migrateLegacyLootAndRegistryAccess(result)
         result = migrateRegistrySetBuilderBuildPatchSource(result)
@@ -13258,6 +13287,8 @@ ${indent}}
         result = migrateLegacyLazyRegistryCodecs(result)
         val effectiveCodecConstantOwners = codecConstantOwners + collectCodecConstantOwnersFromSource(result)
         result = migrateKnownVanillaCodecCodecCalls(result, effectiveMapCodecConstantOwners, effectiveCodecConstantOwners)
+        result = migrateMapCodecSerializationCalls(result, effectiveMapCodecConstantOwners)
+        result = migrateLegacyDataResultGetOrThrowCalls(result)
         result = migrateMapCodecFeatureConstructorArguments(result, effectiveMapCodecConstantOwners)
         result = migrateLegacyDeferredHolderDelegateAccessors(result)
         result = migrateLegacyCreativeTabEnchantmentInstances(result)
@@ -22347,19 +22378,30 @@ public $className(Properties $propertiesName, WoodType $typeName) {
     private fun normaliseGameEventHolderComparison(expression: String): String =
         expression.trim().removeSuffix(".get()")
 
-    private fun migrateRequiredMapCodecConstants(source: String): String {
+    private fun migrateRequiredMapCodecConstants(
+        source: String,
+        mapCodecRequiredOwners: Set<String> = emptySet()
+    ): String {
         if (!source.contains("Codec<") || !source.contains("CODEC")) return source
         val mapCodecTypes = mutableSetOf<String>()
         val topLevelClassName = classNameOfJavaSource(source)
         val mapCodecBasePattern = """(?:[A-Za-z_$][\w$]*\.)*(?:BiomeSource|PlacementModifier|Structure|StructureProcessor|StructurePlacement)"""
         if (topLevelClassName != null &&
-            Regex("""\bextends\s+$mapCodecBasePattern\b""").containsMatchIn(source)
+            (Regex("""\bextends\s+$mapCodecBasePattern\b""").containsMatchIn(source) ||
+                topLevelClassName in mapCodecRequiredOwners)
         ) {
             mapCodecTypes += topLevelClassName
         }
         Regex("""\b(?:class|record)\s+([A-Za-z_$][\w$]*)\b[^{;]*\bextends\s+$mapCodecBasePattern\b""")
             .findAll(source)
             .forEach { mapCodecTypes += it.groupValues[1] }
+        if (mapCodecRequiredOwners.isNotEmpty()) {
+            Regex("""\b(?:class|record)\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(source)
+                .map { it.groupValues[1] }
+                .filter { it in mapCodecRequiredOwners }
+                .forEach { mapCodecTypes += it }
+        }
         if (mapCodecTypes.isEmpty()) return source
 
         var result = source
@@ -22395,6 +22437,18 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 changed = true
                 "MapCodec<$className> ${match.groupValues[1]} = MapCodec.unit(${match.groupValues[2]});"
             }
+            result = Regex(
+                """\bCodec\s*<\s*${Regex.escape(className)}\s*>\s+([A-Z][A-Z0-9_]*)\s*=\s*Codec\.unit\(\s*([^;\r\n]+?)\s*\)\s*;"""
+            ).replace(result) { match ->
+                changed = true
+                "MapCodec<$className> ${match.groupValues[1]} = MapCodec.unit(${match.groupValues[2].trim()});"
+            }
+            result = Regex(
+                """\bCodec\s*<\s*${Regex.escape(className)}\s*>\s+([A-Z][A-Z0-9_]*)\s*=\s*([^;\r\n]+?\.fieldOf\("[^"]+"\)\.xmap\([^;\r\n]+?\))\.codec\(\)\s*;"""
+            ).replace(result) { match ->
+                changed = true
+                "MapCodec<$className> ${match.groupValues[1]} = ${match.groupValues[2]};"
+            }
         }
 
         if (changed) {
@@ -22408,6 +22462,52 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 .replace(result, "protected MapCodec<? extends BiomeSource> codec(")
         }
         return result
+    }
+
+    private fun migrateMapCodecRegistryFactorySignatures(source: String): String {
+        if (!source.contains("Codec<")) return source
+        val registryTypes = listOf(
+            "PlacementModifierType",
+            "StructureProcessorType",
+            "StructurePlacementType",
+            "StructureType"
+        )
+        var result = source
+        var changed = false
+        registryTypes.forEach { registryType ->
+            result = Regex(
+                """\b(${Regex.escape(registryType)}\s*<\s*([A-Za-z_$][\w$]*)\s*>\s+[A-Za-z_$][\w$]*\s*\((?:[^()]|\([^()]*\))*?,\s*)(?:com\.mojang\.serialization\.)?Codec\s*<\s*\2\s*>\s+([A-Za-z_$][\w$]*)"""
+            ).replace(result) { match ->
+                changed = true
+                "${match.groupValues[1]}MapCodec<${match.groupValues[2]}> ${match.groupValues[3]}"
+            }
+        }
+        if (!changed) return source
+        result = addImportIfMissing(result, "com.mojang.serialization.MapCodec")
+        val withoutCodecImport = removeImport(result, "com.mojang.serialization.Codec")
+        return if (!Regex("""(?<!Map)\bCodec\b""").containsMatchIn(withoutCodecImport)) withoutCodecImport else result
+    }
+
+    private fun migrateMapCodecSerializationCalls(
+        source: String,
+        mapCodecConstantOwners: Set<String>
+    ): String {
+        if (mapCodecConstantOwners.isEmpty() || !source.contains(".CODEC.")) return source
+        var result = source
+        for (owner in mapCodecConstantOwners) {
+            result = Regex("""\b((?:[A-Za-z_$][\w$]*\.)*${Regex.escape(owner)}\.CODEC)\.(parse|encodeStart)\s*\(""")
+                .replace(result) { match -> "${match.groupValues[1]}.codec().${match.groupValues[2]}(" }
+        }
+        return result
+    }
+
+    private fun migrateLegacyDataResultGetOrThrowCalls(source: String): String {
+        if (!source.contains(".getOrThrow(")) return source
+        return rewriteJavaCall(source, "getOrThrow") { receiver, args ->
+            if (args.size != 2 || args[0].trim() != "true") return@rewriteJavaCall null
+            val onError = args[1].trim()
+            "$receiver.promotePartial($onError).getOrThrow(IllegalStateException::new)"
+        }
     }
 
     private fun migrateKnownVanillaCodecCodecCalls(
@@ -22608,6 +22708,23 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         for (variable in stateVariables) {
             result = Regex("""\b${Regex.escape(variable)}\.get\s*\(""")
                 .replace(result) { "$variable.getValue(" }
+        }
+        return result
+    }
+
+    private fun migrateJavaOptionalGetValueCalls(source: String): String {
+        if (!source.contains(".getValue()") || !source.contains("Optional")) return source
+        val optionalVariables = Regex(
+            """\b(?:java\.util\.)?Optional\s*<[^;\r\n=()]+>\s+([A-Za-z_$][\w$]*)\b"""
+        ).findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (optionalVariables.isEmpty()) return source
+
+        var result = source
+        optionalVariables.forEach { variable ->
+            result = Regex("""\b${Regex.escape(variable)}\.getValue\(\)""")
+                .replace(result, "$variable.get()")
         }
         return result
     }
