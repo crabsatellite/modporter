@@ -2699,6 +2699,14 @@
       "isRegex": true
     },
     {
+      "id": "loot-copynbt-to-copycustomdata",
+      "pattern": "\\bCopyNbtFunction\\b",
+      "replacement": "CopyCustomDataFunction",
+      "description": "CopyNbtFunction was renamed to CopyCustomDataFunction in 1.21 loot builders",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "chunkgenerator-codec-method-mapcodec",
       "pattern": "protected\\s+Codec<\\?\\s+extends\\s+ChunkGenerator>\\s+codec\\(\\)",
       "replacement": "protected MapCodec<? extends ChunkGenerator> codec()",

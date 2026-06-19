@@ -488,6 +488,9 @@ class TextReplacementPass(
         if (result.contains("CopyComponentsFunction.") && !result.contains("import net.minecraft.world.level.storage.loot.functions.CopyComponentsFunction;")) {
             missingImports.add("import net.minecraft.world.level.storage.loot.functions.CopyComponentsFunction;")
         }
+        if (result.contains("CopyCustomDataFunction.") && !result.contains("import net.minecraft.world.level.storage.loot.functions.CopyCustomDataFunction;")) {
+            missingImports.add("import net.minecraft.world.level.storage.loot.functions.CopyCustomDataFunction;")
+        }
         if (result.contains("DataComponents.") && !result.contains("import net.minecraft.core.component.DataComponents;")) {
             missingImports.add("import net.minecraft.core.component.DataComponents;")
         }

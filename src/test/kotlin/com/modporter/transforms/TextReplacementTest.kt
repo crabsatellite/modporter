@@ -2598,6 +2598,36 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `generic loot nbt copy builders migrate to custom data copy function`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.level.storage.loot.functions.CopyNbtFunction;
+            import net.minecraft.world.level.storage.loot.providers.nbt.ContextNbtProvider;
+
+            public class TestMod {
+                void loot() {
+                    table.apply(CopyNbtFunction.copyData(ContextNbtProvider.BLOCK_ENTITY)
+                            .copy("Locked", "BlockEntityTag.Locked")
+                            .copy("Kind", "BlockEntityTag.Kind", CopyNbtFunction.MergeStrategy.REPLACE));
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.world.level.storage.loot.functions.CopyCustomDataFunction;"))
+        assertTrue(transformed.contains("import net.minecraft.world.level.storage.loot.providers.nbt.ContextNbtProvider;"))
+        assertTrue(transformed.contains("CopyCustomDataFunction.copyData(ContextNbtProvider.BLOCK_ENTITY)"))
+        assertTrue(transformed.contains("CopyCustomDataFunction.MergeStrategy.REPLACE"))
+        assertFalse(transformed.contains("CopyNbtFunction"))
+    }
+
+    @Test
     fun `legacy loot serializers migrate to MapCodec backed loot types`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

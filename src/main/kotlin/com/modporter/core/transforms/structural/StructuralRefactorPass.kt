@@ -7917,6 +7917,7 @@ $fields
         val inheritedRecipeStateAccessors = collectInheritedRecipeStateAccessors(javaFiles)
         val holderLookupCompoundTagMethods = collectHolderLookupCompoundTagMethods(javaFiles)
         val deferredHolderFields = collectDeferredHolderFields(srcDir)
+        val gameEventDeferredHolderFields = collectDeferredHolderFieldsOf(srcDir, "GameEvent")
         val soundEventSupplierConstructors = collectSoundEventSupplierConstructors(javaFiles)
 
         javaFiles.forEach { javaFile ->
@@ -8454,6 +8455,20 @@ $fields
                         ruleId = "struct-deferredholder-getvalue"
                     ))
                     text = deferredHolderAccessMigrated
+                }
+
+                val gameEventHolderMigrated = migrateDeferredHolderGameEventArguments(text, gameEventDeferredHolderFields)
+                if (gameEventHolderMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Pass proven GameEvent DeferredHolder fields directly to 1.21 gameEvent APIs",
+                        before = "gameEvent(..., DeferredHolder<GameEvent, ?>.get(), ...)",
+                        after = "gameEvent(..., DeferredHolder<GameEvent, ?>, ...)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-gameevent-deferredholder-argument"
+                    ))
+                    text = gameEventHolderMigrated
                 }
 
                 val deferredRegisterListenerMigrated = migrateDeferredRegisterListenerReferencesSource(text, deferredRegisterOwners)
@@ -11646,6 +11661,30 @@ ${entries.joinToString(",\n")}
                     }
             }
         return fieldsByOwner
+    }
+
+    private fun collectDeferredHolderFieldsOf(srcDir: Path, registryType: String): Set<String> {
+        val fields = linkedSetOf<String>()
+        val typePattern = Regex.escape(registryType)
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val source = javaFile.readText()
+                if (!source.contains("DeferredHolder") || !source.contains(registryType)) return@forEach
+                val owner = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+                val packageName = packageNameOf(source)
+                Regex(
+                    """(?m)\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?(?:net\.neoforged\.neoforge\.registries\.)?DeferredHolder\s*<\s*(?:[A-Za-z_$][\w$]*\.)*$typePattern\s*,[^;\r\n=]+>\s+([A-Za-z_$][\w$]*)\b"""
+                ).findAll(source)
+                    .forEach { match ->
+                        val field = match.groupValues[1]
+                        fields += "$owner.$field"
+                        if (packageName != null) {
+                            fields += "$packageName.$owner.$field"
+                        }
+                    }
+            }
+        return fields
     }
 
     private fun migrateRecordComponentFieldAccessSource(
@@ -21740,6 +21779,51 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 .replace(result, "$field.get()")
         }
         return result
+    }
+
+    private fun migrateDeferredHolderGameEventArguments(
+        source: String,
+        gameEventHolderFields: Set<String>
+    ): String {
+        if (!source.contains(".gameEvent(") || !source.contains(".get()") || gameEventHolderFields.isEmpty()) {
+            return source
+        }
+        val localOwner = classNameOfJavaSource(source)
+        val localGameEventFields = if (localOwner == null) {
+            emptySet()
+        } else {
+            gameEventHolderFields.asSequence()
+                .filter { it.substringBeforeLast('.', missingDelimiterValue = "") == localOwner }
+                .map { it.substringAfterLast('.') }
+                .toSet()
+        }
+        fun provenHolderExpression(expression: String): Boolean {
+            val trimmed = expression.trim()
+            return trimmed in gameEventHolderFields || trimmed in localGameEventFields
+        }
+
+        var anyChanged = false
+        val migrated = rewriteJavaCall(source, "gameEvent") { receiver, args ->
+            if (args.isEmpty()) return@rewriteJavaCall null
+            var callChanged = false
+            val rewrittenArgs = args.map { arg ->
+                val trimmed = arg.trim()
+                val getCall = Regex("""^((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)\.get\(\)$""")
+                    .find(trimmed)
+                    ?: return@map arg
+                val holderExpression = getCall.groupValues[1]
+                if (provenHolderExpression(holderExpression)) {
+                    callChanged = true
+                    anyChanged = true
+                    holderExpression
+                } else {
+                    arg
+                }
+            }
+            if (!callChanged) return@rewriteJavaCall null
+            "$receiver.gameEvent(${rewrittenArgs.joinToString(", ") { it.trim() }})"
+        }
+        return if (anyChanged) migrated else source
     }
 
     private fun migrateLegacyCommonHooksToolChecks(source: String): String {

@@ -16160,6 +16160,59 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `game event calls pass deferred holders without resolving values`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ModGameEvents.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.gameevent.GameEvent;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ModGameEvents {
+                public static final DeferredRegister<GameEvent> GAME_EVENTS = DeferredRegister.create(Registries.GAME_EVENT, ExampleMod.ID);
+                public static final DeferredHolder<net.minecraft.world.level.gameevent.GameEvent, GameEvent> CUSTOM =
+                    GAME_EVENTS.register("custom", () -> new GameEvent(4));
+            }
+        """.trimIndent())
+        srcDir.resolve("OtherEvents.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class OtherEvents {
+                public static final DeferredHolder<Widget, Widget> NOT_GAME = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("GameEventCalls.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.gameevent.GameEvent;
+
+            public class GameEventCalls {
+                public void emit(Level level, BlockPos pos, BlockState state) {
+                    level.gameEvent(null, ModGameEvents.CUSTOM.get(), pos);
+                    level.gameEvent(ModGameEvents.CUSTOM.get(), pos, GameEvent.Context.of(state));
+                    level.gameEvent(null, OtherEvents.NOT_GAME.get(), pos);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("GameEventCalls.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(transformed.contains("level.gameEvent(null, ModGameEvents.CUSTOM, pos);"), transformed)
+        assertTrue(transformed.contains("level.gameEvent(ModGameEvents.CUSTOM, pos, GameEvent.Context.of(state));"), transformed)
+        assertTrue(transformed.contains("level.gameEvent(null, OtherEvents.NOT_GAME.get(), pos);"), transformed)
+    }
+
+    @Test
     fun `migrates legacy registry accessors only for declared registry receivers`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
