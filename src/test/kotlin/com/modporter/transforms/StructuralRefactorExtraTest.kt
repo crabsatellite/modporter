@@ -1713,6 +1713,128 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy hoe and shovel subclasses migrate constructor attributes structurally`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleHoeItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.HoeItem;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.Tier;
+
+            public class ExampleHoeItem extends HoeItem {
+                public ExampleHoeItem(Tier tier, Item.Properties properties) {
+                    super(tier, -3, 0.0F, properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleShovelItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ShovelItem;
+            import net.minecraft.world.item.Tier;
+
+            public class ExampleShovelItem extends ShovelItem {
+                public ExampleShovelItem(Tier tier) {
+                    super(tier, 1.5F, -3.0F, new Item.Properties().stacksTo(1));
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val migratedHoe = srcDir.resolve("ExampleHoeItem.java").readText()
+        val migratedShovel = srcDir.resolve("ExampleShovelItem.java").readText()
+
+        assertTrue(migratedHoe.contains("super(tier, properties.attributes(net.minecraft.world.item.DiggerItem.createAttributes(tier, -3, 0.0F)));"), migratedHoe)
+        assertTrue(migratedShovel.contains("super(tier, new Item.Properties().stacksTo(1).attributes(net.minecraft.world.item.DiggerItem.createAttributes(tier, 1.5F, -3.0F)));"), migratedShovel)
+    }
+
+    @Test
+    fun `legacy tier enum getLevel migrates to incorrect block tag field structurally`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleTiers.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.item.crafting.Ingredient;
+
+            import java.util.function.Supplier;
+
+            public enum ExampleTiers implements Tier {
+                COPPER(2, 512, 6.5F, 2.0F, 25, () -> Ingredient.EMPTY),
+                MYTHIC(4, 1561, 8.0F, 3.0F, 10, () -> Ingredient.EMPTY);
+
+                private final int harvestLevel;
+                private final int maxUses;
+                private final float efficiency;
+                private final float attackDamage;
+                private final int enchantability;
+                private final Supplier<Ingredient> repairMaterial;
+
+                ExampleTiers(int harvestLevel, int maxUses, float efficiency, float attackDamage, int enchantability, Supplier<Ingredient> repairMaterial) {
+                    this.harvestLevel = harvestLevel;
+                    this.maxUses = maxUses;
+                    this.efficiency = efficiency;
+                    this.attackDamage = attackDamage;
+                    this.enchantability = enchantability;
+                    this.repairMaterial = repairMaterial;
+                }
+
+                @Override
+                public int getUses() {
+                    return this.maxUses;
+                }
+
+                @Override
+                public float getSpeed() {
+                    return this.efficiency;
+                }
+
+                @Override
+                public float getAttackDamageBonus() {
+                    return this.attackDamage;
+                }
+
+                @Override
+                public int getLevel() {
+                    return this.harvestLevel;
+                }
+
+                @Override
+                public int getEnchantmentValue() {
+                    return this.enchantability;
+                }
+
+                @Override
+                public Ingredient getRepairIngredient() {
+                    return this.repairMaterial.get();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val migrated = srcDir.resolve("ExampleTiers.java").readText()
+
+        assertTrue(migrated.contains("import net.minecraft.tags.BlockTags;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.tags.TagKey;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.level.block.Block;"), migrated)
+        assertTrue(migrated.contains("COPPER(BlockTags.INCORRECT_FOR_IRON_TOOL, 512, 6.5F, 2.0F, 25, () -> Ingredient.EMPTY)"), migrated)
+        assertTrue(migrated.contains("MYTHIC(BlockTags.INCORRECT_FOR_NETHERITE_TOOL, 1561, 8.0F, 3.0F, 10, () -> Ingredient.EMPTY)"), migrated)
+        assertTrue(migrated.contains("private final TagKey<Block> incorrectBlocksForDrops;"), migrated)
+        assertTrue(migrated.contains("ExampleTiers(TagKey<Block> incorrectBlocksForDrops, int maxUses, float efficiency, float attackDamage, int enchantability, Supplier<Ingredient> repairMaterial)"), migrated)
+        assertTrue(migrated.contains("this.incorrectBlocksForDrops = incorrectBlocksForDrops;"), migrated)
+        assertTrue(migrated.contains("public TagKey<Block> getIncorrectBlocksForDrops()"), migrated)
+        assertTrue(migrated.contains("return this.incorrectBlocksForDrops;"), migrated)
+        assertFalse(migrated.contains("getLevel()"), migrated)
+        assertFalse(migrated.contains("harvestLevel"), migrated)
+    }
+
+    @Test
     fun `keeps attribute imports for generic multimap type references`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -7620,11 +7742,10 @@ class StructuralRefactorExtraTest {
 
             import net.minecraft.world.item.ItemStack;
             import net.minecraft.world.item.enchantment.Enchantments;
+            import net.minecraft.world.level.Level;
 
             public class ChoppingBoardBlockEntity {
-                Object level;
-
-                public void process(ItemStack toolStack) {
+                public void process(Level level, ItemStack toolStack) {
                     int fortune = toolStack.getEnchantmentLevel(Enchantments.BLOCK_FORTUNE);
                     if (toolStack.hurt(1, level.random, null)) {
                         toolStack.setCount(0);
@@ -7638,13 +7759,43 @@ class StructuralRefactorExtraTest {
         val transformed = tempDir.resolve("src/main/java/com/example/ChoppingBoardBlockEntity.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
-        assertTrue(transformed.contains("level.registryAccess().lookup(net.minecraft.core.registries.Registries.ENCHANTMENT)"))
-        assertTrue(transformed.contains(".flatMap(reg -> reg.get(Enchantments.FORTUNE))"))
-        assertTrue(transformed.contains("EnchantmentHelper.getItemEnchantmentLevel(holder, toolStack)"))
-        assertTrue(transformed.contains("toolStack.setDamageValue(toolStack.getDamageValue() + 1);"))
-        assertTrue(transformed.contains("if (toolStack.getDamageValue() >= toolStack.getMaxDamage())"))
+        assertTrue(transformed.contains("level.registryAccess().lookup(net.minecraft.core.registries.Registries.ENCHANTMENT)"), transformed)
+        assertTrue(transformed.contains(".flatMap(registry -> registry.get(Enchantments.FORTUNE))"), transformed)
+        assertTrue(transformed.contains("EnchantmentHelper.getItemEnchantmentLevel(holder, toolStack)"), transformed)
+        assertTrue(transformed.contains("toolStack.setDamageValue(toolStack.getDamageValue() + 1);"), transformed)
+        assertTrue(transformed.contains("if (toolStack.getDamageValue() >= toolStack.getMaxDamage())"), transformed)
         assertTrue(!transformed.contains("Enchantments.BLOCK_FORTUNE"))
         assertTrue(!transformed.contains("toolStack.hurt(1, level.random, null)"))
+    }
+
+    @Test
+    fun `item enchantment lookup without local registry access uses explicit holder lookup`() {
+        val projectDir = createFile("DartItem.java", """
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.Enchantments;
+            import net.minecraft.world.level.Level;
+
+            public class DartItem {
+                public Object createDart(Level level, LivingEntity shooter) {
+                    return null;
+                }
+
+                public boolean isInfinite(ItemStack dartShooter) {
+                    int enchant = dartShooter.getEnchantmentLevel(Enchantments.INFINITY);
+                    return enchant > 0 && this.getClass() == DartItem.class;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val transformed = tempDir.resolve("src/main/java/com/example/DartItem.java").readText()
+
+        assertFalse(transformed.contains("level.registryAccess()"), transformed)
+        assertTrue(transformed.contains("dartShooter.getEnchantmentLevel(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(Enchantments.INFINITY))"), transformed)
     }
 
     @Test

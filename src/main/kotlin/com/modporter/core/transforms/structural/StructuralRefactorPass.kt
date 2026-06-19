@@ -13179,7 +13179,7 @@ ${indent}}
         result = migrateLegacyItemMaxDamageCalls(result)
         result = migrateDeferredSpawnEggLookups(result)
         result = migrateLegacyEntityTypeSpawnCompoundTagSource(result)
-        result = migrateEnchantmentLevelHolderLookups(result)
+        result = migrateEnchantmentLevelHolderLookups(result, javaInheritanceIndex)
         result = migrateLegacySweepingDamageRatioCalls(result)
         result = migrateLegacyEnchantmentHelperCalls(result, javaInheritanceIndex)
         result = migrateLegacyEnchantmentTagChecks(result)
@@ -13261,6 +13261,7 @@ ${indent}}
         result = migrateLegacyCreativeTabEnchantmentInstances(result)
         result = migrateLegacyHolderAccessors(result)
         result = migrateLegacyItemConstructorsAndProperties(result)
+        result = migrateLegacyTierLevelSource(result)
         result = migrateArmorMaterialHolderFields(result)
         result = migrateLegacyCustomRecipeSource(result)
         result = migrateContainerSizeCallsForDeclaredContainerScopes(result)
@@ -19453,27 +19454,26 @@ ${indent}}"""
         return baseName + index
     }
 
-    private fun migrateEnchantmentLevelHolderLookups(source: String): String {
+    private fun migrateEnchantmentLevelHolderLookups(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String {
         if (!source.contains(".getEnchantmentLevel(Enchantments.")) return source
 
-        val registryAccess = when {
-            Regex("""\bLootParams\.Builder\s+([A-Za-z_$][\w$]*)""").find(source) != null ->
-                Regex("""\bLootParams\.Builder\s+([A-Za-z_$][\w$]*)""").find(source)!!.groupValues[1] + ".getLevel().registryAccess()"
-            Regex("""\bLevel\s+([A-Za-z_$][\w$]*)""").find(source) != null ->
-                Regex("""\bLevel\s+([A-Za-z_$][\w$]*)""").find(source)!!.groupValues[1] + ".registryAccess()"
-            else -> return source
-        }
-
+        var changed = false
         var result = Regex("""([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*(?:\([^)]*\))?)*)\.getEnchantmentLevel\(Enchantments\.([A-Z0-9_]+)\)""")
             .replace(source) { match ->
                 val stack = match.groupValues[1]
                 val enchantment = match.groupValues[2]
+                changed = true
+                val registryAccess = registryAccessExpressionAt(source, match.range.first, javaInheritanceIndex)
+                    ?: return@replace "$stack.getEnchantmentLevel(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(Enchantments.$enchantment))"
                 """$registryAccess.lookup(net.minecraft.core.registries.Registries.ENCHANTMENT)
                     .flatMap(registry -> registry.get(Enchantments.$enchantment))
                     .map(holder -> net.minecraft.world.item.enchantment.EnchantmentHelper.getItemEnchantmentLevel(holder, $stack))
                     .orElse(0)"""
             }
-        if (result.contains("EnchantmentHelper.getItemEnchantmentLevel")) {
+        if (changed) {
             result = addImportIfMissing(result, "net.minecraft.world.item.enchantment.EnchantmentHelper")
         }
         return result
@@ -23957,7 +23957,7 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
                 "super($tier, $properties.attributes(SwordItem.createAttributes($tier, $damage, $speed)))"
             }
         }
-        if (Regex("""\bextends\s+(?:PickaxeItem|AxeItem)\b""").containsMatchIn(result)) {
+        if (Regex("""\bextends\s+(?:PickaxeItem|AxeItem|HoeItem|ShovelItem)\b""").containsMatchIn(result)) {
             result = rewriteSuperConstructorCalls(result) { args ->
                 if (args.size != 4) return@rewriteSuperConstructorCalls null
                 val tier = args[0].trim()
@@ -23969,6 +23969,169 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         }
         return result
     }
+
+    private fun migrateLegacyTierLevelSource(source: String): String {
+        if (!source.contains("implements Tier") || !source.contains("getLevel()")) return source
+        val enumName = Regex("""\benum\s+([A-Za-z_$][\w$]*)\s+implements\s+[^{};]*\bTier\b""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?: return source
+        val levelMethodRegex = Regex(
+            """(?s)([ \t]*@Override\s*\r?\n)?[ \t]*public\s+int\s+getLevel\s*\(\s*\)\s*\{\s*return\s+(?:this\.)?([A-Za-z_$][\w$]*)\s*;\s*\}\s*"""
+        )
+        val levelMethod = levelMethodRegex.find(source) ?: return source
+        val legacyLevelField = levelMethod.groupValues[2]
+        val fieldRegex = Regex("""(?m)^([ \t]*)private\s+final\s+int\s+${Regex.escape(legacyLevelField)}\s*;\s*$""")
+        if (!fieldRegex.containsMatchIn(source)) return source
+
+        val constructorRegex = Regex("""\b${Regex.escape(enumName)}\s*\(([^)]*)\)""")
+        val constructorMatch = constructorRegex.find(source) ?: return source
+        val constructorArgs = splitTopLevelJavaArgs(constructorMatch.groupValues[1])
+        val legacyLevelArgIndex = constructorArgs.indexOfFirst { Regex("""\bint\s+${Regex.escape(legacyLevelField)}\b""").containsMatchIn(it) }
+        if (legacyLevelArgIndex < 0) return source
+
+        val assignmentRegex = Regex("""this\.${Regex.escape(legacyLevelField)}\s*=\s*${Regex.escape(legacyLevelField)}\s*;""")
+        if (!assignmentRegex.containsMatchIn(source)) return source
+
+        val constantsRewrite = rewriteLegacyTierEnumConstants(source, enumName, legacyLevelArgIndex) ?: return source
+        var result = constantsRewrite
+        result = fieldRegex.replace(result) { match ->
+            "${match.groupValues[1]}private final TagKey<Block> incorrectBlocksForDrops;"
+        }
+        val migratedConstructor = constructorRegex.find(result) ?: return source
+        val migratedConstructorArgs = splitTopLevelJavaArgs(migratedConstructor.groupValues[1]).toMutableList()
+        if (legacyLevelArgIndex !in migratedConstructorArgs.indices) return source
+        migratedConstructorArgs[legacyLevelArgIndex] = Regex("""\bint\s+${Regex.escape(legacyLevelField)}\b""")
+            .replace(migratedConstructorArgs[legacyLevelArgIndex], "TagKey<Block> incorrectBlocksForDrops")
+        val constructorReplacement = "$enumName(${migratedConstructorArgs.joinToString(", ")})"
+        result = result.substring(0, migratedConstructor.range.first) +
+            constructorReplacement +
+            result.substring(migratedConstructor.range.last + 1)
+        result = assignmentRegex.replace(result, "this.incorrectBlocksForDrops = incorrectBlocksForDrops;")
+        val migratedLevelMethod = levelMethodRegex.find(result) ?: return source
+        result = result.substring(0, migratedLevelMethod.range.first) +
+            """
+	@Override
+	public TagKey<Block> getIncorrectBlocksForDrops() {
+		return this.incorrectBlocksForDrops;
+	}
+""".trimIndent() + "\n\n" +
+            result.substring(migratedLevelMethod.range.last + 1)
+        result = addImportIfMissing(result, "net.minecraft.tags.BlockTags")
+        result = addImportIfMissing(result, "net.minecraft.tags.TagKey")
+        result = addImportIfMissing(result, "net.minecraft.world.level.block.Block")
+        return result
+    }
+
+    private fun rewriteLegacyTierEnumConstants(source: String, enumName: String, levelArgIndex: Int): String? {
+        val enumMatch = Regex("""\benum\s+${Regex.escape(enumName)}\b""").find(source) ?: return null
+        val bodyStart = source.indexOf('{', enumMatch.range.last)
+        if (bodyStart < 0) return null
+        val bodyEnd = findMatchingBrace(source, bodyStart)
+        if (bodyEnd < 0) return null
+        var cursor = bodyStart + 1
+        var constantsEnd = -1
+        var parenDepth = 0
+        var braceDepth = 0
+        var bracketDepth = 0
+        var angleDepth = 0
+        var inString = false
+        var escaped = false
+        while (cursor < bodyEnd) {
+            val ch = source[cursor]
+            if (inString) {
+                escaped = ch == '\\' && !escaped
+                if (ch == '"' && !escaped) inString = false
+                if (ch != '\\') escaped = false
+                cursor++
+                continue
+            }
+            when (ch) {
+                '"' -> inString = true
+                '(' -> parenDepth++
+                ')' -> if (parenDepth > 0) parenDepth--
+                '{' -> braceDepth++
+                '}' -> if (braceDepth > 0) braceDepth--
+                '[' -> bracketDepth++
+                ']' -> if (bracketDepth > 0) bracketDepth--
+                '<' -> angleDepth++
+                '>' -> if (angleDepth > 0) angleDepth--
+                ';' -> if (parenDepth == 0 && braceDepth == 0 && bracketDepth == 0 && angleDepth == 0) {
+                    constantsEnd = cursor
+                    break
+                }
+            }
+            cursor++
+        }
+        if (constantsEnd < 0) return null
+        val constants = source.substring(bodyStart + 1, constantsEnd)
+        var changed = false
+        val rebuilt = StringBuilder()
+        var segmentStart = 0
+        parenDepth = 0
+        braceDepth = 0
+        bracketDepth = 0
+        angleDepth = 0
+        inString = false
+        escaped = false
+        for (i in constants.indices) {
+            val ch = constants[i]
+            if (inString) {
+                escaped = ch == '\\' && !escaped
+                if (ch == '"' && !escaped) inString = false
+                if (ch != '\\') escaped = false
+                continue
+            }
+            when (ch) {
+                '"' -> inString = true
+                '(' -> parenDepth++
+                ')' -> if (parenDepth > 0) parenDepth--
+                '{' -> braceDepth++
+                '}' -> if (braceDepth > 0) braceDepth--
+                '[' -> bracketDepth++
+                ']' -> if (bracketDepth > 0) bracketDepth--
+                '<' -> angleDepth++
+                '>' -> if (angleDepth > 0) angleDepth--
+                ',' -> if (parenDepth == 0 && braceDepth == 0 && bracketDepth == 0 && angleDepth == 0) {
+                    val (rewritten, didChange) = rewriteLegacyTierEnumConstantSegment(constants.substring(segmentStart, i), levelArgIndex)
+                    rebuilt.append(rewritten).append(',')
+                    changed = changed || didChange
+                    segmentStart = i + 1
+                }
+            }
+        }
+        val (lastSegment, lastChanged) = rewriteLegacyTierEnumConstantSegment(constants.substring(segmentStart), levelArgIndex)
+        rebuilt.append(lastSegment)
+        changed = changed || lastChanged
+        if (!changed) return null
+        return source.substring(0, bodyStart + 1) + rebuilt + source.substring(constantsEnd)
+    }
+
+    private fun rewriteLegacyTierEnumConstantSegment(segment: String, levelArgIndex: Int): Pair<String, Boolean> {
+        val match = Regex("""^(\s*)([A-Z][A-Z0-9_]*)\s*\(""").find(segment) ?: return segment to false
+        val openParen = match.range.last
+        val closeParen = findMatchingParen(segment, openParen)
+        if (closeParen < 0) return segment to false
+        val args = splitTopLevelJavaArgs(segment.substring(openParen + 1, closeParen)).toMutableList()
+        if (levelArgIndex !in args.indices) return segment to false
+        val replacement = legacyTierMiningLevelTag(args[levelArgIndex].trim()) ?: return segment to false
+        args[levelArgIndex] = replacement
+        val rewritten = segment.substring(0, openParen + 1) +
+            args.joinToString(", ") +
+            segment.substring(closeParen)
+        return rewritten to true
+    }
+
+    private fun legacyTierMiningLevelTag(levelText: String): String? =
+        when (levelText.toIntOrNull()) {
+            0 -> "BlockTags.INCORRECT_FOR_WOODEN_TOOL"
+            1 -> "BlockTags.INCORRECT_FOR_STONE_TOOL"
+            2 -> "BlockTags.INCORRECT_FOR_IRON_TOOL"
+            3 -> "BlockTags.INCORRECT_FOR_DIAMOND_TOOL"
+            null -> null
+            else -> "BlockTags.INCORRECT_FOR_NETHERITE_TOOL"
+        }
 
     private fun migrateLegacyRecordItemRegistrations(source: String): String {
         if (!source.contains("new RecordItem(") && !source.contains(".jukeboxPlayable(")) return source
