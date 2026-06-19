@@ -2094,12 +2094,108 @@ class StructuralRefactorExtraTest {
                 }
             }
         """.trimIndent())
+        srcDir.resolve("ReachTool.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+
+            public interface ReachTool {
+                ResourceLocation BLOCK_RANGE_ID = ResourceLocation.fromNamespaceAndPath("example", "block_range");
+                ResourceLocation ENTITY_RANGE_ID = ResourceLocation.fromNamespaceAndPath("example", "entity_range");
+                double RANGE = 2.5D;
+
+                default Multimap<Attribute, AttributeModifier> extendReach(Multimap<Attribute, AttributeModifier> base, EquipmentSlot slot) {
+                    ImmutableMultimap.Builder<Attribute, AttributeModifier> builder = ImmutableMultimap.builder();
+                    builder.putAll(base);
+                    builder.put(Attributes.BLOCK_INTERACTION_RANGE, new AttributeModifier(BLOCK_RANGE_ID, "Block range", this.getModifier(), AttributeModifier.Operation.ADD_VALUE));
+                    builder.put(Attributes.ENTITY_INTERACTION_RANGE, new AttributeModifier(ENTITY_RANGE_ID, "Entity range", this.getModifier(), AttributeModifier.Operation.ADD_VALUE));
+                    return slot == EquipmentSlot.MAINHAND ? builder.build() : base;
+                }
+
+                private double getModifier() {
+                    return RANGE;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LongSwordItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.SwordItem;
+            import net.minecraft.world.item.Tier;
+
+            public class LongSwordItem extends SwordItem implements ReachTool {
+                public LongSwordItem(Tier tier, Properties properties) {
+                    super(tier, properties.attributes(SwordItem.createAttributes(tier, 4, -2.6F)));
+                }
+
+                @Override
+                public Multimap<Holder<Attribute>, AttributeModifier> getAttributeModifiers(EquipmentSlot slot, ItemStack stack) {
+                    return this.extendReach(super.getAttributeModifiers(slot, stack), slot);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("StackScaledWeapon.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.ItemStack;
+
+            public interface StackScaledWeapon {
+                default Multimap<Holder<Attribute>, AttributeModifier> scaleDamage(Multimap<Holder<Attribute>, AttributeModifier> base, ItemStack stack, EquipmentSlot slot) {
+                    return base;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("StackScaledSwordItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.SwordItem;
+            import net.minecraft.world.item.Tier;
+
+            public class StackScaledSwordItem extends SwordItem implements StackScaledWeapon {
+                public StackScaledSwordItem(Tier tier, Properties properties) {
+                    super(tier, properties.attributes(SwordItem.createAttributes(tier, 5, -2.4F)));
+                }
+
+                @Override
+                public Multimap<Holder<Attribute>, AttributeModifier> getAttributeModifiers(EquipmentSlot slot, ItemStack stack) {
+                    return this.scaleDamage(super.getAttributeModifiers(slot, stack), stack, slot);
+                }
+            }
+        """.trimIndent())
 
         val result = StructuralRefactorPass().apply(tempDir)
         val migrated = srcDir.resolve("GiantSwordItem.java").readText()
         val migratedPick = srcDir.resolve("GiantPickItem.java").readText()
+        val migratedLongSword = srcDir.resolve("LongSwordItem.java").readText()
+        val migratedReachTool = srcDir.resolve("ReachTool.java").readText()
+        val stackScaledSword = srcDir.resolve("StackScaledSwordItem.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-item-attribute-modifier-component" })
+        assertTrue(result.changes.any { it.ruleId == "struct-item-attribute-helper-component" })
+        assertTrue(result.changes.any { it.ruleId == "struct-item-attribute-helper-prune" })
         assertTrue(migrated.contains("import net.minecraft.world.entity.EquipmentSlotGroup;"))
         assertTrue(migrated.contains("import net.minecraft.world.entity.ai.attributes.Attributes;"))
         assertTrue(migrated.contains("import net.minecraft.world.item.component.ItemAttributeModifiers;"))
@@ -2116,6 +2212,25 @@ class StructuralRefactorExtraTest {
         assertTrue(migratedPick.contains("net.minecraft.world.item.DiggerItem.createAttributes(tier, damage, speed)"))
         assertTrue(!migratedPick.contains("getDefaultAttributeModifiers"))
         assertTrue(!migratedPick.contains("import net.minecraft.world.entity.ai.attributes.Attribute;"))
+        assertTrue(migratedLongSword.contains("import net.minecraft.world.entity.EquipmentSlotGroup;"), migratedLongSword)
+        assertTrue(migratedLongSword.contains("import net.minecraft.world.entity.ai.attributes.AttributeModifier;"), migratedLongSword)
+        assertTrue(migratedLongSword.contains("import net.minecraft.world.entity.ai.attributes.Attributes;"), migratedLongSword)
+        assertTrue(migratedLongSword.contains("SwordItem.createAttributes(tier, 4, -2.6F)"), migratedLongSword)
+        assertTrue(migratedLongSword.contains(".withModifierAdded(Attributes.BLOCK_INTERACTION_RANGE"), migratedLongSword)
+        assertTrue(migratedLongSword.contains(".withModifierAdded(Attributes.ENTITY_INTERACTION_RANGE"), migratedLongSword)
+        assertTrue(migratedLongSword.contains("RANGE, AttributeModifier.Operation.ADD_VALUE), EquipmentSlotGroup.MAINHAND"), migratedLongSword)
+        assertTrue(!migratedLongSword.contains("this.getModifier()"), migratedLongSword)
+        assertTrue(!migratedLongSword.contains("getAttributeModifiers"), migratedLongSword)
+        assertTrue(!migratedLongSword.contains("super.getAttributeModifiers"), migratedLongSword)
+        assertTrue(!migratedLongSword.contains("import com.google.common.collect.Multimap;"), migratedLongSword)
+        assertTrue(!migratedLongSword.contains("import net.minecraft.world.entity.EquipmentSlot;"), migratedLongSword)
+        assertTrue(!migratedLongSword.contains("import net.minecraft.core.Holder;"), migratedLongSword)
+        assertTrue(!migratedReachTool.contains("extendReach("), migratedReachTool)
+        assertTrue(!migratedReachTool.contains("getModifier()"), migratedReachTool)
+        assertTrue(!migratedReachTool.contains("ImmutableMultimap"), migratedReachTool)
+        assertTrue(!migratedReachTool.contains("Multimap<"), migratedReachTool)
+        assertTrue(stackScaledSword.contains("getAttributeModifiers(EquipmentSlot slot, ItemStack stack)"), stackScaledSword)
+        assertTrue(stackScaledSword.contains("this.scaleDamage(super.getAttributeModifiers(slot, stack), stack, slot)"), stackScaledSword)
     }
 
     @Test

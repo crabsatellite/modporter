@@ -29419,10 +29419,13 @@ $indent}"""
         if (!srcDir.exists()) return emptyList()
         val mainClass = detectModMainClass(projectDir)
         val mainText = mainClass?.readText().orEmpty()
-        val changes = mutableListOf<Change>()
-        Files.walk(srcDir)
+        val javaFiles = Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
-            .forEach { file ->
+            .toList()
+        val sourceByFile = javaFiles.associateWith { it.readText() }
+        val reachHelpers = collectLegacyStaticReachAttributeHelpers(sourceByFile, mainClass, mainText)
+        val changes = mutableListOf<Change>()
+        javaFiles.forEach { file ->
                 val original = file.readText()
                 if (!original.contains("getDefaultAttributeModifiers(EquipmentSlot") ||
                     !original.contains("new AttributeModifier(") ||
@@ -29452,7 +29455,7 @@ $indent}"""
                 val damage = if (componentConstructor != null) constructor.groupValues[4].trim() else constructor.groupValues[3].trim()
                 val speed = if (componentConstructor != null) constructor.groupValues[5].trim() else constructor.groupValues[4].trim()
                 val methodText = javaMethodText(original, "getDefaultAttributeModifiers") ?: return@forEach
-                val modifierLines = legacyItemAttributeModifierLines(methodText, file, mainClass, mainText)
+                val modifierLines = legacyItemAttributeModifierLines(methodText, file, mainClass, mainText, ownerSource = original)
                 if (modifierLines.isEmpty()) return@forEach
 
                 var migrated = original.replace(
@@ -29502,6 +29505,48 @@ ${modifierLines.joinToString("\n")}
                     ))
                 }
             }
+        val migratedHelperNames = linkedSetOf<String>()
+        javaFiles.forEach { file ->
+            val original = file.readText()
+            if (!original.contains("getAttributeModifiers(EquipmentSlot") ||
+                !original.contains("super.getAttributeModifiers(")) {
+                return@forEach
+            }
+            val migration = legacyStaticReachAttributeOverrideMigration(original, reachHelpers) ?: return@forEach
+            var migrated = appendStaticAttributeModifiersToConstructorAttributes(original, migration.modifierLines) ?: return@forEach
+            migrated = removeMethodByNameContaining(
+                migrated,
+                "getAttributeModifiers",
+                listOf("super.getAttributeModifiers", migration.helperName)
+            )
+            migrated = removeUnusedSimpleImport(migrated, "com.google.common.collect.Multimap", "Multimap")
+            migrated = removeUnusedSimpleImport(migrated, "net.minecraft.core.Holder", "Holder")
+            migrated = removeUnusedSimpleImport(migrated, "net.minecraft.world.entity.EquipmentSlot", "EquipmentSlot")
+            migrated = removeUnusedSimpleImport(migrated, "net.minecraft.world.entity.ai.attributes.Attribute", "Attribute")
+            migrated = addImportIfMissing(migrated, "net.minecraft.world.entity.EquipmentSlotGroup")
+            migrated = addImportIfMissing(migrated, "net.minecraft.world.entity.ai.attributes.AttributeModifier")
+            migrated = addImportIfMissing(migrated, "net.minecraft.world.entity.ai.attributes.Attributes")
+            if (migration.modifierLines.any { it.contains("ResourceLocation.") && !it.contains("net.minecraft.resources.ResourceLocation.") }) {
+                migrated = addImportIfMissing(migrated, "net.minecraft.resources.ResourceLocation")
+            }
+            migrated = cleanupRedundantBlankLines(migrated)
+            if (migrated != original) {
+                if (!dryRun) file.writeText(migrated)
+                migratedHelperNames += migration.helperName
+                changes.add(Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate static item attribute helper override to constructor attribute components",
+                    before = "getAttributeModifiers(EquipmentSlot, ItemStack) delegates to a static reach helper",
+                    after = "Item.Properties.attributes(...withModifierAdded(...))",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-item-attribute-helper-component"
+                ))
+            }
+        }
+        if (migratedHelperNames.isNotEmpty()) {
+            changes += pruneUnusedLegacyReachAttributeHelpers(javaFiles, migratedHelperNames, dryRun)
+        }
         return changes
     }
 
@@ -29509,23 +29554,425 @@ ${modifierLines.joinToString("\n")}
         methodText: String,
         file: Path,
         mainClass: Path?,
-        mainText: String
+        mainText: String,
+        slotGroupExpression: String = "EquipmentSlotGroup.HAND",
+        ownerSource: String = file.readText()
     ): List<String> {
         val modRef = modIdReferenceForGeneratedClass(mainClass, mainText, packageNameOf(file.readText()))
-        val modifierPattern = Regex(
-            """attributeBuilder\.put\s*\(\s*([^,]+)\s*,\s*new\s+AttributeModifier\s*\(\s*[^,]+,\s*"([^"]+)"\s*,\s*([^,]+)\s*,\s*AttributeModifier\.Operation\.([A-Z_]+)\s*\)\s*\)\s*;"""
-        )
-        return modifierPattern.findAll(methodText).mapNotNull { match ->
-            val attributeExpression = when (match.groupValues[1].trim()) {
-                "NeoForgeMod.BLOCK_REACH.get()" -> "Attributes.BLOCK_INTERACTION_RANGE"
-                "NeoForgeMod.ENTITY_REACH.get()" -> "Attributes.ENTITY_INTERACTION_RANGE"
+        return legacyAttributeModifierPutCalls(methodText).mapNotNull { args ->
+            val attributeExpression = legacyReachAttributeExpression(args[0]) ?: return@mapNotNull null
+            val modifierArgs = attributeModifierConstructorArgs(args[1]) ?: return@mapNotNull null
+            val modifierExpression = when (modifierArgs.size) {
+                3 -> {
+                    val amount = constructorSafeAttributeModifierArgument(modifierArgs[1], ownerSource) ?: return@mapNotNull null
+                    val operation = modifierArgs[2].trim()
+                    "new AttributeModifier(${modifierArgs[0].trim()}, $amount, $operation)"
+                }
+                4 -> {
+                    val modifierName = modifierArgs[1].trim().removeSurrounding("\"")
+                    if (modifierName.isBlank() || modifierArgs[1].trim().startsWith("\"").not()) return@mapNotNull null
+                    val idExpression = resourceLocationConstantForModifierName(ownerSource, modifierName)
+                        ?: legacyResourceLocationModifierIdExpression(modifierArgs[0], ownerSource)
+                        ?: "net.minecraft.resources.ResourceLocation.fromNamespaceAndPath($modRef, \"${modifierPathName(modifierName)}\")"
+                    val amount = constructorSafeAttributeModifierArgument(modifierArgs[2], ownerSource) ?: return@mapNotNull null
+                    val operation = legacyAttributeModifierOperationExpression(modifierArgs[3]) ?: return@mapNotNull null
+                    "new AttributeModifier($idExpression, $amount, $operation)"
+                }
                 else -> return@mapNotNull null
             }
-            val modifierName = modifierPathName(match.groupValues[2])
-            val amount = match.groupValues[3].trim()
-            val operation = match.groupValues[4].trim()
-            "\t\t\t.withModifierAdded($attributeExpression, new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath($modRef, \"$modifierName\"), $amount, AttributeModifier.Operation.$operation), EquipmentSlotGroup.HAND)"
+            "\t\t\t.withModifierAdded($attributeExpression, $modifierExpression, $slotGroupExpression)"
         }.toList()
+    }
+
+    private data class LegacyReachAttributeHelper(
+        val file: Path,
+        val methodName: String,
+        val modifierLines: List<String>
+    )
+
+    private data class LegacyReachAttributeOverrideMigration(
+        val helperName: String,
+        val modifierLines: List<String>
+    )
+
+    private fun collectLegacyStaticReachAttributeHelpers(
+        sourceByFile: Map<Path, String>,
+        mainClass: Path?,
+        mainText: String
+    ): Map<String, List<LegacyReachAttributeHelper>> {
+        val helpers = linkedMapOf<String, MutableList<LegacyReachAttributeHelper>>()
+        for ((file, source) in sourceByFile) {
+            if (!source.contains("ImmutableMultimap") ||
+                !source.contains("new AttributeModifier(") ||
+                !source.contains("EquipmentSlot.MAINHAND")) {
+                continue
+            }
+            for (method in javaMethodRangesIncludingDefault(source)) {
+                val methodText = source.substring(method.range)
+                if (!methodText.contains("ImmutableMultimap") || !methodText.contains("new AttributeModifier(")) continue
+                val slotGroup = legacyReachSlotGroupExpression(methodText) ?: continue
+                val modifierLines = legacyItemAttributeModifierLines(methodText, file, mainClass, mainText, slotGroup, source)
+                if (modifierLines.isEmpty()) continue
+                helpers.getOrPut(method.name) { mutableListOf() } += LegacyReachAttributeHelper(file, method.name, modifierLines)
+            }
+        }
+        return helpers
+    }
+
+    private fun legacyStaticReachAttributeOverrideMigration(
+        source: String,
+        helpers: Map<String, List<LegacyReachAttributeHelper>>
+    ): LegacyReachAttributeOverrideMigration? {
+        val candidates = javaMethodRangesIncludingDefault(source)
+            .filter { it.name == "getAttributeModifiers" }
+            .mapNotNull { method ->
+                val methodText = source.substring(method.range)
+                staticReachAttributeOverrideMigration(methodText, helpers)
+            }
+            .toList()
+        return candidates.singleOrNull()
+    }
+
+    private fun staticReachAttributeOverrideMigration(
+        methodText: String,
+        helpers: Map<String, List<LegacyReachAttributeHelper>>
+    ): LegacyReachAttributeOverrideMigration? {
+        val parameters = javaMethodParameters(methodText)
+        val slotName = parameters.firstOrNull { simpleJavaTypeName(it.type) == "EquipmentSlot" }?.name ?: return null
+        val stackName = parameters.firstOrNull { simpleJavaTypeName(it.type) == "ItemStack" }?.name ?: return null
+        val openBrace = methodText.indexOf('{')
+        val closeBrace = methodText.lastIndexOf('}')
+        if (openBrace < 0 || closeBrace <= openBrace) return null
+        val body = methodText.substring(openBrace + 1, closeBrace).trim()
+        val returnMatch = Regex("""^return\s+(?:this\.)?([A-Za-z_$][\w$]*)\s*\(""")
+            .find(body)
+            ?: return null
+        val helperName = returnMatch.groupValues[1]
+        val callOpen = body.indexOf('(', returnMatch.range.last - 1)
+        val callClose = if (callOpen >= 0) findMatchingParen(body, callOpen) else -1
+        if (callOpen < 0 || callClose < 0 || body.substring(callClose + 1).trim() != ";") return null
+        val args = splitTopLevelJavaArgs(body.substring(callOpen + 1, callClose)).map { it.trim() }
+        if (args.size != 2 || args[1] != slotName) return null
+        val superCallPattern = Regex(
+            """^super\.getAttributeModifiers\s*\(\s*${Regex.escape(slotName)}\s*,\s*${Regex.escape(stackName)}\s*\)$"""
+        )
+        if (!superCallPattern.matches(args[0])) return null
+        val distinctHelpers = helpers[helperName]
+            ?.distinctBy { it.modifierLines }
+            ?: return null
+        val helper = distinctHelpers.singleOrNull() ?: return null
+        return LegacyReachAttributeOverrideMigration(helperName, helper.modifierLines)
+    }
+
+    private fun appendStaticAttributeModifiersToConstructorAttributes(
+        source: String,
+        modifierLines: List<String>
+    ): String? {
+        val className = classNameOfJavaSource(source) ?: return null
+        var result = source
+        var changed = false
+        javaConstructorRanges(result, className).asReversed().forEach { constructor ->
+            val constructorText = result.substring(constructor.range)
+            val superMatch = Regex("""\bsuper\s*\(""").find(constructorText) ?: return@forEach
+            val superStart = constructor.range.first + superMatch.range.first
+            val superOpen = constructor.range.first + superMatch.range.last
+            val superClose = findMatchingParen(result, superOpen)
+            if (superClose < 0 || superClose > constructor.range.last) return@forEach
+            val args = splitTopLevelJavaArgs(result.substring(superOpen + 1, superClose)).toMutableList()
+            val attributesArgIndex = args.indexOfFirst { it.contains(".attributes(") && it.contains("createAttributes") }
+            if (attributesArgIndex < 0) return@forEach
+            val migratedArg = appendStaticAttributeModifiersToPropertiesArgument(args[attributesArgIndex], modifierLines)
+                ?: return@forEach
+            if (migratedArg == args[attributesArgIndex]) return@forEach
+            args[attributesArgIndex] = migratedArg
+            val replacement = "super(${args.joinToString(", ") { it.trim() }})"
+            result = result.substring(0, superStart) + replacement + result.substring(superClose + 1)
+            changed = true
+        }
+        return if (changed) result else null
+    }
+
+    private fun appendStaticAttributeModifiersToPropertiesArgument(
+        propertiesArg: String,
+        modifierLines: List<String>
+    ): String? {
+        val attributesIndex = propertiesArg.indexOf(".attributes(")
+        if (attributesIndex < 0) return null
+        val attributesOpen = attributesIndex + ".attributes".length
+        val attributesClose = findMatchingParen(propertiesArg, attributesOpen)
+        if (attributesClose < 0) return null
+        val attributesBody = propertiesArg.substring(attributesOpen + 1, attributesClose)
+        if (modifierLines.all { attributesBody.contains(it.trim()) }) return propertiesArg
+        return propertiesArg.substring(0, attributesClose).trimEnd() +
+            "\n" +
+            modifierLines.joinToString("\n") +
+            propertiesArg.substring(attributesClose)
+    }
+
+    private fun pruneUnusedLegacyReachAttributeHelpers(
+        javaFiles: List<Path>,
+        helperNames: Set<String>,
+        dryRun: Boolean
+    ): List<Change> {
+        val changes = mutableListOf<Change>()
+        for (helperName in helperNames) {
+            val declaringFiles = javaFiles.filter { file ->
+                val source = file.readText()
+                javaMethodRangesIncludingDefault(source).any { method ->
+                    method.name == helperName &&
+                        source.substring(method.range).contains("ImmutableMultimap") &&
+                        source.substring(method.range).contains("new AttributeModifier(")
+                }
+            }
+            if (declaringFiles.size != 1) continue
+            val file = declaringFiles.single()
+            val original = file.readText()
+            val method = javaMethodRangesIncludingDefault(original).firstOrNull { candidate ->
+                candidate.name == helperName &&
+                    original.substring(candidate.range).contains("ImmutableMultimap") &&
+                    original.substring(candidate.range).contains("new AttributeModifier(")
+            } ?: continue
+            val removalStart = leadingJavadocStart(original, method.range.first)
+            val withoutMethod = removeRangeWithTrailingLineBreak(original, removalStart..method.range.last)
+            if (javaFiles.any { path ->
+                    val text = if (path == file) withoutMethod else path.readText()
+                    Regex("""(?:\.|(?<![\w$]))${Regex.escape(helperName)}\s*\(""").containsMatchIn(text)
+                }) {
+                continue
+            }
+            var migrated = removeUnusedPrivateNoArgConstantMethods(withoutMethod)
+            migrated = removeUnusedSimpleImport(migrated, "com.google.common.collect.ImmutableMultimap", "ImmutableMultimap")
+            migrated = removeUnusedSimpleImport(migrated, "com.google.common.collect.Multimap", "Multimap")
+            migrated = removeUnusedSimpleImport(migrated, "net.minecraft.core.Holder", "Holder")
+            migrated = removeUnusedSimpleImport(migrated, "net.minecraft.world.entity.EquipmentSlot", "EquipmentSlot")
+            migrated = removeUnusedSimpleImport(migrated, "net.minecraft.world.entity.ai.attributes.Attribute", "Attribute")
+            migrated = removeUnusedSimpleImport(migrated, "net.minecraft.world.entity.ai.attributes.AttributeModifier", "AttributeModifier")
+            migrated = removeUnusedSimpleImport(migrated, "net.minecraft.world.entity.ai.attributes.Attributes", "Attributes")
+            migrated = removeUnusedSimpleImport(migrated, "net.neoforged.neoforge.common.NeoForgeMod", "NeoForgeMod")
+            migrated = cleanupRedundantBlankLines(migrated)
+            if (migrated != original) {
+                if (!dryRun) file.writeText(migrated)
+                changes.add(Change(
+                    file = file,
+                    line = 1,
+                    description = "Remove unused legacy item attribute helper after constructor component migration",
+                    before = "$helperName(...) returns an ImmutableMultimap attribute helper",
+                    after = "helper removed after all structural call sites were migrated",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-item-attribute-helper-prune"
+                ))
+            }
+        }
+        return changes
+    }
+
+    private fun legacyAttributeModifierPutCalls(methodText: String): List<List<String>> {
+        val calls = mutableListOf<List<String>>()
+        var cursor = 0
+        while (true) {
+            val tokenIndex = methodText.indexOf(".put(", cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + ".put".length
+            val closeParen = findMatchingParen(methodText, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + ".put(".length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(methodText.substring(openParen + 1, closeParen))
+            if (args.size == 2 && attributeModifierConstructorArgs(args[1]) != null) {
+                calls += args
+            }
+            cursor = closeParen + 1
+        }
+        return calls
+    }
+
+    private fun attributeModifierConstructorArgs(expression: String): List<String>? {
+        val trimmed = expression.trim()
+        val constructor = Regex("""^new\s+(?:[A-Za-z_$][\w$]*\.)*AttributeModifier\s*\(""")
+            .find(trimmed)
+            ?: return null
+        val openParen = trimmed.indexOf('(', constructor.range.last - 1)
+        val closeParen = if (openParen >= 0) findMatchingParen(trimmed, openParen) else -1
+        if (openParen < 0 || closeParen != trimmed.lastIndex) return null
+        return splitTopLevelJavaArgs(trimmed.substring(openParen + 1, closeParen))
+    }
+
+    private fun legacyReachAttributeExpression(expression: String): String? =
+        when (expression.trim()) {
+            "NeoForgeMod.BLOCK_REACH.get()",
+            "ForgeMod.BLOCK_REACH.get()",
+            "Attributes.BLOCK_INTERACTION_RANGE" -> "Attributes.BLOCK_INTERACTION_RANGE"
+            "NeoForgeMod.ENTITY_REACH.get()",
+            "ForgeMod.ENTITY_REACH.get()",
+            "Attributes.ENTITY_INTERACTION_RANGE" -> "Attributes.ENTITY_INTERACTION_RANGE"
+            else -> null
+        }
+
+    private fun legacyAttributeModifierOperationExpression(expression: String): String? {
+        val trimmed = expression.trim()
+        val operation = Regex("""^AttributeModifier\.Operation\.([A-Z_]+)$""")
+            .find(trimmed)
+            ?.groupValues
+            ?.get(1)
+            ?: return null
+        return "AttributeModifier.Operation.$operation"
+    }
+
+    private fun resourceLocationConstantForModifierName(ownerSource: String, modifierName: String): String? {
+        val target = normalizedModifierConstantName(modifierPathName(modifierName))
+        val candidates = Regex(
+            """(?m)\b(?:(?:public|protected|private|static|final)\s+)*(?:ResourceLocation|net\.minecraft\.resources\.ResourceLocation)\s+([A-Z_$][A-Z0-9_$]*)\b\s*="""
+        ).findAll(ownerSource)
+            .map { it.groupValues[1] }
+            .filter { normalizedModifierConstantName(it) == target }
+            .distinct()
+            .toList()
+        return candidates.singleOrNull()
+    }
+
+    private fun normalizedModifierConstantName(name: String): String =
+        name.lowercase()
+            .removeSuffix("_uuid")
+            .removeSuffix("_id")
+
+    private fun legacyResourceLocationModifierIdExpression(expression: String, ownerSource: String): String? {
+        val trimmed = expression.trim()
+        if (trimmed.startsWith("ResourceLocation.") || trimmed.startsWith("net.minecraft.resources.ResourceLocation.")) {
+            return trimmed
+        }
+        if (!Regex("""^[A-Z_$][A-Z0-9_$]*$""").matches(trimmed)) return null
+        val compactSource = ownerSource.replace(Regex("""\s+"""), " ")
+        return if (compactSource.contains("ResourceLocation $trimmed =") ||
+            compactSource.contains("net.minecraft.resources.ResourceLocation $trimmed =") ||
+            compactSource.contains("$trimmed = ResourceLocation.") ||
+            compactSource.contains("$trimmed = net.minecraft.resources.ResourceLocation.")) {
+            trimmed
+        } else {
+            null
+        }
+    }
+
+    private fun constructorSafeAttributeModifierArgument(expression: String, ownerSource: String): String? {
+        val trimmed = expression.trim()
+        val thisCall = Regex("""^this\.([A-Za-z_$][\w$]*)\s*\(\s*\)$""")
+            .find(trimmed)
+            ?.groupValues
+            ?.get(1)
+        if (thisCall != null) return noArgConstantReturnExpression(ownerSource, thisCall)
+        val bareCall = Regex("""^([A-Za-z_$][\w$]*)\s*\(\s*\)$""")
+            .find(trimmed)
+            ?.groupValues
+            ?.get(1)
+        if (bareCall != null) return noArgConstantReturnExpression(ownerSource, bareCall)
+        if (Regex("""\b(?:this|super)\b""").containsMatchIn(trimmed)) return null
+        if (Regex("""(?<![\w$.])[a-z][A-Za-z0-9_$]*\s*\(""").containsMatchIn(trimmed)) return null
+        return trimmed
+    }
+
+    private fun noArgConstantReturnExpression(source: String, methodName: String): String? {
+        val method = javaMethodRangesIncludingDefault(source)
+            .firstOrNull { it.name == methodName }
+            ?: return null
+        val methodText = source.substring(method.range)
+        val parameters = javaMethodParameters(methodText)
+        if (parameters.isNotEmpty()) return null
+        val openBrace = methodText.indexOf('{')
+        val closeBrace = methodText.lastIndexOf('}')
+        if (openBrace < 0 || closeBrace <= openBrace) return null
+        val body = methodText.substring(openBrace + 1, closeBrace).trim()
+        val returned = Regex("""^return\s+(.+?)\s*;\s*$""", RegexOption.DOT_MATCHES_ALL)
+            .find(body)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
+            ?: return null
+        if (Regex("""\b(?:this|super)\b""").containsMatchIn(returned)) return null
+        if (Regex("""(?<![\w$.])[a-z][A-Za-z0-9_$]*\s*\(""").containsMatchIn(returned)) return null
+        return returned
+    }
+
+    private fun legacyReachSlotGroupExpression(methodText: String): String? {
+        val slotName = javaMethodParameters(methodText).firstOrNull { simpleJavaTypeName(it.type) == "EquipmentSlot" }?.name
+            ?: return null
+        val slot = Regex.escape(slotName)
+        val mainHandPatterns = listOf(
+            Regex("""\b$slot\s*==\s*EquipmentSlot\.MAINHAND\b"""),
+            Regex("""\bEquipmentSlot\.MAINHAND\s*==\s*$slot\b"""),
+            Regex("""\b$slot\.equals\s*\(\s*EquipmentSlot\.MAINHAND\s*\)"""),
+            Regex("""\bEquipmentSlot\.MAINHAND\.equals\s*\(\s*$slot\s*\)""")
+        )
+        return if (mainHandPatterns.any { it.containsMatchIn(methodText) }) {
+            "EquipmentSlotGroup.MAINHAND"
+        } else {
+            null
+        }
+    }
+
+    private fun javaMethodRangesIncludingDefault(source: String): List<JavaMethodRange> {
+        val pattern = Regex(
+            """(?m)^[ \t]*(?:@\w+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:(?:public|protected|private|static|final|synchronized|default|abstract)\s+)+(?:<[^>{};]+>\s*)?[\w<>\[\].?,\s]+\s+([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\{"""
+        )
+        return pattern.findAll(source).mapNotNull { match ->
+            val openBrace = source.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) return@mapNotNull null
+            JavaMethodRange(match.groupValues[1], match.value, match.range.first..closeBrace)
+        }.toList()
+    }
+
+    private fun javaConstructorRanges(source: String, className: String): List<JavaMethodRange> {
+        val pattern = Regex(
+            """(?m)^[ \t]*(?:@\w+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:public|protected|private)\s+${Regex.escape(className)}\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\{"""
+        )
+        return pattern.findAll(source).mapNotNull { match ->
+            val openBrace = source.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) return@mapNotNull null
+            JavaMethodRange(className, match.value, match.range.first..closeBrace)
+        }.toList()
+    }
+
+    private fun leadingJavadocStart(source: String, declarationStart: Int): Int {
+        val before = source.substring(0, declarationStart)
+        val trimmedEnd = before.trimEnd().length
+        if (trimmedEnd <= 0 || !before.substring(0, trimmedEnd).endsWith("*/")) return declarationStart
+        val commentStart = before.lastIndexOf("/**", trimmedEnd)
+        if (commentStart < 0) return declarationStart
+        if (before.substring(trimmedEnd, declarationStart).isNotBlank()) return declarationStart
+        val lineStart = before.lastIndexOf('\n', commentStart).let { if (it < 0) 0 else it + 1 }
+        return lineStart
+    }
+
+    private fun removeRangeWithTrailingLineBreak(source: String, range: IntRange): String {
+        var end = range.last + 1
+        if (end < source.length && source[end] == '\r') end++
+        if (end < source.length && source[end] == '\n') end++
+        return source.removeRange(range.first, end)
+    }
+
+    private fun removeUnusedPrivateNoArgConstantMethods(source: String): String {
+        var result = source
+        var changed: Boolean
+        do {
+            changed = false
+            val removable = javaMethodRangesIncludingDefault(result).filter { method ->
+                val methodText = result.substring(method.range)
+                methodText.trimStart().startsWith("private ") &&
+                    javaMethodParameters(methodText).isEmpty() &&
+                    noArgConstantReturnExpression(result, method.name) != null
+            }
+            for (method in removable.asReversed()) {
+                val removalStart = leadingJavadocStart(result, method.range.first)
+                val withoutMethod = removeRangeWithTrailingLineBreak(result, removalStart..method.range.last)
+                if (Regex("""(?:\.|(?<![\w$]))${Regex.escape(method.name)}\s*\(""").containsMatchIn(withoutMethod)) {
+                    continue
+                }
+                result = withoutMethod
+                changed = true
+            }
+        } while (changed)
+        return result
     }
 
     private fun javaMethodText(source: String, methodName: String): String? {
