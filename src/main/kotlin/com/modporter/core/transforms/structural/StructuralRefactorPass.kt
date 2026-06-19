@@ -12436,6 +12436,7 @@ ${indent}}
         result = migrateLegacyComponentSerializationSource(result, javaInheritanceIndex)
         result = migrateLegacyNitrogenLanguageHelpersSource(result)
         result = migrateLegacyArmorMaterialsHolderSource(result)
+        result = migrateTextColorParseColorLiteralSource(result)
         result = migrateGameProfileDisplayNameComponents(result)
         result = migrateRegistryAccessEmptyFallbacks(result, javaInheritanceIndex)
         result = migrateLegacyGameEventListenerSource(result)
@@ -21047,6 +21048,14 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         }
         result = addImportIfMissing(result, "net.minecraft.world.item.ArmorMaterial")
         return result
+    }
+
+    private fun migrateTextColorParseColorLiteralSource(source: String): String {
+        if (!source.contains("TextColor.parseColor(")) return source
+        return Regex("""TextColor\.parseColor\(\s*"#([0-9A-Fa-f]{6})"\s*\)""")
+            .replace(source) { match ->
+                "TextColor.fromRgb(0x${match.groupValues[1].uppercase()})"
+            }
     }
 
     private fun migrateGameProfileDisplayNameComponents(source: String): String {

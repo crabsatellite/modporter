@@ -14566,6 +14566,33 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates literal text color parse calls without hiding dynamic parse failures`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TooltipColors.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.chat.Style;
+            import net.minecraft.network.chat.TextColor;
+
+            public class TooltipColors {
+                public static final Style BRONZE = Style.EMPTY.withColor(TextColor.parseColor("#D9AB7E"));
+
+                public Style dynamic(String color) {
+                    return Style.EMPTY.withColor(TextColor.parseColor(color).getOrThrow());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("TooltipColors.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("Style.EMPTY.withColor(TextColor.fromRgb(0xD9AB7E))"))
+        assertTrue(migrated.contains("TextColor.parseColor(color).getOrThrow()"))
+    }
+
+    @Test
     fun `migrates legacy sleeping time check event result API by event parameter type`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
