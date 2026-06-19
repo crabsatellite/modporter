@@ -49,6 +49,133 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates SavedData factory calls with static supplier methods`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleSavedData.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.saveddata.SavedData;
+            import net.minecraft.world.level.storage.DimensionDataStorage;
+
+            public class ExampleSavedData extends SavedData {
+                private static final String DATA_NAME = "example";
+
+                public static ExampleSavedData create() {
+                    return new ExampleSavedData();
+                }
+
+                public static ExampleSavedData load(CompoundTag tag) {
+                    return new ExampleSavedData();
+                }
+
+                @Override
+                public CompoundTag save(CompoundTag tag) {
+                    return tag;
+                }
+
+                public static ExampleSavedData get(DimensionDataStorage dataStorage) {
+                    return dataStorage.computeIfAbsent(
+                        ExampleSavedData::load,
+                        ExampleSavedData::create,
+                        DATA_NAME
+                    );
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("ExampleSavedData.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("import net.minecraft.core.HolderLookup;"))
+        assertTrue(transformed.contains("public static ExampleSavedData load(CompoundTag tag, HolderLookup.Provider registries)"))
+        assertTrue(transformed.contains("public CompoundTag save(CompoundTag tag, HolderLookup.Provider registries)"))
+        assertTrue(transformed.contains("dataStorage.computeIfAbsent(new SavedData.Factory<>(ExampleSavedData::create, ExampleSavedData::load), DATA_NAME)"))
+        assertFalse(transformed.contains("ExampleSavedData::load,\n"))
+    }
+
+    @Test
+    fun `migrates removed randomizable container block entity loot table helper`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("StructurePiece.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.server.level.ServerLevelAccessor;
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity;
+            import net.minecraft.world.level.storage.loot.LootTable;
+
+            public class StructurePiece {
+                public void place(ServerLevelAccessor level, RandomSource random, BlockPos chest, ResourceKey<LootTable> loot) {
+                    RandomizableContainerBlockEntity.setLootTable(level, random, chest, loot);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("StructurePiece.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("import net.minecraft.world.RandomizableContainer;"))
+        assertTrue(transformed.contains("RandomizableContainer.setBlockEntityLootTable(level, random, chest, loot);"))
+        assertFalse(transformed.contains("RandomizableContainerBlockEntity"))
+    }
+
+    @Test
+    fun `migrates legacy NbtUtils block position compound lists without changing storage shape`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LegacyPiece.java").writeText("""
+            package com.example;
+
+            import java.util.HashSet;
+            import java.util.Set;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.nbt.ListTag;
+            import net.minecraft.nbt.NbtUtils;
+            import net.minecraft.nbt.Tag;
+
+            public class LegacyPiece {
+                private final Set<BlockPos> positions = new HashSet<>();
+
+                public LegacyPiece(CompoundTag tag) {
+                    ListTag positions = tag.getList("Positions", Tag.TAG_COMPOUND);
+                    for (Tag position : positions) {
+                        this.positions.add(NbtUtils.readBlockPos((CompoundTag) position));
+                    }
+                }
+
+                protected void addAdditionalSaveData(CompoundTag tag) {
+                    ListTag positions = new ListTag();
+                    for (BlockPos position : this.positions) {
+                        positions.add(NbtUtils.writeBlockPos(position));
+                    }
+                    tag.put("Positions", positions);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("LegacyPiece.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("this.positions.add(modporterReadLegacyBlockPos((CompoundTag) position));"))
+        assertTrue(transformed.contains("positions.add(modporterWriteLegacyBlockPos(position));"))
+        assertTrue(transformed.contains("private static BlockPos modporterReadLegacyBlockPos(CompoundTag tag)"))
+        assertTrue(transformed.contains("private static CompoundTag modporterWriteLegacyBlockPos(BlockPos pos)"))
+        assertTrue(transformed.contains("tag.putInt(\"X\", pos.getX());"))
+        assertFalse(transformed.contains("NbtUtils.readBlockPos"))
+        assertFalse(transformed.contains("NbtUtils.writeBlockPos"))
+        assertFalse(transformed.contains("import net.minecraft.nbt.NbtUtils;"))
+    }
+
+    @Test
     fun `migrates legacy pack resource APIs to resources supplier adapters`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

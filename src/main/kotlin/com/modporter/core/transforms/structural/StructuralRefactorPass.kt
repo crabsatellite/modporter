@@ -7831,6 +7831,16 @@ $fields
         return JavaInheritanceIndex(directSuperByClass)
     }
 
+    private fun collectJavaClassNamesExtending(
+        javaFiles: List<Path>,
+        baseTypes: Set<String>,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): Set<String> =
+        javaFiles.flatMap { javaFile -> collectJavaClassDeclarations(javaFile.readText()) }
+            .filter { declaration -> javaClassExtendsAny(declaration, baseTypes, javaInheritanceIndex) }
+            .map { it.name }
+            .toSet()
+
     private fun collectJavaClassDeclarations(source: String): List<JavaClassDeclaration> {
         val classPattern = Regex(
             """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*class\s+([A-Za-z_$][\w$]*)(?:\s*<[^>{}]+>)?\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\b[^{]*\{"""
@@ -7928,6 +7938,7 @@ $fields
         val holderLookupCompoundTagMethods = collectHolderLookupCompoundTagMethods(javaFiles)
         val legacyPlacementBanBaseClasses = collectLegacyPlacementBanBaseClasses(javaFiles)
         val legacyPlacementBanBuilderClasses = collectLegacyPlacementBanBuilderClasses(javaFiles)
+        val savedDataClassNames = collectJavaClassNamesExtending(javaFiles, setOf("SavedData"), javaInheritanceIndex)
         val modId = detectModId(projectDir) ?: projectMetadataModId(projectDir)
         val generatedCompatPackage = detectGeneratedCompatPackage(projectDir)
         val deferredHolderFields = collectDeferredHolderFields(srcDir)
@@ -8373,7 +8384,8 @@ $fields
                     legacyPlacementBanBaseClasses,
                     legacyPlacementBanBuilderClasses,
                     modId.orEmpty(),
-                    generatedCompatPackage
+                    generatedCompatPackage,
+                    savedDataClassNames
                 )
                 if (vanilla121Migrated != text) {
                     changes.add(Change(
@@ -13101,7 +13113,8 @@ ${indent}}
         legacyPlacementBanBaseClasses: Set<String> = emptySet(),
         legacyPlacementBanBuilderClasses: Set<String> = emptySet(),
         modId: String = "",
-        generatedCompatPackage: String = ""
+        generatedCompatPackage: String = "",
+        savedDataClassNames: Set<String> = emptySet()
     ): String {
         var result = source
         var needsEntityTypeTags = false
@@ -13276,8 +13289,11 @@ ${indent}}
         result = migrateLegacyMushroomBlockConstructorOrder(result)
         result = migrateLegacyVanillaBlockConstructors121(result)
         result = migrateLegacyGameEventConstructors(result)
+        result = migrateLegacyNbtUtilsBlockPosCompoundSource(result)
+        result = migrateLegacySavedDataApis(result, savedDataClassNames, javaInheritanceIndex)
         result = migrateDefaultLootTableResourceKeys(result)
         result = migrateContainerEntityLootTableResourceKeys(result)
+        result = migrateRandomizableContainerLootTableCalls(result)
         result = migrateLegacyLootTableKeyFields(result)
         result = migrateLargeFireballVec3Constructors(result)
         result = migrateLegacySignBlockConstructors(result)
@@ -23083,6 +23099,149 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         return null
     }
 
+    private fun migrateLegacyNbtUtilsBlockPosCompoundSource(source: String): String {
+        if (!source.contains("NbtUtils.readBlockPos(")) return source
+
+        val readMigrated = replaceNbtUtilsBlockPosCall(source, "readBlockPos", "modporterReadLegacyBlockPos")
+        if (readMigrated == source) return source
+
+        val writeMigrated = replaceNbtUtilsBlockPosCall(readMigrated, "writeBlockPos", "modporterWriteLegacyBlockPos")
+        var result = addLegacyBlockPosNbtHelpers(writeMigrated, needsWriteHelper = writeMigrated != readMigrated)
+        result = addImportIfMissing(result, "net.minecraft.core.BlockPos")
+        if (!Regex("""(?m)^[ \t]*import\s+net\.minecraft\.nbt\.\*;\s*$""").containsMatchIn(result)) {
+            result = addImportIfMissing(result, "net.minecraft.nbt.CompoundTag")
+        }
+        val withoutNbtUtilsImport = removeImport(result, "net.minecraft.nbt.NbtUtils")
+        if (!Regex("""\bNbtUtils\b""").containsMatchIn(withoutNbtUtilsImport)) {
+            result = withoutNbtUtilsImport
+        }
+        return result
+    }
+
+    private fun replaceNbtUtilsBlockPosCall(source: String, methodName: String, replacementName: String): String {
+        val token = "NbtUtils.$methodName("
+        val migrated = StringBuilder()
+        var cursor = 0
+        var changed = false
+        while (cursor < source.length) {
+            val tokenIndex = source.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + "NbtUtils.$methodName".length
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen < 0) {
+                break
+            }
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (args.size != 1) {
+                migrated.append(source, cursor, closeParen + 1)
+                cursor = closeParen + 1
+                continue
+            }
+            migrated.append(source, cursor, tokenIndex)
+            migrated.append("$replacementName(${args[0].trim()})")
+            cursor = closeParen + 1
+            changed = true
+        }
+        if (!changed) return source
+        migrated.append(source, cursor, source.length)
+        return migrated.toString()
+    }
+
+    private fun addLegacyBlockPosNbtHelpers(source: String, needsWriteHelper: Boolean): String {
+        if (source.contains("modporterReadLegacyBlockPos(CompoundTag tag)")) return source
+
+        val writeHelper = if (needsWriteHelper) """
+
+    private static CompoundTag modporterWriteLegacyBlockPos(BlockPos pos) {
+        CompoundTag tag = new CompoundTag();
+        tag.putInt("X", pos.getX());
+        tag.putInt("Y", pos.getY());
+        tag.putInt("Z", pos.getZ());
+        return tag;
+    }
+""".trimEnd() else ""
+        val helpers = """
+
+    private static BlockPos modporterReadLegacyBlockPos(CompoundTag tag) {
+        return new BlockPos(tag.getInt("X"), tag.getInt("Y"), tag.getInt("Z"));
+    }$writeHelper
+""".trimEnd()
+        return insertBeforeLastClassBrace(source, helpers)
+    }
+
+    private fun migrateLegacySavedDataApis(
+        source: String,
+        savedDataClassNames: Set<String>,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String {
+        if (!source.contains("SavedData") && !source.contains("computeIfAbsent(")) return source
+
+        val localSavedDataClasses = collectJavaClassDeclarations(source)
+            .filter { declaration -> javaClassExtendsAny(declaration, setOf("SavedData"), javaInheritanceIndex) }
+            .map { it.name }
+            .toSet()
+        val knownSavedDataClasses = savedDataClassNames + localSavedDataClasses
+        if (knownSavedDataClasses.isEmpty()) return source
+
+        val id = """[A-Za-z_$][\w$]*"""
+        var result = source
+        var needsHolderLookup = false
+        var needsSavedData = false
+
+        localSavedDataClasses.forEach { className ->
+            result = Regex("""public\s+static\s+${Regex.escape(className)}\s+load\s*\(\s*CompoundTag\s+($id)\s*\)""")
+                .replace(result) { match ->
+                    needsHolderLookup = true
+                    "public static $className load(CompoundTag ${match.groupValues[1]}, HolderLookup.Provider registries)"
+                }
+        }
+
+        if (localSavedDataClasses.isNotEmpty()) {
+            result = Regex("""public\s+CompoundTag\s+save\s*\(\s*CompoundTag\s+($id)\s*\)""")
+                .replace(result) { match ->
+                    needsHolderLookup = true
+                    "public CompoundTag save(CompoundTag ${match.groupValues[1]}, HolderLookup.Provider registries)"
+                }
+        }
+
+        result = rewriteJavaCall(result, "computeIfAbsent") { receiver, args ->
+            if (args.size != 3) return@rewriteJavaCall null
+            val loadReference = parseSimpleMethodReference(args[0]) ?: return@rewriteJavaCall null
+            if (loadReference.member != "load") return@rewriteJavaCall null
+            val supplierReference = parseSimpleMethodReference(args[1]) ?: return@rewriteJavaCall null
+            if (loadReference.owner != supplierReference.owner) return@rewriteJavaCall null
+            if (loadReference.owner.substringAfterLast('.') !in knownSavedDataClasses) return@rewriteJavaCall null
+
+            needsSavedData = true
+            "$receiver.computeIfAbsent(new SavedData.Factory<>(${supplierReference.source}, ${loadReference.source}), ${args[2].trim()})"
+        }
+
+        if (needsHolderLookup) {
+            result = addImportIfMissing(result, "net.minecraft.core.HolderLookup")
+        }
+        if (needsSavedData) {
+            result = addImportIfMissing(result, "net.minecraft.world.level.saveddata.SavedData")
+        }
+        return result
+    }
+
+    private data class SimpleMethodReference(
+        val owner: String,
+        val member: String,
+        val source: String
+    )
+
+    private fun parseSimpleMethodReference(expression: String): SimpleMethodReference? {
+        val match = Regex("""^\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*::\s*([A-Za-z_$][\w$]*|new)\s*$""")
+            .find(expression)
+            ?: return null
+        return SimpleMethodReference(
+            owner = match.groupValues[1],
+            member = match.groupValues[2],
+            source = "${match.groupValues[1]}::${match.groupValues[2]}"
+        )
+    }
+
     private fun migrateDefaultLootTableResourceKeys(source: String): String {
         if (!source.contains("getDefaultLootTable()") || !source.contains("ResourceLocation")) return source
         var result = Regex("""\b(public|protected)\s+ResourceLocation\s+getDefaultLootTable\s*\(\s*\)""")
@@ -23093,6 +23252,22 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
             val withoutResourceLocation = removeImport(result, "net.minecraft.resources.ResourceLocation")
             if (!Regex("""\bResourceLocation\b""").containsMatchIn(withoutResourceLocation)) {
                 result = withoutResourceLocation
+            }
+        }
+        return result
+    }
+
+    private fun migrateRandomizableContainerLootTableCalls(source: String): String {
+        if (!source.contains("RandomizableContainerBlockEntity.setLootTable(")) return source
+        var result = rewriteJavaCall(source, "setLootTable") { receiver, args ->
+            if (receiver != "RandomizableContainerBlockEntity" || args.size != 4) return@rewriteJavaCall null
+            "RandomizableContainer.setBlockEntityLootTable(${args.joinToString(", ") { it.trim() }})"
+        }
+        if (result != source) {
+            result = addImportIfMissing(result, "net.minecraft.world.RandomizableContainer")
+            val withoutBlockEntityImport = removeImport(result, "net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity")
+            if (!Regex("""\bRandomizableContainerBlockEntity\b""").containsMatchIn(withoutBlockEntityImport)) {
+                result = withoutBlockEntityImport
             }
         }
         return result
