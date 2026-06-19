@@ -14593,6 +14593,62 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy mob category create calls to enum extension metadata`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val metaInf = tempDir.resolve("src/main/resources/META-INF")
+        srcDir.createDirectories()
+        metaInf.createDirectories()
+        metaInf.resolve("neoforge.mods.toml").writeText("""
+            modLoader="javafml"
+
+            [[mods]]
+            modId="examplemod"
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMobCategories.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.MobCategory;
+
+            public class ExampleMobCategories {
+                public static final MobCategory SKY_MONSTER = MobCategory.create("SKY_MONSTER", "sky_monster", 4, false, false, 128);
+                public static final MobCategory AERWHALE = MobCategory.create("AERWHALE", "aerwhale", 1, true, false, 128);
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val categories = srcDir.resolve("ExampleMobCategories.java").readText()
+        val helper = srcDir.resolve("NeoForgeEnumExtensions.java").readText()
+        val enumExtensions = metaInf.resolve("enumextensions.json").readText()
+        val toml = metaInf.resolve("neoforge.mods.toml").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(categories.contains("MobCategory.valueOf(\"EXAMPLEMOD_SKY_MONSTER\")"))
+        assertTrue(categories.contains("MobCategory.valueOf(\"EXAMPLEMOD_AERWHALE\")"))
+        assertFalse(categories.contains("MobCategory.create("))
+        assertTrue(helper.contains("public static Object MobCategory_EXAMPLEMOD_SKY_MONSTER(int idx, Class<?> type)"))
+        assertTrue(helper.contains("case 0 -> \"sky_monster\";"))
+        assertTrue(helper.contains("case 1 -> 4;"))
+        assertTrue(helper.contains("case 2 -> false;"))
+        assertTrue(helper.contains("case 3 -> false;"))
+        assertTrue(helper.contains("case 4 -> 128;"))
+        assertTrue(enumExtensions.contains("\"enum\": \"net/minecraft/world/entity/MobCategory\""))
+        assertTrue(enumExtensions.contains("\"constructor\": \"(Ljava/lang/String;IZZI)V\""))
+        assertTrue(enumExtensions.contains("\"name\": \"EXAMPLEMOD_SKY_MONSTER\""))
+        assertTrue(toml.contains("enumExtensions=\"META-INF/enumextensions.json\""))
+        assertTrue(toml.indexOf("[[mods]]") < toml.indexOf("enumExtensions=\"META-INF/enumextensions.json\""), toml)
+        assertTrue(toml.indexOf("enumExtensions=\"META-INF/enumextensions.json\"") < toml.indexOf("modId=\"examplemod\""), toml)
+    }
+
+    @Test
     fun `migrates legacy sleeping time check event result API by event parameter type`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

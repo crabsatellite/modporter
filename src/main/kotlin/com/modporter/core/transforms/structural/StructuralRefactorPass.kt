@@ -280,6 +280,13 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            val mobCategoryEnumExtensionChanges = migrateLegacyMobCategoryEnumExtensions(projectDir, dryRun)
+            changes.addAll(mobCategoryEnumExtensionChanges)
+        } catch (e: Exception) {
+            errors.add("Mob category enum extension migration error: ${e.message}")
+        }
+
+        try {
             val imageButtonChanges = migrateLegacyImageButtonConstructors(projectDir, dryRun)
             changes.addAll(imageButtonChanges)
         } catch (e: Exception) {
@@ -9492,6 +9499,18 @@ $fields
         val iconExpressions: List<String>
     )
 
+    private data class LegacyMobCategoryExtension(
+        val sourceFile: Path,
+        val packageName: String,
+        val enumName: String,
+        val methodName: String,
+        val serializedName: String,
+        val maxInstances: String,
+        val friendly: String,
+        val persistent: String,
+        val despawnDistance: String
+    )
+
     private data class LegacyRegistryBackedMethod(
         val owner: String,
         val name: String
@@ -9889,6 +9908,213 @@ $methods
       "enum": "net/minecraft/client/RecipeBookCategories",
       "name": "${extension.enumName}",
       "constructor": "(Ljava/util/function/Supplier;)V",
+      "parameters": {
+        "class": "$helperInternalName",
+        "method": "${extension.methodName}"
+      }
+    }"""
+    }
+
+    private fun migrateLegacyMobCategoryEnumExtensions(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+        val modId = detectModId(projectDir) ?: return changes
+        val enumPrefix = modId.uppercase().replace(Regex("""[^A-Z0-9_]+"""), "_").trim('_')
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .toList()
+        val extensions = linkedMapOf<String, LegacyMobCategoryExtension>()
+
+        javaFiles.forEach { javaFile ->
+            val original = javaFile.readText()
+            if (!original.contains("MobCategory.create(")) return@forEach
+            val packageName = packageNameOf(original)
+            var migrated = original
+            val replacements = mutableListOf<Pair<String, String>>()
+            var cursor = 0
+            while (true) {
+                val match = Regex("""MobCategory\.create\s*\(""").find(original, cursor) ?: break
+                val openParen = original.indexOf('(', match.range.last - 1)
+                val closeParen = if (openParen >= 0) findMatchingParen(original, openParen) else -1
+                if (closeParen < 0) {
+                    cursor = match.range.last + 1
+                    continue
+                }
+                val args = splitTopLevelJavaArgs(original.substring(openParen + 1, closeParen))
+                val extension = legacyMobCategoryExtension(args, enumPrefix, packageName, javaFile)
+                if (extension != null) {
+                    extensions.putIfAbsent(extension.enumName, extension)
+                    val callText = original.substring(match.range.first, closeParen + 1)
+                    replacements += callText to """MobCategory.valueOf("${extension.enumName}")"""
+                }
+                cursor = closeParen + 1
+            }
+            if (replacements.isNotEmpty()) {
+                replacements.forEach { (before, after) -> migrated = migrated.replace(before, after) }
+                if (migrated != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate legacy MobCategory.create() to NeoForge enum extension lookup",
+                        before = "MobCategory.create(name, serializedName, max, friendly, persistent, despawnDistance)",
+                        after = "MobCategory.valueOf(generated enum extension name)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-mobcategory-enum-extension"
+                    ))
+                    if (!dryRun) javaFile.writeText(migrated)
+                }
+            }
+        }
+
+        if (extensions.isEmpty()) return changes
+        extensions.values.groupBy { it.packageName }.forEach { (packageName, packageExtensions) ->
+            val helperClass = "NeoForgeEnumExtensions"
+            val helperFile = srcDir.resolve(packageName.replace('.', '/')).resolve("$helperClass.java")
+            val helperSource = mobCategoryEnumExtensionHelperSource(packageName, helperClass, packageExtensions)
+            changes.add(Change(
+                file = helperFile,
+                line = 0,
+                description = "Generate NeoForge enum extension parameter helper for legacy mob categories",
+                before = "(missing mob category enum extension helper)",
+                after = "$helperClass.java",
+                confidence = Confidence.HIGH,
+                ruleId = "struct-mobcategory-enum-extension-helper"
+            ))
+            if (!dryRun) {
+                helperFile.parent.createDirectories()
+                val merged = if (helperFile.exists()) {
+                    mergeMobCategoryEnumExtensionHelperMethods(helperFile.readText(), packageExtensions)
+                } else {
+                    helperSource
+                }
+                helperFile.writeText(merged)
+            }
+        }
+
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        val metaInf = resourcesDir.resolve("META-INF")
+        val enumExtensionFile = metaInf.resolve("enumextensions.json")
+        val entries = extensions.values.map { mobCategoryEnumExtensionJsonEntry(it) }
+        changes.add(Change(
+            file = enumExtensionFile,
+            line = 0,
+            description = "Declare NeoForge enum extension metadata for legacy mob categories",
+            before = "(missing mob category enum extension entries)",
+            after = "META-INF/enumextensions.json",
+            confidence = Confidence.HIGH,
+            ruleId = "struct-mobcategory-enum-extension-json"
+        ))
+        if (!dryRun) {
+            metaInf.createDirectories()
+            mergeEnumExtensionEntries(enumExtensionFile, entries)
+            ensureEnumExtensionsTomlEntry(metaInf)
+        }
+        return changes
+    }
+
+    private fun legacyMobCategoryExtension(
+        args: List<String>,
+        enumPrefix: String,
+        packageName: String,
+        sourceFile: Path
+    ): LegacyMobCategoryExtension? {
+        if (args.size != 6) return null
+        val enumNameArgument = javaStringLiteralValue(args[0].trim()) ?: return null
+        val serializedName = javaStringLiteralValue(args[1].trim()) ?: return null
+        val maxInstances = args[2].trim()
+        val friendly = args[3].trim()
+        val persistent = args[4].trim()
+        val despawnDistance = args[5].trim()
+        if (!isJavaIntegerLiteral(maxInstances) ||
+            friendly !in setOf("true", "false") ||
+            persistent !in setOf("true", "false") ||
+            !isJavaIntegerLiteral(despawnDistance)) {
+            return null
+        }
+        val rawEnumName = enumNameArgument.uppercase().replace(Regex("""[^A-Z0-9_]+"""), "_").trim('_')
+        if (rawEnumName.isBlank()) return null
+        val enumName = if (rawEnumName.startsWith("${enumPrefix}_")) rawEnumName else "${enumPrefix}_$rawEnumName"
+        val methodName = "MobCategory_${enumName}".replace(Regex("""[^A-Za-z0-9_]+"""), "_")
+        return LegacyMobCategoryExtension(
+            sourceFile = sourceFile,
+            packageName = packageName,
+            enumName = enumName,
+            methodName = methodName,
+            serializedName = serializedName,
+            maxInstances = maxInstances,
+            friendly = friendly,
+            persistent = persistent,
+            despawnDistance = despawnDistance
+        )
+    }
+
+    private fun javaStringLiteralValue(expression: String): String? {
+        val match = Regex("""^"((?:\\.|[^"\\])*)"$""").matchEntire(expression.trim()) ?: return null
+        return match.groupValues[1]
+    }
+
+    private fun isJavaIntegerLiteral(expression: String): Boolean =
+        Regex("""^[+-]?(?:0|[1-9][0-9]*)(?:[lL])?$""").matches(expression.trim())
+
+    private fun mobCategoryEnumExtensionHelperSource(
+        packageName: String,
+        helperClass: String,
+        extensions: List<LegacyMobCategoryExtension>
+    ): String {
+        val packageLine = if (packageName.isBlank()) "" else "package $packageName;\n\n"
+        val methods = extensions.joinToString("\n\n") { mobCategoryEnumExtensionMethod(it) }
+        return """${packageLine}@SuppressWarnings("unused")
+public final class $helperClass {
+	private $helperClass() {
+	}
+
+$methods
+}
+"""
+    }
+
+    private fun mobCategoryEnumExtensionMethod(extension: LegacyMobCategoryExtension): String {
+        return """
+	public static Object ${extension.methodName}(int idx, Class<?> type) {
+		return type.cast(switch (idx) {
+			case 0 -> "${extension.serializedName}";
+			case 1 -> ${extension.maxInstances};
+			case 2 -> ${extension.friendly};
+			case 3 -> ${extension.persistent};
+			case 4 -> ${extension.despawnDistance};
+			default -> throw new IllegalArgumentException("Unexpected parameter index: " + idx);
+		});
+	}
+        """.trimEnd()
+    }
+
+    private fun mergeMobCategoryEnumExtensionHelperMethods(
+        existing: String,
+        extensions: List<LegacyMobCategoryExtension>
+    ): String {
+        val missingMethods = extensions
+            .filterNot { existing.contains(" ${it.methodName}(int idx, Class<?> type)") }
+            .joinToString("\n\n") { mobCategoryEnumExtensionMethod(it) }
+        if (missingMethods.isBlank()) return existing
+        val insertIndex = existing.lastIndexOf('}')
+        return if (insertIndex >= 0) {
+            existing.substring(0, insertIndex).trimEnd() + "\n\n" + missingMethods + "\n" + existing.substring(insertIndex)
+        } else {
+            existing + "\n\n" + missingMethods
+        }
+    }
+
+    private fun mobCategoryEnumExtensionJsonEntry(extension: LegacyMobCategoryExtension): String {
+        val helperInternalName = if (extension.packageName.isBlank()) {
+            "NeoForgeEnumExtensions"
+        } else {
+            "${extension.packageName.replace('.', '/')}/NeoForgeEnumExtensions"
+        }
+        return """    {
+      "enum": "net/minecraft/world/entity/MobCategory",
+      "name": "${extension.enumName}",
+      "constructor": "(Ljava/lang/String;IZZI)V",
       "parameters": {
         "class": "$helperInternalName",
         "method": "${extension.methodName}"
