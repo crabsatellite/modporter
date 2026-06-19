@@ -2769,8 +2769,10 @@ class StructuralRefactorExtraTest {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val capabilityDir = srcDir.resolve("capability")
         val networkDir = srcDir.resolve("network/packet")
+        val perkDir = srcDir.resolve("perk")
         capabilityDir.createDirectories()
         networkDir.createDirectories()
+        perkDir.createDirectories()
 
         srcDir.resolve("ExampleMod.java").writeText("""
             package com.example;
@@ -2805,7 +2807,6 @@ class StructuralRefactorExtraTest {
         capabilityDir.resolve("SynchedDataCapability.java").writeText("""
             package com.example.capability;
 
-            import com.aetherteam.nitrogen.capability.INBTSynchable;
             import com.aetherteam.nitrogen.network.BasePacket;
             import com.example.network.ExamplePacketHandler;
             import com.example.network.packet.SynchedDataSyncPacket;
@@ -2831,7 +2832,7 @@ class StructuralRefactorExtraTest {
                 }
 
                 public void update(boolean value) {
-                    this.setSynched(INBTSynchable.Direction.CLIENT, "setValue", value);
+                    this.setSynched(Direction.CLIENT, "setValue", value);
                 }
 
                 public CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider) {
@@ -2911,6 +2912,9 @@ class StructuralRefactorExtraTest {
             import com.aetherteam.nitrogen.network.packet.SyncEntityPacket;
             import com.example.capability.SynchedData;
             import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraftforge.common.util.LazyOptional;
             import oshi.util.tuples.Quartet;
 
             public class SynchedDataSyncPacket extends SyncEntityPacket<SynchedData> {
@@ -2925,6 +2929,39 @@ class StructuralRefactorExtraTest {
                 public static SynchedDataSyncPacket decode(FriendlyByteBuf buf) {
                     return new SynchedDataSyncPacket(SyncEntityPacket.decodeEntityValues(buf));
                 }
+
+                @Override
+                public LazyOptional<SynchedData> getCapability(Entity entity) {
+                    return SynchedData.get((Player) entity);
+                }
+            }
+        """.trimIndent())
+        perkDir.resolve("ServerPerkData.java").writeText("""
+            package com.example.perk;
+
+            import com.aetherteam.nitrogen.network.BasePacket;
+            import java.util.Map;
+            import java.util.UUID;
+            import java.util.function.BiFunction;
+            import java.util.function.Function;
+
+            public class ServerPerkData<T> {
+                private final BiFunction<UUID, T, BasePacket> applyPacket;
+                private final Function<Map<UUID, T>, BasePacket> syncPacket;
+
+                public ServerPerkData(Function<ServerPerkData<T>, BiFunction<UUID, T, BasePacket>> applyPacket,
+                                      Function<ServerPerkData<T>, Function<Map<UUID, T>, BasePacket>> syncPacket) {
+                    this.applyPacket = applyPacket.apply(this);
+                    this.syncPacket = syncPacket.apply(this);
+                }
+
+                public BasePacket getApplyPacket(UUID uuid, T value) {
+                    return this.applyPacket.apply(uuid, value);
+                }
+
+                public BasePacket getSyncPacket(Map<UUID, T> values) {
+                    return this.syncPacket.apply(values);
+                }
             }
         """.trimIndent())
 
@@ -2934,6 +2971,7 @@ class StructuralRefactorExtraTest {
         val impl = capabilityDir.resolve("SynchedDataCapability.java").readText()
         val hooks = capabilityDir.resolve("SynchedDataHooks.java").readText()
         val packet = networkDir.resolve("SynchedDataSyncPacket.java").readText()
+        val serverPerkData = perkDir.resolve("ServerPerkData.java").readText()
         val mod = srcDir.resolve("ExampleMod.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-custom-entity-capabilities" })
@@ -2950,13 +2988,27 @@ class StructuralRefactorExtraTest {
         assertTrue(api.contains("player.getData(ExampleCapabilities.PLAYER_DATA.get())"), api)
         assertTrue(impl.contains("public SyncPacket getSyncPacket(int entityID, String key, Type type, Object value)"), impl)
         assertTrue(impl.contains("new SynchedDataSyncPacket(entityID, key, type, value)"), impl)
-        assertTrue(impl.contains("this.setSynched(this.getPlayer().getId(), INBTSynchable.Direction.CLIENT, \"setValue\", value);"), impl)
+        assertTrue(impl.contains("this.setSynched(this.getPlayer().getId(), Direction.CLIENT, \"setValue\", value);"), impl)
         assertFalse(impl.contains("getPacketChannel"), impl)
         assertFalse(impl.contains("BasePacket"), impl)
         assertTrue(hooks.contains("synchedData.setSynched(synchedData.getPlayer().getId(), INBTSynchable.Direction.CLIENT, \"setValue\", value);"), hooks)
         assertTrue(hooks.contains("data.setSynched(data.getPlayer().getId(), INBTSynchable.Direction.CLIENT, \"setValue\", value);"), hooks)
         assertTrue(packet.contains("import com.aetherteam.nitrogen.attachment.INBTSynchable;"), packet)
         assertTrue(packet.contains("RegistryFriendlyByteBuf buf"), packet)
+        assertTrue(packet.contains("CustomPacketPayload.Type<SynchedDataSyncPacket> TYPE"), packet)
+        assertTrue(packet.contains("ResourceLocation.fromNamespaceAndPath(\"examplemod\", \"synched_data_sync\")"), packet)
+        assertTrue(packet.contains("public net.minecraft.network.protocol.common.custom.CustomPacketPayload.Type<? extends net.minecraft.network.protocol.common.custom.CustomPacketPayload> type()"), packet)
+        assertTrue(packet.contains("public java.util.function.Supplier<net.neoforged.neoforge.attachment.AttachmentType<com.example.capability.SynchedData>> getAttachment()"), packet)
+        assertTrue(packet.contains("return com.example.capability.ExampleCapabilities.PLAYER_DATA;"), packet)
+        assertFalse(packet.contains("getCapability"), packet)
+        assertFalse(packet.contains("LazyOptional"), packet)
+        assertTrue(serverPerkData.contains("import net.minecraft.network.protocol.common.custom.CustomPacketPayload;"), serverPerkData)
+        assertTrue(serverPerkData.contains("BiFunction<UUID, T, CustomPacketPayload> applyPacket"), serverPerkData)
+        assertTrue(serverPerkData.contains("Function<Map<UUID, T>, CustomPacketPayload> syncPacket"), serverPerkData)
+        assertTrue(serverPerkData.contains("public CustomPacketPayload getSyncPacket(Map<UUID, T> values)"), serverPerkData)
+        assertFalse(serverPerkData.contains("BasePacket"), serverPerkData)
+        assertFalse(serverPerkData.contains("import com.aetherteam.nitrogen.network.packet.SyncPacket;"), serverPerkData)
+        assertFalse(serverPerkData.contains(" SyncPacket"), serverPerkData)
         assertTrue(mod.contains("ExampleCapabilities.registerAttachments(modEventBus);"), mod)
     }
 

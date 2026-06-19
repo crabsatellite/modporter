@@ -4864,9 +4864,24 @@ $helpers
         return result
     }
 
+    private data class NitrogenAttachmentSupplier(
+        val attachmentType: String,
+        val packageName: String,
+        val ownerType: String,
+        val fieldName: String
+    ) {
+        fun referenceFrom(packageName: String): String =
+            if (this.packageName.isBlank() || this.packageName == packageName) {
+                "$ownerType.$fieldName"
+            } else {
+                "${this.packageName}.$ownerType.$fieldName"
+            }
+    }
+
     private fun migrateNitrogenAttachmentApi(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return emptyList()
+        val modId = detectModId(projectDir)
         val javaFiles = Files.walk(srcDir)
             .filter { it.extension == "java" }
             .toList()
@@ -4880,10 +4895,14 @@ $helpers
                 ?.get(1)
         }.toSet()
         val syncOwnerAccessors = collectNitrogenSyncOwnerAccessors(javaFiles)
+        val attachmentSuppliers = collectNitrogenAttachmentSuppliers(javaFiles)
+        val nitrogenSynchableTypes = collectNitrogenSynchableTypes(javaFiles)
 
         for (javaFile in javaFiles) {
             val original = javaFile.readText()
             if (!original.contains("com.aetherteam.nitrogen.capability.INBTSynchable") &&
+                !original.contains("com.aetherteam.nitrogen.network.BasePacket") &&
+                !original.contains("BasePacket") &&
                 !original.contains("getSyncPacket(") &&
                 !original.contains("setSynched(") &&
                 !original.contains("forceSync(")) {
@@ -4895,19 +4914,8 @@ $helpers
                 "com.aetherteam.nitrogen.capability.INBTSynchable",
                 "com.aetherteam.nitrogen.attachment.INBTSynchable"
             )
-            if (modified.contains("getSyncPacket(")) {
-                modified = modified.replace(
-                    "import com.aetherteam.nitrogen.network.BasePacket;",
-                    "import com.aetherteam.nitrogen.network.packet.SyncPacket;"
-                )
-                modified = modified.replace(
-                    "com.aetherteam.nitrogen.network.BasePacket",
-                    "com.aetherteam.nitrogen.network.packet.SyncPacket"
-                )
-                if (modified.contains("SyncPacket")) {
-                    modified = Regex("""\bBasePacket\b""").replace(modified, "SyncPacket")
-                }
-            }
+            val hasAttachmentSyncPacketMethod = hasNitrogenAttachmentSyncPacketMethod(modified, nitrogenSynchableTypes)
+            modified = rewriteNitrogenBasePacketReferences(modified, hasAttachmentSyncPacketMethod)
 
             val synchableGeneric = Regex("""\bINBTSynchable\s*<\s*([^>]+)\s*>""")
             if (synchableGeneric.containsMatchIn(modified)) {
@@ -4924,6 +4932,15 @@ $helpers
                 )
                 modified = Regex("""\bFriendlyByteBuf\s+([A-Za-z_$][\w$]*)""")
                     .replace(modified, "RegistryFriendlyByteBuf $1")
+                modified = removeMethodByName(modified, "getCapability")
+                modified = ensureNitrogenSyncPacketAttachmentGetter(modified, attachmentSuppliers)
+                modified = ensureNitrogenSyncPacketPayloadType(modified, modId)
+                modified = removeUnusedSimpleImports(modified, listOf(
+                    "net.minecraftforge.common.util.LazyOptional",
+                    "net.minecraft.world.entity.Entity",
+                    "net.minecraft.world.level.Level"
+                ))
+                modified = removeUnusedImportsBySimpleNamePattern(modified, Regex("""LazyOptional"""))
             }
 
             modified = rewriteNitrogenGetSyncPacketSignature(modified, entitySyncPackets)
@@ -4999,6 +5016,235 @@ $helpers
             }
         }
         return changes
+    }
+
+    private fun hasNitrogenAttachmentSyncPacketMethod(source: String, nitrogenSynchableTypes: Set<String>): Boolean {
+        if (!source.contains("getSyncPacket(")) return false
+        val hasMatchingSignature = Regex(
+            """\bgetSyncPacket\s*\(\s*String\s+[A-Za-z_$][\w$]*\s*,\s*(?:INBTSynchable\.)?Type\s+[A-Za-z_$][\w$]*\s*,\s*Object\s+[A-Za-z_$][\w$]*\s*\)"""
+        ).containsMatchIn(source)
+        if (!hasMatchingSignature) return false
+        if (source.contains("INBTSynchable")) return true
+        val packageName = packageNameOf(source)
+        val imports = javaNonStaticImports(source)
+        return extractJavaTopLevelSuperTypes(source).any { superType ->
+            resolveJavaTypeReference(superType, packageName, imports) in nitrogenSynchableTypes
+        }
+    }
+
+    private fun rewriteNitrogenBasePacketReferences(source: String, attachmentSyncPacketMethod: Boolean): String {
+        if (!source.contains("BasePacket") && !source.contains("com.aetherteam.nitrogen.network.BasePacket")) return source
+        val targetImport = if (attachmentSyncPacketMethod) {
+            "com.aetherteam.nitrogen.network.packet.SyncPacket"
+        } else {
+            "net.minecraft.network.protocol.common.custom.CustomPacketPayload"
+        }
+        val targetType = targetImport.substringAfterLast('.')
+        var result = source.replace(
+            "import com.aetherteam.nitrogen.network.BasePacket;",
+            "import $targetImport;"
+        )
+        result = result.replace(
+            "com.aetherteam.nitrogen.network.BasePacket",
+            targetImport
+        )
+        if (result.contains(targetImport) || result.contains(targetType)) {
+            result = Regex("""\bBasePacket\b""").replace(result, targetType)
+        }
+        return result
+    }
+
+    private fun collectNitrogenAttachmentSuppliers(javaFiles: List<Path>): Map<String, NitrogenAttachmentSupplier> {
+        val suppliers = mutableListOf<NitrogenAttachmentSupplier>()
+        for (javaFile in javaFiles) {
+            val source = javaFile.readText()
+            if (!source.contains("AttachmentType<")) continue
+            val packageName = packageNameOf(source)
+            val ownerType = javaTopLevelTypeName(source) ?: continue
+            val imports = javaNonStaticImports(source)
+
+            fun addSupplier(typeName: String, fieldName: String) {
+                val resolvedType = resolveJavaTypeReference(typeName, packageName, imports) ?: return
+                suppliers += NitrogenAttachmentSupplier(
+                    attachmentType = resolvedType,
+                    packageName = packageName,
+                    ownerType = ownerType,
+                    fieldName = fieldName
+                )
+            }
+
+            Regex(
+                """(?m)\bpublic\s+static\s+final\s+(?:java\.util\.function\.)?Supplier\s*<\s*(?:net\.neoforged\.neoforge\.attachment\.)?AttachmentType\s*<\s*([^<>]+)\s*>\s*>\s+([A-Za-z_$][\w$]*)\s*="""
+            ).findAll(source).forEach { match ->
+                addSupplier(match.groupValues[1], match.groupValues[2])
+            }
+            Regex(
+                """(?m)\bpublic\s+static\s+final\s+(?:net\.neoforged\.neoforge\.registries\.)?DeferredHolder\s*<\s*(?:net\.neoforged\.neoforge\.attachment\.)?AttachmentType\s*<\s*\?\s*>\s*,\s*(?:net\.neoforged\.neoforge\.attachment\.)?AttachmentType\s*<\s*([^<>]+)\s*>\s*>\s+([A-Za-z_$][\w$]*)\s*="""
+            ).findAll(source).forEach { match ->
+                addSupplier(match.groupValues[1], match.groupValues[2])
+            }
+            Regex(
+                """(?m)\bpublic\s+static\s+final\s+(?:net\.minecraftforge\.registries\.)?RegistryObject\s*<\s*(?:net\.neoforged\.neoforge\.attachment\.)?AttachmentType\s*<\s*([^<>]+)\s*>\s*>\s+([A-Za-z_$][\w$]*)\s*="""
+            ).findAll(source).forEach { match ->
+                addSupplier(match.groupValues[1], match.groupValues[2])
+            }
+        }
+        return suppliers
+            .groupBy { it.attachmentType }
+            .mapNotNull { (typeName, candidates) -> candidates.singleOrNull()?.let { typeName to it } }
+            .toMap()
+    }
+
+    private fun ensureNitrogenSyncPacketAttachmentGetter(
+        source: String,
+        attachmentSuppliers: Map<String, NitrogenAttachmentSupplier>
+    ): String {
+        if (source.contains("getAttachment(")) return source
+        val syncPacketType = Regex("""\bextends\s+Sync(?:Entity|Level)Packet\s*<\s*([^>]+)\s*>""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
+            ?: return source
+        val packageName = packageNameOf(source)
+        val imports = javaNonStaticImports(source)
+        val attachmentType = resolveJavaTypeReference(syncPacketType, packageName, imports) ?: return source
+        val supplier = attachmentSuppliers[attachmentType] ?: return source
+        val className = javaTopLevelTypeName(source) ?: return source
+        val typeStart = findTypeDeclarationStart(source, className) ?: return source
+        val openBrace = source.indexOf('{', typeStart)
+        if (openBrace < 0) return source
+        val closeBrace = findMatchingBrace(source, openBrace)
+        if (closeBrace <= openBrace) return source
+        val insertion = """
+
+    @Override
+    public java.util.function.Supplier<net.neoforged.neoforge.attachment.AttachmentType<$attachmentType>> getAttachment() {
+        return ${supplier.referenceFrom(packageName)};
+    }
+""".trimEnd()
+        return source.substring(0, closeBrace).trimEnd() + "\n" + insertion + "\n" + source.substring(closeBrace)
+    }
+
+    private fun ensureNitrogenSyncPacketPayloadType(source: String, modId: String?): String {
+        if (modId.isNullOrBlank()) return source
+        if (!Regex("""\bextends\s+Sync(?:Entity|Level)Packet\s*<""").containsMatchIn(source)) return source
+        val className = javaTopLevelTypeName(source) ?: return source
+        val typeStart = findTypeDeclarationStart(source, className) ?: return source
+        val openBrace = source.indexOf('{', typeStart)
+        if (openBrace < 0) return source
+        var result = source
+        if (!Regex("""\bTYPE\s*=""").containsMatchIn(result) ||
+            !Regex("""CustomPacketPayload\.Type\s*<\s*${Regex.escape(className)}\s*>|Type\s*<\s*${Regex.escape(className)}\s*>""").containsMatchIn(result)) {
+            val typeField = """
+
+    public static final net.minecraft.network.protocol.common.custom.CustomPacketPayload.Type<$className> TYPE =
+            new net.minecraft.network.protocol.common.custom.CustomPacketPayload.Type<>(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath("$modId", "${payloadPathName(className)}"));
+""".trimEnd()
+            result = result.substring(0, openBrace + 1) + typeField + result.substring(openBrace + 1)
+        }
+        if (Regex("""\btype\s*\(\s*\)""").containsMatchIn(result)) return result
+        val refreshedOpenBrace = result.indexOf('{', findTypeDeclarationStart(result, className) ?: return result)
+        if (refreshedOpenBrace < 0) return result
+        val closeBrace = findMatchingBrace(result, refreshedOpenBrace)
+        if (closeBrace <= refreshedOpenBrace) return result
+        val typeMethod = """
+
+    @Override
+    public net.minecraft.network.protocol.common.custom.CustomPacketPayload.Type<? extends net.minecraft.network.protocol.common.custom.CustomPacketPayload> type() {
+        return TYPE;
+    }
+""".trimEnd()
+        return result.substring(0, closeBrace).trimEnd() + "\n" + typeMethod + "\n" + result.substring(closeBrace)
+    }
+
+    private fun collectNitrogenSynchableTypes(javaFiles: List<Path>): Set<String> {
+        data class TypeInfo(
+            val fqn: String,
+            val packageName: String,
+            val imports: Map<String, String>,
+            val superTypes: List<String>
+        )
+
+        val types = javaFiles.mapNotNull { javaFile ->
+            val source = javaFile.readText()
+            val typeName = javaTopLevelTypeName(source) ?: return@mapNotNull null
+            val packageName = packageNameOf(source)
+            val fqn = if (packageName.isBlank()) typeName else "$packageName.$typeName"
+            TypeInfo(
+                fqn = fqn,
+                packageName = packageName,
+                imports = javaNonStaticImports(source),
+                superTypes = extractJavaTopLevelSuperTypes(source)
+            )
+        }
+        val synchableTypes = linkedSetOf(
+            "com.aetherteam.nitrogen.capability.INBTSynchable",
+            "com.aetherteam.nitrogen.attachment.INBTSynchable"
+        )
+        var changed = true
+        while (changed) {
+            changed = false
+            for (type in types) {
+                if (type.fqn in synchableTypes) continue
+                val implementsSynchable = type.superTypes.any { superType ->
+                    val resolved = resolveJavaTypeReference(superType, type.packageName, type.imports)
+                    resolved in synchableTypes || superType.substringBefore('<').substringAfterLast('.') == "INBTSynchable"
+                }
+                if (implementsSynchable) {
+                    synchableTypes += type.fqn
+                    changed = true
+                }
+            }
+        }
+        return synchableTypes
+    }
+
+    private fun extractJavaTopLevelSuperTypes(source: String): List<String> {
+        val className = javaTopLevelTypeName(source) ?: return emptyList()
+        val typeStart = Regex(
+            """\b(?:class|interface|record)\s+${Regex.escape(className)}(?:\s*<[^>{};]+>)?"""
+        ).find(source)?.range?.first ?: return emptyList()
+        val openBrace = source.indexOf('{', typeStart)
+        if (openBrace < 0) return emptyList()
+        val header = source.substring(typeStart, openBrace)
+        val superTypes = mutableListOf<String>()
+        Regex("""\bimplements\s+(.+)$""").find(header)?.let { match ->
+            superTypes += splitTopLevelJavaArgs(match.groupValues[1]).map { it.trim() }
+        }
+        val beforeImplements = header.substringBefore(" implements ")
+        Regex("""\bextends\s+(.+)$""").find(beforeImplements)?.let { match ->
+            superTypes += splitTopLevelJavaArgs(match.groupValues[1]).map { it.trim() }
+        }
+        return superTypes.filter { it.isNotBlank() }
+    }
+
+    private fun javaNonStaticImports(source: String): Map<String, String> {
+        val imports = linkedMapOf<String, String>()
+        Regex("""(?m)^[ \t]*import\s+(?!static\b)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\s*;""")
+            .findAll(source)
+            .forEach { match ->
+                val importName = match.groupValues[1]
+                imports[importName.substringAfterLast('.')] = importName
+            }
+        return imports
+    }
+
+    private fun resolveJavaTypeReference(
+        rawType: String,
+        packageName: String,
+        imports: Map<String, String>
+    ): String? {
+        val normalized = normalizeJavaTypeReference(rawType) ?: return null
+        if (normalized.contains(".")) {
+            val firstSegment = normalized.substringBefore('.')
+            imports[firstSegment]?.let { imported ->
+                return "$imported.${normalized.substringAfter('.')}"
+            }
+            return normalized
+        }
+        imports[normalized]?.let { return it }
+        return if (packageName.isBlank()) normalized else "$packageName.$normalized"
     }
 
     private fun collectNitrogenSyncOwnerAccessors(javaFiles: List<Path>): Map<String, String> {
