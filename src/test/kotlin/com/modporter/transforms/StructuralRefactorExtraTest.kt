@@ -21089,8 +21089,87 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
 
             public class PlacementRegistry {
+                public static final PlacementModifierType<ConfigFilter> CONFIG = register(ResourceLocation.parse("example:config"), ConfigFilter.CODEC);
+
                 public static <P extends PlacementModifier> PlacementModifierType<P> register(ResourceLocation name, Codec<P> codec) {
                     return Registry.register(BuiltInRegistries.PLACEMENT_MODIFIER_TYPE, name, () -> codec);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ConfigFilter.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.DataResult;
+            import net.minecraft.world.level.levelgen.placement.PlacementContext;
+            import net.minecraft.world.level.levelgen.placement.PlacementFilter;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+
+            public class ConfigFilter extends PlacementFilter {
+                public static final Codec<ConfigFilter> CODEC = Codec.STRING.comapFlatMap(ConfigFilter::buildDeserialization, filter -> ConfigCodecUtil.serialize(filter.config));
+
+                private final ConfigValue config;
+
+                public ConfigFilter(ConfigValue config) {
+                    this.config = config;
+                }
+
+                @Override
+                protected boolean shouldPlace(PlacementContext context, net.minecraft.util.RandomSource random, net.minecraft.core.BlockPos pos) {
+                    return true;
+                }
+
+                @Override
+                public PlacementModifierType<?> type() {
+                    return PlacementRegistry.CONFIG;
+                }
+
+                private static DataResult<ConfigFilter> buildDeserialization(String configId) {
+                    return DataResult.success(new ConfigFilter(new ConfigValue()));
+                }
+
+                private static class ConfigValue {
+                }
+
+                private static class ConfigCodecUtil {
+                    static String serialize(ConfigValue config) {
+                        return "config";
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TreeDecoratorRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecoratorType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class TreeDecoratorRegistry {
+                public static final DeferredRegister<TreeDecoratorType<?>> TREE_DECORATORS = DeferredRegister.create(Registries.TREE_DECORATOR_TYPE, "example");
+                public static final DeferredHolder<TreeDecoratorType<?>, TreeDecoratorType<HolidayTreeDecorator>> HOLIDAY = TREE_DECORATORS.register("holiday", () -> new TreeDecoratorType<>(HolidayTreeDecorator.CODEC));
+            }
+        """.trimIndent())
+        srcDir.resolve("HolidayTreeDecorator.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.world.level.levelgen.feature.stateproviders.BlockStateProvider;
+            import net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecorator;
+            import net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecoratorType;
+
+            public class HolidayTreeDecorator extends TreeDecorator {
+                public static final Codec<HolidayTreeDecorator> CODEC = BlockStateProvider.CODEC.fieldOf("provider").xmap(HolidayTreeDecorator::new, value -> value.provider).codec();
+                private final BlockStateProvider provider;
+
+                public HolidayTreeDecorator(BlockStateProvider provider) {
+                    this.provider = provider;
+                }
+
+                @Override
+                protected TreeDecoratorType<?> type() {
+                    return TreeDecoratorRegistry.HOLIDAY.get();
                 }
             }
         """.trimIndent())
@@ -21100,6 +21179,8 @@ class StructuralRefactorExtraTest {
         val unitProcessor = srcDir.resolve("UnitProcessor.java").readText()
         val ageProcessor = srcDir.resolve("AgeProcessor.java").readText()
         val placement = srcDir.resolve("PlacementRegistry.java").readText()
+        val configFilter = srcDir.resolve("ConfigFilter.java").readText()
+        val treeDecorator = srcDir.resolve("HolidayTreeDecorator.java").readText()
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
         assertTrue(processor.contains("import com.mojang.serialization.MapCodec;"), processor)
@@ -21117,6 +21198,13 @@ class StructuralRefactorExtraTest {
         assertTrue(placement.contains("PlacementModifierType<P> register(ResourceLocation name, MapCodec<P> codec)"), placement)
         assertFalse(Regex("""(?<!Map)\bCodec\s*<\s*P\s*>\s+codec""").containsMatchIn(placement), placement)
         assertFalse(placement.contains("import com.mojang.serialization.Codec;"), placement)
+        assertTrue(configFilter.contains("import com.mojang.serialization.MapCodec;"), configFilter)
+        assertTrue(configFilter.contains("public static final MapCodec<ConfigFilter> CODEC = Codec.STRING.comapFlatMap(ConfigFilter::buildDeserialization, filter -> ConfigCodecUtil.serialize(filter.config)).fieldOf(\"config\");"), configFilter)
+        assertTrue(configFilter.contains("import com.mojang.serialization.Codec;"), configFilter)
+        assertTrue(treeDecorator.contains("import com.mojang.serialization.MapCodec;"), treeDecorator)
+        assertTrue(treeDecorator.contains("public static final MapCodec<HolidayTreeDecorator> CODEC = BlockStateProvider.CODEC.fieldOf(\"provider\").xmap(HolidayTreeDecorator::new, value -> value.provider);"), treeDecorator)
+        assertFalse(treeDecorator.contains("import com.mojang.serialization.Codec;"), treeDecorator)
+        assertFalse(treeDecorator.contains(".codec();"), treeDecorator)
     }
 
     @Test

@@ -8623,13 +8623,23 @@ $fields
         val mapCodecRegistrySurface = source.contains("StructureProcessorType") ||
             source.contains("PlacementModifierType") ||
             source.contains("StructurePlacementType") ||
-            source.contains("StructureType")
+            source.contains("StructureType") ||
+            source.contains("TreeDecoratorType")
         if (!mapCodecRegistrySurface) return emptySet()
-        return Regex(
+        val owners = linkedSetOf<String>()
+        Regex(
             """(?s)\.register\s*\((?:(?!;).)*?\(\)\s*->\s*(?:\(\)\s*->\s*)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.CODEC"""
         ).findAll(source)
-            .map { it.groupValues[1].substringAfterLast('.') }
-            .toSet()
+            .mapTo(owners) { it.groupValues[1].substringAfterLast('.') }
+        Regex(
+            """(?s)\bregister\s*\((?:(?!;).)*?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.CODEC"""
+        ).findAll(source)
+            .mapTo(owners) { it.groupValues[1].substringAfterLast('.') }
+        Regex(
+            """\bnew\s+(?:PlacementModifierType|StructureProcessorType|StructurePlacementType|StructureType|TreeDecoratorType)\s*<[^>]*>\s*\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.CODEC"""
+        ).findAll(source)
+            .mapTo(owners) { it.groupValues[1].substringAfterLast('.') }
+        return owners
     }
 
     private fun collectCodecConstantOwners(srcDir: Path): Set<String> {
@@ -22449,6 +22459,14 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 changed = true
                 "MapCodec<$className> ${match.groupValues[1]} = ${match.groupValues[2]};"
             }
+            result = Regex(
+                """\bCodec\s*<\s*${Regex.escape(className)}\s*>\s+([A-Z][A-Z0-9_]*)\s*=\s*([^;\r\n]+?\.(?:comapFlatMap|flatXmap|xmap)\([^;\r\n]+?\))\s*;"""
+            ).replace(result) { match ->
+                val codecExpression = match.groupValues[2]
+                val fieldName = inferSingleFieldMapCodecFieldName(source, codecExpression) ?: return@replace match.value
+                changed = true
+                "MapCodec<$className> ${match.groupValues[1]} = $codecExpression.fieldOf(\"$fieldName\");"
+            }
         }
 
         if (changed) {
@@ -22464,13 +22482,34 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         return result
     }
 
+    private fun inferSingleFieldMapCodecFieldName(source: String, codecExpression: String): String? {
+        val lambdaParameter = Regex("""\b([A-Za-z_$][\w$]*)\s*->""")
+            .find(codecExpression)
+            ?.groupValues
+            ?.get(1)
+        if (lambdaParameter != null) {
+            val lambdaField = Regex("""\b${Regex.escape(lambdaParameter)}\.([A-Za-z_$][\w$]*)\b""")
+                .find(codecExpression)
+                ?.groupValues
+                ?.get(1)
+            if (lambdaField != null) return lambdaField
+        }
+        val finalFields = Regex(
+            """(?m)^\s*private\s+final\s+[^;\r\n=]+?\s+([A-Za-z_$][\w$]*)\s*;"""
+        ).findAll(source)
+            .map { it.groupValues[1] }
+            .toList()
+        return finalFields.singleOrNull()
+    }
+
     private fun migrateMapCodecRegistryFactorySignatures(source: String): String {
         if (!source.contains("Codec<")) return source
         val registryTypes = listOf(
             "PlacementModifierType",
             "StructureProcessorType",
             "StructurePlacementType",
-            "StructureType"
+            "StructureType",
+            "TreeDecoratorType"
         )
         var result = source
         var changed = false
