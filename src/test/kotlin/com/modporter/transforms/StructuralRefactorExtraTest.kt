@@ -2149,16 +2149,36 @@ class StructuralRefactorExtraTest {
         srcDir.resolve("StackScaledWeapon.java").writeText("""
             package com.example;
 
+            import com.google.common.collect.ImmutableMultimap;
             import com.google.common.collect.Multimap;
-            import net.minecraft.core.Holder;
+            import java.util.Iterator;
+            import java.util.UUID;
             import net.minecraft.world.entity.EquipmentSlot;
             import net.minecraft.world.entity.ai.attributes.Attribute;
             import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
             import net.minecraft.world.item.ItemStack;
 
             public interface StackScaledWeapon {
-                default Multimap<Holder<Attribute>, AttributeModifier> scaleDamage(Multimap<Holder<Attribute>, AttributeModifier> base, ItemStack stack, EquipmentSlot slot) {
-                    return base;
+                UUID DAMAGE_MODIFIER_UUID = UUID.fromString("00000000-0000-0000-0000-000000000003");
+
+                default Multimap<Attribute, AttributeModifier> scaleDamage(Multimap<Attribute, AttributeModifier> map, ItemStack stack, EquipmentSlot slot) {
+                    if (slot == EquipmentSlot.MAINHAND) {
+                        ImmutableMultimap.Builder<Attribute, AttributeModifier> builder = ImmutableMultimap.builder();
+                        builder.putAll(map);
+                        builder.put(Attributes.ATTACK_DAMAGE, new AttributeModifier(DAMAGE_MODIFIER_UUID, "Damage modifier", this.calculateIncrease(map, stack), AttributeModifier.Operation.ADDITION));
+                        map = builder.build();
+                    }
+                    return map;
+                }
+
+                private int calculateIncrease(Multimap<Attribute, AttributeModifier> map, ItemStack stack) {
+                    double baseDamage = 0.0D;
+                    for (Iterator<AttributeModifier> it = map.get(Attributes.ATTACK_DAMAGE).stream().iterator(); it.hasNext();) {
+                        AttributeModifier modifier = it.next();
+                        baseDamage += modifier.getAmount();
+                    }
+                    return (int) Math.round(baseDamage + stack.getDamageValue());
                 }
             }
         """.trimIndent())
@@ -2166,7 +2186,6 @@ class StructuralRefactorExtraTest {
             package com.example;
 
             import com.google.common.collect.Multimap;
-            import net.minecraft.core.Holder;
             import net.minecraft.world.entity.EquipmentSlot;
             import net.minecraft.world.entity.ai.attributes.Attribute;
             import net.minecraft.world.entity.ai.attributes.AttributeModifier;
@@ -2176,11 +2195,11 @@ class StructuralRefactorExtraTest {
 
             public class StackScaledSwordItem extends SwordItem implements StackScaledWeapon {
                 public StackScaledSwordItem(Tier tier, Properties properties) {
-                    super(tier, properties.attributes(SwordItem.createAttributes(tier, 5, -2.4F)));
+                    super(tier, 5, -2.4F, properties);
                 }
 
                 @Override
-                public Multimap<Holder<Attribute>, AttributeModifier> getAttributeModifiers(EquipmentSlot slot, ItemStack stack) {
+                public Multimap<Attribute, AttributeModifier> getAttributeModifiers(EquipmentSlot slot, ItemStack stack) {
                     return this.scaleDamage(super.getAttributeModifiers(slot, stack), stack, slot);
                 }
             }
@@ -2192,10 +2211,13 @@ class StructuralRefactorExtraTest {
         val migratedLongSword = srcDir.resolve("LongSwordItem.java").readText()
         val migratedReachTool = srcDir.resolve("ReachTool.java").readText()
         val stackScaledSword = srcDir.resolve("StackScaledSwordItem.java").readText()
+        val stackScaledWeapon = srcDir.resolve("StackScaledWeapon.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-item-attribute-modifier-component" })
         assertTrue(result.changes.any { it.ruleId == "struct-item-attribute-helper-component" })
         assertTrue(result.changes.any { it.ruleId == "struct-item-attribute-helper-prune" })
+        assertTrue(result.changes.any { it.ruleId == "struct-item-dynamic-attribute-component" })
+        assertTrue(result.changes.any { it.ruleId == "struct-item-dynamic-attribute-helper" })
         assertTrue(migrated.contains("import net.minecraft.world.entity.EquipmentSlotGroup;"))
         assertTrue(migrated.contains("import net.minecraft.world.entity.ai.attributes.Attributes;"))
         assertTrue(migrated.contains("import net.minecraft.world.item.component.ItemAttributeModifiers;"))
@@ -2229,8 +2251,25 @@ class StructuralRefactorExtraTest {
         assertTrue(!migratedReachTool.contains("getModifier()"), migratedReachTool)
         assertTrue(!migratedReachTool.contains("ImmutableMultimap"), migratedReachTool)
         assertTrue(!migratedReachTool.contains("Multimap<"), migratedReachTool)
-        assertTrue(stackScaledSword.contains("getAttributeModifiers(EquipmentSlot slot, ItemStack stack)"), stackScaledSword)
-        assertTrue(stackScaledSword.contains("this.scaleDamage(super.getAttributeModifiers(slot, stack), stack, slot)"), stackScaledSword)
+        assertTrue(stackScaledSword.contains("import net.minecraft.world.item.component.ItemAttributeModifiers;"), stackScaledSword)
+        assertTrue(stackScaledSword.contains("super(tier, properties.attributes(SwordItem.createAttributes(tier, 5, -2.4F)));"), stackScaledSword)
+        assertTrue(stackScaledSword.contains("public ItemAttributeModifiers getDefaultAttributeModifiers(ItemStack stack)"), stackScaledSword)
+        assertTrue(stackScaledSword.contains("return this.scaleDamage(super.getDefaultAttributeModifiers(), stack);"), stackScaledSword)
+        assertTrue(!stackScaledSword.contains("getAttributeModifiers(EquipmentSlot slot, ItemStack stack)"), stackScaledSword)
+        assertTrue(!stackScaledSword.contains("super.getAttributeModifiers"), stackScaledSword)
+        assertTrue(!stackScaledSword.contains("import com.google.common.collect.Multimap;"), stackScaledSword)
+        assertTrue(!stackScaledSword.contains("import net.minecraft.core.Holder;"), stackScaledSword)
+        assertTrue(stackScaledWeapon.contains("import net.minecraft.world.entity.EquipmentSlotGroup;"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains("import net.minecraft.world.item.component.ItemAttributeModifiers;"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains("default ItemAttributeModifiers scaleDamage(ItemAttributeModifiers modifiers, ItemStack stack)"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains(".withModifierAdded(Attributes.ATTACK_DAMAGE"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains("EquipmentSlotGroup.MAINHAND"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains("private int calculateIncrease(ItemAttributeModifiers modifiers, ItemStack stack)"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains("modifiers.modifiers().stream().filter"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains("modifier.amount()"), stackScaledWeapon)
+        assertTrue(stackScaledWeapon.contains("net.minecraft.resources.ResourceLocation DAMAGE_MODIFIER_UUID"), stackScaledWeapon)
+        assertTrue(!stackScaledWeapon.contains("ImmutableMultimap"), stackScaledWeapon)
+        assertTrue(!stackScaledWeapon.contains("Multimap<"), stackScaledWeapon)
     }
 
     @Test

@@ -29494,6 +29494,7 @@ $indent}"""
             .toList()
         val sourceByFile = javaFiles.associateWith { it.readText() }
         val reachHelpers = collectLegacyStaticReachAttributeHelpers(sourceByFile, mainClass, mainText)
+        val dynamicAttributeHelpers = collectLegacyDynamicItemAttributeHelpers(sourceByFile, mainClass, mainText)
         val changes = mutableListOf<Change>()
         javaFiles.forEach { file ->
                 val original = file.readText()
@@ -29617,6 +29618,54 @@ ${modifierLines.joinToString("\n")}
         if (migratedHelperNames.isNotEmpty()) {
             changes += pruneUnusedLegacyReachAttributeHelpers(javaFiles, migratedHelperNames, dryRun)
         }
+        val dynamicHelpersToMigrate = linkedMapOf<Path, MutableList<LegacyDynamicItemAttributeHelper>>()
+        javaFiles.forEach { file ->
+            val original = file.readText()
+            if (!original.contains("getAttributeModifiers(EquipmentSlot") ||
+                !original.contains("super.getAttributeModifiers(")) {
+                return@forEach
+            }
+            val overrideMigration = replaceLegacyDynamicItemAttributeOverride(original, dynamicAttributeHelpers)
+                ?: return@forEach
+            var migrated = migrateLegacyItemAttributeConstructorToProperties(overrideMigration.source)
+            migrated = removeUnusedSimpleImport(migrated, "com.google.common.collect.Multimap", "Multimap")
+            migrated = removeUnusedSimpleImport(migrated, "net.minecraft.core.Holder", "Holder")
+            migrated = removeUnusedSimpleImport(migrated, "net.minecraft.world.entity.EquipmentSlot", "EquipmentSlot")
+            migrated = removeUnusedSimpleImport(migrated, "net.minecraft.world.entity.ai.attributes.Attribute", "Attribute")
+            migrated = removeUnusedSimpleImport(migrated, "net.minecraft.world.entity.ai.attributes.AttributeModifier", "AttributeModifier")
+            migrated = addImportIfMissing(migrated, "net.minecraft.world.item.component.ItemAttributeModifiers")
+            migrated = cleanupRedundantBlankLines(migrated)
+            if (migrated != original) {
+                if (!dryRun) file.writeText(migrated)
+                dynamicHelpersToMigrate.getOrPut(overrideMigration.helper.file) { mutableListOf() } += overrideMigration.helper
+                changes.add(Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate stack-sensitive item attribute override to 1.21 item attribute components",
+                    before = "getAttributeModifiers(EquipmentSlot, ItemStack) delegates a stack-sensitive Multimap helper",
+                    after = "getDefaultAttributeModifiers(ItemStack) delegates an ItemAttributeModifiers helper",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-item-dynamic-attribute-component"
+                ))
+            }
+        }
+        dynamicHelpersToMigrate.forEach { (file, helpers) ->
+            val original = file.readText()
+            val migrated = migrateLegacyDynamicItemAttributeHelperFile(original, helpers.distinctBy { it.methodName })
+                ?: return@forEach
+            if (migrated != original) {
+                if (!dryRun) file.writeText(migrated)
+                changes.add(Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate stack-sensitive item attribute helper to ItemAttributeModifiers",
+                    before = "Multimap attribute helper mutates a legacy base map",
+                    after = "ItemAttributeModifiers helper returns a slot-scoped modifier component",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-item-dynamic-attribute-helper"
+                ))
+            }
+        }
         return changes
     }
 
@@ -29663,6 +29712,19 @@ ${modifierLines.joinToString("\n")}
     private data class LegacyReachAttributeOverrideMigration(
         val helperName: String,
         val modifierLines: List<String>
+    )
+
+    private data class LegacyDynamicItemAttributeHelper(
+        val file: Path,
+        val methodName: String,
+        val mapParameter: String,
+        val replacementMethod: String,
+        val calculationMethodNames: Set<String>
+    )
+
+    private data class LegacyDynamicItemAttributeOverrideSource(
+        val source: String,
+        val helper: LegacyDynamicItemAttributeHelper
     )
 
     private fun collectLegacyStaticReachAttributeHelpers(
@@ -29733,6 +29795,371 @@ ${modifierLines.joinToString("\n")}
         val helper = distinctHelpers.singleOrNull() ?: return null
         return LegacyReachAttributeOverrideMigration(helperName, helper.modifierLines)
     }
+
+    private fun collectLegacyDynamicItemAttributeHelpers(
+        sourceByFile: Map<Path, String>,
+        mainClass: Path?,
+        mainText: String
+    ): Map<String, List<LegacyDynamicItemAttributeHelper>> {
+        val helpers = linkedMapOf<String, MutableList<LegacyDynamicItemAttributeHelper>>()
+        for ((file, source) in sourceByFile) {
+            if (!source.contains("ImmutableMultimap") ||
+                !source.contains("new AttributeModifier(") ||
+                !source.contains("ItemStack") ||
+                !source.contains("EquipmentSlot.MAINHAND")) {
+                continue
+            }
+            for (method in javaMethodRangesIncludingDefault(source)) {
+                val methodText = source.substring(method.range)
+                val helper = legacyDynamicItemAttributeHelper(method, methodText, file, source, mainClass, mainText)
+                    ?: continue
+                helpers.getOrPut(method.name) { mutableListOf() } += helper
+            }
+        }
+        return helpers
+    }
+
+    private fun legacyDynamicItemAttributeHelper(
+        method: JavaMethodRange,
+        methodText: String,
+        file: Path,
+        ownerSource: String,
+        mainClass: Path?,
+        mainText: String
+    ): LegacyDynamicItemAttributeHelper? {
+        if (!methodText.contains("ImmutableMultimap") ||
+            !methodText.contains("new AttributeModifier(") ||
+            !methodText.contains("EquipmentSlot.MAINHAND")) {
+            return null
+        }
+        val parameters = javaMethodParameters(methodText)
+        val mapParameter = parameters.firstOrNull { rawJavaTypeName(it.type) == "Multimap" }?.name ?: return null
+        val stackParameter = parameters.firstOrNull { simpleJavaTypeName(it.type) == "ItemStack" }?.name ?: return null
+        val slotParameter = parameters.firstOrNull { simpleJavaTypeName(it.type) == "EquipmentSlot" }?.name ?: return null
+        if (legacyReachSlotGroupExpression(methodText) != "EquipmentSlotGroup.MAINHAND") return null
+        val prefix = Regex("""(?m)^([ \t]*)((?:(?:public|protected|private|final|synchronized|default)\s+)+)""")
+            .find(methodText)
+            ?: return null
+        val modifiers = prefix.groupValues[2].trim()
+        if (Regex("""\bstatic\b""").containsMatchIn(modifiers)) return null
+        val methodIndent = prefix.groupValues[1]
+        val modRef = explicitModIdReferenceForGeneratedClass(mainClass, mainText, packageNameOf(ownerSource), null)
+        val modifierLines = legacyDynamicItemAttributeModifierLines(
+            methodText = methodText,
+            ownerSource = ownerSource,
+            modIdExpression = modRef,
+            mapParameter = mapParameter,
+            stackParameter = stackParameter,
+            slotParameter = slotParameter
+        )
+        if (modifierLines.isEmpty()) return null
+        val calculationMethods = modifierLines.flatMap { line ->
+            directJavaMethodCalls(line)
+        }.filter { name ->
+            name != method.name && canMigrateLegacyDynamicAttributeCalculationMethod(ownerSource, name, mapParameter)
+        }.toSet()
+        if (directJavaMethodCalls(modifierLines.joinToString("\n"))
+                .any { name -> name != method.name && name !in calculationMethods }) {
+            return null
+        }
+        val bodyIndent = "$methodIndent\t"
+        val chainIndent = "$methodIndent\t\t"
+        val replacement = buildString {
+            append(methodIndent)
+            append(modifiers)
+            append(" ItemAttributeModifiers ")
+            append(method.name)
+            append("(ItemAttributeModifiers modifiers, ItemStack ")
+            append(stackParameter)
+            append(") {\n")
+            append(bodyIndent)
+            append("return modifiers\n")
+            append(modifierLines.joinToString("\n") { "$chainIndent$it" })
+            append("\n")
+            append(chainIndent)
+            append(";\n")
+            append(methodIndent)
+            append("}")
+        }
+        return LegacyDynamicItemAttributeHelper(file, method.name, mapParameter, replacement, calculationMethods)
+    }
+
+    private fun legacyDynamicItemAttributeModifierLines(
+        methodText: String,
+        ownerSource: String,
+        modIdExpression: String?,
+        mapParameter: String,
+        stackParameter: String,
+        slotParameter: String
+    ): List<String> =
+        legacyAttributeModifierPutCalls(methodText).mapNotNull { args ->
+            val attributeExpression = legacyItemAttributeExpression(args[0]) ?: return@mapNotNull null
+            val modifierArgs = attributeModifierConstructorArgs(args[1]) ?: return@mapNotNull null
+            val modifierExpression = when (modifierArgs.size) {
+                3 -> {
+                    val amount = migrateDynamicAttributeModifierAmount(
+                        modifierArgs[1],
+                        mapParameter,
+                        stackParameter,
+                        slotParameter
+                    ) ?: return@mapNotNull null
+                    val operation = legacyAttributeModifierOperationExpression(modifierArgs[2]) ?: return@mapNotNull null
+                    "new AttributeModifier(${modifierArgs[0].trim()}, $amount, $operation)"
+                }
+                4 -> {
+                    val modifierName = modifierArgs[1].trim().removeSurrounding("\"")
+                    if (modifierName.isBlank() || modifierArgs[1].trim().startsWith("\"").not()) return@mapNotNull null
+                    val legacyId = modifierArgs[0].trim()
+                    val idExpression = resourceLocationConstantForModifierName(ownerSource, modifierName)
+                        ?: legacyResourceLocationModifierIdExpression(legacyId, ownerSource)
+                        ?: legacyId.takeIf {
+                            modIdExpression != null &&
+                                Regex("""^[A-Z_$][A-Z0-9_$]*$""").matches(it) &&
+                                Regex("""\bUUID\s+${Regex.escape(it)}\s*=\s*UUID\.fromString\(""").containsMatchIn(ownerSource)
+                        }
+                        ?: modIdExpression?.let {
+                            "net.minecraft.resources.ResourceLocation.fromNamespaceAndPath($it, \"${modifierPathName(modifierName)}\")"
+                        }
+                        ?: return@mapNotNull null
+                    val amount = migrateDynamicAttributeModifierAmount(
+                        modifierArgs[2],
+                        mapParameter,
+                        stackParameter,
+                        slotParameter
+                    ) ?: return@mapNotNull null
+                    val operation = legacyAttributeModifierOperationExpression(modifierArgs[3]) ?: return@mapNotNull null
+                    "new AttributeModifier($idExpression, $amount, $operation)"
+                }
+                else -> return@mapNotNull null
+            }
+            ".withModifierAdded($attributeExpression, $modifierExpression, EquipmentSlotGroup.MAINHAND)"
+        }.toList()
+
+    private fun legacyItemAttributeExpression(expression: String): String? {
+        legacyReachAttributeExpression(expression)?.let { return it }
+        val trimmed = expression.trim()
+        return if (Regex("""^(?:net\.minecraft\.world\.entity\.ai\.attributes\.)?Attributes\.[A-Z0-9_]+$""")
+                .matches(trimmed)) {
+            trimmed.removePrefix("net.minecraft.world.entity.ai.attributes.")
+        } else {
+            null
+        }
+    }
+
+    private fun migrateDynamicAttributeModifierAmount(
+        expression: String,
+        mapParameter: String,
+        stackParameter: String,
+        slotParameter: String
+    ): String? {
+        var migrated = replaceJavaIdentifier(expression.trim(), mapParameter, "modifiers")
+        migrated = replaceJavaIdentifier(migrated, stackParameter, stackParameter)
+        if (containsJavaIdentifier(migrated, slotParameter)) return null
+        if (Regex("""\bsuper\s*\.""").containsMatchIn(migrated)) return null
+        return migrated
+    }
+
+    private fun replaceLegacyDynamicItemAttributeOverride(
+        source: String,
+        helpers: Map<String, List<LegacyDynamicItemAttributeHelper>>
+    ): LegacyDynamicItemAttributeOverrideSource? {
+        var result = source
+        val migrations = javaMethodRangesIncludingDefault(source)
+            .filter { it.name == "getAttributeModifiers" }
+            .mapNotNull { method ->
+                val methodText = source.substring(method.range)
+                legacyDynamicItemAttributeOverrideReplacement(methodText, helpers)?.let { method to it }
+            }
+            .toList()
+        val (method, migration) = migrations.singleOrNull() ?: return null
+        result = result.replaceRange(method.range, migration.first)
+        return LegacyDynamicItemAttributeOverrideSource(result, migration.second)
+    }
+
+    private fun legacyDynamicItemAttributeOverrideReplacement(
+        methodText: String,
+        helpers: Map<String, List<LegacyDynamicItemAttributeHelper>>
+    ): Pair<String, LegacyDynamicItemAttributeHelper>? {
+        val parameters = javaMethodParameters(methodText)
+        val slotName = parameters.firstOrNull { simpleJavaTypeName(it.type) == "EquipmentSlot" }?.name ?: return null
+        val stackName = parameters.firstOrNull { simpleJavaTypeName(it.type) == "ItemStack" }?.name ?: return null
+        val openBrace = methodText.indexOf('{')
+        val closeBrace = methodText.lastIndexOf('}')
+        if (openBrace < 0 || closeBrace <= openBrace) return null
+        val body = methodText.substring(openBrace + 1, closeBrace).trim()
+        val returnMatch = Regex("""^return\s+(?:this\.)?([A-Za-z_$][\w$]*)\s*\(""")
+            .find(body)
+            ?: return null
+        val helperName = returnMatch.groupValues[1]
+        val callOpen = body.indexOf('(', returnMatch.range.last - 1)
+        val callClose = if (callOpen >= 0) findMatchingParen(body, callOpen) else -1
+        if (callOpen < 0 || callClose < 0 || body.substring(callClose + 1).trim() != ";") return null
+        val args = splitTopLevelJavaArgs(body.substring(callOpen + 1, callClose)).map { it.trim() }
+        if (args.size != 3 || args[1] != stackName || args[2] != slotName) return null
+        val superCallPattern = Regex(
+            """^super\.getAttributeModifiers\s*\(\s*${Regex.escape(slotName)}\s*,\s*${Regex.escape(stackName)}\s*\)$"""
+        )
+        if (!superCallPattern.matches(args[0])) return null
+        val helper = helpers[helperName]
+            ?.distinctBy { it.replacementMethod }
+            ?.singleOrNull()
+            ?: return null
+        val indent = Regex("""(?m)^([ \t]*)(?:@\w+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:public|protected|private)\s+""")
+            .find(methodText)
+            ?.groupValues
+            ?.get(1)
+            ?: ""
+        val replacement = buildString {
+            append(indent)
+            append("@Override\n")
+            append(indent)
+            append("public ItemAttributeModifiers getDefaultAttributeModifiers(ItemStack ")
+            append(stackName)
+            append(") {\n")
+            append(indent)
+            append("\treturn this.")
+            append(helperName)
+            append("(super.getDefaultAttributeModifiers(), ")
+            append(stackName)
+            append(");\n")
+            append(indent)
+            append("}")
+        }
+        return replacement to helper
+    }
+
+    private fun migrateLegacyItemAttributeConstructorToProperties(source: String): String {
+        val className = classNameOfJavaSource(source) ?: return source
+        val parentItem = Regex("""extends\s+([A-Za-z_$][\w$]*Item)\b""").find(source)
+            ?.groupValues
+            ?.get(1)
+            ?: return source
+        val baseAttributesFactory = when (parentItem) {
+            "AxeItem", "HoeItem", "PickaxeItem", "ShovelItem" -> "net.minecraft.world.item.DiggerItem.createAttributes"
+            else -> "$parentItem.createAttributes"
+        }
+        var result = source
+        javaConstructorRanges(result, className).asReversed().forEach { constructor ->
+            val constructorText = result.substring(constructor.range)
+            val superMatch = Regex("""\bsuper\s*\(""").find(constructorText) ?: return@forEach
+            val superStart = constructor.range.first + superMatch.range.first
+            val superOpen = constructor.range.first + superMatch.range.last
+            val superClose = findMatchingParen(result, superOpen)
+            if (superClose < 0 || superClose > constructor.range.last) return@forEach
+            val args = splitTopLevelJavaArgs(result.substring(superOpen + 1, superClose)).map { it.trim() }
+            if (args.size != 4 || args[3].contains(".attributes(")) return@forEach
+            val migratedProperties = "${args[3]}.attributes($baseAttributesFactory(${args[0]}, ${args[1]}, ${args[2]}))"
+            val replacement = "super(${args[0]}, $migratedProperties)"
+            result = result.substring(0, superStart) + replacement + result.substring(superClose + 1)
+        }
+        return result
+    }
+
+    private fun migrateLegacyDynamicItemAttributeHelperFile(
+        source: String,
+        helpers: List<LegacyDynamicItemAttributeHelper>
+    ): String? {
+        var result = source
+        for (helper in helpers) {
+            val method = javaMethodRangesIncludingDefault(result).firstOrNull { candidate ->
+                candidate.name == helper.methodName &&
+                    result.substring(candidate.range).contains("ImmutableMultimap") &&
+                    result.substring(candidate.range).contains("new AttributeModifier(")
+            } ?: return null
+            result = result.replaceRange(method.range, helper.replacementMethod)
+            for (calculationMethod in helper.calculationMethodNames) {
+                result = migrateLegacyDynamicAttributeCalculationMethod(result, calculationMethod, helper.mapParameter)
+                    ?: return null
+            }
+        }
+        result = removeUnusedSimpleImport(result, "com.google.common.collect.ImmutableMultimap", "ImmutableMultimap")
+        result = removeUnusedSimpleImport(result, "com.google.common.collect.Multimap", "Multimap")
+        result = removeUnusedSimpleImport(result, "net.minecraft.core.Holder", "Holder")
+        result = removeUnusedSimpleImport(result, "net.minecraft.world.entity.ai.attributes.Attribute", "Attribute")
+        result = addImportIfMissing(result, "net.minecraft.world.entity.EquipmentSlotGroup")
+        result = addImportIfMissing(result, "net.minecraft.world.item.component.ItemAttributeModifiers")
+        result = cleanupRedundantBlankLines(result)
+        return result
+    }
+
+    private fun canMigrateLegacyDynamicAttributeCalculationMethod(
+        source: String,
+        methodName: String,
+        oldMapParameter: String
+    ): Boolean =
+        migrateLegacyDynamicAttributeCalculationMethod(source, methodName, oldMapParameter) != null
+
+    private fun migrateLegacyDynamicAttributeCalculationMethod(
+        source: String,
+        methodName: String,
+        oldMapParameter: String
+    ): String? {
+        val method = javaMethodRangesIncludingDefault(source).singleOrNull { it.name == methodName } ?: return null
+        val methodText = source.substring(method.range)
+        if (!methodText.contains(oldMapParameter)) return null
+        val parameters = javaMethodParameters(methodText)
+        if (parameters.firstOrNull()?.name != oldMapParameter ||
+            rawJavaTypeName(parameters.first().type) != "Multimap") {
+            return null
+        }
+        var migratedMethod = Regex(
+            """(?:com\.google\.common\.collect\.)?Multimap\s*<[^()]+?>\s+${Regex.escape(oldMapParameter)}\b"""
+        ).replaceFirst(methodText, "ItemAttributeModifiers modifiers")
+        migratedMethod = replaceLegacyAttributeMultimapStreams(migratedMethod, oldMapParameter)
+        if (containsJavaIdentifier(migratedMethod, oldMapParameter)) return null
+        return source.replaceRange(method.range, migratedMethod)
+    }
+
+    private fun replaceLegacyAttributeMultimapStreams(methodText: String, oldMapParameter: String): String {
+        val escapedMap = Regex.escape(oldMapParameter)
+        var result = methodText
+        val streamIteratorPattern = Regex(
+            """\b$escapedMap\.get\s*\(\s*([A-Za-z_$][\w$.]*)\s*\)\s*\.stream\s*\(\s*\)\s*\.iterator\s*\(\s*\)"""
+        )
+        result = streamIteratorPattern.replace(result) { match ->
+            legacyAttributeModifierStreamExpression(match.groupValues[1], withIterator = true)
+        }
+        val iteratorPattern = Regex(
+            """\b$escapedMap\.get\s*\(\s*([A-Za-z_$][\w$.]*)\s*\)\s*\.iterator\s*\(\s*\)"""
+        )
+        result = iteratorPattern.replace(result) { match ->
+            legacyAttributeModifierStreamExpression(match.groupValues[1], withIterator = true)
+        }
+        val streamPattern = Regex(
+            """\b$escapedMap\.get\s*\(\s*([A-Za-z_$][\w$.]*)\s*\)\s*\.stream\s*\(\s*\)"""
+        )
+        result = streamPattern.replace(result) { match ->
+            legacyAttributeModifierStreamExpression(match.groupValues[1], withIterator = false)
+        }
+        return result
+    }
+
+    private fun legacyAttributeModifierStreamExpression(attributeExpression: String, withIterator: Boolean): String {
+        val entry = "modporterAttributeEntry"
+        val stream = "modifiers.modifiers().stream()" +
+            ".filter($entry -> $entry.slot().test(EquipmentSlot.MAINHAND) && $entry.attribute().equals($attributeExpression))" +
+            ".map($entry -> $entry.modifier())"
+        return if (withIterator) "$stream.iterator()" else stream
+    }
+
+    private fun directJavaMethodCalls(source: String): Set<String> =
+        Regex("""(?<![.\w$])(?:this\.)?([A-Za-z_$][\w$]*)\s*\(""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .filterNot { it in setOf("if", "for", "while", "switch", "return", "new", "AttributeModifier") }
+            .toSet()
+
+    private fun replaceJavaIdentifier(source: String, oldName: String, newName: String): String =
+        Regex("""(?<![\w$])${Regex.escape(oldName)}(?![\w$])""").replace(source, newName)
+
+    private fun containsJavaIdentifier(source: String, name: String): Boolean =
+        Regex("""(?<![.\w$])${Regex.escape(name)}(?![\w$])""").containsMatchIn(source)
+
+    private fun rawJavaTypeName(type: String): String =
+        type.trim()
+            .substringBefore('<')
+            .substringAfterLast('.')
+            .trim()
 
     private fun appendStaticAttributeModifiersToConstructorAttributes(
         source: String,
