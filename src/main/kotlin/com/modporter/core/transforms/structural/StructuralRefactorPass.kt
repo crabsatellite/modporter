@@ -12964,6 +12964,7 @@ ${indent}}
         result = migrateLegacyAttachmentGetDataLazyOptionalReturns(result)
         result = migrateAttachmentGetDataIfPresentSource(result)
         result = migrateLegacyEntityCapabilityOptionalChains(result)
+        result = migratePlayerCloneCapabilityLifecycleSource(result)
         result = migrateLegacyAuthlibProfileFetchSource(result)
         result = migrateLegacyChunkGeneratorAsyncSignatures(result)
         result = migrateLegacyBlockStateSurvivalAndPlantCalls(result)
@@ -27444,6 +27445,39 @@ $body
 ${indent}}
             """.trimIndent()
         }
+    }
+
+    private fun migratePlayerCloneCapabilityLifecycleSource(source: String): String {
+        if (!source.contains("reviveCaps()") &&
+            !source.contains("invalidateCapabilities()") &&
+            !source.contains("invalidateCaps()")) {
+            return source
+        }
+        if (!source.contains(".copyFrom(")) return source
+        val methodText = javaDeclaredMethodText(source, "clone") ?: return source
+        val openBrace = methodText.indexOf('{')
+        if (openBrace < 0) return source
+        val signature = methodText.substring(0, openBrace)
+        val playerParams = Regex("""\b(?:Player|ServerPlayer)\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(signature)
+            .map { it.groupValues[1] }
+            .toList()
+        if (playerParams.size < 2 || !methodText.contains(".copyFrom(")) return source
+
+        var migratedMethod = methodText
+        var changed = false
+        playerParams.forEach { playerName ->
+            val revivePattern = Regex("""(?m)^[ \t]*${Regex.escape(playerName)}\.reviveCaps\(\)\s*;\s*\r?\n""")
+            val invalidatePattern = Regex("""(?m)^[ \t]*${Regex.escape(playerName)}\.(?:invalidateCapabilities|invalidateCaps)\(\)\s*;\s*\r?\n""")
+            val hasRevive = revivePattern.containsMatchIn(migratedMethod)
+            val hasInvalidate = invalidatePattern.containsMatchIn(migratedMethod)
+            if (hasRevive && hasInvalidate) {
+                migratedMethod = revivePattern.replace(migratedMethod, "")
+                migratedMethod = invalidatePattern.replace(migratedMethod, "")
+                changed = true
+            }
+        }
+        return if (changed) source.replace(methodText, migratedMethod) else source
     }
 
     private fun migrateLegacyEnchantmentTagChecks(source: String): String {

@@ -19224,6 +19224,45 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `player clone capability lifecycle wrappers are removed only when copyFrom preserves data copy`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PlayerCloneCapabilitySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.player.Player;
+
+            public class PlayerCloneCapabilitySurface {
+                public static void clone(Player originalPlayer, Player newPlayer, boolean wasDeath) {
+                    originalPlayer.reviveCaps();
+                    PlayerData originalData = PlayerData.get(originalPlayer).orElseThrow();
+                    PlayerData newData = PlayerData.get(newPlayer).orElseThrow();
+                    newData.copyFrom(originalData, wasDeath);
+                    originalPlayer.invalidateCapabilities();
+                }
+
+                public static void manual(Player originalPlayer) {
+                    originalPlayer.reviveCaps();
+                    originalPlayer.invalidateCapabilities();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("PlayerCloneCapabilitySurface.java").readText()
+        val cloneMethod = migrated.substring(
+            migrated.indexOf("public static void clone"),
+            migrated.indexOf("public static void manual")
+        )
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(cloneMethod.contains("newData.copyFrom(originalData, wasDeath);"), migrated)
+        assertFalse(cloneMethod.contains("originalPlayer.reviveCaps();"), migrated)
+        assertFalse(cloneMethod.contains("originalPlayer.invalidateCapabilities();"), migrated)
+        assertTrue(migrated.contains("public static void manual(Player originalPlayer) {\n        originalPlayer.reviveCaps();\n        originalPlayer.invalidateCapabilities();"), migrated)
+    }
+
+    @Test
     fun `migrates MobEffect applicable event result API without dropping event dispatch`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
