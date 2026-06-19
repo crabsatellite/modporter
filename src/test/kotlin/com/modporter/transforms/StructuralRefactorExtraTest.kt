@@ -546,6 +546,97 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `adds missing deferred registers to existing main constructor register array`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val worldDir = srcDir.resolve("world")
+        srcDir.createDirectories()
+        worldDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.registry.BlockRegistry;
+            import com.example.registry.CapabilityRegistry;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    CapabilityRegistry.registerAttachments(modEventBus);
+                    DeferredRegister<?>[] registers = { BlockRegistry.BLOCKS };
+                    for (DeferredRegister<?> register : registers) {
+                        register.register(modEventBus);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("registry").createDirectories()
+        srcDir.resolve("registry/BlockRegistry.java").writeText("""
+            package com.example.registry;
+
+            import net.minecraft.core.registries.Registries;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockRegistry {
+                public static final DeferredRegister.Blocks BLOCKS = DeferredRegister.createBlocks("examplemod");
+            }
+        """.trimIndent())
+        srcDir.resolve("registry/CapabilityRegistry.java").writeText("""
+            package com.example.registry;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.neoforge.attachment.AttachmentType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+            import net.neoforged.neoforge.registries.NeoForgeRegistries;
+
+            public class CapabilityRegistry {
+                public static final DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES = DeferredRegister.create(NeoForgeRegistries.ATTACHMENT_TYPES, "examplemod");
+
+                public static void registerAttachments(IEventBus modEventBus) {
+                    ATTACHMENT_TYPES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Compat.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.inventory.MenuType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class Compat {
+                public static class Common {
+                    public static final DeferredRegister<MenuType<?>> MENU_TYPES = DeferredRegister.create(Registries.MENU, "examplemod");
+                }
+            }
+        """.trimIndent())
+        worldDir.resolve("PlacementRegistry.java").writeText("""
+            package com.example.world;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class PlacementRegistry {
+                public static final DeferredRegister<PlacementModifierType<?>> PLACEMENT_MODIFIER_TYPES = DeferredRegister.create(Registries.PLACEMENT_MODIFIER_TYPE, "examplemod");
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredregister-array-completeness" })
+        assertTrue(main.contains("DeferredRegister<?>[] registers = { BlockRegistry.BLOCKS, com.example.world.PlacementRegistry.PLACEMENT_MODIFIER_TYPES };"), main)
+        assertFalse(main.contains("CapabilityRegistry.ATTACHMENT_TYPES"), main)
+        assertFalse(main.contains("Compat.MENU_TYPES"), main)
+    }
+
+    @Test
     fun `detects ifPresent and orElse on capability-related expressions`() {
         val projectDir = createFile("CapUsage.java", """
             package com.example;
@@ -8824,6 +8915,42 @@ class StructuralRefactorExtraTest {
         assertTrue(transformed.contains("private static void onFinalizeSpawn(Mob mob, ServerLevelAccessor level, DifficultyInstance difficulty, MobSpawnType spawnType, SpawnGroupData spawnData, CallbackInfoReturnable<SpawnGroupData> cir)"), transformed)
         assertFalse(transformed.contains("CompoundTag"), transformed)
         assertFalse(transformed.contains("onFinalizeSpawn(Lnet/minecraft/world/entity/Mob;"), transformed)
+    }
+
+    @Test
+    fun `migrates level storage load summaries lambda mixin descriptor`() {
+        val projectDir = createFile("LevelStorageSourceMixin.java", """
+            package com.example.mixin;
+
+            import com.example.WorldDisplayHooks;
+            import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+            import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+            import com.llamalad7.mixinextras.sugar.Local;
+            import net.minecraft.world.level.storage.LevelStorageSource;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.injection.At;
+
+            import java.nio.file.Path;
+
+            @Mixin(LevelStorageSource.class)
+            public class LevelStorageSourceMixin {
+                @WrapOperation(method = { "lambda${'$'}loadLevelSummaries${'$'}2(Lnet/minecraft/world/level/storage/LevelStorageSource${'$'}LevelDirectory;)Lnet/minecraft/world/level/storage/LevelSummary;" }, at = @At(value = "INVOKE", target = "Lnet/minecraft/util/DirectoryLock;isLocked(Ljava/nio/file/Path;)Z"), require = 1, allow = 1)
+                private boolean loadLevelSummaries(Path flag, Operation<Boolean> original, @Local(argsOnly = true) LevelStorageSource.LevelDirectory levelDirectory) {
+                    if (WorldDisplayHooks.canUnlockLevel(levelDirectory.path())) {
+                        return false;
+                    }
+                    return original.call(flag);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val transformed = tempDir.resolve("src/main/java/com/example/LevelStorageSourceMixin.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("lambda${'$'}loadLevelSummaries${'$'}3(Lnet/minecraft/world/level/storage/LevelStorageSource${'$'}LevelDirectory;)Lnet/minecraft/world/level/storage/LevelSummary;"), transformed)
+        assertFalse(transformed.contains("lambda${'$'}loadLevelSummaries${'$'}2"), transformed)
+        assertTrue(transformed.contains("require = 1, allow = 1"), transformed)
     }
 
     @Test

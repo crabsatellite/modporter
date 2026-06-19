@@ -379,6 +379,13 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            val missingDeferredRegisterChanges = registerMissingDeferredRegisterFields(projectDir, dryRun)
+            changes.addAll(missingDeferredRegisterChanges)
+        } catch (e: Exception) {
+            errors.add("DeferredRegister completeness migration error: ${e.message}")
+        }
+
+        try {
             val missingMappingChanges = migrateMissingMappingsAliases(projectDir, dryRun)
             changes.addAll(missingMappingChanges)
         } catch (e: Exception) {
@@ -12091,6 +12098,16 @@ ${entries.joinToString(",\n")}
 
     private data class DeferredRegisterOwner(val simpleName: String, val fieldName: String)
 
+    private data class DeferredRegisterField(
+        val ownerSimpleName: String,
+        val ownerQualifiedName: String,
+        val fieldName: String,
+        val ownerFile: Path? = null
+    ) {
+        val qualifiedReference: String
+            get() = if (ownerQualifiedName.isBlank()) fieldName else "$ownerQualifiedName.$fieldName"
+    }
+
     private fun migrateDeferredRegisterListenerReferences(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return emptyList()
@@ -12135,6 +12152,114 @@ ${entries.joinToString(",\n")}
             val owner = owners[simpleName] ?: return@replace match.value
             "${match.groupValues[1]}$target.${owner.fieldName}.register(${match.groupValues[2]});"
         }
+    }
+
+    private fun registerMissingDeferredRegisterFields(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val mainClass = detectModMainClass(projectDir) ?: return emptyList()
+        val fields = collectDeferredRegisterFields(srcDir)
+            .filterNot { it.ownerQualifiedName == packageNameOf(mainClass.readText()).let { pkg ->
+                val mainName = classNameOfJavaSource(mainClass.readText()) ?: mainClass.fileName.toString().removeSuffix(".java")
+                if (pkg.isBlank()) mainName else "$pkg.$mainName"
+            } }
+        if (fields.isEmpty()) return emptyList()
+
+        val original = mainClass.readText()
+        val migrated = addMissingDeferredRegistersToConstructorArray(original, fields)
+        if (migrated == original) return emptyList()
+        val missing = fields.filter { field ->
+            hasDeferredRegisterArray(original) &&
+                !deferredRegisterReferencePattern(field).containsMatchIn(original) &&
+                deferredRegisterReferencePattern(field).containsMatchIn(migrated)
+        }
+        if (missing.isEmpty()) return emptyList()
+        val changes = listOf(Change(
+            file = mainClass,
+            line = 0,
+            description = "Register DeferredRegister fields discovered outside the main mod class on the existing mod event bus array",
+            before = "DeferredRegister<?>[] registers missing ${missing.joinToString { it.qualifiedReference }}",
+            after = "DeferredRegister<?>[] registers includes ${missing.joinToString { it.qualifiedReference }}",
+            confidence = Confidence.HIGH,
+            ruleId = "struct-deferredregister-array-completeness"
+        ))
+        if (!dryRun) mainClass.writeText(migrated)
+        return changes
+    }
+
+    private fun addMissingDeferredRegistersToConstructorArray(
+        source: String,
+        fields: List<DeferredRegisterField>
+    ): String {
+        if (fields.isEmpty() || !hasDeferredRegisterArray(source)) return source
+        val arrayMatch = Regex("""DeferredRegister\s*<\s*\?\s*>\s*\[\]\s+[A-Za-z_$][\w$]*\s*=\s*\{""")
+            .find(source)
+            ?: return source
+        val openBrace = source.indexOf('{', arrayMatch.range.first)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        if (openBrace < 0 || closeBrace <= openBrace) return source
+
+        val missing = fields
+            .filterNot {
+                deferredRegisterReferencePattern(it).containsMatchIn(source) ||
+                    deferredRegisterFieldRegisteredViaOwnerMethod(source, it)
+            }
+            .map { it.qualifiedReference }
+        if (missing.isEmpty()) return source
+
+        val inside = source.substring(openBrace + 1, closeBrace)
+        if (!inside.contains('\n')) {
+            val prefix = if (inside.trim().isEmpty()) " " else ", "
+            val insertion = prefix + missing.joinToString(", ") + " "
+            return source.substring(0, closeBrace).trimEnd() + insertion + source.substring(closeBrace)
+        }
+
+        val insertion = run {
+            val closeIndent = source.lineStartIndent(closeBrace)
+            val entryIndent = Regex("""\r?\n([ \t]*)""").find(inside)?.groupValues?.get(1) ?: "$closeIndent    "
+            val prefix = if (inside.trim().isEmpty()) "\n" else ",\n"
+            prefix + missing.joinToString(",\n") { "$entryIndent$it" } + "\n$closeIndent"
+        }
+        return source.substring(0, closeBrace) + insertion + source.substring(closeBrace)
+    }
+
+    private fun hasDeferredRegisterArray(source: String): Boolean =
+        Regex("""DeferredRegister\s*<\s*\?\s*>\s*\[\]\s+[A-Za-z_$][\w$]*\s*=""").containsMatchIn(source)
+
+    private fun deferredRegisterReferencePattern(field: DeferredRegisterField): Regex {
+        val simple = Regex.escape(field.ownerSimpleName)
+        val qualified = Regex.escape(field.ownerQualifiedName)
+        val owner = if (field.ownerQualifiedName.isBlank()) simple else "(?:$simple|$qualified)"
+        return Regex("""\b$owner\.${Regex.escape(field.fieldName)}\b""")
+    }
+
+    private fun deferredRegisterFieldRegisteredViaOwnerMethod(
+        mainSource: String,
+        field: DeferredRegisterField
+    ): Boolean {
+        val ownerSource = field.ownerFile?.takeIf { it.exists() }?.readText() ?: return false
+        val owner = if (field.ownerQualifiedName.isBlank()) {
+            Regex.escape(field.ownerSimpleName)
+        } else {
+            "(?:${Regex.escape(field.ownerSimpleName)}|${Regex.escape(field.ownerQualifiedName)})"
+        }
+        val busType = """(?:IEventBus|net\.neoforged\.bus\.api\.IEventBus)"""
+        val methodPattern = Regex(
+            """(?s)\b(?:public|protected|private)?\s*static\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*$busType\s+([A-Za-z_$][\w$]*)\s*\)\s*\{(.*?)\n\s*\}"""
+        )
+        return methodPattern.findAll(ownerSource).any { match ->
+            val methodName = match.groupValues[1]
+            val busName = match.groupValues[2]
+            val body = match.groupValues[3]
+            val registersField = Regex("""\b${Regex.escape(field.fieldName)}\.register\s*\(\s*${Regex.escape(busName)}\s*\)""")
+                .containsMatchIn(body)
+            registersField && Regex("""\b$owner\.${Regex.escape(methodName)}\s*\(""").containsMatchIn(mainSource)
+        }
+    }
+
+    private fun String.lineStartIndent(index: Int): String {
+        val lineStart = lastIndexOf('\n', index).let { if (it < 0) 0 else it + 1 }
+        return substring(lineStart, index).takeWhile { it == ' ' || it == '\t' }
     }
 
     private fun collectJavaRecordComponents(srcDir: Path): Map<String, Set<String>> {
@@ -12611,14 +12736,62 @@ ${entries.joinToString(",\n")}
                 val source = javaFile.readText()
                 if (!source.contains("DeferredRegister")) return@forEach
                 val className = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+                val classBody = javaClassBodyRange(source, className)
                 val field = Regex("""\bDeferredRegister\b[^\r\n;=]*\s+([A-Z][A-Z0-9_]*)\s*=""")
-                    .find(source)
+                    .findAll(source)
+                    .firstOrNull { classBody == null || isDirectClassBodyMember(source, classBody, it.range.first) }
                     ?.groupValues
                     ?.get(1)
                     ?: return@forEach
                 owners[className] = DeferredRegisterOwner(className, field)
             }
         return owners
+    }
+
+    private fun collectDeferredRegisterFields(srcDir: Path): List<DeferredRegisterField> {
+        val fields = linkedSetOf<DeferredRegisterField>()
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val source = javaFile.readText()
+                if (!source.contains("DeferredRegister")) return@forEach
+                val className = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+                val classBody = javaClassBodyRange(source, className)
+                val packageName = packageNameOf(source)
+                val qualifiedName = if (packageName.isBlank()) className else "$packageName.$className"
+                Regex("""\bDeferredRegister\b[^\r\n;=]*\s+([A-Z][A-Z0-9_]*)\s*=""")
+                    .findAll(source)
+                    .filter { classBody == null || isDirectClassBodyMember(source, classBody, it.range.first) }
+                    .forEach { match ->
+                        fields += DeferredRegisterField(className, qualifiedName, match.groupValues[1], javaFile)
+                    }
+            }
+        return fields.toList()
+    }
+
+    private fun isDirectClassBodyMember(source: String, classBody: IntRange, index: Int): Boolean {
+        var depth = 0
+        var i = classBody.first
+        while (i < index && i < source.length) {
+            when (source[i]) {
+                '"' -> i = skipJavaStringLiteral(source, i)
+                '\'' -> i = skipJavaCharLiteral(source, i)
+                '{' -> depth++
+                '}' -> depth--
+            }
+            i++
+        }
+        return depth == 1
+    }
+
+    private fun javaClassBodyRange(source: String, className: String): IntRange? {
+        val classPattern = Regex(
+            """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*(?:class|interface|enum|record)\s+${Regex.escape(className)}\b[^{]*\{"""
+        )
+        val match = classPattern.find(source) ?: return null
+        val openBrace = source.indexOf('{', match.range.last)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        return if (openBrace >= 0 && closeBrace > openBrace) openBrace..closeBrace else null
     }
 
     private fun collectGlobalLootModifierProviderClasses(srcDir: Path): Set<String> {
@@ -14408,6 +14581,7 @@ ${indent}}
             }
         }
         result = migrateLegacyFinalizeSpawnMixinDescriptors(result)
+        result = migrateLegacyLevelStorageSourceLoadSummariesLambdaMixinDescriptor(result)
 
         if (result.contains("populateDefaultEquipmentEnchantments(")) {
             result = Regex(
@@ -21373,6 +21547,19 @@ ${indent}}"""
             result = withoutCompoundImport
         }
         return result
+    }
+
+    private fun migrateLegacyLevelStorageSourceLoadSummariesLambdaMixinDescriptor(source: String): String {
+        val legacyLambda = "lambda\$loadLevelSummaries\$2(Lnet/minecraft/world/level/storage/LevelStorageSource\$LevelDirectory;)Lnet/minecraft/world/level/storage/LevelSummary;"
+        if (!source.contains(legacyLambda)) return source
+        val targetsLevelStorageSource = Regex(
+            """@Mixin\s*\(\s*(?:LevelStorageSource|net\.minecraft\.world\.level\.storage\.LevelStorageSource)\.class\s*\)"""
+        ).containsMatchIn(source)
+        if (!targetsLevelStorageSource) return source
+        if (!source.contains("Lnet/minecraft/util/DirectoryLock;isLocked(Ljava/nio/file/Path;)Z")) return source
+
+        val migratedLambda = "lambda\$loadLevelSummaries\$3(Lnet/minecraft/world/level/storage/LevelStorageSource\$LevelDirectory;)Lnet/minecraft/world/level/storage/LevelSummary;"
+        return source.replace(legacyLambda, migratedLambda)
     }
 
     private fun migrateLegacyNeoForgeModelApiSource(source: String): String {
