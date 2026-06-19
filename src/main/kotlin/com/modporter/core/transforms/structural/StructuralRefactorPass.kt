@@ -13224,6 +13224,7 @@ ${indent}}
         result = migrateLegacySkullOwnerVerifyComponentsSource(result)
         result = migrateLegacyItemStackTagReads(result)
         result = migrateLegacyItemStackTagWrites(result)
+        result = migrateLegacyItemStackTagReads(result)
         result = migrateLegacyItemEnchantmentComponents(result)
         result = migrateLegacyItemMaxDamageCalls(result)
         result = migrateDeferredSpawnEggLookups(result)
@@ -13317,6 +13318,7 @@ ${indent}}
         result = migrateLegacyItemConstructorsAndProperties(result)
         result = migrateLegacyTierLevelSource(result)
         result = migrateArmorMaterialHolderFields(result)
+        result = migrateArmorMaterialHolderNameAccess(result)
         result = migrateLegacyCustomRecipeSource(result)
         result = migrateContainerSizeCallsForDeclaredContainerScopes(result)
         result = migrateDeclaredCollectionGetSizeCalls(result)
@@ -19283,12 +19285,17 @@ ${indent}}
             !source.contains(".hasTag()")) {
             return source
         }
+        val stackReceiver = """[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*(?:\(\))?)*"""
+        var result = Regex(
+            """(?:net\.minecraft\.world\.item\.component\.)?CustomData\.of\(\s*($stackReceiver)\.getTag\(\)\s*\)"""
+        ).replace(source) { match ->
+            "${match.groupValues[1]}.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY)"
+        }
         val itemStackVariables = Regex("""\b(?:net\.minecraft\.world\.item\.)?ItemStack\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(source)
+            .findAll(result)
             .map { it.groupValues[1] }
             .toSet()
-        if (itemStackVariables.isEmpty()) return source
-        var result = source
+        if (itemStackVariables.isEmpty()) return result
         for (stack in itemStackVariables) {
             val receiver = Regex.escape(stack)
             result = Regex("""\b$receiver\.hasTag\s*\(\s*\)""")
@@ -27537,6 +27544,8 @@ ${indent}}
             .replace(".material.getToughness()", ".material.value().toughness()")
             .replace(".material.getKnockbackResistance()", ".material.value().knockbackResistance()")
             .replace(".material.getEquipSound()", ".material.value().equipSound().value()")
+            .replace(".material.getName()", ".material.unwrapKey().orElseThrow().location().getPath()")
+            .replace(".getMaterial().getName()", ".getMaterial().unwrapKey().orElseThrow().location().getPath()")
 
         val materialVariables = Regex("""\bHolder\s*<\s*ArmorMaterial\s*>\s+([A-Za-z_$][\w$]*)\b""")
             .findAll(result)
@@ -27549,9 +27558,28 @@ ${indent}}
             result = Regex("""\b$escaped\.getToughness\(\)""").replace(result, "$variable.value().toughness()")
             result = Regex("""\b$escaped\.getKnockbackResistance\(\)""").replace(result, "$variable.value().knockbackResistance()")
             result = Regex("""\b$escaped\.getEquipSound\(\)""").replace(result, "$variable.value().equipSound().value()")
+            result = Regex("""\b$escaped\.getName\(\)""").replace(result, "$variable.unwrapKey().orElseThrow().location().getPath()")
         }
 
         return if (result != source) addImportIfMissing(result, "net.minecraft.core.Holder") else source
+    }
+
+    private fun migrateArmorMaterialHolderNameAccess(source: String): String {
+        if (!source.contains("ArmorMaterial") || !source.contains(".getName()")) return source
+        var result = source
+            .replace(".getMaterial().getName()", ".getMaterial().unwrapKey().orElseThrow().location().getPath()")
+            .replace(".material.getName()", ".material.unwrapKey().orElseThrow().location().getPath()")
+
+        val materialVariables = Regex("""\bHolder\s*<\s*ArmorMaterial\s*>\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(result)
+            .map { it.groupValues[1] }
+            .toSet()
+        for (variable in materialVariables) {
+            val escaped = Regex.escape(variable)
+            result = Regex("""\b$escaped\.getName\(\)""")
+                .replace(result, "$variable.unwrapKey().orElseThrow().location().getPath()")
+        }
+        return result
     }
 
     private fun migrateLegacyItemExtensionAndProjectileApis(source: String): String {

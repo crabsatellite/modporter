@@ -12400,8 +12400,16 @@ class StructuralRefactorExtraTest {
                     return this.material.getEquipSound();
                 }
 
+                public String textureName() {
+                    return this.material.getName();
+                }
+
                 public ArmorMaterial getMaterial() {
                     return this.material;
+                }
+
+                public String getterTextureName() {
+                    return this.getMaterial().getName();
                 }
             }
         """.trimIndent())
@@ -12416,9 +12424,58 @@ class StructuralRefactorExtraTest {
         assertTrue(item.contains("return this.material.value().enchantmentValue();"), item)
         assertTrue(item.contains("return this.material.value().repairIngredient().get().test(stack);"), item)
         assertTrue(item.contains("return this.material.value().equipSound().value();"), item)
+        assertTrue(item.contains("return this.material.unwrapKey().orElseThrow().location().getPath();"), item)
         assertTrue(item.contains("public Holder<ArmorMaterial> getMaterial()"), item)
+        assertTrue(item.contains("return this.getMaterial().unwrapKey().orElseThrow().location().getPath();"), item)
         assertFalse(item.contains("material.getEnchantmentValue()"), item)
         assertFalse(item.contains("material.getRepairIngredient()"), item)
+        assertFalse(item.contains("material.getName()"), item)
+    }
+
+    @Test
+    fun `migrates CustomData of legacy stack tags to existing custom data components`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CustomDataCopy.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.component.DataComponents;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.component.CustomData;
+
+            public class CustomDataCopy {
+                public void copy(ItemStack source, ItemStack target) {
+                    if (source.has(DataComponents.CUSTOM_DATA)) {
+                        target.set(DataComponents.CUSTOM_DATA, CustomData.of(source.getTag()));
+                    }
+                }
+
+                public void copySlot(SlotResult slotResult, ItemStack target) {
+                    if (slotResult.stack().has(DataComponents.CUSTOM_DATA)) {
+                        target.set(DataComponents.CUSTOM_DATA, CustomData.of(slotResult.stack().getTag()));
+                    }
+                }
+
+                public void copyLegacySlot(SlotResult slotResult, ItemStack target) {
+                    target.setTag(slotResult.stack().getTag());
+                }
+
+                interface SlotResult {
+                    ItemStack stack();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("CustomDataCopy.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(migrated.contains("target.set(DataComponents.CUSTOM_DATA, source.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
+        assertTrue(migrated.contains("target.set(DataComponents.CUSTOM_DATA, slotResult.stack().getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
+        assertTrue(migrated.contains("target.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, slotResult.stack().getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
+        assertFalse(migrated.contains("CustomData.of(source.getTag())"), migrated)
+        assertFalse(migrated.contains("CustomData.of(slotResult.stack().getTag())"), migrated)
+        assertFalse(migrated.contains("setTag(slotResult.stack().getTag())"), migrated)
     }
 
     @Test
