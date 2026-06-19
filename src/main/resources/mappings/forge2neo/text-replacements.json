@@ -50,6 +50,27 @@
       "fileGlob": "*.java"
     },
     {
+      "id": "pkg-lootr-neoforge-init",
+      "pattern": "noobanidus.mods.lootr.init",
+      "replacement": "noobanidus.mods.lootr.neoforge.init",
+      "description": "Lootr moved loader-specific init classes under the neoforge package",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "pkg-lootr-neoforge-config",
+      "pattern": "noobanidus.mods.lootr.config",
+      "replacement": "noobanidus.mods.lootr.neoforge.config",
+      "description": "Lootr moved loader-specific config classes under the neoforge package",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "lootr-config-new-textures",
+      "pattern": "ConfigManager.isOldTextures()",
+      "replacement": "!ConfigManager.isNewTextures()",
+      "description": "Lootr texture mode API renamed from old-texture predicate to new-texture predicate",
+      "fileGlob": "*.java"
+    },
+    {
       "id": "forgegui-import",
       "pattern": "import\\s+net\\.minecraftforge\\.client\\.gui\\.overlay\\.ForgeGui;\\r?\\n",
       "replacement": "import net.minecraft.client.gui.Gui;\n",

@@ -2917,22 +2917,30 @@ class BuildSystemTest {
 
             dependencies {
                 implementation fg.deobf("curse.maven:jade-324717:4681833")
+                compileOnly "curse.maven:lootr-361276:${'$'}{project.lootr_version}"
                 runtimeOnly "curse.maven:jeed-532286:4599236"
                 runtimeOnly fg.deobf("curse.maven:museum-curator-859070:4629894")
             }
         """.trimIndent())
+        projectDir.resolve("gradle.properties").writeText("""
+            lootr_version=5636598
+        """.trimIndent())
 
         val result = pass.apply(projectDir)
         val content = projectDir.resolve("build.gradle").readText()
+        val props = projectDir.resolve("gradle.properties").readText()
 
         assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
         assertTrue(result.changes.any { it.ruleId == "build-remove-dep" })
-        assertTrue(content.contains("""implementation "curse.maven:jade-324717:5529595""""))
+        assertTrue(content.contains("""compileOnly "curse.maven:jade-324717:5813144""""))
+        assertTrue(content.contains("""compileOnly "curse.maven:lootr-361276:5832064""""))
         assertTrue(content.contains("""runtimeOnly "curse.maven:jeed-532286:6550600""""))
         assertFalse(content.contains("4681833"))
+        assertFalse(content.contains("5636598"))
         assertFalse(content.contains("4599236"))
         assertFalse(content.contains("curse.maven:museum-curator-859070"))
         assertFalse(content.contains("4629894"))
+        assertTrue(props.contains("lootr_version=5832064"), props)
     }
 
     @Test
@@ -2988,6 +2996,30 @@ class BuildSystemTest {
         assertTrue(content.contains("https://maven.blamejared.com"))
         assertFalse(content.contains("TO" + "DO: Update for NeoForge"))
         assertFalse(content.contains("name: \"Botania\""))
+    }
+
+    @Test
+    fun `resolves CraftTweaker to official NeoForge maven artifact`() {
+        val projectDir = tempDir.resolve("p19-crafttweaker")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                implementation fg.deobf("com.blamejared.crafttweaker:CraftTweaker-forge-1.20.1:14.0.14")
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(content.contains("""implementation "com.blamejared.crafttweaker:CraftTweaker-neoforge-1.21.1:21.0.38""""))
+        assertTrue(content.contains("https://maven.blamejared.com"))
+        assertFalse(content.contains("CraftTweaker-forge-1.20.1"))
+        assertFalse(content.contains("maven.modrinth:crafttweaker"))
     }
 
     @Test

@@ -752,6 +752,42 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `lootr loader-specific init package migrates to neoforge namespace`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import noobanidus.mods.lootr.init.ModBlocks;
+            import noobanidus.mods.lootr.config.ConfigManager;
+
+            public class TestMod {
+                public Object chest() {
+                    return ModBlocks.CHEST.get();
+                }
+
+                public boolean oldTextures() {
+                    return ConfigManager.isOldTextures();
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "pkg-lootr-neoforge-init" })
+        assertTrue(result.changes.any { it.ruleId == "pkg-lootr-neoforge-config" })
+        assertTrue(result.changes.any { it.ruleId == "lootr-config-new-textures" })
+        assertTrue(transformed.contains("import noobanidus.mods.lootr.neoforge.init.ModBlocks;"))
+        assertTrue(transformed.contains("import noobanidus.mods.lootr.neoforge.config.ConfigManager;"))
+        assertTrue(transformed.contains("return !ConfigManager.isNewTextures();"))
+        assertFalse(transformed.contains("noobanidus.mods.lootr.init"))
+        assertFalse(transformed.contains("noobanidus.mods.lootr.config"))
+        assertFalse(transformed.contains("isOldTextures"))
+    }
+
+    @Test
     fun `deferred holder concrete registrations use registry base generic`() {
         val projectDir = createTestFile("""
             package com.example;

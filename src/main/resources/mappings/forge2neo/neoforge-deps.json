@@ -192,11 +192,35 @@
       "forgePrefix": "curse.maven:jade-324717",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "implementation", "coord": "curse.maven:jade-324717:5529595" }
+        { "config": "compileOnly", "coord": "curse.maven:jade-324717:5813144" }
+      ],
+      "versionProperties": [
+        {
+          "name": "jade_version",
+          "value": "5813144",
+          "notes": "Jade NeoForge 1.21.1 CurseMaven file used by upstream Aether 1.21.1"
+        }
       ],
       "mavenUrl": null,
       "status": "available",
-      "notes": "Jade CurseMaven: 5529595 is the NeoForge 1.21.1 runtime/API build used by the upstream 1.21.1 port"
+      "notes": "Jade CurseMaven: 5813144 is the NeoForge 1.21.1 compile-only API/runtime file used by the upstream Aether 1.21.1 port"
+    },
+    {
+      "forgePrefix": "curse.maven:lootr-361276",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "curse.maven:lootr-361276:5832064" }
+      ],
+      "versionProperties": [
+        {
+          "name": "lootr_version",
+          "value": "5832064",
+          "notes": "Lootr NeoForge 1.21.1 CurseMaven file with loader-specific neoforge init package"
+        }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "Lootr CurseMaven: 5832064 exposes noobanidus.mods.lootr.neoforge.init for NeoForge 1.21.1 compat"
     },
     {
       "forgePrefix": "curse.maven:jeed-532286",
@@ -305,10 +329,12 @@
     {
       "forgePrefix": "com.blamejared.crafttweaker",
       "modrinthSlug": "crafttweaker",
-      "neoforgeCoords": [],
-      "mavenUrl": null,
-      "status": "check_online",
-      "notes": "CraftTweaker: check Modrinth"
+      "neoforgeCoords": [
+        { "config": "implementation", "coord": "com.blamejared.crafttweaker:CraftTweaker-neoforge-1.21.1:21.0.38" }
+      ],
+      "mavenUrl": "https://maven.blamejared.com",
+      "status": "available",
+      "notes": "CraftTweaker: use the official BlameJared NeoForge artifact; the Modrinth Maven jar exposes intermediary names to ModDev"
     },
     {
       "forgePrefix": "curse.maven:geckolib",
