@@ -13175,6 +13175,7 @@ ${indent}}
         result = migrateRecipeHolderIdAndLocalMmlibApi(result)
         result = migrateRecipeBookCategoryFinderRecipeHolders(result)
         result = migrateLegacyCraftingRecipeBoundaries(result)
+        result = migrateGenericRecipeInputImplementations(result)
         result = migrateRecipeHolderOptionalMapLambdaValueAccess(result)
         result = migrateMerchantOfferItemCosts(result)
         result = migrateItemUseDurationCalls(result)
@@ -18626,6 +18627,140 @@ ${indent}}"""
             }
         }
         return result
+    }
+
+    private fun migrateGenericRecipeInputImplementations(source: String): String {
+        if (!source.contains("Recipe<Container>") || source.contains("implements CraftingRecipe")) return source
+
+        val id = """[A-Za-z_$][\w$]*"""
+        val parameterPrefix = """(?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*)*(?:final\s+)?"""
+        val methodPattern = Regex(
+            """(?m)^([ \t]*(?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:public|protected|private)\s+(?:boolean|ItemStack)\s+(?:matches|assemble)\s*\(\s*$parameterPrefix)(Container)(\s+($id)\s*,\s*(?:Level|HolderLookup\.Provider)\s+$id\s*\)\s*(?:throws\s+[^{;]+)?\{)"""
+        )
+
+        val replacements = mutableListOf<Pair<IntRange, String>>()
+        methodPattern.findAll(source).forEach { match ->
+            val openBrace = source.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) return source
+            val body = source.substring(openBrace + 1, closeBrace)
+            val parameterName = match.groupValues[4]
+            if (!recipeInputCompatibleContainerParameterUsage(body, parameterName)) return source
+            replacements.add((match.groups[2]?.range ?: return source) to "RecipeInput")
+            Regex("""(?<![\w$])${Regex.escape(parameterName)}\s*\.\s*getContainerSize\s*\(\s*\)""")
+                .findAll(body)
+                .forEach { call ->
+                    val start = openBrace + 1 + call.range.first
+                    val end = openBrace + 1 + call.range.last
+                    replacements.add((start..end) to "$parameterName.size()")
+                }
+        }
+
+        if (replacements.isEmpty()) return source
+
+        var result = source
+        for ((range, replacement) in replacements.sortedByDescending { it.first.first }) {
+            result = result.substring(0, range.first) + replacement + result.substring(range.last + 1)
+        }
+
+        result = Regex("""Recipe\s*<\s*Container\s*>""").replace(result, "Recipe<RecipeInput>")
+        result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeInput")
+        val withoutContainerImport = removeImport(result, "net.minecraft.world.Container")
+        if (!hasSimpleTypeReference(withoutContainerImport, "Container")) {
+            result = withoutContainerImport
+        }
+        return result
+    }
+
+    private fun recipeInputCompatibleContainerParameterUsage(body: String, parameterName: String): Boolean {
+        val masked = maskJavaCommentsAndLiterals(body)
+        val parameterPattern = Regex("""(?<![\w$])${Regex.escape(parameterName)}(?![\w$])""")
+        val allowedRecipeInputMethods = setOf("getItem", "size", "isEmpty", "getContainerSize")
+
+        parameterPattern.findAll(masked).forEach { match ->
+            var cursor = match.range.last + 1
+            while (cursor < masked.length && masked[cursor].isWhitespace()) cursor++
+            if (cursor >= masked.length || masked[cursor] != '.') return false
+            cursor++
+            while (cursor < masked.length && masked[cursor].isWhitespace()) cursor++
+            val methodStart = cursor
+            while (cursor < masked.length && (masked[cursor].isLetterOrDigit() || masked[cursor] == '_' || masked[cursor] == '$')) cursor++
+            val methodName = masked.substring(methodStart, cursor)
+            if (methodName !in allowedRecipeInputMethods) return false
+            while (cursor < masked.length && masked[cursor].isWhitespace()) cursor++
+            if (cursor >= masked.length || masked[cursor] != '(') return false
+        }
+
+        return true
+    }
+
+    private fun maskJavaCommentsAndLiterals(source: String): String {
+        val result = StringBuilder(source.length)
+        var index = 0
+        var inLineComment = false
+        var inBlockComment = false
+        var inString = false
+        var inChar = false
+        var escaped = false
+        while (index < source.length) {
+            val ch = source[index]
+            val next = source.getOrNull(index + 1)
+
+            when {
+                inLineComment -> {
+                    if (ch == '\r' || ch == '\n') {
+                        inLineComment = false
+                        result.append(ch)
+                    } else {
+                        result.append(' ')
+                    }
+                }
+                inBlockComment -> {
+                    if (ch == '*' && next == '/') {
+                        result.append("  ")
+                        index++
+                        inBlockComment = false
+                    } else {
+                        result.append(if (ch == '\r' || ch == '\n') ch else ' ')
+                    }
+                }
+                inString -> {
+                    result.append(if (ch == '\r' || ch == '\n') ch else ' ')
+                    if (ch == '"' && !escaped) inString = false
+                    escaped = ch == '\\' && !escaped
+                    if (ch != '\\') escaped = false
+                }
+                inChar -> {
+                    result.append(if (ch == '\r' || ch == '\n') ch else ' ')
+                    if (ch == '\'' && !escaped) inChar = false
+                    escaped = ch == '\\' && !escaped
+                    if (ch != '\\') escaped = false
+                }
+                ch == '/' && next == '/' -> {
+                    result.append("  ")
+                    index++
+                    inLineComment = true
+                }
+                ch == '/' && next == '*' -> {
+                    result.append("  ")
+                    index++
+                    inBlockComment = true
+                }
+                ch == '"' -> {
+                    result.append(' ')
+                    inString = true
+                    escaped = false
+                }
+                ch == '\'' -> {
+                    result.append(' ')
+                    inChar = true
+                    escaped = false
+                }
+                else -> result.append(ch)
+            }
+            index++
+        }
+        return result.toString()
     }
 
     private fun inferSingleStackRecipeBookRecipeClass(source: String, recipeTypeHints: RecipeTypeHints): String? {

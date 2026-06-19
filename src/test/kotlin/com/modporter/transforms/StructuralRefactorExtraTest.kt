@@ -8577,6 +8577,90 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates non crafting container recipes to generic recipe input only when container usage is compatible`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PlacementBanRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+
+            public abstract class PlacementBanRecipe implements Recipe<Container> {
+                public boolean matches(Level level, BlockPos pos, ItemStack stack) {
+                    return true;
+                }
+
+                @Override
+                public boolean matches(Container container, Level level) {
+                    return container.isEmpty() || container.size() == 0;
+                }
+
+                @Override
+                public ItemStack assemble(Container container, HolderLookup.Provider provider) {
+                    return ItemStack.EMPTY;
+                }
+
+                @Override
+                public boolean canCraftInDimensions(int width, int height) { return false; }
+
+                @Override
+                public RecipeType<?> getType() { return RecipeType.CRAFTING; }
+            }
+        """.trimIndent())
+        srcDir.resolve("ContainerOnlyRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+
+            public class ContainerOnlyRecipe implements Recipe<Container> {
+                @Override
+                public boolean matches(Container container, Level level) {
+                    container.setChanged();
+                    return true;
+                }
+
+                @Override
+                public ItemStack assemble(Container container, HolderLookup.Provider provider) {
+                    return ItemStack.EMPTY;
+                }
+
+                @Override
+                public boolean canCraftInDimensions(int width, int height) { return false; }
+
+                @Override
+                public RecipeType<?> getType() { return RecipeType.CRAFTING; }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("PlacementBanRecipe.java").readText()
+        val blocked = srcDir.resolve("ContainerOnlyRecipe.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("implements Recipe<RecipeInput>"), migrated)
+        assertTrue(migrated.contains("boolean matches(RecipeInput container, Level level)"), migrated)
+        assertTrue(migrated.contains("ItemStack assemble(RecipeInput container, HolderLookup.Provider provider)"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.item.crafting.RecipeInput;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.world.Container;"), migrated)
+        assertTrue(migrated.contains("public boolean matches(Level level, BlockPos pos, ItemStack stack)"), migrated)
+        assertTrue(blocked.contains("implements Recipe<Container>"), blocked)
+        assertTrue(blocked.contains("boolean matches(Container container, Level level)"), blocked)
+        assertTrue(blocked.contains("container.setChanged();"), blocked)
+        assertFalse(blocked.contains("RecipeInput"), blocked)
+    }
+
+    @Test
     fun `migrates cached check container recipes to single stack recipe holders`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
