@@ -3692,11 +3692,25 @@ $itemArguments
         val constructorBody = findConstructorBodyWithEventBus(source, eventBusName)
         fun insideConstructor(match: MatchResult): Boolean =
             constructorBody == null || match.range.first in constructorBody
+        val clientGuardRanges = constructorBody?.let { findClientDistGuardRanges(source, it) }.orEmpty()
+        val isClientOnlyRegistration = registration.contains("Dist.CLIENT") || registration.contains("FMLLoader.getDist()")
+        fun outsideClientGuard(match: MatchResult): Boolean =
+            isClientOnlyRegistration || clientGuardRanges.none { match.range.first in it }
+        val busDeclarationIndent = Regex(
+            """(?m)^([ \t]*)IEventBus\s+${Regex.escape(eventBusName)}\s*=[^;]*;\s*$"""
+        ).findAll(source)
+            .firstOrNull(::insideConstructor)
+            ?.groupValues
+            ?.get(1)
+        fun sameConstructorLevel(match: MatchResult): Boolean =
+            busDeclarationIndent == null || match.groupValues.getOrNull(1) == busDeclarationIndent
+        fun allowedRegistrationAnchor(match: MatchResult): Boolean =
+            insideConstructor(match) && outsideClientGuard(match) && sameConstructorLevel(match)
 
         val afterPreferredRegister = Regex(
             """(?m)^([ \t]*)${Regex.escape(preferredRegistryClassName)}(?:\.\w+)*\.register\(${Regex.escape(eventBusName)}\);\s*$"""
         ).findAll(source)
-            .lastOrNull(::insideConstructor)
+            .lastOrNull(::allowedRegistrationAnchor)
         if (afterPreferredRegister != null) {
             val insertPos = afterPreferredRegister.range.last + 1
             return source.substring(0, insertPos) + "\n" + registration + source.substring(insertPos)
@@ -3704,7 +3718,7 @@ $itemArguments
 
         val afterAnyRegister = Regex("""(?m)^([ \t]*)[\w.]+\.register\(${Regex.escape(eventBusName)}\);\s*$""")
             .findAll(source)
-            .filter(::insideConstructor)
+            .filter(::allowedRegistrationAnchor)
             .lastOrNull()
         if (afterAnyRegister != null) {
             val insertPos = afterAnyRegister.range.last + 1
@@ -3715,7 +3729,7 @@ $itemArguments
             val localDeclaration = Regex(
                 """(?m)^([ \t]*)IEventBus\s+${Regex.escape(eventBusName)}\s*=[^;]*;\s*$"""
             ).findAll(source)
-                .filter(::insideConstructor)
+                .filter { insideConstructor(it) && outsideClientGuard(it) }
                 .firstOrNull()
             if (localDeclaration != null) {
                 val insertPos = localDeclaration.range.last + 1
@@ -3727,6 +3741,20 @@ $itemArguments
         }
 
         return source + "\n" + registration + "\n"
+    }
+
+    private fun findClientDistGuardRanges(source: String, constructorBody: IntRange): List<IntRange> {
+        val guardPattern = Regex(
+            """if\s*\(\s*(?:FMLLoader|net\.neoforged\.fml\.loading\.FMLLoader)\.getDist\(\)\s*==\s*(?:Dist|net\.neoforged\.api\.distmarker\.Dist)\.CLIENT\s*\)\s*\{"""
+        )
+        return guardPattern.findAll(source)
+            .mapNotNull { match ->
+                if (match.range.first !in constructorBody) return@mapNotNull null
+                val openBrace = source.indexOf('{', match.range.first)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+                if (openBrace < 0 || closeBrace < openBrace) null else match.range.first..closeBrace
+            }
+            .toList()
     }
 
     private fun findConstructorBodyWithEventBus(source: String, eventBusName: String): IntRange? {

@@ -478,6 +478,74 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `inserts common static mod bus subscribers outside client dist guard`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val entityDir = srcDir.resolve("entity")
+        val clientDir = srcDir.resolve("client")
+        srcDir.createDirectories()
+        entityDir.createDirectories()
+        clientDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.client.ClientRegistry;
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.loading.FMLLoader;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    if (FMLLoader.getDist() == Dist.CLIENT) {
+                        ClientRegistry.CLIENT_THINGS.register(modEventBus);
+                    }
+                }
+            }
+        """.trimIndent())
+        entityDir.resolve("EntityRegistry.java").writeText("""
+            package com.example.entity;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.event.entity.EntityAttributeCreationEvent;
+
+            @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+            public class EntityRegistry {
+                @SubscribeEvent
+                public static void registerEntityAttributes(EntityAttributeCreationEvent event) {
+                }
+            }
+        """.trimIndent())
+        clientDir.resolve("ClientRegistry.java").writeText("""
+            package com.example.client;
+
+            import net.neoforged.bus.api.IEventBus;
+
+            public class ClientRegistry {
+                public static final ClientRegistry CLIENT_THINGS = new ClientRegistry();
+
+                public void register(IEventBus bus) {
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val main = srcDir.resolve("ExampleMod.java").readText()
+        val listener = "modEventBus.addListener(com.example.entity.EntityRegistry::registerEntityAttributes);"
+        val listenerIndex = main.indexOf(listener)
+        val guardIndex = main.indexOf("if (FMLLoader.getDist() == Dist.CLIENT)")
+        assertTrue(listenerIndex > 0, main)
+        assertTrue(listenerIndex < guardIndex, main)
+        assertTrue(main.contains("IEventBus modEventBus = modContainer.getEventBus();\n        $listener\n        if (FMLLoader.getDist() == Dist.CLIENT)"), main)
+    }
+
+    @Test
     fun `detects ifPresent and orElse on capability-related expressions`() {
         val projectDir = createFile("CapUsage.java", """
             package com.example;
