@@ -5606,6 +5606,7 @@ class StructuralRefactorExtraTest {
                     new MerchantOffer(new ItemStack(Items.EMERALD, 10), new ItemStack(Items.DIRT), 16, 2, 0.05F);
                     int color = net.minecraft.world.item.alchemy.PotionUtils.getColor(stack);
                     boolean locked = EnchantmentHelper.hasBindingCurse(stack);
+                    boolean retained = EnchantmentHelper.hasVanishingCurse(stack);
                     if (EquipmentSlot.CHEST.getType() == EquipmentSlot.Type.ARMOR) {}
                 }
 
@@ -5654,6 +5655,7 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("new ItemCost(Items.EMERALD, 10)"))
         assertTrue(migrated.contains("stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"))
         assertTrue(migrated.contains("EnchantmentHelper.has(stack, EnchantmentEffectComponents.PREVENT_ARMOR_CHANGE)"))
+        assertTrue(migrated.contains("EnchantmentHelper.has(stack, EnchantmentEffectComponents.PREVENT_EQUIPMENT_DROP)"))
         assertTrue(migrated.contains("import net.minecraft.world.item.enchantment.EnchantmentEffectComponents;"))
         assertTrue(migrated.contains("EquipmentSlot.CHEST.getType() == EquipmentSlot.Type.HUMANOID_ARMOR"))
         assertTrue(!migrated.contains("EquipmentSlot.Type.ARMOR"))

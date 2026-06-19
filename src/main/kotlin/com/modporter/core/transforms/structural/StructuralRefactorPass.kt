@@ -12907,6 +12907,11 @@ ${indent}}
             result = bindingCurseMigrated
             needsEnchantmentEffectComponents = true
         }
+        val vanishingCurseMigrated = migrateLegacyVanishingCurseChecks(result)
+        if (vanishingCurseMigrated != result) {
+            result = vanishingCurseMigrated
+            needsEnchantmentEffectComponents = true
+        }
         result = migrateRecipeBookGhostRecipeSource(result)
         result = migrateOptionalCompoundRecipeTagAccess(result, optionalCompoundRecipeTagOwners)
         result = migrateLegacyClientRenderingSource(result)
@@ -25615,6 +25620,37 @@ $methodBody
             }
             migrated.append(source, cursor, tokenIndex)
             migrated.append("EnchantmentHelper.has(${args[0].trim()}, EnchantmentEffectComponents.PREVENT_ARMOR_CHANGE)")
+            cursor = closeParen + 1
+        }
+        if (cursor == 0) return source
+        migrated.append(source, cursor, source.length)
+        return migrated.toString()
+    }
+
+    private fun migrateLegacyVanishingCurseChecks(source: String): String {
+        val token = "EnchantmentHelper.hasVanishingCurse"
+        if (!source.contains(token)) return source
+        val migrated = StringBuilder()
+        var cursor = 0
+        while (cursor < source.length) {
+            val tokenIndex = source.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + token.length
+            if (openParen >= source.length || source[openParen] != '(') {
+                migrated.append(source, cursor, openParen)
+                cursor = openParen
+                continue
+            }
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen < 0) break
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (args.size != 1) {
+                migrated.append(source, cursor, closeParen + 1)
+                cursor = closeParen + 1
+                continue
+            }
+            migrated.append(source, cursor, tokenIndex)
+            migrated.append("EnchantmentHelper.has(${args[0].trim()}, EnchantmentEffectComponents.PREVENT_EQUIPMENT_DROP)")
             cursor = closeParen + 1
         }
         if (cursor == 0) return source
