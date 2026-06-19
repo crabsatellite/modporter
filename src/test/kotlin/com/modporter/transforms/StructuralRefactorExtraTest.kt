@@ -1835,7 +1835,7 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
-    fun `keeps attribute imports for generic multimap type references`() {
+    fun `migrates attribute modifier multimaps to holder keyed types`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
         srcDir.resolve("AttributeMaps.java").writeText("""
@@ -1859,9 +1859,48 @@ class StructuralRefactorExtraTest {
         StructuralRefactorPass().apply(tempDir)
         val migrated = srcDir.resolve("AttributeMaps.java").readText()
 
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"), migrated)
         assertTrue(migrated.contains("import net.minecraft.world.entity.ai.attributes.Attribute;"), migrated)
-        assertTrue(migrated.contains("Multimap<Attribute, AttributeModifier>"), migrated)
-        assertTrue(migrated.contains("ImmutableMultimap.Builder<Attribute, AttributeModifier>"), migrated)
+        assertTrue(migrated.contains("Multimap<Holder<Attribute>, AttributeModifier>"), migrated)
+        assertTrue(migrated.contains("ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier>"), migrated)
+        assertFalse(migrated.contains("Multimap<Attribute, AttributeModifier>"), migrated)
+    }
+
+    @Test
+    fun `migrates reach attribute multimaps after neoforge reach constants`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ReachAttributes.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.neoforged.neoforge.common.NeoForgeMod;
+
+            public interface ReachAttributes {
+                default Multimap<Attribute, AttributeModifier> extend(Multimap<Attribute, AttributeModifier> map, EquipmentSlot slot) {
+                    ImmutableMultimap.Builder<Attribute, AttributeModifier> builder = ImmutableMultimap.builder();
+                    builder.putAll(map);
+                    builder.put(NeoForgeMod.BLOCK_REACH.get(), new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath("example", "block_reach"), 1.0D, AttributeModifier.Operation.ADD_VALUE));
+                    builder.put(NeoForgeMod.ENTITY_REACH.get(), new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath("example", "entity_reach"), 1.0D, AttributeModifier.Operation.ADD_VALUE));
+                    return builder.build();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ReachAttributes.java").readText()
+
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.entity.ai.attributes.Attributes;"), migrated)
+        assertTrue(migrated.contains("Multimap<Holder<Attribute>, AttributeModifier>"), migrated)
+        assertTrue(migrated.contains("ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier>"), migrated)
+        assertTrue(migrated.contains("builder.put(Attributes.BLOCK_INTERACTION_RANGE"), migrated)
+        assertTrue(migrated.contains("builder.put(Attributes.ENTITY_INTERACTION_RANGE"), migrated)
+        assertFalse(migrated.contains("NeoForgeMod"), migrated)
     }
 
     @Test
@@ -5907,7 +5946,7 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("EquipmentSlot.CHEST.getType() == EquipmentSlot.Type.HUMANOID_ARMOR"))
         assertTrue(!migrated.contains("EquipmentSlot.Type.ARMOR"))
         assertTrue(migrated.contains("Holder<Attribute> attribute"))
-        assertTrue(migrated.contains("new AttributeModifier(modifierName, value, AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL)"))
+        assertTrue(migrated.contains("new AttributeModifier(modifierName, value, AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL)"), migrated)
         assertTrue(migrated.contains("attributeInstance.hasModifier(modifier.id())"))
         assertTrue(migrated.contains("attributeInstance.removeModifier(modifierName)"))
         assertTrue(migrated.contains("MobEffect effect = effectHolder.value();"))
@@ -7799,6 +7838,38 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy entity enchantment helper calls to holder lookups`() {
+        val projectDir = createFile("LegacyEntityEnchantments.java", """
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.item.enchantment.Enchantments;
+
+            public class LegacyEntityEnchantments {
+                public int flame(LivingEntity livingEntity) {
+                    return EnchantmentHelper.getEnchantmentLevel(Enchantments.FLAME, livingEntity);
+                }
+
+                public int movement(LivingEntity entity) {
+                    return EnchantmentHelper.getDepthStrider(entity) + EnchantmentHelper.getFireAspect(entity);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val transformed = tempDir.resolve("src/main/java/com/example/LegacyEntityEnchantments.java").readText()
+
+        assertFalse(transformed.contains("level.registryAccess()"), transformed)
+        assertTrue(transformed.contains("EnchantmentHelper.getEnchantmentLevel(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(Enchantments.FLAME), livingEntity)"), transformed)
+        assertTrue(transformed.contains("EnchantmentHelper.getEnchantmentLevel(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(Enchantments.DEPTH_STRIDER), entity)"), transformed)
+        assertTrue(transformed.contains("EnchantmentHelper.getEnchantmentLevel(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(Enchantments.FIRE_ASPECT), entity)"), transformed)
+        assertFalse(transformed.contains("getDepthStrider"), transformed)
+        assertFalse(transformed.contains("getFireAspect"), transformed)
+    }
+
+    @Test
     fun `migrates raider spawn equipment and raid enchantment APIs`() {
         val projectDir = createFile("SamuraiIllagerEntity.java", """
             package com.example;
@@ -9092,6 +9163,7 @@ class StructuralRefactorExtraTest {
                         ItemStack inputSlotStack = stacks.get(0);
                         ItemStack resultStack = ((Recipe<WorldlyContainer>) recipe).assemble(this, registryAccess);
                         EnchantmentHelper.setEnchantments(EnchantmentHelper.getEnchantments(inputSlotStack), resultStack);
+                        EnchantmentHelper.setEnchantments(EnchantmentHelper.getEnchantments(this.getItem(1)), resultStack);
                     }
                     return true;
                 }
@@ -9116,6 +9188,7 @@ class StructuralRefactorExtraTest {
         assertTrue(blockEntity.contains("((Recipe<SingleRecipeInput>) recipe.value()).assemble(new SingleRecipeInput(inputSlotStack), registryAccess)"), blockEntity)
         assertTrue(blockEntity.contains(".map(RecipeHolder::value).map(AbstractCookingRecipe::getIngredients)"), blockEntity)
         assertTrue(blockEntity.contains("EnchantmentHelper.setEnchantments(resultStack, EnchantmentHelper.getEnchantmentsForCrafting(inputSlotStack))"), blockEntity)
+        assertTrue(blockEntity.contains("EnchantmentHelper.setEnchantments(resultStack, EnchantmentHelper.getEnchantmentsForCrafting(this.getItem(1)))"), blockEntity)
         assertFalse(accessor.contains("CachedCheck<Container"), accessor)
         assertFalse(blockEntity.contains("Recipe<WorldlyContainer>"), blockEntity)
     }
@@ -10582,21 +10655,28 @@ class StructuralRefactorExtraTest {
             package com.example;
 
             import java.util.UUID;
+            import net.minecraft.resources.ResourceLocation;
             import net.minecraft.world.entity.ai.attributes.AttributeInstance;
             import net.minecraft.world.entity.ai.attributes.AttributeModifier;
 
             public class AttributeShapes {
                 static final UUID REACH_MODIFIER = UUID.fromString("00000000-0000-0000-0000-000000000001");
+                static final ResourceLocation DAMAGE_MODIFIER = ResourceLocation.fromNamespaceAndPath("example", "damage_modifier");
                 static final AttributeModifier ACTIVE = new AttributeModifier("Active Boost", 1.0D, AttributeModifier.Operation.ADD_VALUE);
 
-                void update(AttributeInstance instance) {
+                void update(AttributeInstance instance, Object map, Object stack) {
                     UUID oldId = REACH_MODIFIER;
                     AttributeModifier speed = new AttributeModifier(oldId, "Segment Count Speed Boost", 0.1D, AttributeModifier.Operation.ADD_VALUE);
+                    AttributeModifier damage = new AttributeModifier(DAMAGE_MODIFIER, "Damage modifier", this.calculateIncrease(map, stack), AttributeModifier.Operation.ADD_VALUE);
                     instance.removeModifier(oldId);
                     if (!instance.hasModifier(ACTIVE)) {
                         instance.addTransientModifier(ACTIVE);
                     }
                     instance.removeModifier(speed);
+                }
+
+                double calculateIncrease(Object map, Object stack) {
+                    return 1.0D;
                 }
             }
         """.trimIndent())
@@ -10609,6 +10689,7 @@ class StructuralRefactorExtraTest {
         assertTrue(transformed.contains("new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(\"com\", \"active_boost\"), 1.0D, AttributeModifier.Operation.ADD_VALUE)"))
         assertTrue(transformed.contains("net.minecraft.resources.ResourceLocation oldId = REACH_MODIFIER;"))
         assertTrue(transformed.contains("new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(\"com\", \"segment_count_speed_boost\"), 0.1D, AttributeModifier.Operation.ADD_VALUE)"))
+        assertTrue(transformed.contains("new AttributeModifier(DAMAGE_MODIFIER, this.calculateIncrease(map, stack), AttributeModifier.Operation.ADD_VALUE)"), transformed)
         assertTrue(transformed.contains("instance.removeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(\"com\", \"segment_count_speed_boost\"));"))
         assertTrue(transformed.contains("instance.hasModifier(ACTIVE.id())"))
         assertTrue(transformed.contains("instance.removeModifier(speed.id())"))
@@ -17732,7 +17813,7 @@ class StructuralRefactorExtraTest {
                 @Override
                 public AbstractArrow customArrow(AbstractArrow arrow) {
                     arrow.getPersistentData().putBoolean("example", true);
-                    return arrow;
+                    return super.customArrow(arrow);
                 }
 
                 @Override
@@ -17901,6 +17982,7 @@ class StructuralRefactorExtraTest {
         val rarity = srcDir.resolve("RarityItem.java").readText()
         val frosted = srcDir.resolve("FrostedEffect.java").readText()
         assertTrue(bow.contains("public AbstractArrow customArrow(AbstractArrow arrow, ItemStack projectileStack, ItemStack weaponStack)"))
+        assertTrue(bow.contains("return super.customArrow(arrow, projectileStack, weaponStack);"), bow)
         assertTrue(bow.contains("this.getUseDuration(stack, living) - timeLeft"))
         assertTrue(bow.contains("arrowItem.createArrow(level, itemstack, player, stack)"))
         assertTrue(!bow.contains("setKnockback"))

@@ -13186,6 +13186,7 @@ ${indent}}
         result = migrateLegacyDamageBonusMobTypeCalls(result)
         result = migrateLegacyMobCustomDamageSourceAttacks(result)
         result = migrateLegacyMobCustomDamageSourceUtilityAttacks(result)
+        result = migrateLegacyEntityEnchantmentHelperCalls(result)
         result = migrateMobSpawnEquipmentSignatures(result)
         result = migrateLegacyEnchantmentConstantNames(result)
         result = migrateLegacyAttachmentGetDataLazyOptionalReturns(result)
@@ -13209,6 +13210,7 @@ ${indent}}
             genericMethodReturnTypes,
             attributeModifierIdMethodArguments
         )
+        result = migrateAttributeModifierMultimapHolderTypes(result)
         result = migrateEntityRidingOffsetExpressions(result, javaInheritanceIndex)
         result = migrateLegacyPassengerAttachmentOverrides(result)
         result = migrateLegacyEntityOverrideSignatures(result, javaInheritanceIndex)
@@ -13271,6 +13273,7 @@ ${indent}}
         result = migrateLegacyRegistryObjectMethodReferences(result)
         result = migrateDeferredHolderCollectionVariance(result)
         result = migrateLegacyCommonHooksToolChecks(result)
+        result = migrateAttributeModifierMultimapHolderTypes(result)
         result = migrateWeightedEntryWrapperAccessors(result)
         result = migrateLegacyLootEnchantmentHolderCalls(result)
         result = migrateLegacyBlockLootSubProviderSource(result)
@@ -14037,6 +14040,25 @@ ${indent}}
             !source.contains("Multimap") ||
             !source.contains("Attribute") ||
             !Regex("""\b(?:ICurioItem|SlotContext)\b""").containsMatchIn(source)) {
+            return source
+        }
+
+        var result = source
+        result = Regex("""\bMultimap\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""")
+            .replace(result, "Multimap<Holder<Attribute>, AttributeModifier>")
+        result = Regex("""\bImmutableMultimap\.Builder\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""")
+            .replace(result, "ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier>")
+        result = Regex("""\bImmutableMultimap\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""")
+            .replace(result, "ImmutableMultimap<Holder<Attribute>, AttributeModifier>")
+
+        if (result == source) return source
+        return addImportIfMissing(result, "net.minecraft.core.Holder")
+    }
+
+    private fun migrateAttributeModifierMultimapHolderTypes(source: String): String {
+        if (!source.contains("AttributeModifier") ||
+            !source.contains("Attributes.") ||
+            (!source.contains("Multimap<Attribute") && !source.contains("ImmutableMultimap"))) {
             return source
         }
 
@@ -19497,6 +19519,9 @@ ${indent}}"""
     ): String {
         if (!source.contains("Enchantments.") &&
             !source.contains("EnchantmentHelper.hasFrostWalker(") &&
+            !source.contains("EnchantmentHelper.getEnchantmentLevel(") &&
+            !source.contains("EnchantmentHelper.getDepthStrider(") &&
+            !source.contains("EnchantmentHelper.getFireAspect(") &&
             !source.contains("EnchantmentHelper.getTagEnchantmentLevel(")) {
             return source
         }
@@ -19526,6 +19551,87 @@ ${indent}}"""
         result = migrateLegacyEnchantmentLevelHelperCall(result, "getItemEnchantmentLevel", javaInheritanceIndex)
         result = migrateLegacyEnchantmentResourceKeyHelperCall(result, "getTagEnchantmentLevel")
         result = migrateLegacyEnchantmentResourceKeyHelperCall(result, "getItemEnchantmentLevel")
+        return result
+    }
+
+    private fun migrateLegacyEntityEnchantmentHelperCalls(source: String): String {
+        if (!source.contains("EnchantmentHelper.getEnchantmentLevel(") &&
+            !source.contains("EnchantmentHelper.getDepthStrider(") &&
+            !source.contains("EnchantmentHelper.getFireAspect(")) {
+            return source
+        }
+
+        var changed = false
+        var needsEnchantments = false
+
+        fun enchantmentHolderLookup(enchantment: String): String? {
+            val trimmed = enchantment.trim()
+            if (Regex("""^Enchantments\.[A-Z0-9_]+$""").matches(trimmed)) {
+                return "net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow($trimmed)"
+            }
+            val resourceKeyMatch = Regex("""^((?:[A-Za-z_$][\w$]*\.)+[A-Z0-9_$]+)\.get\(\)$""").find(trimmed)
+            if (resourceKeyMatch != null) {
+                return "net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(${resourceKeyMatch.groupValues[1]})"
+            }
+            return null
+        }
+
+        fun rewriteFullInvocation(input: String, methodName: String, transform: (args: List<String>) -> String?): String {
+            var result = input
+            var cursor = 0
+            val token = "$methodName("
+            while (true) {
+                val tokenIndex = result.indexOf(token, cursor)
+                if (tokenIndex < 0) break
+                if (tokenIndex > 0 && (result[tokenIndex - 1].isLetterOrDigit() || result[tokenIndex - 1] == '_' || result[tokenIndex - 1] == '$')) {
+                    cursor = tokenIndex + token.length
+                    continue
+                }
+                val openParen = tokenIndex + methodName.length
+                val closeParen = findMatchingParen(result, openParen)
+                if (closeParen < 0) {
+                    cursor = tokenIndex + token.length
+                    continue
+                }
+                val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+                val replacement = transform(args)
+                if (replacement == null) {
+                    cursor = closeParen + 1
+                    continue
+                }
+                result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
+                cursor = tokenIndex + replacement.length
+            }
+            return result
+        }
+
+        var result = rewriteFullInvocation(source, "EnchantmentHelper.getEnchantmentLevel") { args ->
+            if (args.size != 2) return@rewriteFullInvocation null
+            val holderLookup = enchantmentHolderLookup(args[0]) ?: return@rewriteFullInvocation null
+            changed = true
+            "EnchantmentHelper.getEnchantmentLevel($holderLookup, ${args[1].trim()})"
+        }
+
+        result = rewriteFullInvocation(result, "EnchantmentHelper.getDepthStrider") { args ->
+            if (args.size != 1) return@rewriteFullInvocation null
+            val holderLookup = enchantmentHolderLookup("Enchantments.DEPTH_STRIDER") ?: return@rewriteFullInvocation null
+            changed = true
+            needsEnchantments = true
+            "EnchantmentHelper.getEnchantmentLevel($holderLookup, ${args[0].trim()})"
+        }
+
+        result = rewriteFullInvocation(result, "EnchantmentHelper.getFireAspect") { args ->
+            if (args.size != 1) return@rewriteFullInvocation null
+            val holderLookup = enchantmentHolderLookup("Enchantments.FIRE_ASPECT") ?: return@rewriteFullInvocation null
+            changed = true
+            needsEnchantments = true
+            "EnchantmentHelper.getEnchantmentLevel($holderLookup, ${args[0].trim()})"
+        }
+
+        if (!changed) return source
+        if (needsEnchantments) {
+            result = addImportIfMissing(result, "net.minecraft.world.item.enchantment.Enchantments")
+        }
         return result
     }
 
@@ -20390,6 +20496,19 @@ ${indent}}"""
             val id = idExpression(modifierPathName(match.groupValues[2]))
             idAliases[oldId] = id
             "new AttributeModifier($id, ${match.groupValues[3].trim()}, AttributeModifier.Operation.${match.groupValues[4]})"
+        }
+        result = rewriteJavaNew(result, "AttributeModifier") { args ->
+            if (args.size != 4) return@rewriteJavaNew null
+            val legacyName = args[1].trim()
+            val amount = args[2].trim()
+            val operation = args[3].trim()
+            if (!legacyName.startsWith("\"") && !legacyName.endsWith(".toString()")) return@rewriteJavaNew null
+            val id = if (legacyName.endsWith(".toString()")) {
+                legacyName.removeSuffix(".toString()").trim()
+            } else {
+                args[0].trim()
+            }
+            "new AttributeModifier($id, $amount, $operation)"
         }
         result = Regex("""\.addAttributeModifier\(\s*([^,]+)\s*,\s*([^,\r\n]+)\.toString\(\)\s*,""")
             .replace(result) { match ->
@@ -24292,6 +24411,17 @@ $methodBody
         ).replace(result) { match ->
             "EnchantmentHelper.setEnchantments(${match.groupValues[2]}, EnchantmentHelper.getEnchantmentsForCrafting(${match.groupValues[1].trim()}))"
         }
+        result = rewriteJavaInvocationArguments(result, "EnchantmentHelper.setEnchantments") { args ->
+            if (args.size != 2) return@rewriteJavaInvocationArguments null
+            val enchantments = args[0].trim()
+            if (!enchantments.startsWith("EnchantmentHelper.getEnchantmentsForCrafting(")) {
+                return@rewriteJavaInvocationArguments null
+            }
+            val openParen = enchantments.indexOf('(')
+            val closeParen = if (openParen >= 0) findMatchingParen(enchantments, openParen) else -1
+            if (closeParen != enchantments.length - 1) return@rewriteJavaInvocationArguments null
+            listOf(args[1].trim(), enchantments)
+        }
         result = Regex(
             """EnchantmentHelper\.getEnchantmentsForCrafting\(([^)]+)\)\.forEach\(\s*\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*->\s*\{"""
         ).replace(result) { match ->
@@ -27290,6 +27420,15 @@ ${indent}}
                 needsItemStack = true
                 "public AbstractArrow customArrow(AbstractArrow ${match.groupValues[1]}, ItemStack projectileStack, ItemStack weaponStack)"
             }
+        javaDeclaredMethodText(result, "customArrow")?.let { methodText ->
+            if (methodText.contains("ItemStack projectileStack") && methodText.contains("ItemStack weaponStack")) {
+                val replacement = Regex("""super\.customArrow\(\s*([^,)]+)\s*\)""")
+                    .replace(methodText) { match -> "super.customArrow(${match.groupValues[1].trim()}, projectileStack, weaponStack)" }
+                if (replacement != methodText) {
+                    result = result.replace(methodText, replacement)
+                }
+            }
+        }
 
         var legacyArmorLayerParameter: String? = null
         result = Regex(
