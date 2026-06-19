@@ -1250,6 +1250,12 @@ class StructuralRefactorExtraTest {
                 public static final DeferredHolder<Item, Item> HONEY_BATH_BUCKET = ITEMS.register("honey_bath_bucket",
                         () -> new BathBucketItem(FluidsRegister.HONEY_BATH_FLUID, new Item.Properties().stacksTo(1)));
 
+                public static final DeferredHolder<Item, Item> FILTERED_BUCKET = ITEMS.register("filtered_bucket",
+                        () -> new FilteredBucketItem(FluidsRegister.HOT_WATER_FLUID, new Item.Properties().stacksTo(1)));
+
+                public static final DeferredHolder<Item, Item> EMPTY_ENTITY_BUCKET = ITEMS.register("empty_entity_bucket",
+                        () -> new EmptyMobBucketItem(EntityRegister.TEST_ENTITY, FluidsRegister.HOT_WATER_FLUID, SoundRegister.EMPTY, new Item.Properties().stacksTo(1)));
+
                 public static void register(IEventBus eventBus) {
                     ITEMS.register(eventBus);
                 }
@@ -1277,9 +1283,79 @@ class StructuralRefactorExtraTest {
             }
         """.trimIndent())
 
+        itemsDir.resolve("FilteredBucketWrapper.java").writeText("""
+            package com.example.items;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.fluids.capability.wrappers.FluidBucketWrapper;
+
+            public class FilteredBucketWrapper extends FluidBucketWrapper {
+                public FilteredBucketWrapper(ItemStack stack) {
+                    super(stack);
+                }
+            }
+        """.trimIndent())
+
+        itemsDir.resolve("FilteredBucketItem.java").writeText("""
+            package com.example.items;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.BucketItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.material.Fluid;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import java.util.function.Supplier;
+            import org.jetbrains.annotations.Nullable;
+
+            public class FilteredBucketItem extends BucketItem {
+                public FilteredBucketItem(Supplier<? extends Fluid> supplier, Properties properties) {
+                    super(supplier, properties);
+                }
+
+                @Override
+                public ICapabilityProvider initCapabilities(ItemStack container, @Nullable CompoundTag nbt) {
+                    if (FilteredBucketRules.accepts(container)) {
+                        return new FilteredBucketWrapper(container);
+                    }
+                    return super.initCapabilities(container, nbt);
+                }
+            }
+        """.trimIndent())
+
+        itemsDir.resolve("EmptyMobBucketItem.java").writeText("""
+            package com.example.items;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.sounds.SoundEvent;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.MobBucketItem;
+            import net.minecraft.world.level.material.Fluid;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import java.util.function.Supplier;
+            import org.jetbrains.annotations.Nullable;
+
+            public class EmptyMobBucketItem extends MobBucketItem {
+                public EmptyMobBucketItem(Supplier<? extends EntityType<?>> entitySupplier,
+                                          Supplier<? extends Fluid> fluidSupplier,
+                                          Supplier<? extends SoundEvent> soundSupplier,
+                                          Properties properties) {
+                    super(entitySupplier, properties);
+                }
+
+                @Nullable
+                @Override
+                public ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag tag) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+
         val pass = StructuralRefactorPass()
         val result = pass.apply(tempDir)
         val bucket = itemsDir.resolve("BathBucketItem.java").readText()
+        val filteredBucket = itemsDir.resolve("FilteredBucketItem.java").readText()
+        val emptyMobBucket = itemsDir.resolve("EmptyMobBucketItem.java").readText()
         val mod = srcDir.resolve("ExampleMod.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-fluid-bucket-item-capability" })
@@ -1289,11 +1365,22 @@ class StructuralRefactorExtraTest {
         assertTrue(bucket.contains("event.registerItem(Capabilities.FluidHandler.ITEM, (stack, context) -> new FluidBucketWrapper(stack), items);"))
         assertTrue(!bucket.contains("initCapabilities"))
         assertTrue(!bucket.contains("ICapabilityProvider"))
+        assertTrue(filteredBucket.contains("super(supplier.get(), properties);"), filteredBucket)
+        assertTrue(filteredBucket.contains("event.registerItem(Capabilities.FluidHandler.ITEM, (stack, context) -> FilteredBucketRules.accepts(stack) ? new FilteredBucketWrapper(stack) : null, items);"), filteredBucket)
+        assertFalse(filteredBucket.contains("initCapabilities"), filteredBucket)
+        assertFalse(filteredBucket.contains("ICapabilityProvider"), filteredBucket)
+        assertFalse(filteredBucket.contains("CompoundTag"), filteredBucket)
+        assertFalse(emptyMobBucket.contains("initCapabilities"), emptyMobBucket)
+        assertFalse(emptyMobBucket.contains("ICapabilityProvider"), emptyMobBucket)
+        assertFalse(emptyMobBucket.contains("registerCapabilities"), emptyMobBucket)
         assertTrue(mod.contains("import com.example.items.BathBucketItem;"))
+        assertTrue(mod.contains("import com.example.items.FilteredBucketItem;"))
         assertTrue(mod.contains("import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;"))
         assertTrue(mod.contains("modEventBus.addListener((RegisterCapabilitiesEvent event) -> BathBucketItem.registerCapabilities(event,"))
+        assertTrue(mod.contains("modEventBus.addListener((RegisterCapabilitiesEvent event) -> FilteredBucketItem.registerCapabilities(event,"))
         assertTrue(mod.contains("ItemRegister.HOT_WATER_BUCKET.get()"))
         assertTrue(mod.contains("ItemRegister.HONEY_BATH_BUCKET.get()"))
+        assertTrue(mod.contains("ItemRegister.FILTERED_BUCKET.get()"))
     }
 
     @Test
@@ -10564,7 +10651,7 @@ class StructuralRefactorExtraTest {
                 protected void populateBiomeInformation(Object left, Object right, List<Component> tooltip) {}
             }
         """.trimIndent())
-        srcDir.resolve("SkyrootBucketItem.java").writeText("""
+        srcDir.resolve("GenericBucketItem.java").writeText("""
             package com.example;
 
             import net.minecraft.core.BlockPos;
@@ -10573,7 +10660,7 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.level.block.LiquidBlockContainer;
             import net.minecraft.world.level.block.state.BlockState;
 
-            public class SkyrootBucketItem extends BucketItem {
+            public class GenericBucketItem extends BucketItem {
                 public void place(LiquidBlockContainer liquidBlockContainer, Level level, BlockPos pos, BlockState state) {
                     if (liquidBlockContainer.canPlaceLiquid(null, level, pos, state, this.getFluid())) {
                         liquidBlockContainer.placeLiquid(level, pos, state, this.getFluid().defaultFluidState());
@@ -10582,13 +10669,13 @@ class StructuralRefactorExtraTest {
                 }
             }
         """.trimIndent())
-        srcDir.resolve("SkyrootBucketWrapper.java").writeText("""
+        srcDir.resolve("GenericBucketWrapper.java").writeText("""
             package com.example;
 
             import net.neoforged.neoforge.fluids.FluidStack;
             import net.neoforged.neoforge.fluids.FluidType;
 
-            public class SkyrootBucketWrapper {
+            public class GenericBucketWrapper {
                 public FluidType wrap(FluidStack fluid) {
                     boolean allowed = fluid.getFluid().is(ExampleTags.Fluids.ALLOWED_BUCKET_PICKUP);
                     return fluid.getFluid().getFluidType();
@@ -10622,8 +10709,8 @@ class StructuralRefactorExtraTest {
         val reiBiomeTooltip = srcDir.resolve("BiomeTooltip.java").readText()
         val biomeParameterCategory = srcDir.resolve("BiomeParameterRecipeCategory.java").readText()
         val jeiBiomeParameterCategory = srcDir.resolve("JeiBiomeParameterRecipeCategory.java").readText()
-        val bucketItem = srcDir.resolve("SkyrootBucketItem.java").readText()
-        val bucketWrapper = srcDir.resolve("SkyrootBucketWrapper.java").readText()
+        val bucketItem = srcDir.resolve("GenericBucketItem.java").readText()
+        val bucketWrapper = srcDir.resolve("GenericBucketWrapper.java").readText()
         val lazyOptionalConsumer = srcDir.resolve("LazyOptionalConsumer.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })

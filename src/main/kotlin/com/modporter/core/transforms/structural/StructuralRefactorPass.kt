@@ -3291,6 +3291,11 @@ ${registrations.distinct().joinToString("\n")}
         val className: String
     )
 
+    private data class FluidBucketInitCapabilitiesRemoval(
+        val source: String,
+        val providerExpression: String?
+    )
+
     private data class RegisteredItemReference(
         val registryFile: Path,
         val packageName: String,
@@ -3309,34 +3314,41 @@ ${registrations.distinct().joinToString("\n")}
         val javaFiles = Files.walk(srcDir)
             .filter { it.extension == "java" }
             .toList()
+        val javaInheritanceIndex = collectJavaInheritanceIndex(javaFiles)
+        val fluidBucketWrapperTypes = collectFluidBucketWrapperTypes(javaFiles, javaInheritanceIndex)
+        val bucketItemBaseTypes = setOf("BucketItem", "MobBucketItem", "MilkBucketItem")
 
         val migrations = javaFiles.mapNotNull { javaFile ->
             val text = javaFile.readText()
-            if (!text.contains("extends BucketItem") ||
-                !text.contains("initCapabilities") ||
-                !text.contains("FluidBucketWrapper")
-            ) {
+            if (!text.contains("initCapabilities")) {
                 return@mapNotNull null
             }
 
-            val className = Regex("""\bclass\s+(\w+)\s+extends\s+BucketItem\b""")
-                .find(text)
-                ?.groupValues
-                ?.get(1)
+            val declaration = collectJavaClassDeclarations(text)
+                .firstOrNull { javaClassExtendsAny(it, bucketItemBaseTypes, javaInheritanceIndex) }
                 ?: return@mapNotNull null
+            val className = declaration.name
             val packageName = packageNameOf(text)
             var modified = text
 
-            val beforeMethodRemoval = modified
-            modified = removeFluidBucketInitCapabilities(modified)
-            if (modified == beforeMethodRemoval) return@mapNotNull null
+            val removal = removeFluidBucketInitCapabilities(modified, fluidBucketWrapperTypes)
+                ?: return@mapNotNull null
+            modified = removal.source
 
-            modified = migrateBucketItemSupplierSuperCall(modified, className)
-            modified = addFluidBucketCapabilityRegistrationMethod(modified, className)
-            modified = addImportIfMissing(modified, "net.minecraft.world.level.ItemLike")
-            modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.Capabilities")
-            modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
-            modified = addImportIfMissing(modified, "net.neoforged.neoforge.fluids.capability.wrappers.FluidBucketWrapper")
+            if (removal.providerExpression != null) {
+                modified = migrateBucketItemSupplierSuperCall(modified, className)
+                modified = addFluidBucketCapabilityRegistrationMethod(modified, className, removal.providerExpression)
+                modified = addImportIfMissing(modified, "net.minecraft.world.level.ItemLike")
+                modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.Capabilities")
+                modified = addImportIfMissing(modified, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
+                if (removal.providerExpression.contains("new FluidBucketWrapper(")) {
+                    modified = addImportIfMissing(
+                        modified,
+                        "net.neoforged.neoforge.fluids.capability.wrappers.FluidBucketWrapper"
+                    )
+                }
+            }
+            modified = cleanupFluidBucketInitCapabilitiesImports(modified)
 
             if (!dryRun) {
                 javaFile.writeText(modified)
@@ -3351,11 +3363,13 @@ ${registrations.distinct().joinToString("\n")}
                 ruleId = "struct-fluid-bucket-item-capability"
             ))
 
-            FluidBucketCapabilityMigration(
-                itemClassFile = javaFile,
-                packageName = packageName,
-                className = className
-            )
+            removal.providerExpression?.let {
+                FluidBucketCapabilityMigration(
+                    itemClassFile = javaFile,
+                    packageName = packageName,
+                    className = className
+                )
+            }
         }
 
         if (migrations.isEmpty()) return changes
@@ -3412,26 +3426,56 @@ $itemArguments
         return changes
     }
 
-    private fun removeFluidBucketInitCapabilities(source: String): String {
+    private fun collectFluidBucketWrapperTypes(
+        javaFiles: List<Path>,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): Set<String> =
+        buildSet {
+            add("FluidBucketWrapper")
+            javaFiles.flatMap { javaFile -> collectJavaClassDeclarations(javaFile.readText()) }
+                .filter { declaration -> javaClassExtendsAny(declaration, setOf("FluidBucketWrapper"), javaInheritanceIndex) }
+                .forEach { declaration -> add(declaration.name) }
+        }
+
+    private fun removeFluidBucketInitCapabilities(
+        source: String,
+        fluidBucketWrapperTypes: Set<String>
+    ): FluidBucketInitCapabilitiesRemoval? {
         val methodName = "initCapabilities"
         var searchStart = source.indexOf(methodName)
         var result = source
         while (searchStart >= 0) {
             val methodNameIndex = result.indexOf(methodName, searchStart)
-            if (methodNameIndex < 0) return result
+            if (methodNameIndex < 0) return null
             val openBrace = result.indexOf('{', methodNameIndex)
-            if (openBrace < 0) return result
+            if (openBrace < 0) return null
             val closeBrace = findMatchingBrace(result, openBrace)
-            if (closeBrace < 0) return result
+            if (closeBrace < 0) return null
             val signatureStart = result.lastIndexOf('\n', methodNameIndex).let { if (it < 0) 0 else it + 1 }
-            val annotationStart = Regex("""(?m)[ \t]*@Override\s*\r?\n\s*$""")
+            val annotationStart = Regex("""(?m)(?:^[ \t]*@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*\r?\n)+[ \t]*$""")
                 .findAll(result.substring(0, signatureStart))
                 .lastOrNull()
                 ?.range
                 ?.first
                 ?: signatureStart
+            val removalStart = Regex("""(?s)/\*\*.*?\*/\s*$""")
+                .find(result.substring(0, annotationStart))
+                ?.range
+                ?.first
+                ?: annotationStart
             val methodText = result.substring(annotationStart, closeBrace + 1)
-            if (!methodText.contains("FluidBucketWrapper") || !methodText.contains("ICapabilityProvider")) {
+            if (!methodText.contains("ICapabilityProvider")) {
+                searchStart = closeBrace + 1
+                continue
+            }
+            val headerText = result.substring(annotationStart, openBrace)
+            val bodyText = result.substring(openBrace + 1, closeBrace)
+            val providerExpression = fluidBucketProviderExpression(
+                headerText,
+                bodyText,
+                fluidBucketWrapperTypes
+            )
+            if (providerExpression == null && !initCapabilitiesReturnsOnlyNull(bodyText)) {
                 searchStart = closeBrace + 1
                 continue
             }
@@ -3441,10 +3485,130 @@ $itemArguments
             }.let { idx ->
                 if (idx < result.length && result[idx] == '\n') idx + 1 else idx
             }
-            return result.removeRange(annotationStart, end)
+            return FluidBucketInitCapabilitiesRemoval(
+                source = result.removeRange(removalStart, end),
+                providerExpression = providerExpression
+            )
         }
-        return result
+        return null
     }
+
+    private fun fluidBucketProviderExpression(
+        methodHeader: String,
+        methodBody: String,
+        fluidBucketWrapperTypes: Set<String>
+    ): String? {
+        val methodNameIndex = methodHeader.indexOf("initCapabilities")
+        if (methodNameIndex < 0) return null
+        val parametersText = methodHeader.substring(methodNameIndex).substringAfter("(", "").substringBeforeLast(")", "")
+        val parameterNames = javaParameterNames(parametersText)
+        val stackParameterName = splitTopLevelJavaArgs(parametersText)
+            .firstOrNull { parameter -> parameter.contains("ItemStack") }
+            ?.let(::javaParameterName)
+            ?: return null
+        val returnExpressions = Regex("""(?s)\breturn\s+([^;]+);""")
+            .findAll(methodBody)
+            .map { it.groupValues[1].trim() }
+            .toList()
+        if (returnExpressions.isEmpty()) return null
+
+        val providerReturns = returnExpressions.mapNotNull { expression ->
+            normalizeFluidBucketProviderExpression(expression, stackParameterName, fluidBucketWrapperTypes)
+        }.distinct()
+        if (providerReturns.size != 1) return null
+
+        val providerExpression = providerReturns.single()
+        if (returnExpressions.size == 1) {
+            return providerExpression
+        }
+
+        val unsupportedReturns = returnExpressions.filter { expression ->
+            normalizeFluidBucketProviderExpression(expression, stackParameterName, fluidBucketWrapperTypes) == null &&
+                expression != "null" &&
+                !Regex("""^super\.initCapabilities\s*\(""").containsMatchIn(expression)
+        }
+        if (unsupportedReturns.isNotEmpty()) return null
+
+        return guardedFluidBucketProviderExpression(
+            methodBody,
+            stackParameterName,
+            parameterNames - stackParameterName,
+            providerExpression,
+            fluidBucketWrapperTypes
+        )
+    }
+
+    private fun normalizeFluidBucketProviderExpression(
+        expression: String,
+        stackParameterName: String,
+        fluidBucketWrapperTypes: Set<String>
+    ): String? {
+        val match = Regex(
+            """^new\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\(\s*${Regex.escape(stackParameterName)}\s*\)$"""
+        ).find(expression.trim()) ?: return null
+        val wrapperType = match.groupValues[1]
+        val wrapperSimpleName = wrapperType.substringAfterLast('.')
+        if (wrapperSimpleName !in fluidBucketWrapperTypes) return null
+        val emittedType = if (wrapperType == "net.neoforged.neoforge.fluids.capability.wrappers.FluidBucketWrapper") {
+            "FluidBucketWrapper"
+        } else {
+            wrapperType
+        }
+        return "new $emittedType(stack)"
+    }
+
+    private fun guardedFluidBucketProviderExpression(
+        methodBody: String,
+        stackParameterName: String,
+        nonStackParameterNames: Set<String>,
+        providerExpression: String,
+        fluidBucketWrapperTypes: Set<String>
+    ): String? {
+        val guardedReturnPatterns = listOf(
+            Regex("""(?s)\bif\s*\((.*?)\)\s*\{\s*return\s+([^;]+);\s*\}"""),
+            Regex("""(?s)\bif\s*\((.*?)\)\s*return\s+([^;]+);""")
+        )
+        for (pattern in guardedReturnPatterns) {
+            for (match in pattern.findAll(methodBody)) {
+                val returnedProvider = normalizeFluidBucketProviderExpression(
+                    match.groupValues[2].trim(),
+                    stackParameterName,
+                    fluidBucketWrapperTypes
+                ) ?: continue
+                if (returnedProvider != providerExpression) continue
+                val condition = match.groupValues[1].trim()
+                if (nonStackParameterNames.any { name ->
+                        Regex("""(?<![\w$])${Regex.escape(name)}(?![\w$])""").containsMatchIn(condition)
+                    }
+                ) {
+                    continue
+                }
+                val normalizedCondition = Regex("""(?<![\w$])${Regex.escape(stackParameterName)}(?![\w$])""")
+                    .replace(condition, "stack")
+                return "$normalizedCondition ? $providerExpression : null"
+            }
+        }
+        return null
+    }
+
+    private fun initCapabilitiesReturnsOnlyNull(methodBody: String): Boolean {
+        val returnExpressions = Regex("""(?s)\breturn\s+([^;]+);""")
+            .findAll(methodBody)
+            .map { it.groupValues[1].trim() }
+            .toList()
+        return returnExpressions.isNotEmpty() && returnExpressions.all { it == "null" }
+    }
+
+    private fun javaParameterNames(parametersText: String): Set<String> =
+        splitTopLevelJavaArgs(parametersText)
+            .mapNotNull(::javaParameterName)
+            .toSet()
+
+    private fun javaParameterName(parameterText: String): String? =
+        Regex("""([A-Za-z_$][\w$]*)\s*(?:\[\s*\])?\s*$""")
+            .find(parameterText.trim())
+            ?.groupValues
+            ?.get(1)
 
     private fun migrateBucketItemSupplierSuperCall(source: String, className: String): String {
         val constructorPattern = Regex(
@@ -3455,19 +3619,40 @@ $itemArguments
         }
     }
 
-    private fun addFluidBucketCapabilityRegistrationMethod(source: String, className: String): String {
+    private fun addFluidBucketCapabilityRegistrationMethod(
+        source: String,
+        className: String,
+        providerExpression: String
+    ): String {
         if (source.contains("registerCapabilities(RegisterCapabilitiesEvent")) return source
-        val classMatch = Regex("""\bclass\s+${Regex.escape(className)}\s+extends\s+BucketItem\b""").find(source)
+        val classMatch = Regex("""\bclass\s+${Regex.escape(className)}\b[^{]*\{""").find(source)
             ?: return source
         val classOpen = source.indexOf('{', classMatch.range.last)
         if (classOpen < 0) return source
         val method = """
 
     public static void registerCapabilities(RegisterCapabilitiesEvent event, ItemLike... items) {
-        event.registerItem(Capabilities.FluidHandler.ITEM, (stack, context) -> new FluidBucketWrapper(stack), items);
+        event.registerItem(Capabilities.FluidHandler.ITEM, (stack, context) -> $providerExpression, items);
     }
 """
         return source.substring(0, classOpen + 1) + method + source.substring(classOpen + 1)
+    }
+
+    private fun cleanupFluidBucketInitCapabilitiesImports(source: String): String {
+        var result = source
+        val withoutImports = Regex("""(?m)^[ \t]*import\s+[^\r\n]+;\s*\r?\n""").replace(result, "")
+        if (!hasSimpleTypeReference(withoutImports, "ICapabilityProvider")) {
+            result = removeImport(result, "net.neoforged.neoforge.capabilities.ICapabilityProvider")
+        }
+        if (!hasSimpleTypeReference(withoutImports, "CompoundTag")) {
+            result = removeImport(result, "net.minecraft.nbt.CompoundTag")
+        }
+        val withoutImportsAfterTypes = Regex("""(?m)^[ \t]*import\s+[^\r\n]+;\s*\r?\n""").replace(result, "")
+        if (!withoutImportsAfterTypes.contains("@Nullable")) {
+            result = removeImport(result, "org.jetbrains.annotations.Nullable")
+            result = removeImport(result, "javax.annotation.Nullable")
+        }
+        return cleanupRedundantBlankLines(result)
     }
 
     private fun findRegisteredItemReferences(
