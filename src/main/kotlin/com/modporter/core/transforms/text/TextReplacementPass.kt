@@ -77,6 +77,22 @@ class TextReplacementPass(
         changes.addAll(networkHooksOpenScreen.changes)
         errors.addAll(networkHooksOpenScreen.errors)
 
+        val beforeForgeInternalNames = content
+        content = migrateForgeInternalNameDescriptors(content)
+        if (content != beforeForgeInternalNames) {
+            changes.add(
+                Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate Forge JVM internal names in mixin descriptors to NeoForge owners",
+                    before = "Lnet/minecraftforge/...;",
+                    after = "Lnet/neoforged/...;",
+                    confidence = Confidence.HIGH,
+                    ruleId = "forge-internal-name-descriptors"
+                )
+            )
+        }
+
         val beforeInventoryRecipeHolder = content
         content = migrateInventoryRecipeHolderInterface(content)
         if (content != beforeInventoryRecipeHolder) {
@@ -3250,6 +3266,22 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
                 )
             }
         return explicitRules + classRenameRules
+    }
+
+    private fun migrateForgeInternalNameDescriptors(source: String): String {
+        if (!source.contains("Lnet/minecraftforge/")) return source
+        return listOf(
+            "Lnet/minecraftforge/fml/" to "Lnet/neoforged/fml/",
+            "Lnet/minecraftforge/eventbus/" to "Lnet/neoforged/bus/",
+            "Lnet/minecraftforge/api/distmarker/" to "Lnet/neoforged/api/distmarker/",
+            "Lnet/minecraftforge/forgespi/" to "Lnet/neoforged/neoforgespi/",
+            "Lnet/minecraftforge/accesstransformer/" to "Lnet/neoforged/accesstransformer/",
+            "Lnet/minecraftforge/coremod/" to "Lnet/neoforged/coremod/",
+            "Lnet/minecraftforge/jarjar/" to "Lnet/neoforged/jarjar/",
+            "Lnet/minecraftforge/" to "Lnet/neoforged/neoforge/"
+        ).fold(source) { current, (oldOwner, newOwner) ->
+            current.replace(oldOwner, newOwner)
+        }
     }
 
     private fun findJavaFiles(projectDir: Path): List<Path> {

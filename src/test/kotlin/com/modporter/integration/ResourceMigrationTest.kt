@@ -191,6 +191,131 @@ class ResourceMigrationTest {
     }
 
     @Test
+    fun `custom recipe data fields migrate only from source derived serializer codecs`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/resmod")
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        javaDir.createDirectories()
+        recipeDir.createDirectories()
+
+        javaDir.resolve("ResMod.java").writeText("""
+            package resmod;
+
+            public final class ResMod {
+                public static final String MODID = "resmod";
+            }
+        """.trimIndent())
+        javaDir.resolve("ModRecipeSerializers.java").writeText("""
+            package resmod;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModRecipeSerializers {
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS = DeferredRegister.create(Registries.RECIPE_SERIALIZER, ResMod.MODID);
+                public static final DeferredHolder<RecipeSerializer<?>, HeatingRecipe.Serializer> HEATING = RECIPE_SERIALIZERS.register("heating", HeatingRecipe.Serializer::new);
+                public static final DeferredHolder<RecipeSerializer<?>, IncubationRecipe.Serializer> INCUBATION = RECIPE_SERIALIZERS.register("incubation", IncubationRecipe.Serializer::new);
+                public static final DeferredHolder<RecipeSerializer<?>, PlainRecipe.Serializer> PLAIN = RECIPE_SERIALIZERS.register("plain", PlainRecipe.Serializer::new);
+            }
+        """.trimIndent())
+        javaDir.resolve("AbstractHeatingSerializer.java").writeText("""
+            package resmod;
+
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class AbstractHeatingSerializer<T> implements RecipeSerializer<T> {
+                private final MapCodec<T> codec = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                    ItemStack.CODEC.fieldOf("result").forGetter(recipe -> null)
+                ).apply(instance, value -> null));
+            }
+        """.trimIndent())
+        javaDir.resolve("HeatingRecipe.java").writeText("""
+            package resmod;
+
+            public final class HeatingRecipe {
+                public static class Serializer extends AbstractHeatingSerializer<HeatingRecipe> {
+                }
+            }
+        """.trimIndent())
+        javaDir.resolve("IncubationRecipe.java").writeText("""
+            package resmod;
+
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public final class IncubationRecipe {
+                public static class Serializer implements RecipeSerializer<IncubationRecipe> {
+                    private static final MapCodec<IncubationRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                        CompoundTag.CODEC.optionalFieldOf("tag").forGetter(recipe -> null)
+                    ).apply(instance, value -> null));
+                }
+            }
+        """.trimIndent())
+        javaDir.resolve("PlainRecipe.java").writeText("""
+            package resmod;
+
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public final class PlainRecipe {
+                public static class Serializer implements RecipeSerializer<PlainRecipe> {
+                }
+            }
+        """.trimIndent())
+        recipeDir.resolve("heating.json").writeText("""
+            {
+              "type": "resmod:heating",
+              "ingredient": {
+                "item": "minecraft:stone"
+              },
+              "result": "resmod:heated_stone"
+            }
+        """.trimIndent())
+        recipeDir.resolve("incubation.json").writeText("""
+            {
+              "type": "resmod:incubation",
+              "ingredient": {
+                "item": "resmod:egg"
+              },
+              "tag": "{Hungry:1b,IsBaby:1b,MoaType:\"resmod:white\",Nested:{Value:2s},List:[1b,2b]}"
+            }
+        """.trimIndent())
+        recipeDir.resolve("plain.json").writeText("""
+            {
+              "type": "resmod:plain",
+              "result": "resmod:plain_result",
+              "tag": "{ShouldStay:1b}"
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val heating = projectDir.resolve("src/generated/resources/data/resmod/recipe/heating.json").readText()
+        val incubation = projectDir.resolve("src/generated/resources/data/resmod/recipe/incubation.json").readText()
+        val plain = projectDir.resolve("src/generated/resources/data/resmod/recipe/plain.json").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "res-recipe-result-entry-id" })
+        assertTrue(result.changes.any { it.ruleId == "res-recipe-snbt-compound-tag" })
+        assertTrue(heating.contains(""""result": {"""))
+        assertTrue(heating.contains(""""id": "resmod:heated_stone""""))
+        assertTrue(incubation.contains(""""tag": {"""))
+        assertTrue(incubation.contains(""""Hungry": 1"""))
+        assertTrue(incubation.contains(""""IsBaby": 1"""))
+        assertTrue(incubation.contains(""""MoaType": "resmod:white""""))
+        assertTrue(incubation.contains(""""Nested": {"""))
+        assertTrue(incubation.contains(""""Value": 2"""))
+        assertTrue(incubation.contains(""""List": ["""))
+        assertTrue(plain.contains(""""result": "resmod:plain_result""""))
+        assertTrue(plain.contains(""""tag": "{ShouldStay:1b}""""))
+    }
+
+    @Test
     fun `farmers delight cutting result array entries migrate to item stack object`() {
         val projectDir = setupResourceProject()
         val recipeDir = projectDir.resolve("src/main/resources/data/resmod/recipes")
@@ -698,6 +823,75 @@ class ResourceMigrationTest {
         assertFalse(tag.contains("#c:gravel\""))
         assertFalse(tag.contains("#c:sand\""))
         assertFalse(tag.contains("#forge:"))
+    }
+
+    @Test
+    fun `common leather string tags and mcfunction item nbt migrate to 1_21 syntax`() {
+        val projectDir = setupResourceProject()
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        val advancementDir = projectDir.resolve("src/generated/resources/data/resmod/advancements/recipes/tools")
+        val functionDir = projectDir.resolve("src/main/resources/data/resmod/functions")
+        recipeDir.createDirectories()
+        advancementDir.createDirectories()
+        functionDir.createDirectories()
+        recipeDir.resolve("gloves.json").writeText("""
+            {
+              "type": "minecraft:crafting_shaped",
+              "key": {
+                "#": {
+                  "tag": "forge:leather"
+                },
+                "S": {
+                  "tag": "c:string"
+                }
+              },
+              "pattern": [
+                "#S#"
+              ],
+              "result": "resmod:gloves"
+            }
+        """.trimIndent())
+        advancementDir.resolve("gloves.json").writeText("""
+            {
+              "criteria": {
+                "has_string": {
+                  "trigger": "minecraft:inventory_changed",
+                  "conditions": {
+                    "items": [
+                      {
+                        "items": "#c:string"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+        functionDir.resolve("suit_up.mcfunction").writeText("""
+            give @p resmod:hammer{Unbreakable:1,CustomFlag:1b}
+            execute at @p run fill ~-1 ~ ~-1 ~1 ~1 ~1 minecraft:air replace #forge:stone
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/generated/resources/data/resmod/recipe/gloves.json").readText()
+        val advancement = projectDir.resolve("src/generated/resources/data/resmod/advancement/recipes/tools/gloves.json").readText()
+        val function = projectDir.resolve("src/main/resources/data/resmod/function/suit_up.mcfunction").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "res-mcfunction-common-tag-reference" })
+        assertTrue(result.changes.any { it.ruleId == "res-mcfunction-itemstack-components" })
+        assertTrue(recipe.contains(""""tag": "c:leathers""""))
+        assertTrue(recipe.contains(""""tag": "c:strings""""))
+        assertTrue(advancement.contains(""""items": "#c:strings""""))
+        assertTrue(function.contains("resmod:hammer["))
+        assertTrue(function.contains("minecraft:unbreakable={}"))
+        assertTrue(function.contains("minecraft:custom_data={CustomFlag:1b}"))
+        assertTrue(function.contains("#c:stones"))
+        assertFalse(recipe.contains("forge:leather"))
+        assertFalse(recipe.contains("c:string\""))
+        assertFalse(advancement.contains("#c:string\""))
+        assertFalse(function.contains("{Unbreakable:1"))
+        assertFalse(function.contains("#forge:stone"))
     }
 
     @Test

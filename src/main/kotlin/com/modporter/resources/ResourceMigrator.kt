@@ -69,8 +69,10 @@ private val COMMON_TAG_PATH_RENAMES = mapOf(
     "cobblestone" to "cobblestones",
     "glass" to "glass_blocks",
     "gravel" to "gravels",
+    "leather" to "leathers",
     "sand" to "sands",
     "stone" to "stones",
+    "string" to "strings",
     "tools/bows" to "tools/bow",
     "tools/brushes" to "tools/brush",
     "tools/crossbows" to "tools/crossbow",
@@ -213,6 +215,7 @@ class ResourceMigrationPass(
                 normalizeCommonTagFilePaths(resourceDir, changes, errors, dryRun)
                 if (!dryRun) {
                     transformDataJsonFiles(dataDir, projectDir, changes, errors)
+                    transformDataFunctionFiles(dataDir, changes, errors)
                 }
                 migrateBannerPatternDataResources(dataDir, changes, errors, dryRun)
             }
@@ -1089,6 +1092,7 @@ public class $className extends CustomRecipe {
         errors: MutableList<String>
     ) {
         val codeAwardedAdvancements = detectCodeAwardedAdvancements(projectDir)
+        val recipeCodecHints = collectRecipeDataCodecHints(projectDir)
         Files.walk(dataDir)
             .filter { it.toString().endsWith(".json") && Files.isRegularFile(it) }
             .forEach { file ->
@@ -1109,7 +1113,7 @@ public class $className extends CustomRecipe {
                     // Forge recipe/loot conditions → NeoForge conditions
                     // Only rename "conditions" in non-advancement files (advancements use "conditions" for triggers)
                     if (isRecipeFile && content.contains("\"result\"")) {
-                        val newContent = migrateRecipeResultEntries(content)
+                        val newContent = migrateRecipeResultEntries(content, recipeCodecHints)
                         if (newContent != content) {
                             content = newContent
                             modified = true
@@ -1120,6 +1124,22 @@ public class $className extends CustomRecipe {
                                 after = "\"result\": {\"id\": \"mod:item\"}",
                                 confidence = Confidence.HIGH,
                                 ruleId = "res-recipe-result-entry-id"
+                            ))
+                        }
+                    }
+
+                    if (isRecipeFile && recipeCodecHints.hasCompoundTagFields && content.contains("\"tag\"")) {
+                        val newContent = migrateRecipeCompoundTagFields(content, recipeCodecHints)
+                        if (newContent != content) {
+                            content = newContent
+                            modified = true
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Recipe CompoundTag codec field: legacy SNBT string -> JSON object",
+                                before = "\"tag\": \"{Foo:1b}\"",
+                                after = "\"tag\": {\"Foo\": 1}",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-recipe-snbt-compound-tag"
                             ))
                         }
                     }
@@ -1550,19 +1570,468 @@ public class $className extends CustomRecipe {
             }
     }
 
-    private fun migrateRecipeResultEntries(content: String): String {
+    private fun transformDataFunctionFiles(
+        dataDir: Path,
+        changes: MutableList<Change>,
+        errors: MutableList<String>
+    ) {
+        Files.walk(dataDir)
+            .filter { it.toString().endsWith(".mcfunction") && Files.isRegularFile(it) }
+            .forEach { file ->
+                try {
+                    val original = file.readText()
+                    var content = original
+                    val appliedRules = linkedSetOf<String>()
+
+                    val tagContent = normalizeMcfunctionTagReferences(content)
+                    if (tagContent != content) {
+                        content = tagContent
+                        appliedRules += "res-mcfunction-common-tag-reference"
+                    }
+
+                    val itemStackContent = migrateMcfunctionItemStackNbt(content)
+                    if (itemStackContent != content) {
+                        content = itemStackContent
+                        appliedRules += "res-mcfunction-itemstack-components"
+                    }
+
+                    if (content != original) {
+                        file.writeText(content)
+                        if ("res-mcfunction-common-tag-reference" in appliedRules) {
+                            changes.add(Change(
+                                file = file,
+                                line = 0,
+                                description = "Command tag references: forge/neoforge/common singular paths -> c namespace 1.21 paths",
+                                before = "#forge:stone or #c:string",
+                                after = "#c:stones or #c:strings",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-mcfunction-common-tag-reference"
+                            ))
+                        }
+                        if ("res-mcfunction-itemstack-components" in appliedRules) {
+                            changes.add(Change(
+                                file = file,
+                                line = 0,
+                                description = "Command item stack NBT -> 1.21 data component syntax",
+                                before = "mod:item{Unbreakable:1}",
+                                after = "mod:item[minecraft:unbreakable={}]",
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-mcfunction-itemstack-components"
+                            ))
+                        }
+                    }
+                } catch (e: Exception) {
+                    errors.add("Failed to transform function ${file.fileName}: ${e.message}")
+                }
+            }
+    }
+
+    private fun normalizeMcfunctionTagReferences(content: String): String =
+        Regex("""#(?:forge|neoforge|c):([A-Za-z0-9_./-]+)""").replace(content) { match ->
+            "#c:${normalizeCommonTagPath(match.groupValues[1])}"
+        }
+
+    private fun migrateMcfunctionItemStackNbt(content: String): String {
+        val result = StringBuilder()
+        var cursor = 0
+        val idPattern = Regex("""[A-Za-z0-9_.-]+:[A-Za-z0-9_./-]+""")
+        while (cursor < content.length) {
+            val match = idPattern.find(content, cursor) ?: break
+            val idStart = match.range.first
+            val idEnd = match.range.last + 1
+            if (idStart > cursor) {
+                result.append(content, cursor, idStart)
+            }
+
+            val previous = content.getOrNull(idStart - 1)
+            val next = content.getOrNull(idEnd)
+            if (previous != null && isResourceLocationCommandChar(previous) || next != '{') {
+                result.append(match.value)
+                cursor = idEnd
+                continue
+            }
+
+            val closeBrace = findMatchingSnbtBrace(content, idEnd)
+            if (closeBrace < 0) {
+                result.append(match.value)
+                cursor = idEnd
+                continue
+            }
+
+            val nbt = content.substring(idEnd, closeBrace + 1)
+            val components = legacyItemNbtToCommandComponents(nbt)
+            if (components == null) {
+                result.append(match.value)
+                result.append(nbt)
+            } else {
+                result.append(match.value)
+                result.append(components)
+            }
+            cursor = closeBrace + 1
+        }
+        if (cursor < content.length) {
+            result.append(content, cursor, content.length)
+        }
+        return result.toString()
+    }
+
+    private fun isResourceLocationCommandChar(char: Char): Boolean =
+        char.isLetterOrDigit() || char == '_' || char == '-' || char == '.' || char == '/' || char == ':'
+
+    private fun findMatchingSnbtBrace(source: String, openBrace: Int): Int {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (index in openBrace until source.length) {
+            val char = source[index]
+            if (escaped) {
+                escaped = false
+                continue
+            }
+            when {
+                char == '\\' && inString -> escaped = true
+                char == '"' -> inString = !inString
+                !inString && char == '{' -> depth++
+                !inString && char == '}' -> {
+                    depth--
+                    if (depth == 0) return index
+                }
+            }
+        }
+        return -1
+    }
+
+    private fun legacyItemNbtToCommandComponents(nbt: String): String? {
+        val trimmed = nbt.trim()
+        if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null
+        val body = trimmed.substring(1, trimmed.length - 1).trim()
+        if (body.isEmpty()) return null
+
+        val components = mutableListOf<String>()
+        val customData = mutableListOf<String>()
+        for (entry in splitTopLevelSnbtEntries(body)) {
+            val colon = findTopLevelSnbtColon(entry)
+            if (colon <= 0) return null
+            val key = unquoteSnbtString(entry.substring(0, colon).trim())
+            val rawValue = entry.substring(colon + 1).trim()
+            when (key) {
+                "Unbreakable" -> {
+                    if (isTruthySnbtValue(rawValue)) {
+                        components += "minecraft:unbreakable={}"
+                    }
+                }
+                "Damage" -> {
+                    val damage = parseSnbtInt(rawValue) ?: return null
+                    components += "minecraft:damage=$damage"
+                }
+                else -> customData += entry
+            }
+        }
+        if (customData.isNotEmpty()) {
+            components += "minecraft:custom_data={${customData.joinToString(",")}}"
+        }
+        if (components.isEmpty()) return "[]"
+        return components.joinToString(prefix = "[", postfix = "]")
+    }
+
+    private fun isTruthySnbtValue(value: String): Boolean {
+        val normalized = value.trim().lowercase()
+        if (normalized == "true") return true
+        if (normalized == "false") return false
+        return parseSnbtInt(normalized)?.let { it != 0 } ?: false
+    }
+
+    private fun collectRecipeDataCodecHints(projectDir: Path): RecipeDataCodecHints {
+        val javaSources = collectJavaSourceInfos(projectDir)
+        if (javaSources.isEmpty()) return RecipeDataCodecHints.EMPTY
+
+        val index = JavaSourceIndex(javaSources)
+        val stringConstants = collectJavaStringConstants(javaSources.map { it.content })
+        val registryNamespaces = collectRecipeSerializerRegistryNamespaces(javaSources, stringConstants)
+        if (registryNamespaces.isEmpty()) return RecipeDataCodecHints.EMPTY
+
+        val itemStackFields = linkedMapOf<String, MutableSet<String>>()
+        val compoundTagFields = linkedMapOf<String, MutableSet<String>>()
+        val registerPattern = Regex(
+            """\b([A-Za-z_$][\w$]*)\.register\(\s*"([^"]+)"\s*,\s*(?:(?:\(\)\s*->\s*new\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?))|([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)::new)"""
+        )
+
+        for (source in javaSources) {
+            if (!source.content.contains(".register(")) continue
+            registerPattern.findAll(source.content).forEach { match ->
+                val namespace = registryNamespaces[match.groupValues[1]] ?: return@forEach
+                val serializerId = match.groupValues[2]
+                val factoryReference = match.groupValues[3].ifBlank { match.groupValues[4] }
+                val fields = recipeCodecFieldsForFactory(factoryReference, source, index)
+                if (fields.isEmpty) return@forEach
+
+                val typeId = "$namespace:$serializerId"
+                if (fields.itemStackFields.isNotEmpty()) {
+                    itemStackFields.getOrPut(typeId) { linkedSetOf() }.addAll(fields.itemStackFields)
+                }
+                if (fields.compoundTagFields.isNotEmpty()) {
+                    compoundTagFields.getOrPut(typeId) { linkedSetOf() }.addAll(fields.compoundTagFields)
+                }
+            }
+        }
+
+        return RecipeDataCodecHints(
+            itemStackFieldsByType = itemStackFields.mapValues { it.value.toSet() },
+            compoundTagFieldsByType = compoundTagFields.mapValues { it.value.toSet() }
+        )
+    }
+
+    private fun collectRecipeSerializerRegistryNamespaces(
+        sources: List<JavaSourceInfo>,
+        stringConstants: Map<String, String>
+    ): Map<String, String> {
+        val registries = linkedMapOf<String, String>()
+        val createPattern = Regex(
+            """(?s)\b([A-Za-z_$][\w$]*)\s*=\s*DeferredRegister\.create\(\s*[^,]+,\s*([^)]+?)\s*\)\s*;"""
+        )
+        for (source in sources) {
+            if (!source.content.contains("DeferredRegister") || !source.content.contains("RecipeSerializer")) continue
+            createPattern.findAll(source.content).forEach { match ->
+                val namespace = resolveJavaStringExpression(match.groupValues[2].trim(), stringConstants)
+                    ?: return@forEach
+                registries[match.groupValues[1]] = namespace
+            }
+        }
+        return registries
+    }
+
+    private fun recipeCodecFieldsForFactory(
+        factoryReference: String,
+        context: JavaSourceInfo,
+        index: JavaSourceIndex
+    ): RecipeCodecFieldSet {
+        val source = resolveJavaTypeReference(factoryReference, context, index) ?: return RecipeCodecFieldSet.EMPTY
+        val nestedClass = nestedClassName(factoryReference, source)
+        return recipeCodecFieldsForType(source, nestedClass, index, visited = linkedSetOf())
+    }
+
+    private fun recipeCodecFieldsForType(
+        source: JavaSourceInfo,
+        nestedClass: String?,
+        index: JavaSourceIndex,
+        visited: MutableSet<String>
+    ): RecipeCodecFieldSet {
+        val key = "${source.fqName}#${nestedClass.orEmpty()}"
+        if (!visited.add(key)) return RecipeCodecFieldSet.EMPTY
+
+        val className = nestedClass ?: source.simpleName
+        val classBlock = extractJavaClassBlock(source.content, className) ?: source.content
+        var fields = recipeCodecFieldsInBlock(classBlock)
+
+        val superclass = directSuperclassReference(classBlock, className)
+        if (superclass != null) {
+            val parent = resolveJavaTypeReference(superclass, source, index)
+            if (parent != null) {
+                fields += recipeCodecFieldsForType(parent, nestedClass = null, index, visited)
+            }
+        }
+        return fields
+    }
+
+    private fun recipeCodecFieldsInBlock(block: String): RecipeCodecFieldSet {
+        val itemStackFields = Regex(
+            """\bItemStack\s*\.\s*CODEC\s*\.\s*(?:optionalFieldOf|fieldOf)\s*\(\s*"([^"]+)""""
+        ).findAll(block).map { it.groupValues[1] }.toSet()
+        val compoundTagFields = Regex(
+            """\bCompoundTag\s*\.\s*CODEC\s*\.\s*(?:optionalFieldOf|fieldOf)\s*\(\s*"([^"]+)""""
+        ).findAll(block).map { it.groupValues[1] }.toSet()
+        return RecipeCodecFieldSet(itemStackFields, compoundTagFields)
+    }
+
+    private fun directSuperclassReference(classBlock: String, className: String): String? =
+        Regex("""\bclass\s+${Regex.escape(className)}\b[^{]*\bextends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)""")
+            .find(classBlock)
+            ?.groupValues
+            ?.get(1)
+
+    private fun collectJavaSourceInfos(projectDir: Path): List<JavaSourceInfo> {
+        val sourceRoots = listOf(
+            projectDir.resolve("src/main/java"),
+            projectDir.resolve("src/generated/java")
+        ).filter { it.exists() }
+        if (sourceRoots.isEmpty()) return emptyList()
+
+        return sourceRoots.flatMap { root ->
+            Files.walk(root).use { files ->
+                files
+                    .filter { Files.isRegularFile(it) && it.toString().endsWith(".java") }
+                    .map { javaSourceInfo(it) }
+                    .toList()
+            }
+        }
+    }
+
+    private fun javaSourceInfo(file: Path): JavaSourceInfo {
+        val content = file.readText()
+        val packageName = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""")
+            .find(content)
+            ?.groupValues
+            ?.get(1)
+            .orEmpty()
+        val simpleName = file.fileName.toString().removeSuffix(".java")
+        val imports = linkedMapOf<String, String>()
+        val wildcardImports = linkedSetOf<String>()
+        Regex("""(?m)^\s*import\s+(?!static)([\w.]+(?:\.\*)?)\s*;""")
+            .findAll(content)
+            .forEach { match ->
+                val imported = match.groupValues[1]
+                if (imported.endsWith(".*")) {
+                    wildcardImports += imported.removeSuffix(".*")
+                } else {
+                    imports[imported.substringAfterLast('.')] = imported
+                }
+            }
+        val fqName = if (packageName.isBlank()) simpleName else "$packageName.$simpleName"
+        return JavaSourceInfo(file, content, packageName, simpleName, fqName, imports, wildcardImports)
+    }
+
+    private fun resolveJavaTypeReference(
+        reference: String,
+        context: JavaSourceInfo,
+        index: JavaSourceIndex
+    ): JavaSourceInfo? {
+        val clean = sanitizeJavaTypeReference(reference)
+        if (clean.isBlank()) return null
+        val segments = clean.split('.').filter { it.isNotBlank() }
+        if (segments.isEmpty()) return null
+
+        for (end in segments.size downTo 1) {
+            val candidate = segments.take(end).joinToString(".")
+            index.byFqName[candidate]?.let { return it }
+            if (end == 1) {
+                resolveSimpleJavaType(candidate, context, index)?.let { return it }
+            }
+        }
+
+        return resolveSimpleJavaType(segments.first(), context, index)
+    }
+
+    private fun resolveSimpleJavaType(
+        simpleName: String,
+        context: JavaSourceInfo,
+        index: JavaSourceIndex
+    ): JavaSourceInfo? {
+        context.imports[simpleName]?.let { fqName ->
+            index.byFqName[fqName]?.let { return it }
+        }
+
+        if (context.packageName.isNotBlank()) {
+            index.byFqName["${context.packageName}.$simpleName"]?.let { return it }
+        }
+
+        val wildcardMatches = context.wildcardImports
+            .mapNotNull { packageName -> index.byFqName["$packageName.$simpleName"] }
+            .distinctBy { it.fqName }
+        if (wildcardMatches.size == 1) return wildcardMatches.single()
+
+        val simpleMatches = index.bySimpleName[simpleName].orEmpty()
+            .distinctBy { it.fqName }
+        return simpleMatches.singleOrNull()
+    }
+
+    private fun sanitizeJavaTypeReference(reference: String): String =
+        reference
+            .trim()
+            .removePrefix("new ")
+            .substringBefore("<")
+            .removeSuffix("::new")
+            .removeSuffix(".class")
+            .trim()
+
+    private fun nestedClassName(reference: String, topLevel: JavaSourceInfo): String? {
+        val clean = sanitizeJavaTypeReference(reference)
+        val afterFqName = clean.removePrefix("${topLevel.fqName}.")
+        if (afterFqName != clean) return afterFqName.substringBefore('.').takeIf { it.isNotBlank() }
+        val afterSimpleName = clean.removePrefix("${topLevel.simpleName}.")
+        if (afterSimpleName != clean) return afterSimpleName.substringBefore('.').takeIf { it.isNotBlank() }
+        return null
+    }
+
+    private fun extractJavaClassBlock(source: String, className: String): String? {
+        val classMatch = Regex("""\bclass\s+${Regex.escape(className)}\b""").find(source) ?: return null
+        val openBrace = source.indexOf('{', classMatch.range.last + 1)
+        if (openBrace < 0) return null
+        val closeBrace = findMatchingJavaBrace(source, openBrace)
+        if (closeBrace < 0) return null
+        return source.substring(classMatch.range.first, closeBrace + 1)
+    }
+
+    private fun findMatchingJavaBrace(source: String, openBrace: Int): Int {
+        var depth = 0
+        var index = openBrace
+        var inString = false
+        var inChar = false
+        var inLineComment = false
+        var inBlockComment = false
+        var escaped = false
+        while (index < source.length) {
+            val char = source[index]
+            val next = source.getOrNull(index + 1)
+            when {
+                inLineComment -> {
+                    if (char == '\n' || char == '\r') inLineComment = false
+                }
+                inBlockComment -> {
+                    if (char == '*' && next == '/') {
+                        inBlockComment = false
+                        index++
+                    }
+                }
+                escaped -> escaped = false
+                inString -> when (char) {
+                    '\\' -> escaped = true
+                    '"' -> inString = false
+                }
+                inChar -> when (char) {
+                    '\\' -> escaped = true
+                    '\'' -> inChar = false
+                }
+                char == '/' && next == '/' -> {
+                    inLineComment = true
+                    index++
+                }
+                char == '/' && next == '*' -> {
+                    inBlockComment = true
+                    index++
+                }
+                char == '"' -> inString = true
+                char == '\'' -> inChar = true
+                char == '{' -> depth++
+                char == '}' -> {
+                    depth--
+                    if (depth == 0) return index
+                }
+            }
+            index++
+        }
+        return -1
+    }
+
+    private fun migrateRecipeResultEntries(
+        content: String,
+        recipeCodecHints: RecipeDataCodecHints = RecipeDataCodecHints.EMPTY
+    ): String {
         val root = parseResourceJson(content) ?: return content
-        val result = migrateRecipeResultEntries(root, currentRecipeType = null)
+        val result = migrateRecipeResultEntries(root, currentRecipeType = null, recipeCodecHints)
         if (!result.changed) return content
         return RESOURCE_JSON.encodeToString(JsonElement.serializer(), result.element) + "\n"
     }
 
-    private fun migrateRecipeResultEntries(element: JsonElement, currentRecipeType: String?): JsonElementMigration {
+    private fun migrateRecipeResultEntries(
+        element: JsonElement,
+        currentRecipeType: String?,
+        recipeCodecHints: RecipeDataCodecHints
+    ): JsonElementMigration {
         return when (element) {
             is JsonArray -> {
                 var changed = false
                 val values = element.map { child ->
-                    val result = migrateRecipeResultEntries(child, currentRecipeType)
+                    val result = migrateRecipeResultEntries(child, currentRecipeType, recipeCodecHints)
                     changed = changed || result.changed
                     result.element
                 }
@@ -1576,14 +2045,10 @@ public class $className extends CustomRecipe {
                 val recipeType = objectType ?: currentRecipeType
                 val entries = linkedMapOf<String, JsonElement>()
                 for ((key, value) in element) {
-                    val result = if (key == "result") {
-                        if (shouldMigrateRecipeResultForType(recipeType)) {
+                    val result = if (shouldMigrateRecipeItemStackField(recipeType, key, recipeCodecHints)) {
                             migrateRecipeResultValue(value)
-                        } else {
-                            JsonElementMigration(value, changed = false)
-                        }
                     } else {
-                        migrateRecipeResultEntries(value, recipeType)
+                        migrateRecipeResultEntries(value, recipeType, recipeCodecHints)
                     }
                     changed = changed || result.changed
                     entries[key] = result.element
@@ -1594,8 +2059,13 @@ public class $className extends CustomRecipe {
         }
     }
 
-    private fun shouldMigrateRecipeResultForType(type: String?): Boolean =
-        type?.startsWith("minecraft:") == true
+    private fun shouldMigrateRecipeItemStackField(
+        type: String?,
+        fieldName: String,
+        recipeCodecHints: RecipeDataCodecHints
+    ): Boolean =
+        (fieldName == "result" && type?.startsWith("minecraft:") == true) ||
+            (type != null && fieldName in recipeCodecHints.itemStackFields(type))
 
     private fun migrateRecipeResultValue(element: JsonElement): JsonElementMigration {
         return when (element) {
@@ -1631,6 +2101,61 @@ public class $className extends CustomRecipe {
             }
             else -> JsonElementMigration(element, changed = false)
         }
+    }
+
+    private fun migrateRecipeCompoundTagFields(
+        content: String,
+        recipeCodecHints: RecipeDataCodecHints
+    ): String {
+        val root = parseResourceJson(content) ?: return content
+        val result = migrateRecipeCompoundTagFields(root, currentRecipeType = null, recipeCodecHints)
+        if (!result.changed) return content
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), result.element) + "\n"
+    }
+
+    private fun migrateRecipeCompoundTagFields(
+        element: JsonElement,
+        currentRecipeType: String?,
+        recipeCodecHints: RecipeDataCodecHints
+    ): JsonElementMigration {
+        return when (element) {
+            is JsonArray -> {
+                var changed = false
+                val values = element.map { child ->
+                    val result = migrateRecipeCompoundTagFields(child, currentRecipeType, recipeCodecHints)
+                    changed = changed || result.changed
+                    result.element
+                }
+                JsonElementMigration(JsonArray(values), changed)
+            }
+            is JsonObject -> {
+                var changed = false
+                val objectType = (element["type"] as? JsonPrimitive)
+                    ?.takeIf { it.isString }
+                    ?.content
+                val recipeType = objectType ?: currentRecipeType
+                val entries = linkedMapOf<String, JsonElement>()
+                val compoundFields = recipeCodecHints.compoundTagFields(recipeType)
+                for ((key, value) in element) {
+                    val result = if (key in compoundFields) {
+                        migrateSnbtCompoundTagValue(value)
+                    } else {
+                        migrateRecipeCompoundTagFields(value, recipeType, recipeCodecHints)
+                    }
+                    changed = changed || result.changed
+                    entries[key] = result.element
+                }
+                JsonElementMigration(JsonObject(entries), changed)
+            }
+            else -> JsonElementMigration(element, changed = false)
+        }
+    }
+
+    private fun migrateSnbtCompoundTagValue(element: JsonElement): JsonElementMigration {
+        val primitive = element as? JsonPrimitive ?: return JsonElementMigration(element, changed = false)
+        if (!primitive.isString) return JsonElementMigration(element, changed = false)
+        val compound = parseSnbtCompoundJson(primitive.content) ?: return JsonElementMigration(element, changed = false)
+        return JsonElementMigration(compound, changed = true)
     }
 
     private fun migrateFarmersDelightCuttingRecipe(content: String): String {
@@ -1751,6 +2276,81 @@ public class $className extends CustomRecipe {
         return JsonObject(migrated)
     }
 
+    private fun parseSnbtCompoundJson(value: String): JsonObject? {
+        val trimmed = value.trim()
+        if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null
+        val body = trimmed.substring(1, trimmed.length - 1).trim()
+        if (body.isEmpty()) return JsonObject(emptyMap())
+
+        val entries = linkedMapOf<String, JsonElement>()
+        for (entry in splitTopLevelSnbtEntries(body)) {
+            val colon = findTopLevelSnbtColon(entry)
+            if (colon <= 0) return null
+            val key = unquoteSnbtString(entry.substring(0, colon).trim())
+            val element = parseSnbtJsonElement(entry.substring(colon + 1).trim()) ?: return null
+            entries[key] = element
+        }
+        return JsonObject(entries)
+    }
+
+    private fun parseSnbtJsonElement(value: String): JsonElement? {
+        val trimmed = value.trim()
+        if (trimmed.isEmpty()) return null
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+            return parseSnbtCompoundJson(trimmed)
+        }
+        if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+            return parseSnbtArrayJson(trimmed)
+        }
+        if (trimmed.length >= 2 && trimmed.first() == '"' && trimmed.last() == '"') {
+            return JsonPrimitive(unquoteSnbtString(trimmed))
+        }
+        return parseSnbtNumberPrimitive(trimmed)
+            ?: when (trimmed.lowercase()) {
+                "true" -> JsonPrimitive(true)
+                "false" -> JsonPrimitive(false)
+                else -> JsonPrimitive(trimmed)
+            }
+    }
+
+    private fun parseSnbtArrayJson(value: String): JsonArray? {
+        val trimmed = value.trim()
+        if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return null
+        val body = trimmed.substring(1, trimmed.length - 1).trim()
+        val arrayBody = if (body.length > 2 && body[1] == ';' && body[0] in charArrayOf('B', 'b', 'I', 'i', 'L', 'l')) {
+            body.substring(2).trim()
+        } else {
+            body
+        }
+        if (arrayBody.isEmpty()) return JsonArray(emptyList())
+
+        val values = splitTopLevelSnbtEntries(arrayBody).map { entry ->
+            parseSnbtJsonElement(entry) ?: return null
+        }
+        return JsonArray(values)
+    }
+
+    private fun findTopLevelSnbtColon(value: String): Int {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (index in value.indices) {
+            val char = value[index]
+            if (escaped) {
+                escaped = false
+                continue
+            }
+            when {
+                char == '\\' && inString -> escaped = true
+                char == '"' -> inString = !inString
+                !inString && (char == '{' || char == '[') -> depth++
+                !inString && (char == '}' || char == ']') -> depth--
+                !inString && depth == 0 && char == ':' -> return index
+            }
+        }
+        return -1
+    }
+
     private fun partialNbtToComponents(nbt: String): JsonObject? {
         val trimmed = nbt.trim()
         if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null
@@ -1761,7 +2361,7 @@ public class $className extends CustomRecipe {
         val components = linkedMapOf<String, JsonElement>()
         val customData = linkedMapOf<String, JsonElement>()
         for (entry in splitTopLevelSnbtEntries(body)) {
-            val colon = entry.indexOf(':')
+            val colon = findTopLevelSnbtColon(entry)
             if (colon <= 0) continue
             val key = entry.substring(0, colon).trim().trim('"')
             val value = entry.substring(colon + 1).trim()
@@ -1816,10 +2416,30 @@ public class $className extends CustomRecipe {
     private fun parseSnbtInt(value: String): Int? =
         value.trim().trimEnd('b', 'B', 's', 'S', 'l', 'L').toIntOrNull()
 
+    private fun parseSnbtNumberPrimitive(value: String): JsonPrimitive? {
+        val normalized = value.trim()
+        if (normalized.isEmpty()) return null
+        val suffix = normalized.last()
+        val unsigned = when (suffix) {
+            'b', 'B', 's', 'S', 'l', 'L', 'f', 'F', 'd', 'D' -> normalized.dropLast(1)
+            else -> normalized
+        }
+        return when {
+            suffix in charArrayOf('f', 'F', 'd', 'D') ||
+                unsigned.contains('.') ||
+                unsigned.indexOf('e', ignoreCase = true) >= 0 ->
+                unsigned.toDoubleOrNull()?.let { JsonPrimitive(it) }
+            suffix in charArrayOf('l', 'L') ->
+                unsigned.toLongOrNull()?.let { JsonPrimitive(it) }
+            else ->
+                unsigned.toIntOrNull()?.let { JsonPrimitive(it) }
+                    ?: unsigned.toLongOrNull()?.let { JsonPrimitive(it) }
+        }
+    }
+
     private fun parseSnbtJsonPrimitive(value: String): JsonElement {
         val normalized = value.trim()
-        parseSnbtInt(normalized)?.let { return JsonPrimitive(it) }
-        normalized.trimEnd('f', 'F', 'd', 'D').toDoubleOrNull()?.let { return JsonPrimitive(it) }
+        parseSnbtNumberPrimitive(normalized)?.let { return it }
         return when (normalized.lowercase()) {
             "true" -> JsonPrimitive(true)
             "false" -> JsonPrimitive(false)
@@ -2518,6 +3138,59 @@ public class $className extends CustomRecipe {
             }
             else -> JsonElementMigration(element, changed = false)
         }
+    }
+
+    private data class RecipeDataCodecHints(
+        val itemStackFieldsByType: Map<String, Set<String>> = emptyMap(),
+        val compoundTagFieldsByType: Map<String, Set<String>> = emptyMap()
+    ) {
+        val hasCompoundTagFields: Boolean
+            get() = compoundTagFieldsByType.isNotEmpty()
+
+        fun itemStackFields(type: String?): Set<String> =
+            if (type == null) emptySet() else itemStackFieldsByType[type].orEmpty()
+
+        fun compoundTagFields(type: String?): Set<String> =
+            if (type == null) emptySet() else compoundTagFieldsByType[type].orEmpty()
+
+        companion object {
+            val EMPTY = RecipeDataCodecHints()
+        }
+    }
+
+    private data class RecipeCodecFieldSet(
+        val itemStackFields: Set<String> = emptySet(),
+        val compoundTagFields: Set<String> = emptySet()
+    ) {
+        val isEmpty: Boolean
+            get() = itemStackFields.isEmpty() && compoundTagFields.isEmpty()
+
+        operator fun plus(other: RecipeCodecFieldSet): RecipeCodecFieldSet =
+            RecipeCodecFieldSet(
+                itemStackFields = itemStackFields + other.itemStackFields,
+                compoundTagFields = compoundTagFields + other.compoundTagFields
+            )
+
+        companion object {
+            val EMPTY = RecipeCodecFieldSet()
+        }
+    }
+
+    private data class JavaSourceInfo(
+        val file: Path,
+        val content: String,
+        val packageName: String,
+        val simpleName: String,
+        val fqName: String,
+        val imports: Map<String, String>,
+        val wildcardImports: Set<String>
+    )
+
+    private data class JavaSourceIndex(
+        val sources: List<JavaSourceInfo>
+    ) {
+        val byFqName: Map<String, JavaSourceInfo> = sources.associateBy { it.fqName }
+        val bySimpleName: Map<String, List<JavaSourceInfo>> = sources.groupBy { it.simpleName }
     }
 
     private data class JsonElementMigration(val element: JsonElement, val changed: Boolean)

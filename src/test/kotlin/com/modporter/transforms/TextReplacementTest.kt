@@ -50,6 +50,38 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `forge internal names in mixin descriptors use neoforge owners`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+            import org.spongepowered.asm.mixin.injection.At;
+
+            public class TestMod {
+                @WrapOperation(method = "render(Lnet/minecraft/client/gui/GuiGraphics;IIF)V", at = @At(value = "INVOKE", target = "Lnet/minecraftforge/internal/BrandingControl;forEachLine(ZZLjava/util/function/BiConsumer;)V"))
+                private void branding() {}
+
+                String fml = "Lnet/minecraftforge/fml/ModLoadingContext;";
+                String bus = "Lnet/minecraftforge/eventbus/api/IEventBus;";
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "forge-internal-name-descriptors" })
+        assertTrue(transformed.contains("Lnet/neoforged/neoforge/internal/BrandingControl;"), transformed)
+        assertTrue(transformed.contains("Lnet/neoforged/fml/ModLoadingContext;"), transformed)
+        assertTrue(transformed.contains("Lnet/neoforged/bus/api/IEventBus;"), transformed)
+        assertFalse(transformed.contains("Lnet/minecraftforge/"), transformed)
+        assertFalse(transformed.contains("Lnet/neoforged/neoforge/fml/"), transformed)
+        assertFalse(transformed.contains("Lnet/neoforged/neoforge/eventbus/"), transformed)
+    }
+
+    @Test
     fun `colorless glass tag constants use renamed glass block constants`() {
         val projectDir = createTestFile("""
             package com.example;

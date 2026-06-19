@@ -11,12 +11,17 @@ import com.github.javaparser.ast.body.Parameter
 import com.github.javaparser.ast.body.VariableDeclarator
 import com.github.javaparser.ast.expr.*
 import com.github.javaparser.ast.type.ClassOrInterfaceType
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.*
 import mu.KotlinLogging
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.*
 
 private val logger = KotlinLogging.logger {}
+private val STRUCTURAL_RESOURCE_JSON = Json {
+    prettyPrint = true
+}
 
 /**
  * Pass 3: Structural refactoring for complex API migrations.
@@ -8821,6 +8826,20 @@ $fields
                     text = baseContainerMigrated
                 }
 
+                val eventBusSubscriberStaticMigrated = migrateEventBusSubscriberStaticMethodsSource(text)
+                if (eventBusSubscriberStaticMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Make @EventBusSubscriber @SubscribeEvent methods static for NeoForge auto-registration",
+                        before = "@EventBusSubscriber class with instance @SubscribeEvent methods",
+                        after = "@SubscribeEvent methods declared static",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-eventbussubscriber-static-methods"
+                    ))
+                    text = eventBusSubscriberStaticMigrated
+                }
+
                 val customNameSetterMigrated = migrateBaseContainerCustomNameSetterSource(text)
                 if (customNameSetterMigrated != text) {
                     changes.add(Change(
@@ -8945,6 +8964,20 @@ $fields
                         ruleId = "struct-holder-value-accessors"
                     ))
                     text = holderAccessorMigrated
+                }
+
+                val abstractClientPlayerSkinWrapMigrated = migrateLegacyAbstractClientPlayerCapeMixinToSkinWrapSource(text)
+                if (abstractClientPlayerSkinWrapMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate removed AbstractClientPlayer cape hooks to PlayerSkin wrapping",
+                        before = "isCapeLoaded()/getCloakTextureLocation() mixin injections",
+                        after = "getSkin() WrapMethod returning a PlayerSkin with the migrated cape texture",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-abstract-client-player-skin-wrap"
+                    ))
+                    text = abstractClientPlayerSkinWrapMigrated
                 }
 
                 val screenBackgroundMigrated = migrateScreenBackgroundRenderedEventSource(text)
@@ -10431,6 +10464,7 @@ $fields
         val packageName: String,
         val enumName: String,
         val methodName: String,
+        val oldSerializedName: String,
         val serializedName: String,
         val maxInstances: String,
         val friendly: String,
@@ -11087,6 +11121,8 @@ $methods
             mergeEnumExtensionEntries(enumExtensionFile, entries)
             ensureEnumExtensionsTomlEntry(metaInf)
         }
+
+        changes.addAll(migrateMobCategoryDataResourceKeys(projectDir, extensions.values, dryRun))
         return changes
     }
 
@@ -11116,6 +11152,7 @@ $methods
             packageName = packageName,
             enumName = enumName,
             methodName = methodName,
+            oldSerializedName = serializedName,
             serializedName = enumExtensionNameParameter(modId, serializedName),
             maxInstances = maxInstances,
             friendly = friendly,
@@ -11211,6 +11248,145 @@ $methods
       }
     }"""
     }
+
+    private fun migrateMobCategoryDataResourceKeys(
+        projectDir: Path,
+        extensions: Collection<LegacyMobCategoryExtension>,
+        dryRun: Boolean
+    ): List<Change> {
+        val renames = linkedMapOf<String, String>()
+        extensions.forEach { extension ->
+            if (extension.oldSerializedName != extension.serializedName) {
+                renames.putIfAbsent(extension.oldSerializedName, extension.serializedName)
+            }
+        }
+        if (renames.isEmpty()) return emptyList()
+
+        val resourceDirs = listOf(
+            projectDir.resolve("src/main/resources"),
+            projectDir.resolve("src/generated/resources")
+        ).filter { it.exists() }
+        if (resourceDirs.isEmpty()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        resourceDirs.forEach { resourceDir ->
+            val jsonFiles = Files.walk(resourceDir).use { paths ->
+                paths
+                    .filter { Files.isRegularFile(it) && it.toString().endsWith(".json") }
+                    .filter {
+                        val filePath = it.toString().replace('\\', '/')
+                        filePath.contains("/data/") && filePath.contains("/worldgen/")
+                    }
+                    .toList()
+            }
+            for (jsonFile in jsonFiles) {
+                val original = jsonFile.readText()
+                if (renames.keys.none { key -> original.contains("\"$key\"") }) continue
+                val root = parseStructuralResourceJson(original) ?: continue
+                val migrated = migrateMobCategoryDataKeys(root, renames, currentKey = null)
+                if (migrated.conflicts.isNotEmpty()) {
+                    throw IllegalStateException(
+                        "Ambiguous MobCategory data key migration in $jsonFile: " +
+                            migrated.conflicts.joinToString("; ")
+                    )
+                }
+                if (!migrated.changed) continue
+
+                changes.add(Change(
+                    file = jsonFile,
+                    line = 0,
+                    description = "Rewrite MobCategory enum extension data keys to namespaced serialized names",
+                    before = renames.keys.joinToString(limit = 4),
+                    after = renames.values.joinToString(limit = 4),
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-mobcategory-data-keys"
+                ))
+                if (!dryRun) {
+                    jsonFile.writeText(
+                        STRUCTURAL_RESOURCE_JSON.encodeToString(JsonElement.serializer(), migrated.element) + "\n"
+                    )
+                }
+            }
+        }
+        return changes
+    }
+
+    private fun parseStructuralResourceJson(content: String): JsonElement? =
+        try {
+            STRUCTURAL_RESOURCE_JSON.parseToJsonElement(content)
+        } catch (_: SerializationException) {
+            null
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+
+    private fun migrateMobCategoryDataKeys(
+        element: JsonElement,
+        renames: Map<String, String>,
+        currentKey: String?
+    ): MobCategoryDataKeyMigration {
+        return when (element) {
+            is JsonArray -> {
+                var changed = false
+                val conflicts = mutableListOf<String>()
+                val values = element.map { child ->
+                    val migrated = migrateMobCategoryDataKeys(child, renames, currentKey = null)
+                    changed = changed || migrated.changed
+                    conflicts.addAll(migrated.conflicts)
+                    migrated.element
+                }
+                MobCategoryDataKeyMigration(JsonArray(values), changed, conflicts)
+            }
+            is JsonObject -> {
+                if (currentKey == "spawners" || currentKey == "spawn_overrides") {
+                    return migrateMobCategoryCategoryKeyObject(element, renames)
+                }
+
+                var changed = false
+                val conflicts = mutableListOf<String>()
+                val entries = linkedMapOf<String, JsonElement>()
+                for ((key, value) in element) {
+                    val migrated = migrateMobCategoryDataKeys(value, renames, currentKey = key)
+                    entries[key] = migrated.element
+                    changed = changed || migrated.changed
+                    conflicts.addAll(migrated.conflicts)
+                }
+                MobCategoryDataKeyMigration(JsonObject(entries), changed, conflicts)
+            }
+            else -> MobCategoryDataKeyMigration(element, changed = false)
+        }
+    }
+
+    private fun migrateMobCategoryCategoryKeyObject(
+        element: JsonObject,
+        renames: Map<String, String>
+    ): MobCategoryDataKeyMigration {
+        var changed = false
+        val conflicts = mutableListOf<String>()
+        val entries = linkedMapOf<String, JsonElement>()
+        for ((key, value) in element) {
+            val migrated = migrateMobCategoryDataKeys(value, renames, currentKey = null)
+            val targetKey = renames[key] ?: key
+            if (targetKey != key) {
+                changed = true
+                if (entries.containsKey(targetKey)) {
+                    conflicts += "'$key' maps to existing '$targetKey'"
+                    entries[key] = migrated.element
+                    continue
+                }
+            }
+            entries[targetKey] = migrated.element
+            changed = changed || migrated.changed
+            conflicts.addAll(migrated.conflicts)
+        }
+        return MobCategoryDataKeyMigration(JsonObject(entries), changed, conflicts)
+    }
+
+    private data class MobCategoryDataKeyMigration(
+        val element: JsonElement,
+        val changed: Boolean,
+        val conflicts: List<String> = emptyList()
+    )
 
     private fun migrateLegacyPathTypeCreateConstants(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
@@ -14202,6 +14378,7 @@ ${indent}}
         result = migrateItemStackAttributeModifierAccess(result)
         result = migrateLegacyServerDataConstructors(result)
         result = migrateLegacyConnectScreenStartConnectingCalls(result)
+        result = migrateLegacyClientPacketListenerDisconnectMixinSource(result)
         result = migrateLegacySingleplayerWorldFlowSource(result)
         val bindingCurseMigrated = migrateLegacyBindingCurseChecks(result)
         if (bindingCurseMigrated != result) {
@@ -21549,6 +21726,168 @@ ${indent}}"""
         return result
     }
 
+    private data class JavaAnnotatedMethodBlock(
+        val start: Int,
+        val endExclusive: Int,
+        val bodyStart: Int,
+        val bodyEnd: Int,
+        val methodIndent: String,
+        val text: String
+    )
+
+    private fun migrateLegacyAbstractClientPlayerCapeMixinToSkinWrapSource(source: String): String {
+        if (!source.contains("isCapeLoaded()Z") ||
+            !source.contains("getCloakTextureLocation()Lnet/minecraft/resources/ResourceLocation;") ||
+            !Regex("""@Mixin\s*\(\s*(?:value\s*=\s*)?(?:AbstractClientPlayer|net\.minecraft\.client\.player\.AbstractClientPlayer)\.class\s*\)""")
+                .containsMatchIn(source)) {
+            return source
+        }
+
+        val loadedBlock = findAnnotatedMixinMethodBlock(
+            source,
+            "isCapeLoaded()Z",
+            "@Inject"
+        ) ?: return source
+        val cloakBlock = findAnnotatedMixinMethodBlock(
+            source,
+            "getCloakTextureLocation()Lnet/minecraft/resources/ResourceLocation;",
+            "@Inject"
+        ) ?: return source
+        val cloakHeader = cloakBlock.text.substring(0, cloakBlock.bodyStart - cloakBlock.start)
+        val callbackName = Regex(
+            """CallbackInfoReturnable\s*<\s*(?:net\.minecraft\.resources\.)?ResourceLocation\s*>\s+([A-Za-z_$][\w$]*)"""
+        ).find(cloakHeader)?.groupValues?.get(1) ?: return source
+
+        var migratedBody = cloakBlock.text.substring(cloakBlock.bodyStart - cloakBlock.start, cloakBlock.bodyEnd - cloakBlock.start)
+            .trim('\r', '\n')
+        val bodyIndent = Regex("""(?m)^([ \t]+)\S""")
+            .find(migratedBody)
+            ?.groupValues
+            ?.get(1)
+            ?: cloakBlock.methodIndent + "    "
+        val skinName = uniqueJavaLocalName(migratedBody, "skin")
+        var returnedCapeTexture = false
+        migratedBody = Regex("""\b${Regex.escape(callbackName)}\.setReturnValue\(\s*([^;\r\n]+?)\s*\);""")
+            .replace(migratedBody) { match ->
+                returnedCapeTexture = true
+                val textureExpression = match.groupValues[1].trim()
+                "return new PlayerSkin($skinName.texture(), $skinName.textureUrl(), $textureExpression, $skinName.elytraTexture(), $skinName.model(), $skinName.secure());"
+            }
+        if (!returnedCapeTexture) return source
+
+        migratedBody = insertPlayerSkinOriginalCall(migratedBody, bodyIndent, skinName)
+            .trimEnd() + "\n${bodyIndent}return $skinName;"
+        val wrapMethod = buildString {
+            append(cloakBlock.methodIndent)
+            append("@WrapMethod(method = \"getSkin()Lnet/minecraft/client/resources/PlayerSkin;\")\n")
+            append(cloakBlock.methodIndent)
+            append("private PlayerSkin getSkin(Operation<PlayerSkin> original) {\n")
+            append(migratedBody)
+            append("\n")
+            append(cloakBlock.methodIndent)
+            append("}")
+        }
+
+        var result = source
+        listOf(
+            loadedBlock.start to (loadedBlock.endExclusive to ""),
+            cloakBlock.start to (cloakBlock.endExclusive to wrapMethod)
+        ).sortedByDescending { it.first }
+            .forEach { (start, endAndReplacement) ->
+                val (endExclusive, replacement) = endAndReplacement
+                result = result.substring(0, start) + replacement + result.substring(endExclusive)
+            }
+
+        result = addImportIfMissing(result, "com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod")
+        result = addImportIfMissing(result, "com.llamalad7.mixinextras.injector.wrapoperation.Operation")
+        result = addImportIfMissing(result, "net.minecraft.client.resources.PlayerSkin")
+        result = removeImportIfTokenAbsent(result, "org.spongepowered.asm.mixin.injection.Inject", Regex("""(?<![\w$])@Inject\b"""))
+        result = removeImportIfTokenAbsent(result, "org.spongepowered.asm.mixin.injection.At", Regex("""(?<![\w$])@At\b"""))
+        result = removeImportIfTokenAbsent(
+            result,
+            "org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable",
+            Regex("""(?<![\w$])CallbackInfoReturnable(?![\w$])""")
+        )
+        return result
+    }
+
+    private fun findAnnotatedMixinMethodBlock(
+        source: String,
+        descriptor: String,
+        annotationName: String
+    ): JavaAnnotatedMethodBlock? {
+        val descriptorIndex = source.indexOf(descriptor)
+        if (descriptorIndex < 0) return null
+        val annotationIndex = source.lastIndexOf(annotationName, descriptorIndex)
+        if (annotationIndex < 0) return null
+        val methodMatch = Regex(
+            """(?m)^[ \t]*(?:private|protected|public)\s+(?:static\s+)?[\w.$<>\[\]?,\s]+\s+[A-Za-z_$][\w$]*\s*\("""
+        ).find(source, descriptorIndex) ?: return null
+        val openBrace = source.indexOf('{', methodMatch.range.last)
+        if (openBrace < 0) return null
+        val closeBrace = findMatchingBrace(source, openBrace)
+        if (closeBrace < 0) return null
+        val annotationLineStart = lineStartAt(source, annotationIndex)
+        val start = includeLeadingJavadoc(source, annotationLineStart)
+        var endExclusive = closeBrace + 1
+        if (source.getOrNull(endExclusive) == '\r') endExclusive++
+        if (source.getOrNull(endExclusive) == '\n') endExclusive++
+        val methodIndent = source.substring(annotationLineStart, annotationIndex)
+            .takeWhile { it == ' ' || it == '\t' }
+        return JavaAnnotatedMethodBlock(
+            start = start,
+            endExclusive = endExclusive,
+            bodyStart = openBrace + 1,
+            bodyEnd = closeBrace,
+            methodIndent = methodIndent,
+            text = source.substring(start, endExclusive)
+        )
+    }
+
+    private fun includeLeadingJavadoc(source: String, annotationLineStart: Int): Int {
+        val beforeAnnotation = source.substring(0, annotationLineStart)
+        val trimmedBefore = beforeAnnotation.trimEnd()
+        if (!trimmedBefore.endsWith("*/")) return annotationLineStart
+        val javadocEnd = trimmedBefore.length - 2
+        val javadocStart = source.lastIndexOf("/**", javadocEnd)
+        if (javadocStart < 0) return annotationLineStart
+        val between = source.substring(javadocEnd + 2, annotationLineStart)
+        if (between.any { it != ' ' && it != '\t' && it != '\r' && it != '\n' }) return annotationLineStart
+        return lineStartAt(source, javadocStart)
+    }
+
+    private fun insertPlayerSkinOriginalCall(body: String, bodyIndent: String, skinName: String): String {
+        val originalCall = "${bodyIndent}PlayerSkin $skinName = original.call();"
+        val playerLocal = Regex(
+            """(?m)^([ \t]*(?:net\.minecraft\.client\.player\.)?AbstractClientPlayer\s+[A-Za-z_$][\w$]*\s*=\s*\(\s*(?:net\.minecraft\.client\.player\.)?AbstractClientPlayer\s*\)\s*\(\s*Object\s*\)\s*this\s*;)[ \t]*$"""
+        ).find(body)
+        if (playerLocal != null) {
+            val insertAt = playerLocal.range.last + 1
+            return body.substring(0, insertAt) + "\n" + originalCall + body.substring(insertAt)
+        }
+        val firstContent = Regex("""\S""").find(body)?.range?.first ?: 0
+        return body.substring(0, firstContent) + "PlayerSkin $skinName = original.call();\n$bodyIndent" + body.substring(firstContent)
+    }
+
+    private fun uniqueJavaLocalName(source: String, base: String): String {
+        var suffix = 0
+        while (true) {
+            val candidate = if (suffix == 0) base else "$base$suffix"
+            if (!Regex("""(?<![\w$])${Regex.escape(candidate)}(?![\w$])""").containsMatchIn(source)) {
+                return candidate
+            }
+            suffix++
+        }
+    }
+
+    private fun removeImportIfTokenAbsent(source: String, importName: String, token: Regex): String {
+        val withoutImport = removeImport(source, importName)
+        return if (!token.containsMatchIn(withoutImport)) withoutImport else source
+    }
+
+    private fun lineStartAt(source: String, index: Int): Int =
+        source.lastIndexOf('\n', index).let { if (it < 0) 0 else it + 1 }
+
     private fun migrateLegacyLevelStorageSourceLoadSummariesLambdaMixinDescriptor(source: String): String {
         val legacyLambda = "lambda\$loadLevelSummaries\$2(Lnet/minecraft/world/level/storage/LevelStorageSource\$LevelDirectory;)Lnet/minecraft/world/level/storage/LevelSummary;"
         if (!source.contains(legacyLambda)) return source
@@ -23854,13 +24193,8 @@ public $className(Properties $propertiesName, WoodType $typeName) {
             result = Regex(
                 """\bCodec\s*<\s*${Regex.escape(className)}\s*>\s+([A-Z][A-Z0-9_]*)\s*=\s*((?:[A-Za-z_$][\w$]*\.)*[A-Z][A-Za-z0-9_$]*(?:\.[A-Z][A-Za-z0-9_$]*)*\.CODEC(?:\.codec\(\))?\.listOf\(\))\.xmap\(([^;\r\n]+)\);"""
             ).replace(result) { match ->
-                val fieldName = Regex("""\b[A-Za-z_$][\w$]*\s*->\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\b""")
-                    .find(match.groupValues[3])
-                    ?.groupValues
-                    ?.get(1)
-                    ?: "value"
                 changed = true
-                "MapCodec<$className> ${match.groupValues[1]} = ${match.groupValues[2]}.fieldOf(\"$fieldName\").xmap(${match.groupValues[3]});"
+                "MapCodec<$className> ${match.groupValues[1]} = ${match.groupValues[2]}.fieldOf(\"value\").xmap(${match.groupValues[3]});"
             }
             result = Regex(
                 """\bCodec\s*<\s*${Regex.escape(className)}\s*>\s+([A-Z][A-Z0-9_]*)\s*=\s*((?:[A-Za-z_$][\w$]*\.)*[A-Z][A-Za-z0-9_$]*(?:\.[A-Z][A-Za-z0-9_$]*)*\.CODEC(?:\.codec\(\))?\.listOf\(\)\.fieldOf\("[^"]+"\)\.xmap\([^;\r\n]+?\))\.codec\(\)\s*;"""
@@ -23890,9 +24224,8 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 """\bCodec\s*<\s*${Regex.escape(className)}\s*>\s+([A-Z][A-Z0-9_]*)\s*=\s*([^;\r\n]+?\.(?:comapFlatMap|flatXmap|xmap)\([^;\r\n]+?\))\s*;"""
             ).replace(result) { match ->
                 val codecExpression = match.groupValues[2]
-                val fieldName = inferSingleFieldMapCodecFieldName(source, codecExpression) ?: return@replace match.value
                 changed = true
-                "MapCodec<$className> ${match.groupValues[1]} = $codecExpression.fieldOf(\"$fieldName\");"
+                "MapCodec<$className> ${match.groupValues[1]} = $codecExpression.fieldOf(\"value\");"
             }
         }
 
@@ -23907,26 +24240,6 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 .replace(result, "protected MapCodec<? extends BiomeSource> codec(")
         }
         return result
-    }
-
-    private fun inferSingleFieldMapCodecFieldName(source: String, codecExpression: String): String? {
-        val lambdaParameter = Regex("""\b([A-Za-z_$][\w$]*)\s*->""")
-            .find(codecExpression)
-            ?.groupValues
-            ?.get(1)
-        if (lambdaParameter != null) {
-            val lambdaField = Regex("""\b${Regex.escape(lambdaParameter)}\.([A-Za-z_$][\w$]*)\b""")
-                .find(codecExpression)
-                ?.groupValues
-                ?.get(1)
-            if (lambdaField != null) return lambdaField
-        }
-        val finalFields = Regex(
-            """(?m)^\s*private\s+final\s+[^;\r\n=]+?\s+([A-Za-z_$][\w$]*)\s*;"""
-        ).findAll(source)
-            .map { it.groupValues[1] }
-            .toList()
-        return finalFields.singleOrNull()
     }
 
     private fun migrateMapCodecRegistryFactorySignatures(source: String): String {
@@ -28315,10 +28628,105 @@ $methodBody
     }
 
     private fun migrateLegacyConnectScreenStartConnectingCalls(source: String): String {
-        if (!source.contains("ConnectScreen.startConnecting(")) return source
-        return migrateMethodCalls(source, "ConnectScreen.startConnecting") { args ->
-            if (args.size == 5) args + "null" else args
+        val legacyDescriptor = "startConnecting(Lnet/minecraft/client/gui/screens/Screen;Lnet/minecraft/client/Minecraft;Lnet/minecraft/client/multiplayer/resolver/ServerAddress;Lnet/minecraft/client/multiplayer/ServerData;Z)V"
+        if (!source.contains("ConnectScreen.startConnecting(") && !source.contains(legacyDescriptor)) return source
+        var result = source
+        if (result.contains("ConnectScreen.startConnecting(")) {
+            result = migrateMethodCalls(result, "ConnectScreen.startConnecting") { args ->
+                if (args.size == 5) args + "null" else args
+            }
         }
+        if (result.contains(legacyDescriptor) && targetsConnectScreenMixin(result)) {
+            result = result.replace(
+                legacyDescriptor,
+                "startConnecting(Lnet/minecraft/client/gui/screens/Screen;Lnet/minecraft/client/Minecraft;Lnet/minecraft/client/multiplayer/resolver/ServerAddress;Lnet/minecraft/client/multiplayer/ServerData;ZLnet/minecraft/client/multiplayer/TransferState;)V"
+            )
+            result = Regex(
+                """(?m)^([ \t]*(?:private|protected|public)\s+static\s+void\s+[A-Za-z_$][\w$]*\s*\([^)]*\bboolean\s+[A-Za-z_$][\w$]*\s*,\s*)CallbackInfo\s+([A-Za-z_$][\w$]*)(\s*\))"""
+            ).replace(result) { match ->
+                "${match.groupValues[1]}TransferState transferState, CallbackInfo ${match.groupValues[2]}${match.groupValues[3]}"
+            }
+            result = addImportIfMissing(result, "net.minecraft.client.multiplayer.TransferState")
+        }
+        return result
+    }
+
+    private fun targetsConnectScreenMixin(source: String): Boolean =
+        Regex("""@Mixin\s*\(\s*(?:ConnectScreen|net\.minecraft\.client\.gui\.screens\.ConnectScreen)\.class\s*\)""")
+            .containsMatchIn(source)
+
+    private fun migrateLegacyClientPacketListenerDisconnectMixinSource(source: String): String {
+        val legacyDescriptor = "onDisconnect(Lnet/minecraft/network/chat/Component;)V"
+        if (!source.contains(legacyDescriptor) ||
+            !Regex("""@Mixin\s*\(\s*(?:ClientPacketListener|net\.minecraft\.client\.multiplayer\.ClientPacketListener)\.class\s*\)""")
+                .containsMatchIn(source)) {
+            return source
+        }
+        val block = findAnnotatedMixinMethodBlock(source, legacyDescriptor, "@Inject") ?: return source
+        val header = block.text.substring(0, block.bodyStart - block.start)
+        val id = """[A-Za-z_$][\w$]*"""
+        val reasonName = Regex("""(?:net\.minecraft\.network\.chat\.)?Component\s+($id)""")
+            .find(header)
+            ?.groupValues
+            ?.get(1)
+            ?: return source
+        val oldCallbackName = Regex("""CallbackInfo\s+($id)""")
+            .find(header)
+            ?.groupValues
+            ?.get(1)
+            ?: return source
+
+        val existingNames = header + block.text.substring(block.bodyStart - block.start, block.bodyEnd - block.start)
+        val detailsName = uniqueJavaLocalName(existingNames, "details")
+        val callbackName = uniqueJavaLocalName(existingNames, "cir")
+        var returnedScreen = false
+        var body = block.text.substring(block.bodyStart - block.start, block.bodyEnd - block.start)
+        body = rewriteJavaCall(body, "setScreen") { receiver, args ->
+            if (args.size != 1) return@rewriteJavaCall null
+            val screenExpression = args.single().trim()
+            val isMinecraftReceiver = receiver == "Minecraft.getInstance()" ||
+                receiver == "net.minecraft.client.Minecraft.getInstance()"
+            if (!isMinecraftReceiver ||
+                !screenExpression.contains("new DisconnectedScreen(") ||
+                !Regex("""(?<![\w$])${Regex.escape(reasonName)}(?![\w$])""").containsMatchIn(screenExpression)) {
+                return@rewriteJavaCall null
+            }
+            returnedScreen = true
+            val migratedExpression = Regex("""(?<![\w$])${Regex.escape(reasonName)}(?![\w$])""")
+                .replace(screenExpression, detailsName)
+            "$callbackName.setReturnValue($migratedExpression)"
+        }
+        if (!returnedScreen) return source
+        body = Regex("""(?m)^[ \t]*${Regex.escape(oldCallbackName)}\.cancel\(\);\s*(?:\r?\n)?""")
+            .replace(body, "")
+
+        val rewrittenHeader = header
+            .replace(legacyDescriptor, "createDisconnectScreen(Lnet/minecraft/network/DisconnectionDetails;)Lnet/minecraft/client/gui/screens/Screen;")
+            .replace(
+                Regex("""(?m)^([ \t]*(?:private|protected|public)\s+(?:static\s+)?void\s+$id\s*)\([^)]*\)\s*\{""")
+            ) { match ->
+                "${match.groupValues[1]}(DisconnectionDetails $detailsName, CallbackInfoReturnable<Screen> $callbackName) {"
+            }
+        if (!rewrittenHeader.contains("CallbackInfoReturnable<Screen>")) return source
+
+        val rewrittenBlock = rewrittenHeader + body + block.text.substring(block.bodyEnd - block.start)
+        var result = source.substring(0, block.start) + rewrittenBlock + source.substring(block.endExclusive)
+        result = Regex("""@Mixin\s*\(\s*ClientPacketListener\.class\s*\)""")
+            .replace(result, "@Mixin(ClientCommonPacketListenerImpl.class)")
+        result = Regex("""@Mixin\s*\(\s*net\.minecraft\.client\.multiplayer\.ClientPacketListener\.class\s*\)""")
+            .replace(result, "@Mixin(net.minecraft.client.multiplayer.ClientCommonPacketListenerImpl.class)")
+        result = removeImport(result, "net.minecraft.client.multiplayer.ClientPacketListener")
+        result = addImportIfMissing(result, "net.minecraft.client.multiplayer.ClientCommonPacketListenerImpl")
+        result = addImportIfMissing(result, "net.minecraft.client.gui.screens.Screen")
+        result = addImportIfMissing(result, "net.minecraft.network.DisconnectionDetails")
+        result = addImportIfMissing(result, "org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable")
+        result = removeImportIfTokenAbsent(result, "net.minecraft.client.Minecraft", Regex("""(?<![\w$])Minecraft(?![\w$])"""))
+        result = removeImportIfTokenAbsent(
+            result,
+            "org.spongepowered.asm.mixin.injection.callback.CallbackInfo",
+            Regex("""(?<![\w$])CallbackInfo(?![\w$])""")
+        )
+        return result
     }
 
     private fun migrateLegacySingleplayerWorldFlowSource(source: String): String {
@@ -28363,6 +28771,8 @@ $methodBody
                 null
             }
         }
+
+        result = migrateLegacyWorldOpenFlowsMixinSource(result)
 
         result = rewriteJavaCall(result, "clearLevel") { receiver, args ->
             if (args.size != 1) return@rewriteJavaCall null
@@ -28410,6 +28820,126 @@ $methodBody
             result = addImportIfMissing(result, "java.io.IOException")
         }
         return result
+    }
+
+    private fun migrateLegacyWorldOpenFlowsMixinSource(source: String): String {
+        val targetsWorldOpenFlows = Regex(
+            """@Mixin\s*\(\s*(?:WorldOpenFlows|net\.minecraft\.client\.gui\.screens\.worldselection\.WorldOpenFlows)\.class\s*\)"""
+        ).containsMatchIn(source)
+        if (!targetsWorldOpenFlows) return source
+
+        var result = source
+        var changed = false
+        val legacyOpenWorld = "loadLevel(Lnet/minecraft/client/gui/screens/Screen;Ljava/lang/String;)V"
+        if (result.contains(legacyOpenWorld)) {
+            result = result.replace(legacyOpenWorld, "openWorld(Ljava/lang/String;Ljava/lang/Runnable;)V")
+            result = migrateLegacyWorldOpenFlowsOpenWorldInjectHandler(result)
+            changed = true
+        }
+
+        val legacyDoLoadLevel = "doLoadLevel(Lnet/minecraft/client/gui/screens/Screen;Ljava/lang/String;ZZZ)V"
+        if (result.contains(legacyDoLoadLevel)) {
+            result = result.replace(
+                legacyDoLoadLevel,
+                "openWorldLoadLevelStem(Lnet/minecraft/world/level/storage/LevelStorageSource\$LevelStorageAccess;Lcom/mojang/serialization/Dynamic;ZLjava/lang/Runnable;)V"
+            )
+            result = migrateLegacyWorldOpenFlowsConfirmExperimentalWarningMixin(result)
+            result = migrateLegacyWorldOpenFlowsLoadLevelStemInjectHandler(result)
+            result = addImportIfMissing(result, "com.mojang.serialization.Dynamic")
+            result = changedThenAddWorldOpenFlowsImports(result)
+            result = removeImportIfTokenAbsent(result, "com.llamalad7.mixinextras.sugar.Local", Regex("""(?<![\w$])@Local\b"""))
+            result = removeImportIfTokenAbsent(result, "org.spongepowered.asm.mixin.injection.ModifyVariable", Regex("""(?<![\w$])@ModifyVariable\b"""))
+            result = removeImportIfTokenAbsent(result, "net.minecraft.client.gui.screens.Screen", Regex("""(?<![\w$])Screen(?![\w$])"""))
+            changed = true
+        }
+
+        return if (changed) result else source
+    }
+
+    private fun changedThenAddWorldOpenFlowsImports(source: String): String {
+        var result = source
+        result = addImportIfMissing(result, "net.minecraft.server.WorldStem")
+        result = addImportIfMissing(result, "net.minecraft.server.packs.repository.PackRepository")
+        result = addImportIfMissing(result, "net.minecraft.world.level.storage.PrimaryLevelData")
+        return result
+    }
+
+    private fun migrateLegacyWorldOpenFlowsOpenWorldInjectHandler(source: String): String {
+        val id = """[A-Za-z_$][\w$]*"""
+        val signature = Regex(
+            """(?m)^([ \t]*(?:private|protected|public)\s+void\s+$id\s*)\(\s*Screen\s+($id)\s*,\s*String\s+($id)\s*,\s*CallbackInfo\s+($id)\s*\)\s*\{"""
+        )
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        for (match in signature.findAll(source)) {
+            val openBrace = source.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (closeBrace < 0) continue
+            val screenParam = match.groupValues[2]
+            val body = source.substring(openBrace + 1, closeBrace)
+            if (Regex("""(?<![\w$])${Regex.escape(screenParam)}(?![\w$])""").containsMatchIn(body)) continue
+            val levelName = match.groupValues[3]
+            val callback = match.groupValues[4]
+            edits.add(match.range to "${match.groupValues[1]}(String $levelName, Runnable onFail, CallbackInfo $callback) {")
+        }
+        if (edits.isEmpty()) return source
+        return applyStringEdits(source, edits)
+    }
+
+    private fun migrateLegacyWorldOpenFlowsConfirmExperimentalWarningMixin(source: String): String {
+        val legacyDescriptor = "openWorldLoadLevelStem(Lnet/minecraft/world/level/storage/LevelStorageSource\$LevelStorageAccess;Lcom/mojang/serialization/Dynamic;ZLjava/lang/Runnable;)V"
+        val annotationStart = source.indexOf("@ModifyVariable")
+        if (annotationStart < 0 || !source.substring(annotationStart).take(500).contains(legacyDescriptor)) return source
+        val openBrace = source.indexOf('{', annotationStart)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        if (closeBrace < 0) return source
+        val header = source.substring(annotationStart, openBrace)
+        val signature = Regex("""private\s+boolean\s+([A-Za-z_$][\w$]*)\s*\(\s*boolean\s+([A-Za-z_$][\w$]*)\s*\)""")
+            .find(header)
+            ?: return source
+        val methodName = signature.groupValues[1]
+        val originalParam = signature.groupValues[2]
+        val body = source.substring(openBrace + 1, closeBrace)
+        val condition = Regex(
+            """if\s*\((.*?)\)\s*\{\s*return\s+true\s*;\s*\}\s*else\s*\{\s*return\s+${Regex.escape(originalParam)}\s*;\s*\}""",
+            RegexOption.DOT_MATCHES_ALL
+        ).find(body)?.groupValues?.get(1)?.trim() ?: return source
+        val indent = source.substring(lineStartAt(source, annotationStart), annotationStart)
+            .takeWhile { it == ' ' || it == '\t' }
+        val replacement = """
+${indent}@Inject(method = "openWorldCheckWorldStemCompatibility(Lnet/minecraft/world/level/storage/LevelStorageSource${'$'}LevelStorageAccess;Lnet/minecraft/server/WorldStem;Lnet/minecraft/server/packs/repository/PackRepository;Ljava/lang/Runnable;)V", at = @At("HEAD"), remap = false)
+${indent}private void $methodName(LevelStorageSource.LevelStorageAccess levelStorage, WorldStem worldStem, PackRepository packRepository, Runnable onFail, CallbackInfo ci) {
+${indent}    if ($condition && worldStem.worldData() instanceof PrimaryLevelData modporterPrimaryLevelData) {
+${indent}        modporterPrimaryLevelData.withConfirmedWarning(true);
+${indent}    }
+${indent}}""".trimStart('\n')
+        return source.replaceRange(annotationStart, closeBrace + 1, replacement)
+    }
+
+    private fun migrateLegacyWorldOpenFlowsLoadLevelStemInjectHandler(source: String): String {
+        val id = """[A-Za-z_$][\w$]*"""
+        val signature = Regex(
+            """(?m)^([ \t]*(?:private|protected|public)\s+void\s+$id\s*)\(\s*Screen\s+$id\s*,\s*String\s+$id\s*,\s*boolean\s+($id)\s*,\s*boolean\s+$id\s*,\s*boolean\s+$id\s*,\s*CallbackInfo\s+($id)\s*,\s*@Local\s+LevelStorageSource\.LevelStorageAccess\s+($id)\s*\)"""
+        )
+        return signature.replace(source) { match ->
+            val safeMode = match.groupValues[2]
+            val callback = match.groupValues[3]
+            val levelStorage = match.groupValues[4]
+            "${match.groupValues[1]}(LevelStorageSource.LevelStorageAccess $levelStorage, Dynamic<?> levelData, boolean $safeMode, Runnable onFail, CallbackInfo $callback)"
+        }
+    }
+
+    private fun applyStringEdits(source: String, edits: List<Pair<IntRange, String>>): String {
+        if (edits.isEmpty()) return source
+        val builder = StringBuilder()
+        var cursor = 0
+        for ((range, replacement) in edits.sortedBy { it.first.first }) {
+            if (range.first < cursor) continue
+            builder.append(source, cursor, range.first)
+            builder.append(replacement)
+            cursor = range.last + 1
+        }
+        builder.append(source, cursor, source.length)
+        return builder.toString()
     }
 
     private fun wrapVoidLevelStorageDataTagReads(
@@ -37587,6 +38117,52 @@ $writeLines
             }
         }
         return -1
+    }
+
+    private fun migrateEventBusSubscriberStaticMethodsSource(source: String): String {
+        if (!source.contains("@EventBusSubscriber") || !source.contains("@SubscribeEvent")) return source
+        var result = source
+        var cursor = 0
+        val subscriberAnnotation = Regex("""@(?:Mod\.)?EventBusSubscriber\b(?:\([^)]*\))?""")
+        val classDeclaration = Regex("""\b(?:(?:public|protected|private|abstract|final|static)\s+)*(?:class|enum)\s+[A-Za-z_$][\w$]*\b""")
+
+        while (true) {
+            val annotation = subscriberAnnotation.find(result, cursor) ?: break
+            val declaration = classDeclaration.find(result, annotation.range.last + 1) ?: break
+            val openBrace = result.indexOf('{', declaration.range.last)
+            if (openBrace < 0) {
+                cursor = declaration.range.last + 1
+                continue
+            }
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace < 0) {
+                cursor = openBrace + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            val migratedBody = makeSubscribeEventMethodsStatic(body)
+            if (migratedBody != body) {
+                result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
+                cursor = openBrace + 1 + migratedBody.length
+            } else {
+                cursor = closeBrace + 1
+            }
+        }
+        return result
+    }
+
+    private fun makeSubscribeEventMethodsStatic(body: String): String {
+        val methodPattern = Regex(
+            """(?m)^([ \t]*@SubscribeEvent(?:\([^)]*\))?[ \t]*(?:\r?\n[ \t]*@[A-Za-z0-9_.]+(?:\([^)]*\))?[ \t]*)*\r?\n)([ \t]*)((?:(?:public|protected|private|final|synchronized|static)\s+)*)(void\s+[A-Za-z_$][\w$]*\s*\()"""
+        )
+        return methodPattern.replace(body) { match ->
+            val modifiers = match.groupValues[3]
+            if (Regex("""\bstatic\b""").containsMatchIn(modifiers)) {
+                match.value
+            } else {
+                "${match.groupValues[1]}${match.groupValues[2]}${modifiers}static ${match.groupValues[4]}"
+            }
+        }
     }
 
     /**

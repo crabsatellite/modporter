@@ -14,6 +14,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.util.concurrent.TimeUnit
+import java.util.jar.JarEntry
+import java.util.jar.JarOutputStream
+import java.util.zip.ZipFile
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.isDirectory
@@ -181,6 +184,280 @@ class RealModBenchmarkTest {
     }
 
     @Test
+    fun `runtime log audit allows external dependency optional mixin warning only with project absence evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        val logFile = tempDir.resolve("external-mixin.log")
+        logFile.writeText("""
+            [05:05:53] [main/DEBUG] [mixin/]: Registering mixin config: quark_integrations.mixins.json source=SecureJarResource(quark)
+            [05:05:54] [main/WARN] [mixin/]: Error loading class: noobanidus/mods/lootr/common/impl/LootrServiceRegistry (java.lang.ClassNotFoundException: noobanidus.mods.lootr.common.impl.LootrServiceRegistry)
+            [05:05:54] [main/WARN] [mixin/]: @Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found quark_integrations.mixins.json:lootr.LootrServiceRegistryMixin from mod (unknown)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected external dependency mixin warning to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("config 'quark_integrations.mixins.json' was loaded from dependency 'quark'") },
+            "Expected machine evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps external mixin warning when project owns mixin config`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        val resources = projectDir.resolve("src/main/resources")
+        resources.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        resources.resolve("quark_integrations.mixins.json").writeText("{}\n")
+        val logFile = tempDir.resolve("owned-mixin.log")
+        logFile.writeText("""
+            [05:05:53] [main/DEBUG] [mixin/]: Registering mixin config: quark_integrations.mixins.json source=SecureJarResource(quark)
+            [05:05:54] [main/WARN] [mixin/]: @Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found quark_integrations.mixins.json:lootr.LootrServiceRegistryMixin from mod (unknown)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("@Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found") },
+            "Project-owned mixin config must keep warning fatal"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows external mixin warning with classpath config evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        val moddevDir = projectDir.resolve("build/moddev")
+        val dependencyJar = tempDir.resolve("quark.jar")
+        moddevDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        createJar(
+            dependencyJar,
+            mapOf(
+                "quark_integrations.mixins.json" to "{}",
+                "META-INF/neoforge.mods.toml" to """
+                    [[mods]]
+                    modId = "quark"
+                """.trimIndent()
+            )
+        )
+        moddevDir.resolve("gameTestServerLegacyClasspath.txt").writeText("$dependencyJar\n")
+        val logFile = tempDir.resolve("external-mixin-classpath.log")
+        logFile.writeText("""
+            [05:05:54] [main/WARN] [mixin/]: Error loading class: noobanidus/mods/lootr/common/impl/LootrServiceRegistry (java.lang.ClassNotFoundException: noobanidus.mods.lootr.common.impl.LootrServiceRegistry)
+            [05:05:54] [main/WARN] [mixin/]: @Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found quark_integrations.mixins.json:lootr.LootrServiceRegistryMixin from mod (unknown)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected classpath-proven external mixin warning to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("config 'quark_integrations.mixins.json' was found in external runtime jar for dependency 'quark'") },
+            "Expected classpath evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps external mixin warning when target source references missing class`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        val moddevDir = projectDir.resolve("build/moddev")
+        val javaDir = projectDir.resolve("src/main/java/example")
+        val dependencyJar = tempDir.resolve("quark.jar")
+        moddevDir.createDirectories()
+        javaDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        javaDir.resolve("Integration.java").writeText("""
+            package example;
+            class Integration {
+                String target = "noobanidus.mods.lootr.common.impl.LootrServiceRegistry";
+            }
+        """.trimIndent() + "\n")
+        createJar(
+            dependencyJar,
+            mapOf(
+                "quark_integrations.mixins.json" to "{}",
+                "META-INF/neoforge.mods.toml" to """
+                    [[mods]]
+                    modId = "quark"
+                """.trimIndent()
+            )
+        )
+        moddevDir.resolve("gameTestServerLegacyClasspath.txt").writeText("$dependencyJar\n")
+        val logFile = tempDir.resolve("external-mixin-owned-target.log")
+        logFile.writeText("""
+            [05:05:54] [main/WARN] [mixin/]: @Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found quark_integrations.mixins.json:lootr.LootrServiceRegistryMixin from mod (unknown)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("@Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found") },
+            "Project-owned target references must keep warning fatal"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows external mixin warning with loaded mod dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "maven.modrinth:quark:4.1-480"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("external-mixin-loaded-mod.log")
+        logFile.writeText("""
+            [05:05:50] [main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/]:
+                 Mod List:
+                    Quark 4.1-480 (quark)
+                    The Aether 0.0NONE (aether)
+            [05:05:54] [main/WARN] [mixin/]: @Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found quark_integrations.mixins.json:lootr.LootrServiceRegistryMixin from mod (unknown)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected loaded-mod dependency evidence to allow external mixin warning: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("runtime Mod List and active build dependency evidence") },
+            "Expected loaded-mod dependency evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps loaded mod mixin warning without active dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                // implementation "maven.modrinth:quark:4.1-480"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("external-mixin-loaded-mod-no-dep.log")
+        logFile.writeText("""
+            [05:05:50] [main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/]:
+                 Mod List:
+                    Quark 4.1-480 (quark)
+                    The Aether 0.0NONE (aether)
+            [05:05:54] [main/WARN] [mixin/]: @Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found quark_integrations.mixins.json:lootr.LootrServiceRegistryMixin from mod (unknown)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("@Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found") },
+            "Loaded-mod name alone must not allowlist missing mixin target warnings"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows external dependency config correction with active dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "maven.modrinth:quark:4.1-480"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("external-config-correction.log")
+        logFile.writeText("""
+            [06:14:06] [modloading-worker-0/DEBUG] [ne.ne.fm.co.ConfigTracker/CONFIG]: Config file quark-common.toml for quark tracking
+            [06:14:06] [modloading-worker-0/WARN] [ne.ne.fm.co.ConfigTracker/CONFIG]: Configuration file ${projectDir.resolve("run/config/quark-common.toml")} is not correct. Correcting
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected external config correction to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("config 'quark-common.toml' is tracked for loaded external mod 'quark'") },
+            "Expected active dependency evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps target config correction warning`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "local:example:1.0"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("target-config-correction.log")
+        logFile.writeText("""
+            [06:14:06] [modloading-worker-0/DEBUG] [ne.ne.fm.co.ConfigTracker/CONFIG]: Config file example-common.toml for example tracking
+            [06:14:06] [modloading-worker-0/WARN] [ne.ne.fm.co.ConfigTracker/CONFIG]: Configuration file ${projectDir.resolve("run/config/example-common.toml")} is not correct. Correcting
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Configuration file") && it.contains("example-common.toml") },
+            "Target mod config corrections must remain fatal"
+        )
+    }
+
+    private fun createJar(jar: Path, entries: Map<String, String>) {
+        jar.parent?.createDirectories()
+        JarOutputStream(Files.newOutputStream(jar)).use { output ->
+            for ((name, content) in entries) {
+                output.putNextEntry(JarEntry(name))
+                output.write(content.toByteArray())
+                output.closeEntry()
+            }
+        }
+    }
+
+    @Test
+    fun `runtime log audit allows external dependency mob category warning only without source reference`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        val logFile = tempDir.resolve("external-mob-category.log")
+        logFile.writeText("""
+            [05:06:10] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected quark:stoneling that was registered with CREATURE mob category but was added under MONSTER mob category for aether:skyroot_forest biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected external dependency mob warning to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("entity 'quark:stoneling' is not the target mod namespace") },
+            "Expected machine evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps external mob category warning when target source references entity`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        val javaDir = projectDir.resolve("src/main/java/example")
+        javaDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        javaDir.resolve("Integration.java").writeText("""
+            package example;
+
+            final class Integration {
+                static final String ENTITY = "quark:stoneling";
+            }
+        """.trimIndent())
+        val logFile = tempDir.resolve("referenced-mob-category.log")
+        logFile.writeText("""
+            [05:06:10] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected quark:stoneling that was registered with CREATURE mob category but was added under MONSTER mob category for aether:skyroot_forest biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Detected quark:stoneling") },
+            "Target source references to the entity must keep warning fatal"
+        )
+    }
+
+    @Test
     fun `runtime log audit allowlists Twilight duplicate glass sword only with source evidence`(@TempDir tempDir: Path) {
         val projectDir = tempDir.resolve("work/twilight")
         val sourceDir = tempDir.resolve("sources/twilight")
@@ -225,6 +502,45 @@ class RealModBenchmarkTest {
         assertTrue(
             audit.findings.any { it.contains("duplicate items were found") },
             "Expected subtype registration to invalidate the upstream-issue allowlist"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allowlists source inherited missing sound definition`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeMissingSoundEvidence(projectDir, includeMissingEventInSoundsJson = false)
+        writeMissingSoundEvidence(sourceDir, includeMissingEventInSoundsJson = false)
+        val logFile = tempDir.resolve("missing-sound-inherited.log")
+        logFile.writeText("""
+            [06:14:12] [Render thread/WARN] [minecraft/SoundEngine]: Missing sound for event: example:entity.sentry.ambient
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected source-inherited missing sound to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("input and converted sources declare sound event 'example:entity.sentry.ambient'") },
+            "Expected source-inheritance evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps missing sound warning when input resource defined it`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeMissingSoundEvidence(projectDir, includeMissingEventInSoundsJson = false)
+        writeMissingSoundEvidence(sourceDir, includeMissingEventInSoundsJson = true)
+        val logFile = tempDir.resolve("missing-sound-regression.log")
+        logFile.writeText("""
+            [06:14:12] [Render thread/WARN] [minecraft/SoundEngine]: Missing sound for event: example:entity.sentry.ambient
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Missing sound for event: example:entity.sentry.ambient") },
+            "Porter-lost sound definitions must remain fatal"
         )
     }
 
@@ -1390,6 +1706,54 @@ class RealModBenchmarkTest {
         jeiDir.resolve("JEICompat.java").writeText(jeiBody)
     }
 
+    private fun writeMissingSoundEvidence(projectDir: Path, includeMissingEventInSoundsJson: Boolean) {
+        val javaDir = projectDir.resolve("src/main/java/example")
+        val resourceDir = projectDir.resolve("src/generated/resources/assets/example")
+        javaDir.createDirectories()
+        resourceDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        javaDir.resolve("ExampleSoundEvents.java").writeText("""
+            package example;
+
+            import net.minecraft.sounds.SoundEvent;
+
+            public final class ExampleSoundEvents {
+                public static final SoundEvent SENTRY_AMBIENT = register("entity.sentry.ambient");
+
+                private static SoundEvent register(String id) {
+                    return null;
+                }
+            }
+        """.trimIndent() + "\n")
+        val soundsJson = if (includeMissingEventInSoundsJson) {
+            """
+            {
+              "entity.sentry.ambient": {
+                "sounds": [
+                  "example:entity/sentry/ambient"
+                ]
+              },
+              "entity.sentry.hurt": {
+                "sounds": [
+                  "example:entity/sentry/hurt"
+                ]
+              }
+            }
+            """.trimIndent()
+        } else {
+            """
+            {
+              "entity.sentry.hurt": {
+                "sounds": [
+                  "example:entity/sentry/hurt"
+                ]
+              }
+            }
+            """.trimIndent()
+        }
+        resourceDir.resolve("sounds.json").writeText(soundsJson + "\n")
+    }
+
     private fun terminateProcessTree(process: Process, forcibly: Boolean) {
         val descendants = process.toHandle().descendants().iterator().asSequence().toList().asReversed()
         for (handle in descendants) {
@@ -2083,6 +2447,7 @@ class RealModBenchmarkTest {
 
         val findings = mutableListOf<String>()
         val allowedIssues = mutableListOf<String>()
+        val evidenceCache = RuntimeLogEvidenceCache(projectDir, inputSourceDir)
         var clientShutdownStarted = false
         val lines = logFile.readText().lines()
         lines.forEachIndexed { index, line ->
@@ -2094,7 +2459,7 @@ class RealModBenchmarkTest {
             val fatal = runtimeFatalPatterns.any { it.containsMatchIn(line) }
             val warning = failOnWarnings && runtimeWarningPatterns.any { it.containsMatchIn(line) }
             if (fatal || warning) {
-                val allowedIssue = allowedKnownUpstreamRuntimeIssue(lines, index, projectDir, inputSourceDir)
+                val allowedIssue = allowedKnownUpstreamRuntimeIssue(lines, index, evidenceCache)
                 if (allowedIssue != null) {
                     allowedIssues.add("line ${index + 1}: $allowedIssue")
                     return@forEachIndexed
@@ -2114,13 +2479,390 @@ class RealModBenchmarkTest {
     private fun allowedKnownUpstreamRuntimeIssue(
         lines: List<String>,
         index: Int,
-        projectDir: Path?,
-        inputSourceDir: Path?
+        evidenceCache: RuntimeLogEvidenceCache
     ): String? {
-        if (!isTwilightGlassSwordDuplicateWarning(lines, index)) return null
-        val evidence = twilightGlassSwordDuplicateEvidence(projectDir ?: return null, inputSourceDir) ?: return null
-        return "Twilight Forest source-inherited creative-tab duplicate glass_sword warning ($evidence)"
+        externalDependencyMissingMixinEvidence(lines, index, evidenceCache)?.let {
+            return "external dependency optional mixin target warning ($it)"
+        }
+        externalDependencyMobCategoryEvidence(lines[index], evidenceCache)?.let {
+            return "external dependency mob-category warning ($it)"
+        }
+        externalDependencyConfigCorrectionEvidence(lines, index, evidenceCache)?.let {
+            return "external dependency config correction warning ($it)"
+        }
+        sourceInheritedMissingSoundEvidence(lines[index], evidenceCache)?.let {
+            return "source-inherited missing sound definition warning ($it)"
+        }
+        if (isTwilightGlassSwordDuplicateWarning(lines, index)) {
+            val evidence = twilightGlassSwordDuplicateEvidence(
+                evidenceCache.projectDir ?: return null,
+                evidenceCache.inputSourceDir
+            ) ?: return null
+            return "Twilight Forest source-inherited creative-tab duplicate glass_sword warning ($evidence)"
+        }
+        return null
     }
+
+    private fun externalDependencyMissingMixinEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val project = evidenceCache.projectDir ?: return null
+        val config = missingMixinConfigName(lines, index) ?: return null
+        if (evidenceCache.containsFileNamed(config)) {
+            return null
+        }
+
+        val targetClass = missingMixinTargetClassName(lines, index)
+        if (targetClass != null && evidenceCache.containsAnyText(targetClass, targetClass.replace('.', '/'))) {
+            return null
+        }
+
+        val sourceMod = mixinConfigSourceMod(lines, index, config)?.let { sourceMod ->
+            val targetMod = evidenceCache.targetMod ?: detectBenchmarkModId(project)
+            if (targetMod != null && sourceMod == targetMod) return null
+            "config '$config' was loaded from dependency '$sourceMod' and is absent from converted/input project resources"
+        } ?: evidenceCache.externalClasspathConfigSource(config)
+            ?: mixinConfigLoadedDependencyEvidence(lines, config, evidenceCache)
+            ?: return null
+
+        return sourceMod
+    }
+
+    private fun mixinConfigLoadedDependencyEvidence(
+        lines: List<String>,
+        config: String,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val ownerMod = loadedModIdForMixinConfig(lines, config) ?: return null
+        val targetMod = evidenceCache.targetMod
+        if (targetMod != null && ownerMod == targetMod) return null
+        if (!evidenceCache.buildFileContainsDependencyId(ownerMod)) return null
+        return "config '$config' is attributed to loaded external mod '$ownerMod' by runtime Mod List and active build dependency evidence"
+    }
+
+    private fun loadedModIdForMixinConfig(lines: List<String>, config: String): String? {
+        val loadedModIds = loadedRuntimeModIds(lines)
+        val stem = config
+            .removeSuffix(".json")
+            .removeSuffix(".mixins")
+            .removeSuffix(".mixin")
+        return loadedModIds.firstOrNull { modId ->
+            stem == modId ||
+                stem.startsWith("$modId.") ||
+                stem.startsWith("${modId}_") ||
+                stem.startsWith("${modId}-")
+        }
+    }
+
+    private fun loadedRuntimeModIds(lines: List<String>): Set<String> {
+        val pattern = Regex("""\(([a-z0-9_.-]+)\)\s*$""")
+        return lines.mapNotNull { line -> pattern.find(line)?.groupValues?.get(1) }
+            .filterNot { it == "unknown" }
+            .toSet()
+    }
+
+    private fun missingMixinTargetClassName(lines: List<String>, index: Int): String? {
+        val windowStart = (index - 1).coerceAtLeast(0)
+        val windowEnd = (index + 2).coerceAtMost(lines.lastIndex)
+        val pattern = Regex("""@Mixin target ([^ ]+) was not found [^:\s]+\.mixins\.json:""")
+        for (lineIndex in windowStart..windowEnd) {
+            pattern.find(lines[lineIndex])?.let { return it.groupValues[1] }
+        }
+        return null
+    }
+
+    private fun missingMixinConfigName(lines: List<String>, index: Int): String? {
+        val windowStart = (index - 1).coerceAtLeast(0)
+        val windowEnd = (index + 2).coerceAtMost(lines.lastIndex)
+        val pattern = Regex("""@Mixin target [^ ]+ was not found ([^:\s]+\.mixins\.json):""")
+        for (lineIndex in windowStart..windowEnd) {
+            pattern.find(lines[lineIndex])?.let { return it.groupValues[1] }
+        }
+        return null
+    }
+
+    private fun mixinConfigSourceMod(lines: List<String>, index: Int, config: String): String? {
+        val pattern = Regex("""Registering mixin config: ${Regex.escape(config)} source=SecureJarResource\(([^)]+)\)""")
+        return lines.take(index + 1)
+            .takeLast(300)
+            .asReversed()
+            .firstNotNullOfOrNull { line -> pattern.find(line)?.groupValues?.get(1) }
+    }
+
+    private fun externalDependencyMobCategoryEvidence(
+        line: String,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        evidenceCache.projectDir ?: return null
+        val match = Regex("""Detected ([a-z0-9_.-]+:[a-z0-9_./-]+) that was registered with [A-Z_]+ mob category but was added under [A-Z_]+ mob category""")
+            .find(line)
+            ?: return null
+        val entityId = match.groupValues[1]
+        val targetMod = evidenceCache.targetMod
+        if (targetMod != null && entityId.substringBefore(':') == targetMod) return null
+        if (evidenceCache.containsText(entityId)) return null
+        return "entity '$entityId' is not the target mod namespace and is absent from converted/input project sources"
+    }
+
+    private fun externalDependencyConfigCorrectionEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        evidenceCache.projectDir ?: return null
+        val config = correctedConfigFileName(lines[index]) ?: return null
+        val ownerMod = configTrackerOwnerMod(lines, index, config)
+            ?: loadedModIdForConfig(lines, config)
+            ?: return null
+        val targetMod = evidenceCache.targetMod
+        if (targetMod != null && ownerMod == targetMod) return null
+        if (!evidenceCache.buildFileContainsDependencyId(ownerMod)) return null
+        return "config '$config' is tracked for loaded external mod '$ownerMod' with active build dependency evidence"
+    }
+
+    private fun correctedConfigFileName(line: String): String? =
+        Regex("""Configuration file .*[\\/ ]([a-z0-9_.-]+-(?:client|common|server)\.toml) is not correct\. Correcting""")
+            .find(line)
+            ?.groupValues
+            ?.get(1)
+
+    private fun configTrackerOwnerMod(lines: List<String>, index: Int, config: String): String? {
+        val pattern = Regex("""Config file ${Regex.escape(config)} for ([a-z0-9_.-]+) tracking""")
+        return lines.take(index + 1)
+            .takeLast(80)
+            .asReversed()
+            .firstNotNullOfOrNull { line -> pattern.find(line)?.groupValues?.get(1) }
+    }
+
+    private fun loadedModIdForConfig(lines: List<String>, config: String): String? {
+        val stem = config
+            .removeSuffix(".toml")
+            .removeSuffix("-client")
+            .removeSuffix("-common")
+            .removeSuffix("-server")
+        return loadedRuntimeModIds(lines).firstOrNull { modId -> stem == modId }
+    }
+
+    private fun sourceInheritedMissingSoundEvidence(
+        line: String,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val match = Regex("""Missing sound for event: ([a-z0-9_.-]+):([a-z0-9_./-]+)""")
+            .find(line)
+            ?: return null
+        val namespace = match.groupValues[1]
+        val soundPath = match.groupValues[2]
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (namespace != targetMod) return null
+        if (!sourceDeclaresSoundEvent(project, namespace, soundPath)) return null
+        if (!sourceDeclaresSoundEvent(sourceDir, namespace, soundPath)) return null
+        if (!hasSoundDefinitionFile(project, namespace) || !hasSoundDefinitionFile(sourceDir, namespace)) return null
+        if (resourceDefinesSoundEvent(project, namespace, soundPath)) return null
+        if (resourceDefinesSoundEvent(sourceDir, namespace, soundPath)) return null
+        return "input and converted sources declare sound event '$namespace:$soundPath' but their sounds.json resources omit it"
+    }
+
+    private inner class RuntimeLogEvidenceCache(
+        val projectDir: Path?,
+        val inputSourceDir: Path?
+    ) {
+        val targetMod: String? by lazy { projectDir?.let { detectBenchmarkModId(it) } }
+        private val fileNameMemo = mutableMapOf<String, Boolean>()
+        private val textMemo = mutableMapOf<String, Boolean>()
+        private val externalConfigMemo = mutableMapOf<String, String?>()
+        private val dependencyIdMemo = mutableMapOf<String, Boolean>()
+
+        fun containsFileNamed(fileName: String): Boolean =
+            fileNameMemo.getOrPut(fileName) {
+                projectDir?.let { projectContainsFileNamed(it, fileName) } == true ||
+                    inputSourceDir?.let { projectContainsFileNamed(it, fileName) } == true
+            }
+
+        fun containsText(text: String): Boolean =
+            textMemo.getOrPut(text) {
+                projectDir?.let { projectContainsText(it, text) } == true ||
+                    inputSourceDir?.let { projectContainsText(it, text) } == true
+            }
+
+        fun containsAnyText(vararg texts: String): Boolean =
+            texts.any { containsText(it) }
+
+        fun externalClasspathConfigSource(config: String): String? =
+            externalConfigMemo.getOrPut(config) {
+                val project = projectDir ?: return@getOrPut null
+                val source = runtimeClasspathConfigSource(project, config, targetMod)
+                    ?: return@getOrPut null
+                "config '$config' was found in external runtime jar for dependency '$source' and is absent from converted/input project resources"
+            }
+
+        fun buildFileContainsDependencyId(id: String): Boolean =
+            dependencyIdMemo.getOrPut(id) {
+                projectDir?.let { activeBuildFileContainsDependencyId(it, id) } == true
+            }
+    }
+
+    private fun activeBuildFileContainsDependencyId(projectDir: Path, id: String): Boolean {
+        val buildFiles = listOf(
+            projectDir.resolve("build.gradle"),
+            projectDir.resolve("build.gradle.kts")
+        ).filter { it.exists() }
+        val pattern = Regex("""(^|[:'"(,\s])${Regex.escape(id)}($|[:'"),\s])""")
+        for (buildFile in buildFiles) {
+            val activeText = buildFile.readText()
+                .lines()
+                .filterNot { it.trimStart().startsWith("//") }
+                .joinToString("\n")
+            if (pattern.containsMatchIn(activeText)) return true
+        }
+        return false
+    }
+
+    private fun runtimeClasspathConfigSource(projectDir: Path, config: String, targetMod: String?): String? {
+        for (jar in runtimeClasspathJars(projectDir)) {
+            val modId = modIdFromJar(jar)
+            if (targetMod != null && modId == targetMod) continue
+            if (jarContainsEntryNamed(jar, config)) return modId ?: jar.fileName.toString()
+        }
+        return null
+    }
+
+    private fun runtimeClasspathJars(projectDir: Path): List<Path> {
+        val moddev = projectDir.resolve("build/moddev")
+        if (!moddev.exists()) return emptyList()
+
+        val classpathFiles = mutableListOf<Path>()
+        Files.walk(moddev).use { files ->
+            files.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith("Classpath.txt") }
+                .forEach { classpathFiles.add(it) }
+        }
+
+        val jars = linkedSetOf<Path>()
+        for (classpathFile in classpathFiles) {
+            for (line in classpathFile.readText().lines()) {
+                for (entry in line.split(File.pathSeparatorChar)) {
+                    val raw = entry.trim().trim('"')
+                    if (!raw.endsWith(".jar", ignoreCase = true)) continue
+                    val jar = runCatching { Path.of(raw).toAbsolutePath().normalize() }.getOrNull() ?: continue
+                    if (jar.exists()) jars.add(jar)
+                }
+            }
+        }
+        return jars.toList()
+    }
+
+    private fun jarContainsEntryNamed(jar: Path, fileName: String): Boolean =
+        runCatching {
+            ZipFile(jar.toFile()).use { zip ->
+                val entries = zip.entries()
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    if (!entry.isDirectory && entry.name.substringAfterLast('/') == fileName) return true
+                }
+            }
+            false
+        }.getOrDefault(false)
+
+    private fun modIdFromJar(jar: Path): String? =
+        readJarEntryText(jar, "META-INF/neoforge.mods.toml")?.let { parseTomlModId(it) }
+            ?: readJarEntryText(jar, "META-INF/mods.toml")?.let { parseTomlModId(it) }
+            ?: readJarEntryText(jar, "fabric.mod.json")?.let { parseJsonModId(it) }
+
+    private fun readJarEntryText(jar: Path, entryName: String): String? =
+        runCatching {
+            ZipFile(jar.toFile()).use { zip ->
+                val entry = zip.getEntry(entryName) ?: return null
+                zip.getInputStream(entry).bufferedReader().use { it.readText() }
+            }
+        }.getOrNull()
+
+    private fun parseTomlModId(text: String): String? =
+        Regex("""(?m)^\s*modId\s*=\s*["']([^"']+)["']""")
+            .find(text)
+            ?.groupValues
+            ?.get(1)
+
+    private fun parseJsonModId(text: String): String? =
+        Regex(""""id"\s*:\s*"([^"]+)"""")
+            .find(text)
+            ?.groupValues
+            ?.get(1)
+
+    private fun projectContainsFileNamed(projectDir: Path, fileName: String): Boolean {
+        if (!projectDir.exists()) return false
+        val roots = listOf(
+            projectDir.resolve("src/main/resources"),
+            projectDir.resolve("src/generated/resources")
+        ).filter { it.exists() }
+        for (root in roots) {
+            Files.walk(root).use { files ->
+                if (files.anyMatch { Files.isRegularFile(it) && it.fileName.toString() == fileName }) return true
+            }
+        }
+        return false
+    }
+
+    private fun projectContainsText(projectDir: Path, text: String): Boolean {
+        if (!projectDir.exists()) return false
+        val roots = listOf(
+            projectDir.resolve("src/main/java"),
+            projectDir.resolve("src/main/kotlin"),
+            projectDir.resolve("src/main/resources"),
+            projectDir.resolve("src/generated/resources")
+        ).filter { it.exists() }
+        for (root in roots) {
+            Files.walk(root).use { files ->
+                if (files.anyMatch { Files.isRegularFile(it) && runCatching { it.readText().contains(text) }.getOrDefault(false) }) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private fun sourceDeclaresSoundEvent(projectDir: Path, namespace: String, soundPath: String): Boolean {
+        if (!projectDir.exists()) return false
+        val roots = listOf(
+            projectDir.resolve("src/main/java"),
+            projectDir.resolve("src/main/kotlin"),
+            projectDir.resolve("src/generated/java")
+        ).filter { it.exists() }
+        val soundLiteral = Regex("""["'](?:${Regex.escape(namespace)}:)?${Regex.escape(soundPath)}["']""")
+        for (root in roots) {
+            Files.walk(root).use { files ->
+                if (files.anyMatch { file ->
+                        Files.isRegularFile(file) &&
+                            (file.fileName.toString().endsWith(".java") || file.fileName.toString().endsWith(".kt")) &&
+                            runCatching {
+                                val source = activeCode(file.readText())
+                                source.contains("SoundEvent") && soundLiteral.containsMatchIn(source)
+                            }.getOrDefault(false)
+                    }) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private fun hasSoundDefinitionFile(projectDir: Path, namespace: String): Boolean =
+        soundDefinitionFiles(projectDir, namespace).any { it.exists() }
+
+    private fun resourceDefinesSoundEvent(projectDir: Path, namespace: String, soundPath: String): Boolean {
+        val keyPattern = Regex("""(?m)^\s*"${Regex.escape(soundPath)}"\s*:""")
+        return soundDefinitionFiles(projectDir, namespace)
+            .filter { it.exists() }
+            .any { file -> runCatching { keyPattern.containsMatchIn(file.readText()) }.getOrDefault(false) }
+    }
+
+    private fun soundDefinitionFiles(projectDir: Path, namespace: String): List<Path> =
+        listOf(
+            projectDir.resolve("src/main/resources/assets/$namespace/sounds.json"),
+            projectDir.resolve("src/generated/resources/assets/$namespace/sounds.json")
+        )
 
     private fun isTwilightGlassSwordDuplicateWarning(lines: List<String>, index: Int): Boolean {
         val line = lines[index]

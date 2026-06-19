@@ -358,6 +358,42 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `event bus subscriber methods become static for automatic registration`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ClientEvents.java").writeText("""
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.fml.event.lifecycle.FMLLoadCompleteEvent;
+
+            @EventBusSubscriber(modid = ExampleMod.MODID, value = Dist.CLIENT)
+            public class ClientEvents {
+                private static boolean refreshPacks = false;
+
+                @SubscribeEvent
+                public void loadComplete(FMLLoadCompleteEvent event) {
+                    if (refreshPacks) {
+                        refreshPacks = false;
+                    }
+                }
+
+                public void helper() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ClientEvents.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-eventbussubscriber-static-methods" })
+        assertTrue(migrated.contains("@SubscribeEvent\n    public static void loadComplete(FMLLoadCompleteEvent event)"), migrated)
+        assertTrue(migrated.contains("public void helper()"), migrated)
+    }
+
+    @Test
     fun `migrates static bus mod subscribers to constructor listener registration`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val dataDir = srcDir.resolve("data")
@@ -8918,6 +8954,66 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates AbstractClientPlayer cape texture injections to PlayerSkin wrap`() {
+        val projectDir = createFile("AbstractClientPlayerMixin.java", """
+            package com.example.mixin;
+
+            import com.example.EquipmentUtil;
+            import com.example.Hooks;
+            import com.example.SlotResult;
+            import net.minecraft.client.player.AbstractClientPlayer;
+            import net.minecraft.resources.ResourceLocation;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.injection.At;
+            import org.spongepowered.asm.mixin.injection.Inject;
+            import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+            @Mixin(AbstractClientPlayer.class)
+            public class AbstractClientPlayerMixin {
+                @Inject(at = @At("HEAD"), method = "isCapeLoaded()Z", cancellable = true)
+                private void isCapeLoaded(CallbackInfoReturnable<Boolean> cir) {
+                    AbstractClientPlayer player = (AbstractClientPlayer) (Object) this;
+                    if (EquipmentUtil.hasCape(player) && Hooks.isCapeVisible(player)) {
+                        cir.setReturnValue(true);
+                    }
+                }
+
+                @Inject(at = @At("HEAD"), method = "getCloakTextureLocation()Lnet/minecraft/resources/ResourceLocation;", cancellable = true)
+                private void getCloakTextureLocation(CallbackInfoReturnable<ResourceLocation> cir) {
+                    AbstractClientPlayer player = (AbstractClientPlayer) (Object) this;
+                    SlotResult result = EquipmentUtil.getCape(player);
+                    if (result != null && Hooks.isCapeVisible(player)) {
+                        ResourceLocation texture = Hooks.getCapeTexture(result.stack());
+                        if (texture != null) {
+                            cir.setReturnValue(texture);
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val transformed = tempDir.resolve("src/main/java/com/example/AbstractClientPlayerMixin.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-abstract-client-player-skin-wrap" }, "changes=${result.changes}")
+        assertTrue(transformed.contains("import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;"), transformed)
+        assertTrue(transformed.contains("import com.llamalad7.mixinextras.injector.wrapoperation.Operation;"), transformed)
+        assertTrue(transformed.contains("import net.minecraft.client.resources.PlayerSkin;"), transformed)
+        assertTrue(transformed.contains("@WrapMethod(method = \"getSkin()Lnet/minecraft/client/resources/PlayerSkin;\")"), transformed)
+        assertTrue(transformed.contains("private PlayerSkin getSkin(Operation<PlayerSkin> original)"), transformed)
+        assertTrue(transformed.contains("PlayerSkin skin = original.call();"), transformed)
+        assertTrue(transformed.contains("SlotResult result = EquipmentUtil.getCape(player);"), transformed)
+        assertTrue(transformed.contains("if (result != null && Hooks.isCapeVisible(player))"), transformed)
+        assertTrue(transformed.contains("return new PlayerSkin(skin.texture(), skin.textureUrl(), texture, skin.elytraTexture(), skin.model(), skin.secure());"), transformed)
+        assertTrue(transformed.contains("return skin;"), transformed)
+        assertFalse(transformed.contains("isCapeLoaded()Z"), transformed)
+        assertFalse(transformed.contains("getCloakTextureLocation()"), transformed)
+        assertFalse(transformed.contains("CallbackInfoReturnable"), transformed)
+        assertFalse(transformed.contains("@Inject"), transformed)
+        assertFalse(transformed.contains("org.spongepowered.asm.mixin.injection.At"), transformed)
+    }
+
+    @Test
     fun `migrates level storage load summaries lambda mixin descriptor`() {
         val projectDir = createFile("LevelStorageSourceMixin.java", """
             package com.example.mixin;
@@ -9729,6 +9825,90 @@ class StructuralRefactorExtraTest {
         assertTrue(transformed.contains("ConnectScreen.startConnecting(this, minecraft, ServerAddress.parseString(remote.ip), remote, false, null)"))
         assertTrue(transformed.contains("ConnectScreen.startConnecting(this, minecraft, ServerAddress.parseString(local.ip), local, false, null)"))
         assertFalse(transformed.contains("false, null, null"))
+    }
+
+    @Test
+    fun `legacy ConnectScreen mixin startConnecting descriptor receives transfer state parameter`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ConnectScreenMixin.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.gui.screens.ConnectScreen;
+            import net.minecraft.client.gui.screens.Screen;
+            import net.minecraft.client.multiplayer.ServerData;
+            import net.minecraft.client.multiplayer.resolver.ServerAddress;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.injection.At;
+            import org.spongepowered.asm.mixin.injection.Inject;
+            import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+            @Mixin(ConnectScreen.class)
+            public class ConnectScreenMixin {
+                @Inject(at = @At(value = "HEAD"), method = "startConnecting(Lnet/minecraft/client/gui/screens/Screen;Lnet/minecraft/client/Minecraft;Lnet/minecraft/client/multiplayer/resolver/ServerAddress;Lnet/minecraft/client/multiplayer/ServerData;Z)V")
+                private static void startConnecting(Screen screen, Minecraft minecraft, ServerAddress serverAddress, ServerData serverData, boolean isQuickPlay, CallbackInfo ci) {
+                    PreviewState.beforeServerConnect(screen);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("ConnectScreenMixin.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("import net.minecraft.client.multiplayer.TransferState;"), transformed)
+        assertTrue(transformed.contains("startConnecting(Lnet/minecraft/client/gui/screens/Screen;Lnet/minecraft/client/Minecraft;Lnet/minecraft/client/multiplayer/resolver/ServerAddress;Lnet/minecraft/client/multiplayer/ServerData;ZLnet/minecraft/client/multiplayer/TransferState;)V"), transformed)
+        assertTrue(transformed.contains("boolean isQuickPlay, TransferState transferState, CallbackInfo ci"), transformed)
+        assertFalse(transformed.contains("ServerData;Z)V"), transformed)
+    }
+
+    @Test
+    fun `legacy client packet disconnect mixin returns replacement disconnect screen`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ClientPacketListenerMixin.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.gui.screens.DisconnectedScreen;
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.minecraft.client.multiplayer.ClientPacketListener;
+            import net.minecraft.network.chat.Component;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.injection.At;
+            import org.spongepowered.asm.mixin.injection.Inject;
+            import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+            @Mixin(ClientPacketListener.class)
+            public class ClientPacketListenerMixin {
+                @Inject(at = @At(value = "INVOKE", target = "Lnet/minecraft/client/gui/screens/multiplayer/JoinMultiplayerScreen;<init>(Lnet/minecraft/client/gui/screens/Screen;)V"), method = "onDisconnect(Lnet/minecraft/network/chat/Component;)V", cancellable = true)
+                public void onDisconnect(Component reason, CallbackInfo ci) {
+                    if (ExampleClientConfig.useTitleDisconnect()) {
+                        Minecraft.getInstance().setScreen(new DisconnectedScreen(new TitleScreen(), Component.translatable("disconnect.lost"), reason));
+                        ci.cancel();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("ClientPacketListenerMixin.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("import net.minecraft.client.multiplayer.ClientCommonPacketListenerImpl;"), transformed)
+        assertTrue(transformed.contains("import net.minecraft.client.gui.screens.Screen;"), transformed)
+        assertTrue(transformed.contains("import net.minecraft.network.DisconnectionDetails;"), transformed)
+        assertTrue(transformed.contains("import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;"), transformed)
+        assertTrue(transformed.contains("@Mixin(ClientCommonPacketListenerImpl.class)"), transformed)
+        assertTrue(transformed.contains("createDisconnectScreen(Lnet/minecraft/network/DisconnectionDetails;)Lnet/minecraft/client/gui/screens/Screen;"), transformed)
+        assertTrue(transformed.contains("public void onDisconnect(DisconnectionDetails details, CallbackInfoReturnable<Screen> cir)"), transformed)
+        assertTrue(transformed.contains("cir.setReturnValue(new DisconnectedScreen(new TitleScreen(), Component.translatable(\"disconnect.lost\"), details));"), transformed)
+        assertFalse(transformed.contains("import net.minecraft.client.Minecraft;"), transformed)
+        assertFalse(transformed.contains("import net.minecraft.client.multiplayer.ClientPacketListener;"), transformed)
+        assertFalse(transformed.contains("import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;"), transformed)
+        assertFalse(transformed.contains("onDisconnect(Lnet/minecraft/network/chat/Component;)V"), transformed)
+        assertFalse(transformed.contains("ci.cancel();"), transformed)
     }
 
     @Test
@@ -17253,6 +17433,7 @@ class StructuralRefactorExtraTest {
     fun `migrates legacy mob category create calls to enum extension metadata`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val metaInf = tempDir.resolve("src/main/resources/META-INF")
+        val worldgenDir = tempDir.resolve("src/generated/resources/data/examplemod/worldgen")
         srcDir.createDirectories()
         metaInf.createDirectories()
         metaInf.resolve("neoforge.mods.toml").writeText("""
@@ -17280,12 +17461,51 @@ class StructuralRefactorExtraTest {
                 public static final MobCategory AERWHALE = MobCategory.create("AERWHALE", "aerwhale", 1, true, false, 128);
             }
         """.trimIndent())
+        worldgenDir.resolve("biome").createDirectories()
+        worldgenDir.resolve("biome/sky.json").writeText("""
+            {
+              "spawners": {
+                "sky_monster": [
+                  {
+                    "type": "examplemod:zephyr",
+                    "weight": 20,
+                    "minCount": 1,
+                    "maxCount": 1
+                  }
+                ],
+                "aerwhale": [
+                  {
+                    "type": "examplemod:aerwhale",
+                    "weight": 10,
+                    "minCount": 1,
+                    "maxCount": 1
+                  }
+                ]
+              },
+              "carvers": {
+                "sky_monster": "not a mob category key"
+              }
+            }
+        """.trimIndent())
+        worldgenDir.resolve("structure").createDirectories()
+        worldgenDir.resolve("structure/dungeon.json").writeText("""
+            {
+              "spawn_overrides": {
+                "sky_monster": {
+                  "bounding_box": "full",
+                  "spawns": []
+                }
+              }
+            }
+        """.trimIndent())
 
         val result = StructuralRefactorPass().apply(tempDir)
         val categories = srcDir.resolve("ExampleMobCategories.java").readText()
         val helper = srcDir.resolve("NeoForgeEnumExtensions.java").readText()
         val enumExtensions = metaInf.resolve("enumextensions.json").readText()
         val toml = metaInf.resolve("neoforge.mods.toml").readText()
+        val biome = worldgenDir.resolve("biome/sky.json").readText()
+        val structure = worldgenDir.resolve("structure/dungeon.json").readText()
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
         assertTrue(categories.contains("MobCategory.valueOf(\"EXAMPLEMOD_SKY_MONSTER\")"))
@@ -17305,6 +17525,12 @@ class StructuralRefactorExtraTest {
         assertTrue(toml.contains("enumExtensions=\"META-INF/enumextensions.json\""))
         assertTrue(toml.indexOf("[[mods]]") < toml.indexOf("enumExtensions=\"META-INF/enumextensions.json\""), toml)
         assertTrue(toml.indexOf("enumExtensions=\"META-INF/enumextensions.json\"") < toml.indexOf("modId=\"examplemod\""), toml)
+        assertTrue(result.changes.any { it.ruleId == "struct-mobcategory-data-keys" })
+        assertTrue(biome.contains(""""examplemod:sky_monster": ["""), biome)
+        assertTrue(biome.contains(""""examplemod:aerwhale": ["""), biome)
+        assertTrue(biome.contains(""""sky_monster": "not a mob category key""""), biome)
+        assertTrue(structure.contains(""""examplemod:sky_monster": {"""), structure)
+        assertFalse(structure.contains(""""sky_monster": {"""), structure)
     }
 
     @Test
@@ -18877,7 +19103,7 @@ class StructuralRefactorExtraTest {
         assertTrue(misc.contains("DeferredHolder::get"))
         assertTrue(misc.contains("wrapper.data()"))
         assertTrue(requiredMapCodec.contains("MapCodec<MapCodecRequiredSurface> CODEC = RecordCodecBuilder.<MapCodecRequiredSurface>mapCodec"))
-        assertTrue(requiredMapCodec.contains("MapCodec<MapCodecRequiredSurface> LIST_CODEC = BoundingBox.CODEC.listOf().fieldOf(\"cutouts\").xmap"))
+        assertTrue(requiredMapCodec.contains("MapCodec<MapCodecRequiredSurface> LIST_CODEC = BoundingBox.CODEC.listOf().fieldOf(\"value\").xmap"))
         assertTrue(requiredMapCodec.contains("MapCodec<MapCodecRequiredSurface> FIELD_CODEC = BoundingBox.CODEC.listOf().fieldOf(\"cutouts\").xmap"))
         assertTrue(requiredMapCodec.contains("MapCodec<NestedProcessor> CODEC = MapCodec.unit(INSTANCE);"))
         assertTrue(holderAndItem.contains("this.widget.value().run()"))
@@ -22412,6 +22638,86 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy WorldOpenFlows mixin injection points to split open-world flow`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("WorldOpenFlowsMixin.java").writeText("""
+            package com.example;
+
+            import com.llamalad7.mixinextras.sugar.Local;
+            import com.mojang.serialization.Dynamic;
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.gui.screens.GenericMessageScreen;
+            import net.minecraft.client.gui.screens.Screen;
+            import net.minecraft.client.gui.screens.worldselection.WorldOpenFlows;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.level.storage.LevelStorageSource;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.injection.At;
+            import org.spongepowered.asm.mixin.injection.Inject;
+            import org.spongepowered.asm.mixin.injection.ModifyVariable;
+            import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+            import java.io.IOException;
+
+            @Mixin(WorldOpenFlows.class)
+            public class WorldOpenFlowsMixin {
+                @Inject(method = "loadLevel(Lnet/minecraft/client/gui/screens/Screen;Ljava/lang/String;)V", at = @At(value = "HEAD"), cancellable = true)
+                private void openWorld(Screen lastScreen, String levelName, CallbackInfo ci) {
+                    if (PreviewState.isActive() && Minecraft.getInstance().hasSingleplayerServer()) {
+                        PreviewState.enterLoadedLevel(levelName);
+                        ci.cancel();
+                    }
+                }
+
+                @ModifyVariable(method = "doLoadLevel(Lnet/minecraft/client/gui/screens/Screen;Ljava/lang/String;ZZZ)V", at = @At("HEAD"), ordinal = 2, argsOnly = true, remap = false)
+                private boolean confirmExperimentalWarning(boolean confirmExperimentalWarning) {
+                    if (PreviewState.isActive()) {
+                        return true;
+                    } else {
+                        return confirmExperimentalWarning;
+                    }
+                }
+
+                @Inject(method = "doLoadLevel(Lnet/minecraft/client/gui/screens/Screen;Ljava/lang/String;ZZZ)V", at = @At(value = "INVOKE", target = "Lnet/minecraft/server/packs/repository/ServerPacksSource;createPackRepository(Lnet/minecraft/world/level/storage/LevelStorageSource${'$'}LevelStorageAccess;)Lnet/minecraft/server/packs/repository/PackRepository;", shift = At.Shift.BEFORE, remap = true), remap = false)
+                private void doLoadLevel(Screen lastScreen, String levelName, boolean safeMode, boolean checkAskForBackup, boolean confirmExperimentalWarning, CallbackInfo ci, @Local LevelStorageSource.LevelStorageAccess levelStorage) {
+                    try {
+                        if (PreviewState.isActive() && !PreviewState.sameSummaries(levelStorage.getSummary(levelStorage.getDataTag()))) {
+                            PreviewState.stopLevel(new GenericMessageScreen(Component.translatable("menu.savingLevel")));
+                            PreviewState.resetSummary();
+                        }
+                    } catch (IOException e) {
+                        return;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("WorldOpenFlowsMixin.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.server.WorldStem;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.server.packs.repository.PackRepository;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.level.storage.PrimaryLevelData;"), migrated)
+        assertTrue(migrated.contains("""method = "openWorld(Ljava/lang/String;Ljava/lang/Runnable;)V""""), migrated)
+        assertTrue(migrated.contains("private void openWorld(String levelName, Runnable onFail, CallbackInfo ci)"), migrated)
+        assertTrue(migrated.contains("""method = "openWorldCheckWorldStemCompatibility(Lnet/minecraft/world/level/storage/LevelStorageSource${'$'}LevelStorageAccess;Lnet/minecraft/server/WorldStem;Lnet/minecraft/server/packs/repository/PackRepository;Ljava/lang/Runnable;)V""""), migrated)
+        assertTrue(migrated.contains("private void confirmExperimentalWarning(LevelStorageSource.LevelStorageAccess levelStorage, WorldStem worldStem, PackRepository packRepository, Runnable onFail, CallbackInfo ci)"), migrated)
+        assertTrue(migrated.contains("PreviewState.isActive() && worldStem.worldData() instanceof PrimaryLevelData modporterPrimaryLevelData"), migrated)
+        assertTrue(migrated.contains("modporterPrimaryLevelData.withConfirmedWarning(true);"), migrated)
+        assertTrue(migrated.contains("""method = "openWorldLoadLevelStem(Lnet/minecraft/world/level/storage/LevelStorageSource${'$'}LevelStorageAccess;Lcom/mojang/serialization/Dynamic;ZLjava/lang/Runnable;)V""""), migrated)
+        assertTrue(migrated.contains("private void doLoadLevel(LevelStorageSource.LevelStorageAccess levelStorage, Dynamic<?> levelData, boolean safeMode, Runnable onFail, CallbackInfo ci)"), migrated)
+        assertFalse(migrated.contains("loadLevel(Lnet/minecraft/client/gui/screens/Screen;Ljava/lang/String;)V"), migrated)
+        assertFalse(migrated.contains("doLoadLevel(Lnet/minecraft/client/gui/screens/Screen;Ljava/lang/String;ZZZ)V"), migrated)
+        assertFalse(migrated.contains("@ModifyVariable"), migrated)
+        assertFalse(migrated.contains("@Local"), migrated)
+        assertFalse(migrated.contains("import org.spongepowered.asm.mixin.injection.ModifyVariable;"), migrated)
+        assertFalse(migrated.contains("import com.llamalad7.mixinextras.sugar.Local;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.client.gui.screens.Screen;"), migrated)
+    }
+
+    @Test
     fun `migrates LevelStorageAccess summary reads through data tag`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -22794,7 +23100,8 @@ class StructuralRefactorExtraTest {
         assertFalse(Regex("""(?<!Map)\bCodec\s*<\s*P\s*>\s+codec""").containsMatchIn(placement), placement)
         assertFalse(placement.contains("import com.mojang.serialization.Codec;"), placement)
         assertTrue(configFilter.contains("import com.mojang.serialization.MapCodec;"), configFilter)
-        assertTrue(configFilter.contains("public static final MapCodec<ConfigFilter> CODEC = Codec.STRING.comapFlatMap(ConfigFilter::buildDeserialization, filter -> ConfigCodecUtil.serialize(filter.config)).fieldOf(\"config\");"), configFilter)
+        assertTrue(configFilter.contains("public static final MapCodec<ConfigFilter> CODEC = Codec.STRING.comapFlatMap(ConfigFilter::buildDeserialization, filter -> ConfigCodecUtil.serialize(filter.config)).fieldOf(\"value\");"), configFilter)
+        assertFalse(configFilter.contains(".fieldOf(\"config\")"), configFilter)
         assertTrue(configFilter.contains("import com.mojang.serialization.Codec;"), configFilter)
         assertTrue(configFilter.contains("return PlacementRegistry.CONFIG.get();"), configFilter)
         assertTrue(treeDecorator.contains("import com.mojang.serialization.MapCodec;"), treeDecorator)
