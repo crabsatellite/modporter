@@ -287,6 +287,13 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            val pathTypeCreateChanges = migrateLegacyPathTypeCreateConstants(projectDir, dryRun)
+            changes.addAll(pathTypeCreateChanges)
+        } catch (e: Exception) {
+            errors.add("PathType.create migration error: ${e.message}")
+        }
+
+        try {
             val imageButtonChanges = migrateLegacyImageButtonConstructors(projectDir, dryRun)
             changes.addAll(imageButtonChanges)
         } catch (e: Exception) {
@@ -9511,6 +9518,17 @@ $fields
         val despawnDistance: String
     )
 
+    private data class LegacyPathTypeConstant(
+        val sourceFile: Path,
+        val packageName: String,
+        val ownerClass: String,
+        val fieldName: String,
+        val malusExpression: String,
+        val declarationText: String
+    ) {
+        val ownerFqn: String = if (packageName.isBlank()) ownerClass else "$packageName.$ownerClass"
+    }
+
     private data class LegacyRegistryBackedMethod(
         val owner: String,
         val name: String
@@ -10121,6 +10139,172 @@ $methods
       }
     }"""
     }
+
+    private fun migrateLegacyPathTypeCreateConstants(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .toList()
+        val sources = javaFiles.associateWith { it.readText() }
+        val constants = javaFiles.flatMap { file -> collectLegacyPathTypeConstants(file, sources.getValue(file)) }
+        if (constants.isEmpty()) return emptyList()
+
+        val migratable = constants
+            .filter { isNegativeOneFloatLiteral(it.malusExpression) }
+            .filter { allPathTypeConstantReferencesAreProvenBlockedConsumers(sources, it) }
+        if (migratable.isEmpty()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        val migratedSources = sources.toMutableMap()
+        migratable.forEach { constant ->
+            val referencePattern = legacyPathTypeConstantReferencePattern(constant)
+            migratedSources.keys.forEach { javaFile ->
+                val original = migratedSources.getValue(javaFile)
+                if (!referencePattern.containsMatchIn(original)) return@forEach
+                var migrated = referencePattern.replace(original, "PathType.BLOCKED")
+                val withoutOwnerImport = removeImport(migrated, constant.ownerFqn)
+                if (!hasSimpleTypeReference(withoutOwnerImport, constant.ownerClass)) {
+                    migrated = withoutOwnerImport
+                }
+                if (Regex("""\bPathType\b""").containsMatchIn(migrated)) {
+                    migrated = addImportIfMissing(migrated, "net.minecraft.world.level.pathfinder.PathType")
+                }
+                if (migrated != original) {
+                    migratedSources[javaFile] = migrated
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Inline removed legacy PathType.create constant into proven blocked path type consumers",
+                        before = "${constant.ownerClass}.${constant.fieldName}",
+                        after = "PathType.BLOCKED",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-path-type-create-blocked-consumer"
+                    ))
+                }
+            }
+        }
+
+        migratable.groupBy { it.sourceFile }.forEach { (sourceFile, constantsForFile) ->
+            var migrated = migratedSources.getValue(sourceFile)
+            val original = migrated
+            constantsForFile.forEach { constant ->
+                migrated = migrated.replace(constant.declarationText, "")
+            }
+            if (!migrated.contains("PathType.create(")) {
+                val withoutPathTypeImport = removeImport(migrated, "net.minecraft.world.level.pathfinder.PathType")
+                if (!hasSimpleTypeReference(withoutPathTypeImport, "PathType")) {
+                    migrated = withoutPathTypeImport
+                }
+            }
+            migrated = migrated.replace(Regex("""\n{3,}"""), "\n\n")
+            if (migrated != original) {
+                migratedSources[sourceFile] = migrated
+                changes.add(Change(
+                    file = sourceFile,
+                    line = 0,
+                    description = "Remove legacy PathType.create constant after all proven blocked consumers were migrated",
+                    before = "PathType.create(name, -1.0F)",
+                    after = "(removed obsolete path type constant)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-path-type-create-remove-constant"
+                ))
+            }
+        }
+
+        if (!dryRun) {
+            migratedSources.forEach { (file, migrated) ->
+                if (migrated != sources.getValue(file)) {
+                    file.writeText(migrated)
+                }
+            }
+        }
+        return changes
+    }
+
+    private fun collectLegacyPathTypeConstants(file: Path, source: String): List<LegacyPathTypeConstant> {
+        if (!source.contains("PathType.create(")) return emptyList()
+        val ownerClass = classNameOfJavaSource(source) ?: return emptyList()
+        val packageName = packageNameOf(source)
+        val constants = mutableListOf<LegacyPathTypeConstant>()
+        val pattern = Regex(
+            """(?m)^[ \t]*(?:(?:public|protected|private)\s+)?static\s+final\s+PathType\s+([A-Za-z_$][\w$]*)\s*=\s*PathType\.create\s*\("""
+        )
+        var cursor = 0
+        while (true) {
+            val match = pattern.find(source, cursor) ?: break
+            val openParen = source.indexOf('(', match.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(source, openParen) else -1
+            if (closeParen < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val semicolon = source.indexOf(';', closeParen)
+            if (semicolon < 0) {
+                cursor = closeParen + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (args.size == 2 && javaStringLiteralValue(args[0].trim()) != null) {
+                val declarationEnd = if (semicolon + 1 < source.length && source[semicolon + 1] == '\n') semicolon + 2 else semicolon + 1
+                constants += LegacyPathTypeConstant(
+                    sourceFile = file,
+                    packageName = packageName,
+                    ownerClass = ownerClass,
+                    fieldName = match.groupValues[1],
+                    malusExpression = args[1].trim(),
+                    declarationText = source.substring(match.range.first, declarationEnd)
+                )
+            }
+            cursor = semicolon + 1
+        }
+        return constants
+    }
+
+    private fun isNegativeOneFloatLiteral(expression: String): Boolean {
+        val normalized = expression.trim().removeSuffix("F").removeSuffix("f")
+        return normalized.toFloatOrNull() == -1.0f
+    }
+
+    private fun allPathTypeConstantReferencesAreProvenBlockedConsumers(
+        sources: Map<Path, String>,
+        constant: LegacyPathTypeConstant
+    ): Boolean {
+        val referencePattern = legacyPathTypeConstantReferencePattern(constant)
+        var references = 0
+        var allowed = 0
+        sources.values.forEach { source ->
+            val refs = referencePattern.findAll(source).toList()
+            if (refs.isEmpty()) return@forEach
+            references += refs.size
+            val allowedRanges = mutableListOf<IntRange>()
+            legacyPathTypeConstantReturnPattern(constant).findAll(source).forEach { match ->
+                val method = enclosingMethodText(source, match.range.first) ?: return false
+                if (!Regex("""\bPathType\s+getBlockPathType\s*\(""").containsMatchIn(method)) return false
+                allowedRanges += match.range
+            }
+            legacyPathTypeConstantSetMalusPattern(constant).findAll(source).forEach { match ->
+                if (isNegativeOneFloatLiteral(match.groupValues[1])) {
+                    allowedRanges += match.range
+                }
+            }
+            refs.forEach { ref ->
+                if (allowedRanges.any { ref.range.first >= it.first && ref.range.last <= it.last }) {
+                    allowed++
+                }
+            }
+        }
+        return references > 0 && references == allowed
+    }
+
+    private fun legacyPathTypeConstantReferencePattern(constant: LegacyPathTypeConstant): Regex =
+        Regex("""(?<![\w$])${Regex.escape(constant.ownerClass)}\.${Regex.escape(constant.fieldName)}(?![\w$])""")
+
+    private fun legacyPathTypeConstantReturnPattern(constant: LegacyPathTypeConstant): Regex =
+        Regex("""return\s+${Regex.escape(constant.ownerClass)}\.${Regex.escape(constant.fieldName)}\s*;""")
+
+    private fun legacyPathTypeConstantSetMalusPattern(constant: LegacyPathTypeConstant): Regex =
+        Regex("""setPathfindingMalus\s*\(\s*${Regex.escape(constant.ownerClass)}\.${Regex.escape(constant.fieldName)}\s*,\s*([^,)]+)\s*\)""")
 
     private fun migrateLegacyImageButtonConstructors(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()

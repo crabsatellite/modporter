@@ -14649,6 +14649,110 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy blocked path type constants only for proven blocked consumers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AetherBlockPathTypes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.pathfinder.PathType;
+
+            public class AetherBlockPathTypes {
+                public static final PathType BOSS_DOORWAY = PathType.create("BOSS_DOORWAY", -1.0F);
+                public static final PathType CUSTOM_MALUS = PathType.create("CUSTOM_MALUS", -1.0F);
+            }
+        """.trimIndent())
+        srcDir.resolve("DoorwayBlock.java").writeText("""
+            package com.example;
+
+            import javax.annotation.Nullable;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.pathfinder.PathType;
+
+            public class DoorwayBlock {
+                @Nullable
+                public PathType getBlockPathType(BlockState state, BlockGetter level, BlockPos pos, @Nullable Mob mob) {
+                    return AetherBlockPathTypes.BOSS_DOORWAY;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("PathConsumer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.Mob;
+
+            public class PathConsumer {
+                public void configure(Mob mob) {
+                    mob.setPathfindingMalus(AetherBlockPathTypes.BOSS_DOORWAY, -1.0F);
+                    mob.setPathfindingMalus(AetherBlockPathTypes.CUSTOM_MALUS, 0.0F);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val constants = srcDir.resolve("AetherBlockPathTypes.java").readText()
+        val doorway = srcDir.resolve("DoorwayBlock.java").readText()
+        val consumer = srcDir.resolve("PathConsumer.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(doorway.contains("return PathType.BLOCKED;"))
+        assertFalse(doorway.contains("AetherBlockPathTypes.BOSS_DOORWAY"))
+        assertFalse(constants.contains("BOSS_DOORWAY = PathType.create"))
+        assertTrue(constants.contains("CUSTOM_MALUS = PathType.create(\"CUSTOM_MALUS\", -1.0F);"))
+        assertTrue(consumer.contains("import net.minecraft.world.level.pathfinder.PathType;"))
+        assertTrue(consumer.contains("mob.setPathfindingMalus(PathType.BLOCKED, -1.0F);"))
+        assertTrue(consumer.contains("AetherBlockPathTypes.CUSTOM_MALUS"))
+    }
+
+    @Test
+    fun `migrates legacy blocked path type constants across imported owner packages`() {
+        val aiDir = tempDir.resolve("src/main/java/com/example/entity/ai")
+        val blockDir = tempDir.resolve("src/main/java/com/example/block")
+        aiDir.createDirectories()
+        blockDir.createDirectories()
+        aiDir.resolve("ExampleBlockPathTypes.java").writeText("""
+            package com.example.entity.ai;
+
+            import net.minecraft.world.level.pathfinder.PathType;
+
+            public class ExampleBlockPathTypes {
+                public static final PathType BOSS_DOORWAY = PathType.create("BOSS_DOORWAY", -1.0F);
+            }
+        """.trimIndent())
+        blockDir.resolve("DoorwayBlock.java").writeText("""
+            package com.example.block;
+
+            import com.example.entity.ai.ExampleBlockPathTypes;
+            import javax.annotation.Nullable;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.pathfinder.PathType;
+
+            public class DoorwayBlock {
+                @Nullable
+                @Override
+                public PathType getBlockPathType(BlockState state, BlockGetter level, BlockPos pos, @Nullable Mob mob) {
+                    return ExampleBlockPathTypes.BOSS_DOORWAY;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val constants = aiDir.resolve("ExampleBlockPathTypes.java").readText()
+        val doorway = blockDir.resolve("DoorwayBlock.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(doorway.contains("return PathType.BLOCKED;"), doorway)
+        assertFalse(doorway.contains("import com.example.entity.ai.ExampleBlockPathTypes;"), doorway)
+        assertFalse(constants.contains("PathType.create("), constants)
+    }
+
+    @Test
     fun `migrates legacy sleeping time check event result API by event parameter type`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
