@@ -145,7 +145,7 @@ class BuildSystemTest {
         val content = projectDir.resolve("gradle.properties").readText()
         assertTrue(content.contains("base_minecraft_version=1.21"))
         assertTrue(content.contains("minecraft_version=1.21.1"))
-        assertTrue(content.contains("neo_forge_version=21.1.219"))
+        assertTrue(content.contains("neo_forge_version=21.1.230"))
         assertFalse(Regex("""(?<!\w)forge_version\s*=""").containsMatchIn(content),
             "Should not have standalone forge_version property")
     }
@@ -162,7 +162,7 @@ class BuildSystemTest {
         pass.apply(projectDir)
         val content = projectDir.resolve("gradle.properties").readText()
 
-        assertTrue(content.contains("neo_forge_version=21.1.219"), content)
+        assertTrue(content.contains("neo_forge_version=21.1.230"), content)
         assertFalse(content.contains("neoneo_forge_version"), content)
     }
 
@@ -352,6 +352,91 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `registers spawn placement listener outside guarded client listener block`() {
+        val projectDir = tempDir.resolve("spawn-placement-client-guard")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val clientDir = projectDir.resolve("src/main/java/com/example/client")
+        srcDir.createDirectories()
+        clientDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.client.ClientRegistry;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    modEventBus.addListener(ClientRegistry::registerClientStuff);
+                    EntityRegistry.ENTITY_TYPES.register(modEventBus);
+                    modEventBus.addListener(EntityRegistry::registerAttributes);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("EntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.MobCategory;
+            import net.neoforged.neoforge.event.entity.EntityAttributeCreationEvent;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class EntityRegistry {
+                public static final DeferredRegister<EntityType<?>> ENTITY_TYPES =
+                    DeferredRegister.create(Registries.ENTITY_TYPE, ExampleMod.MODID);
+
+                public static final DeferredHolder<EntityType<?>, EntityType<DeerEntity>> DEER = ENTITY_TYPES.register("deer",
+                    () -> EntityType.Builder.of(DeerEntity::new, MobCategory.CREATURE)
+                        .sized(0.9F, 0.95F).build("deer"));
+
+                public static void registerAttributes(EntityAttributeCreationEvent event) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("DeerEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.animal.Animal;
+            import net.minecraft.world.level.Level;
+
+            public class DeerEntity extends Animal {
+                public DeerEntity(EntityType<? extends DeerEntity> type, Level level) {
+                    super(type, level);
+                }
+            }
+        """.trimIndent())
+        clientDir.resolve("ClientRegistry.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.client.Minecraft;
+
+            public class ClientRegistry {
+                public static void registerClientStuff(Object event) {
+                    Minecraft.getInstance();
+                }
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+        val guardIdx = mod.indexOf("if (net.neoforged.fml.loading.FMLLoader.getDist() == net.neoforged.api.distmarker.Dist.CLIENT)")
+        val spawnIdx = mod.indexOf("modEventBus.addListener(com.example.EntityRegistry::registerSpawnPlacements);")
+
+        assertTrue(guardIdx >= 0, mod)
+        assertTrue(spawnIdx >= 0, mod)
+        assertTrue(spawnIdx < guardIdx, mod)
+    }
+
+    @Test
     fun `migrates structure template pool reflection fields to access transformers`() {
         val projectDir = tempDir.resolve("structure-pool-reflection")
         val srcDir = projectDir.resolve("src/main/java/com/example")
@@ -504,6 +589,54 @@ class BuildSystemTest {
         assertFalse(content.contains("getMethod"))
         assertFalse(content.contains("java.lang.reflect"))
         assertFalse(content.contains("ServerPlayer"))
+    }
+
+    @Test
+    fun `registers existing mixin configs when migrating away from manifest registration`() {
+        val projectDir = tempDir.resolve("existing-mixin-config-registration")
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        val metaInfDir = resourcesDir.resolve("META-INF")
+        resourcesDir.createDirectories()
+        metaInfDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            tasks.named('jar', Jar).configure {
+                manifest {
+                    attributes([
+                        "MixinConfigs": "example.mixins.json"
+                    ])
+                }
+            }
+        """.trimIndent())
+        metaInfDir.resolve("neoforge.mods.toml").writeText("""
+            modLoader="javafml"
+            loaderVersion="[1,)"
+
+            [[mods]]
+            modId="examplemod"
+        """.trimIndent())
+        resourcesDir.resolve("example.mixins.json").writeText("""
+            {
+              "required": true,
+              "package": "com.example.mixin",
+              "mixins": [
+                "BlockAccessor"
+              ]
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val buildGradle = projectDir.resolve("build.gradle").readText()
+        val modsToml = metaInfDir.resolve("neoforge.mods.toml").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-register-existing-mixin-config" })
+        assertFalse(buildGradle.contains("MixinConfigs"), buildGradle)
+        assertTrue(modsToml.contains("[[mixins]]"), modsToml)
+        assertTrue(modsToml.contains("config=\"example.mixins.json\""), modsToml)
     }
 
     @Test
@@ -2531,6 +2664,90 @@ class BuildSystemTest {
         assertTrue(kimono.contains("Holder<ArmorMaterial> material"))
         assertTrue(mod.contains("import com.example.item.ExampleArmorMaterials;"))
         assertTrue(mod.contains("ExampleArmorMaterials.ARMOR_MATERIALS.register(modEventBus);"))
+    }
+
+    @Test
+    fun `registers generated armor materials outside existing deferred register loops`() {
+        val projectDir = tempDir.resolve("p15-armor-loop")
+        val itemDir = projectDir.resolve("src/main/java/com/example/item")
+        val modDir = projectDir.resolve("src/main/java/com/example")
+        itemDir.createDirectories()
+        modDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        modDir.resolve("TestMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            @Mod(TestMod.MODID)
+            public class TestMod {
+                public static final String MODID = "example";
+
+                public TestMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    DeferredRegister<?>[] registers = { ExampleRegistry.BLOCKS, ExampleRegistry.ITEMS };
+                    for (DeferredRegister<?> register : registers) {
+                        register.register(modEventBus);
+                    }
+                }
+            }
+        """.trimIndent())
+        itemDir.resolve("ExampleArmorMaterials.java").writeText("""
+            package com.example.item;
+
+            import com.example.TestMod;
+            import net.minecraft.sounds.SoundEvent;
+            import net.minecraft.sounds.SoundEvents;
+            import net.minecraft.world.item.ArmorMaterial;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import java.util.function.Supplier;
+
+            public enum ExampleArmorMaterials implements ArmorMaterial {
+                STRAW("straw", "strawhat", 6, new int[]{0, 0, 0, 1}, 30,
+                        SoundEvents.ARMOR_EQUIP_LEATHER, 0.0F, 0.0F, () -> Ingredient.of(Items.WHEAT));
+
+                private final String name;
+                private final String textureName;
+                private final SoundEvent sound;
+                private final Supplier<Ingredient> repairIngredient;
+
+                ExampleArmorMaterials(String name, String textureName, int durabilityMult, int[] protections, int enchant,
+                                       SoundEvent sound, float tough, float kb, Supplier<Ingredient> repair) {
+                    this.name = name;
+                    this.textureName = textureName;
+                    this.sound = sound;
+                    this.repairIngredient = repair;
+                }
+
+                @Override
+                public String getName() {
+                    return TestMod.MODID + ":" + this.name;
+                }
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+
+        val mod = modDir.resolve("TestMod.java").readText()
+        val armorRegistration = "ExampleArmorMaterials.ARMOR_MATERIALS.register(modEventBus);"
+        val armorIdx = mod.indexOf(armorRegistration)
+        val arrayIdx = mod.indexOf("DeferredRegister<?>[] registers")
+        val loopIdx = mod.indexOf("for (DeferredRegister<?> register : registers)")
+        val loopRegisterIdx = mod.indexOf("register.register(modEventBus);")
+
+        assertTrue(armorIdx >= 0, mod)
+        assertTrue(armorIdx < arrayIdx, mod)
+        assertTrue(loopIdx >= 0, mod)
+        assertTrue(loopRegisterIdx > loopIdx, mod)
+        assertFalse(mod.substring(loopIdx, loopRegisterIdx).contains(armorRegistration), mod)
     }
 
     @Test

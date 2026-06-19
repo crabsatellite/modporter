@@ -325,7 +325,7 @@ class RuntimeReadinessTest {
         val content = dir.resolve("gradle.properties").readText()
 
         assertTrue(content.contains("minecraft_version=1.21.1"), "MC 1.21.1")
-        assertTrue(content.contains("neo_forge_version=21.1.219"), "NeoForge version")
+        assertTrue(content.contains("neo_forge_version=21.1.230"), "NeoForge version")
     }
 
     @Test

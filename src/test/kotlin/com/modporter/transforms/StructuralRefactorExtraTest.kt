@@ -3124,6 +3124,7 @@ class StructuralRefactorExtraTest {
         assertTrue(types.contains("RecipeBookType.valueOf(\"EXAMPLEMOD_FREEZER\")"), types)
         assertFalse(types.contains("RecipeBookType.create"), types)
         assertTrue(helper.contains("public static Object RecipeBookCategory_EXAMPLEMOD_MAGIC_SEARCH(int idx, Class<?> type)"), helper)
+        assertFalse(helper.contains("type.cast("), helper)
         assertTrue(helper.contains("(Supplier<List<ItemStack>>) () -> List.of(new ItemStack(Items.COMPASS), new ItemStack(ExampleItems.WAND.get()))"), helper)
         assertTrue(helper.contains("import com.example.registry.ExampleItems;"), helper)
         assertTrue(enumExtensions.contains("\"enum\": \"net/minecraft/client/RecipeBookCategories\""), enumExtensions)
@@ -8717,6 +8718,47 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy finalize spawn mixin descriptors`() {
+        val projectDir = createFile("ForgeEventFactoryMixin.java", """
+            package com.example.mixin;
+
+            import com.example.EntityHooks;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.DifficultyInstance;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.entity.MobSpawnType;
+            import net.minecraft.world.entity.SpawnGroupData;
+            import net.minecraft.world.level.ServerLevelAccessor;
+            import net.neoforged.neoforge.event.EventHooks;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.injection.At;
+            import org.spongepowered.asm.mixin.injection.Inject;
+            import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+            @Mixin(EventHooks.class)
+            public class ForgeEventFactoryMixin {
+                /**
+                 * @see Mob#finalizeSpawn(ServerLevelAccessor, DifficultyInstance, MobSpawnType, SpawnGroupData, CompoundTag)
+                 */
+                @Inject(at = @At(value = "INVOKE_ASSIGN", target = "Lnet/minecraft/world/entity/Mob;finalizeSpawn(Lnet/minecraft/world/level/ServerLevelAccessor;Lnet/minecraft/world/DifficultyInstance;Lnet/minecraft/world/entity/MobSpawnType;Lnet/minecraft/world/entity/SpawnGroupData;Lnet/minecraft/nbt/CompoundTag;)Lnet/minecraft/world/entity/SpawnGroupData;"), method = "onFinalizeSpawn(Lnet/minecraft/world/entity/Mob;Lnet/minecraft/world/level/ServerLevelAccessor;Lnet/minecraft/world/DifficultyInstance;Lnet/minecraft/world/entity/MobSpawnType;Lnet/minecraft/world/entity/SpawnGroupData;Lnet/minecraft/nbt/CompoundTag;)Lnet/minecraft/world/entity/SpawnGroupData;")
+                private static void onFinalizeSpawn(Mob mob, ServerLevelAccessor level, DifficultyInstance difficulty, MobSpawnType spawnType, SpawnGroupData spawnData, CompoundTag spawnTag, CallbackInfoReturnable<SpawnGroupData> cir) {
+                    EntityHooks.spawnWithAccessories(mob, difficulty);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val transformed = tempDir.resolve("src/main/java/com/example/ForgeEventFactoryMixin.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("target = \"Lnet/minecraft/world/entity/Mob;finalizeSpawn(Lnet/minecraft/world/level/ServerLevelAccessor;Lnet/minecraft/world/DifficultyInstance;Lnet/minecraft/world/entity/MobSpawnType;Lnet/minecraft/world/entity/SpawnGroupData;)Lnet/minecraft/world/entity/SpawnGroupData;\""), transformed)
+        assertTrue(transformed.contains("method = \"finalizeMobSpawn(Lnet/minecraft/world/entity/Mob;Lnet/minecraft/world/level/ServerLevelAccessor;Lnet/minecraft/world/DifficultyInstance;Lnet/minecraft/world/entity/MobSpawnType;Lnet/minecraft/world/entity/SpawnGroupData;)Lnet/minecraft/world/entity/SpawnGroupData;\""), transformed)
+        assertTrue(transformed.contains("private static void onFinalizeSpawn(Mob mob, ServerLevelAccessor level, DifficultyInstance difficulty, MobSpawnType spawnType, SpawnGroupData spawnData, CallbackInfoReturnable<SpawnGroupData> cir)"), transformed)
+        assertFalse(transformed.contains("CompoundTag"), transformed)
+        assertFalse(transformed.contains("onFinalizeSpawn(Lnet/minecraft/world/entity/Mob;"), transformed)
+    }
+
+    @Test
     fun `migrates legacy mmlib datagen helpers without disabling providers`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -9901,15 +9943,19 @@ class StructuralRefactorExtraTest {
         val blockEntity = srcDir.resolve("FurnaceHookBlockEntity.java").readText()
 
         assertTrue(accessor.contains("RecipeManager.CachedCheck<SingleRecipeInput, ? extends AbstractCookingRecipe> example${'$'}getQuickCheck()"), accessor)
-        assertTrue(accessor.contains("boolean callCanBurn(RegistryAccess registryAccess, @Nullable RecipeHolder<?> recipe"), accessor)
+        assertTrue(accessor.contains("static boolean callCanBurn(RegistryAccess registryAccess, @Nullable RecipeHolder<?> recipe, NonNullList<ItemStack> stacks, int stackSize, AbstractFurnaceBlockEntity furnace)"), accessor)
+        assertTrue(accessor.contains("throw new AssertionError();"), accessor)
         assertTrue(blockEntity.contains("RecipeHolder<?> recipe;"), blockEntity)
         assertTrue(blockEntity.contains("example${'$'}getQuickCheck().getRecipeFor(new SingleRecipeInput(blockEntity.getItem(0)), level).orElse(null)"), blockEntity)
+        assertTrue(blockEntity.contains("AbstractFurnaceBlockEntityAccessor.callCanBurn(level.registryAccess(), recipe, accessor.example${'$'}getItems(), maxStackSize, blockEntity)"), blockEntity)
         assertTrue(blockEntity.contains("private boolean burn(RegistryAccess registryAccess, @Nullable RecipeHolder<?> recipe"), blockEntity)
+        assertTrue(blockEntity.contains("AbstractFurnaceBlockEntityAccessor.callCanBurn(registryAccess, recipe, stacks, stackSize, this)"), blockEntity)
         assertTrue(blockEntity.contains("((Recipe<SingleRecipeInput>) recipe.value()).assemble(new SingleRecipeInput(inputSlotStack), registryAccess)"), blockEntity)
         assertTrue(blockEntity.contains(".map(RecipeHolder::value).map(AbstractCookingRecipe::getIngredients)"), blockEntity)
         assertTrue(blockEntity.contains("EnchantmentHelper.setEnchantments(resultStack, EnchantmentHelper.getEnchantmentsForCrafting(inputSlotStack))"), blockEntity)
         assertTrue(blockEntity.contains("EnchantmentHelper.setEnchantments(resultStack, EnchantmentHelper.getEnchantmentsForCrafting(this.getItem(1)))"), blockEntity)
         assertFalse(accessor.contains("CachedCheck<Container"), accessor)
+        assertFalse(blockEntity.contains("accessor.callCanBurn"), blockEntity)
         assertFalse(blockEntity.contains("Recipe<WorldlyContainer>"), blockEntity)
     }
 
@@ -15553,6 +15599,7 @@ class StructuralRefactorExtraTest {
         assertTrue(enumExtensions.contains("\"constructor\": \"(ILjava/lang/String;Lnet/minecraft/ChatFormatting;)V\""), enumExtensions)
         assertTrue(enumExtensions.contains("\"method\": \"Rarity_EXAMPLEMOD_TWILIGHT\""), enumExtensions)
         assertTrue(enumExtensions.contains("\"method\": \"Rarity_EXAMPLEMOD_LOOT\""), enumExtensions)
+        assertFalse(enumHelper.contains("type.cast("), enumHelper)
         assertTrue(enumHelper.contains("case 1 -> \"examplemod:twilight\";"), enumHelper)
         assertTrue(enumHelper.contains("case 1 -> \"examplemod:loot\";"), enumHelper)
         assertTrue(enumHelper.contains("case 2 -> ChatFormatting.DARK_GREEN;"), enumHelper)
@@ -15775,6 +15822,270 @@ class StructuralRefactorExtraTest {
         assertTrue(boss.contains("this.readBossSaveData(spawnTag, this.registryAccess());"), boss)
         assertTrue(boss.contains("this.addLocalSaveData(tag);"), boss)
         assertTrue(boss.contains("this.readLocalSaveData(tag);"), boss)
+    }
+
+    @Test
+    fun `migrates legacy entity portal accessors and custom portal blocks to portal processor protocol`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val accessorDir = srcDir.resolve("mixin")
+        srcDir.createDirectories()
+        accessorDir.createDirectories()
+        accessorDir.resolve("EntityAccessor.java").writeText("""
+            package com.example.mixin;
+
+            import net.minecraft.BlockUtil;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.phys.Vec3;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.gen.Accessor;
+            import org.spongepowered.asm.mixin.gen.Invoker;
+
+            @Mixin(Entity.class)
+            public interface EntityAccessor {
+                @Accessor("random")
+                RandomSource example${'$'}getRandom();
+
+                @Accessor("portalEntrancePos")
+                BlockPos aether${'$'}getPortalEntrancePos();
+
+                @Accessor("portalEntrancePos")
+                void aether${'$'}setPortalEntrancePos(BlockPos portalEntrancePos);
+
+                @Invoker
+                Vec3 callGetRelativePortalPosition(Direction.Axis axis, BlockUtil.FoundRectangle portal);
+
+                @Accessor("isInsidePortal")
+                boolean aether${'$'}isIsInsidePortal();
+            }
+        """.trimIndent())
+        srcDir.resolve("SkyPortalBlock.java").writeText("""
+            package com.example;
+
+            import com.example.mixin.EntityAccessor;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.server.MinecraftServer;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class SkyPortalBlock extends Block {
+                @Override
+                public void entityInside(BlockState state, Level level, BlockPos pos, Entity entity) {
+                    EntityAccessor entityAccessor = (EntityAccessor) entity;
+                    if (!entity.isPassenger() && !entity.isVehicle()) {
+                        if (entity.isOnPortalCooldown()) {
+                            entity.setPortalCooldown();
+                        } else {
+                            if (!entity.level().isClientSide() && !pos.equals(entityAccessor.aether${'$'}getPortalEntrancePos())) {
+                                entityAccessor.aether${'$'}setPortalEntrancePos(pos.immutable());
+                            }
+                            this.handleTeleportation(entity);
+                        }
+                    }
+                }
+
+                private void handleTeleportation(Entity entity) {
+                    MinecraftServer server = entity.level().getServer();
+                    ResourceKey<Level> destinationKey = entity.level().dimension() == Level.NETHER ? Level.OVERWORLD : Level.NETHER;
+                    if (server != null) {
+                        ServerLevel destinationLevel = server.getLevel(destinationKey);
+                        if (destinationLevel != null && !entity.isPassenger()) {
+                            entity.changeDimension(new SkyPortalForcer(destinationLevel, true).getPortalInfo(entity, destinationLevel));
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("PortalStatus.java").writeText("""
+            package com.example;
+
+            import com.example.mixin.EntityAccessor;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.Entity;
+
+            public class PortalStatus {
+                public boolean isInside(Entity entity) {
+                    EntityAccessor accessor = (EntityAccessor) entity;
+                    return accessor.aether${'$'}isIsInsidePortal();
+                }
+
+                public BlockPos entry(Entity entity) {
+                    return ((EntityAccessor) entity).aether${'$'}getPortalEntrancePos();
+                }
+
+                public void update(Entity entity, BlockPos pos) {
+                    ((EntityAccessor) entity).aether${'$'}setPortalEntrancePos(pos);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val accessor = accessorDir.resolve("EntityAccessor.java").readText()
+        val portalBlock = srcDir.resolve("SkyPortalBlock.java").readText()
+        val portalStatus = srcDir.resolve("PortalStatus.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(accessor.contains("import net.minecraft.world.entity.PortalProcessor;"), accessor)
+        assertTrue(accessor.contains("@Accessor(\"portalProcess\")"), accessor)
+        assertTrue(accessor.contains("PortalProcessor modporter${'$'}getPortalProcess();"), accessor)
+        assertFalse(accessor.contains("default BlockPos aether${'$'}getPortalEntrancePos()"), accessor)
+        assertFalse(accessor.contains("default void aether${'$'}setPortalEntrancePos"), accessor)
+        assertFalse(accessor.contains("default boolean aether${'$'}isIsInsidePortal"), accessor)
+        assertFalse(accessor.contains("@Accessor(\"portalEntrancePos\")"), accessor)
+        assertFalse(accessor.contains("@Accessor(\"isInsidePortal\")"), accessor)
+
+        assertTrue(portalBlock.contains("class SkyPortalBlock extends Block implements Portal"), portalBlock)
+        assertTrue(portalBlock.contains("import net.minecraft.world.level.block.Portal;"), portalBlock)
+        assertTrue(portalBlock.contains("import net.minecraft.world.level.portal.DimensionTransition;"), portalBlock)
+        assertTrue(portalBlock.contains("public int getPortalTransitionTime(ServerLevel level, Entity entity)"), portalBlock)
+        assertTrue(portalBlock.contains("return entity.getDimensionChangingDelay();"), portalBlock)
+        assertTrue(portalBlock.contains("public DimensionTransition getPortalDestination(ServerLevel level, Entity entity, BlockPos pos)"), portalBlock)
+        assertTrue(portalBlock.contains("entity.setAsInsidePortal(this, pos);"), portalBlock)
+        assertTrue(portalBlock.contains("return new SkyPortalForcer(destinationLevel, true).getPortalInfo(entity, destinationLevel);"), portalBlock)
+        assertFalse(portalBlock.contains("import com.example.mixin.EntityAccessor;"), portalBlock)
+        assertFalse(portalBlock.contains("EntityAccessor entityAccessor"), portalBlock)
+        assertFalse(portalBlock.contains("aether${'$'}setPortalEntrancePos"), portalBlock)
+        assertFalse(portalBlock.contains("aether${'$'}getPortalEntrancePos"), portalBlock)
+
+        assertTrue(portalStatus.contains("return (accessor.modporter${'$'}getPortalProcess() != null && accessor.modporter${'$'}getPortalProcess().isInsidePortalThisTick());"), portalStatus)
+        assertTrue(portalStatus.contains("return (((EntityAccessor) entity).modporter${'$'}getPortalProcess() != null ? ((EntityAccessor) entity).modporter${'$'}getPortalProcess().getEntryPosition() : null);"), portalStatus)
+        assertTrue(portalStatus.contains("java.util.Optional.ofNullable(((EntityAccessor) entity).modporter${'$'}getPortalProcess()).ifPresent(portalProcess -> portalProcess.updateEntryPosition(pos));"), portalStatus)
+        assertFalse(portalStatus.contains("aether${'$'}isIsInsidePortal"), portalStatus)
+        assertFalse(portalStatus.contains("aether${'$'}setPortalEntrancePos"), portalStatus)
+        assertFalse(portalStatus.contains("aether${'$'}getPortalEntrancePos"), portalStatus)
+    }
+
+    @Test
+    fun `migrates legacy concrete powder concrete accessor to block return`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val mixinDir = srcDir.resolve("mixin")
+        srcDir.createDirectories()
+        mixinDir.createDirectories()
+        mixinDir.resolve("ConcretePowderBlockAccessor.java").writeText("""
+            package com.example.mixin;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.block.ConcretePowderBlock;
+            import net.minecraft.world.level.block.state.BlockState;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.gen.Accessor;
+            import org.spongepowered.asm.mixin.gen.Invoker;
+
+            @Mixin(ConcretePowderBlock.class)
+            public interface ConcretePowderBlockAccessor {
+                @Accessor("concrete")
+                BlockState example${'$'}getConcrete();
+
+                @Invoker
+                static boolean callShouldSolidify(BlockGetter level, BlockPos pos, BlockState state) {
+                    throw new AssertionError();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FallingConcrete.java").writeText("""
+            package com.example;
+
+            import com.example.mixin.ConcretePowderBlockAccessor;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.ConcretePowderBlock;
+
+            public class FallingConcrete {
+                public void solidify(Level level, BlockPos pos, ConcretePowderBlock block) {
+                    ConcretePowderBlockAccessor accessor = (ConcretePowderBlockAccessor) block;
+                    level.setBlock(pos, accessor.example${'$'}getConcrete(), 3);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val accessor = mixinDir.resolve("ConcretePowderBlockAccessor.java").readText()
+        val fallingConcrete = srcDir.resolve("FallingConcrete.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(accessor.contains("import net.minecraft.world.level.block.Block;"), accessor)
+        assertTrue(accessor.contains("Block example${'$'}getConcrete();"), accessor)
+        assertFalse(accessor.contains("BlockState example${'$'}getConcrete();"), accessor)
+        assertTrue(fallingConcrete.contains("level.setBlock(pos, accessor.example${'$'}getConcrete().defaultBlockState(), 3);"), fallingConcrete)
+    }
+
+    @Test
+    fun `migrates legacy WorldGenRegion structure manager accessor to public API`() {
+        val accessorDir = tempDir.resolve("src/main/java/com/example/mixin/mixins/common/accessor")
+        val worldDir = tempDir.resolve("src/main/java/com/example/world")
+        val resourcesDir = tempDir.resolve("src/main/resources")
+        accessorDir.createDirectories()
+        worldDir.createDirectories()
+        resourcesDir.createDirectories()
+
+        val accessorFile = accessorDir.resolve("WorldGenRegionAccessor.java")
+        accessorFile.writeText("""
+            package com.example.mixin.mixins.common.accessor;
+
+            import net.minecraft.server.level.WorldGenRegion;
+            import net.minecraft.world.level.StructureManager;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.gen.Accessor;
+
+            @Mixin(WorldGenRegion.class)
+            public interface WorldGenRegionAccessor {
+                @Accessor("structureManager")
+                StructureManager example${'$'}getStructureManager();
+            }
+        """.trimIndent())
+        worldDir.resolve("DungeonBlacklistFilter.java").writeText("""
+            package com.example.world;
+
+            import com.example.mixin.mixins.common.accessor.WorldGenRegionAccessor;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.server.level.WorldGenRegion;
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.level.StructureManager;
+            import net.minecraft.world.level.levelgen.placement.PlacementContext;
+
+            public class DungeonBlacklistFilter {
+                protected boolean shouldPlace(PlacementContext context, RandomSource random, BlockPos pos) {
+                    if (!(context.getLevel() instanceof WorldGenRegion)) {
+                        return false;
+                    }
+                    StructureManager structureManager = ((WorldGenRegionAccessor) context.getLevel()).example${'$'}getStructureManager();
+                    return structureManager.getStructureAt(pos, null).isValid();
+                }
+            }
+        """.trimIndent())
+        val mixinConfig = resourcesDir.resolve("example.mixins.json")
+        mixinConfig.writeText("""
+            {
+              "required": true,
+              "package": "com.example.mixin.mixins",
+              "mixins": [
+                "common.OtherMixin",
+                "common.accessor.WorldGenRegionAccessor",
+                "common.accessor.KeepAccessor"
+              ]
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        val filter = worldDir.resolve("DungeonBlacklistFilter.java").readText()
+        val config = mixinConfig.readText()
+        assertTrue(filter.contains("StructureManager structureManager = context.getLevel().getLevel().structureManager();"), filter)
+        assertFalse(filter.contains("WorldGenRegionAccessor"), filter)
+        assertFalse(accessorFile.exists())
+        assertFalse(config.contains("common.accessor.WorldGenRegionAccessor"), config)
+        assertTrue(config.contains("common.OtherMixin"), config)
+        assertTrue(config.contains("common.accessor.KeepAccessor"), config)
+        assertTrue(result.changes.any { it.ruleId == "struct-worldgenregion-structuremanager-accessor-call" })
+        assertTrue(result.changes.any { it.ruleId == "struct-worldgenregion-structuremanager-mixin-config" })
+        assertTrue(result.changes.any { it.ruleId == "struct-worldgenregion-structuremanager-accessor-remove" })
     }
 
     @Test
@@ -16786,7 +17097,9 @@ class StructuralRefactorExtraTest {
         assertTrue(categories.contains("MobCategory.valueOf(\"EXAMPLEMOD_AERWHALE\")"))
         assertFalse(categories.contains("MobCategory.create("))
         assertTrue(helper.contains("public static Object MobCategory_EXAMPLEMOD_SKY_MONSTER(int idx, Class<?> type)"))
-        assertTrue(helper.contains("case 0 -> \"sky_monster\";"))
+        assertFalse(helper.contains("type.cast("), helper)
+        assertTrue(helper.contains("case 0 -> \"examplemod:sky_monster\";"))
+        assertTrue(helper.contains("case 0 -> \"examplemod:aerwhale\";"))
         assertTrue(helper.contains("case 1 -> 4;"))
         assertTrue(helper.contains("case 2 -> false;"))
         assertTrue(helper.contains("case 3 -> false;"))
@@ -17405,6 +17718,41 @@ class StructuralRefactorExtraTest {
         assertFalse(dart.contains("getKnockback()"), dart)
         assertFalse(dart.contains("doPostHurtEffects"), dart)
         assertFalse(dart.contains("doPostDamageEffects"), dart)
+    }
+
+    @Test
+    fun `migrates legacy player attack mixin post hurt injection target`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/mixin")
+        srcDir.createDirectories()
+        srcDir.resolve("PlayerMixin.java").writeText("""
+            package com.example.mixin;
+
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.player.Player;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.injection.At;
+            import org.spongepowered.asm.mixin.injection.Inject;
+            import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+            @Mixin(Player.class)
+            public class PlayerMixin {
+                @Inject(at = @At(value = "INVOKE", target = "Lnet/minecraft/world/item/enchantment/EnchantmentHelper;doPostHurtEffects(Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/entity/Entity;)V", shift = At.Shift.AFTER), method = "attack(Lnet/minecraft/world/entity/Entity;)V")
+                private void attack(Entity target, CallbackInfo ci) {
+                    Player player = (Player) (Object) this;
+                    Hooks.damageGloves(player);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val mixin = srcDir.resolve("PlayerMixin.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(mixin.contains("import net.minecraft.world.entity.LivingEntity;"), mixin)
+        assertTrue(mixin.contains("target = \"Lnet/minecraft/world/entity/player/Player;setLastHurtMob(Lnet/minecraft/world/entity/Entity;)V\""), mixin)
+        assertTrue(mixin.contains("if (target instanceof LivingEntity) {"), mixin)
+        assertTrue(mixin.contains("Hooks.damageGloves(player);"), mixin)
+        assertFalse(mixin.contains("EnchantmentHelper;doPostHurtEffects"), mixin)
     }
 
     @Test
@@ -19953,6 +20301,7 @@ class StructuralRefactorExtraTest {
         assertTrue(grass.contains("GrassColorModifier.valueOf(\"EXAMPLEMOD_MAGIC\")"))
         assertTrue(grass.contains("GrassColorModifier.valueOf(\"EXAMPLEMOD_SWAMPY\")"))
         assertTrue(!grass.contains("GrassColorModifier.create"))
+        assertFalse(enumHelper.contains("type.cast("), enumHelper)
         assertTrue(enumHelper.contains("case 0 -> \"examplemod:magic\""))
         assertTrue(enumHelper.contains("case 1 -> (GrassColorModifier.ColorModifier) ((x, z, color) -> {"))
         assertTrue(enumHelper.contains("BiomeGrassColors.helper((int) x, color)"))
@@ -22238,12 +22587,21 @@ class StructuralRefactorExtraTest {
         assertTrue(ageProcessor.contains("import com.mojang.serialization.Codec;"), ageProcessor)
         assertFalse(ageProcessor.contains(".codec();"), ageProcessor)
         assertTrue(placement.contains("import com.mojang.serialization.MapCodec;"), placement)
-        assertTrue(placement.contains("PlacementModifierType<P> register(ResourceLocation name, MapCodec<P> codec)"), placement)
+        assertTrue(placement.contains("import net.neoforged.neoforge.registries.DeferredHolder;"), placement)
+        assertTrue(placement.contains("import net.neoforged.neoforge.registries.DeferredRegister;"), placement)
+        assertTrue(placement.contains("DeferredRegister.create(Registries.PLACEMENT_MODIFIER_TYPE, \"example\")"), placement)
+        assertTrue(placement.contains("DeferredHolder<PlacementModifierType<?>, PlacementModifierType<ConfigFilter>> CONFIG = register(\"config\", ConfigFilter.CODEC);"), placement)
+        assertTrue(placement.contains("DeferredHolder<PlacementModifierType<?>, PlacementModifierType<P>> register(String name, MapCodec<P> codec)"), placement)
+        assertTrue(placement.contains("return PLACEMENT_MODIFIER_TYPES.register(name, () -> () -> codec);"), placement)
+        assertFalse(placement.contains("Registry.register(BuiltInRegistries.PLACEMENT_MODIFIER_TYPE"), placement)
+        assertFalse(placement.contains("import net.minecraft.core.Registry;"), placement)
+        assertFalse(placement.contains("import net.minecraft.core.registries.BuiltInRegistries;"), placement)
         assertFalse(Regex("""(?<!Map)\bCodec\s*<\s*P\s*>\s+codec""").containsMatchIn(placement), placement)
         assertFalse(placement.contains("import com.mojang.serialization.Codec;"), placement)
         assertTrue(configFilter.contains("import com.mojang.serialization.MapCodec;"), configFilter)
         assertTrue(configFilter.contains("public static final MapCodec<ConfigFilter> CODEC = Codec.STRING.comapFlatMap(ConfigFilter::buildDeserialization, filter -> ConfigCodecUtil.serialize(filter.config)).fieldOf(\"config\");"), configFilter)
         assertTrue(configFilter.contains("import com.mojang.serialization.Codec;"), configFilter)
+        assertTrue(configFilter.contains("return PlacementRegistry.CONFIG.get();"), configFilter)
         assertTrue(treeDecorator.contains("import com.mojang.serialization.MapCodec;"), treeDecorator)
         assertTrue(treeDecorator.contains("public static final MapCodec<HolidayTreeDecorator> CODEC = BlockStateProvider.CODEC.fieldOf(\"provider\").xmap(HolidayTreeDecorator::new, value -> value.provider);"), treeDecorator)
         assertFalse(treeDecorator.contains("import com.mojang.serialization.Codec;"), treeDecorator)

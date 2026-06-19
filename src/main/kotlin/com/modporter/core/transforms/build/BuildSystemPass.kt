@@ -4,6 +4,7 @@ import com.modporter.core.pipeline.*
 import mu.KotlinLogging
 import java.nio.file.Path
 import kotlin.io.path.*
+import kotlin.streams.toList
 
 private val logger = KotlinLogging.logger {}
 
@@ -25,6 +26,8 @@ class BuildSystemPass(
 ) : Pass {
     override val name = "Build System"
     override val order = 4
+
+    private val targetNeoForgeVersion = "21.1.230"
 
     override fun analyze(projectDir: Path): PassResult = processBuildFiles(projectDir, dryRun = true)
     override fun apply(projectDir: Path): PassResult = processBuildFiles(projectDir, dryRun = false)
@@ -286,6 +289,12 @@ class BuildSystemPass(
             changes.addAll(migrateCoremodScripts(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Failed to migrate coremod scripts: ${e.message}")
+        }
+
+        try {
+            changes.addAll(registerExistingMixinConfigs(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to register existing mixin configs: ${e.message}")
         }
 
         try {
@@ -2636,6 +2645,40 @@ public interface $invokerName {
         return "$modId.modporter.mixins.json"
     }
 
+    private fun registerExistingMixinConfigs(projectDir: Path, dryRun: Boolean): List<Change> {
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        if (!resourcesDir.exists()) return emptyList()
+
+        val configNames = java.nio.file.Files.walk(resourcesDir).use { paths ->
+            paths
+                .filter { it.isRegularFile() && it.fileName.toString().endsWith(".mixins.json") }
+                .map { mixinConfig ->
+                    val source = mixinConfig.readText()
+                    val isConfig = Regex(""""package"\s*:\s*"[^"]+"""").containsMatchIn(source) &&
+                        Regex(""""(?:mixins|client|server)"\s*:\s*\[""").containsMatchIn(source)
+                    if (!isConfig) {
+                        null
+                    } else {
+                        resourcesDir.relativize(mixinConfig).joinToString("/")
+                    }
+                }
+                .filter { it != null }
+                .map { it!! }
+                .distinct()
+                .sorted()
+                .toList()
+        }
+        if (configNames.isEmpty()) return emptyList()
+
+        return ensureNeoForgeModsTomlMixinEntries(
+            projectDir = projectDir,
+            configNames = configNames,
+            dryRun = dryRun,
+            description = "Register existing mixin config in NeoForge mods metadata",
+            ruleId = "build-register-existing-mixin-config"
+        )
+    }
+
     private fun readFirstModId(projectDir: Path): String? {
         fun concreteModId(raw: String?): String? {
             val value = raw?.trim()?.trim('"') ?: return null
@@ -2673,30 +2716,54 @@ public interface $invokerName {
     }
 
     private fun ensureNeoForgeModsTomlMixinEntry(projectDir: Path, configName: String, dryRun: Boolean): List<Change> {
+        return ensureNeoForgeModsTomlMixinEntries(
+            projectDir = projectDir,
+            configNames = listOf(configName),
+            dryRun = dryRun,
+            description = "Register generated mixin config in NeoForge mods metadata",
+            ruleId = "build-register-generated-mixin-config"
+        )
+    }
+
+    private fun ensureNeoForgeModsTomlMixinEntries(
+        projectDir: Path,
+        configNames: List<String>,
+        dryRun: Boolean,
+        description: String,
+        ruleId: String
+    ): List<Change> {
         val modsToml = listOf(
             projectDir.resolve("src/main/resources/META-INF/neoforge.mods.toml"),
             projectDir.resolve("src/main/resources/META-INF/mods.toml")
         ).firstOrNull { it.exists() } ?: return emptyList()
         val original = modsToml.readText()
-        if (Regex("""(?m)^\s*config\s*=\s*"${Regex.escape(configName)}"""").containsMatchIn(original)) {
+        val missing = configNames
+            .distinct()
+            .filterNot { configName ->
+                Regex("""(?m)^\s*config\s*=\s*["']${Regex.escape(configName)}["']""").containsMatchIn(original)
+            }
+        if (missing.isEmpty()) {
             return emptyList()
         }
-        val entry = """
-
+        val entries = missing.joinToString(System.lineSeparator() + System.lineSeparator()) { configName ->
+            """
 [[mixins]]
 config="$configName"
-""".trimEnd() + System.lineSeparator()
-        val modified = original.trimEnd() + System.lineSeparator() + entry
+""".trimIndent()
+        } + System.lineSeparator()
+        val modified = original.trimEnd() + System.lineSeparator() + System.lineSeparator() + entries
         if (!dryRun) modsToml.writeText(modified)
-        return listOf(Change(
-            file = modsToml,
-            line = 1,
-            description = "Register generated mixin config in NeoForge mods metadata",
-            before = "neoforge.mods.toml without [[mixins]] $configName",
-            after = "[[mixins]] config=\"$configName\"",
-            confidence = Confidence.HIGH,
-            ruleId = "build-register-generated-mixin-config"
-        ))
+        return missing.map { configName ->
+            Change(
+                file = modsToml,
+                line = original.lines().size,
+                description = description,
+                before = "neoforge.mods.toml without [[mixins]] $configName",
+                after = "[[mixins]] config=\"$configName\"",
+                confidence = Confidence.HIGH,
+                ruleId = ruleId
+            )
+        }
     }
 
     private fun cleanupSplitTickPhaseChecks(projectDir: Path, dryRun: Boolean): List<Change> {
@@ -3490,18 +3557,8 @@ $body
             for (registryName in registries.distinct()) {
                 if (modified.contains("$registryName::registerSpawnPlacements")) continue
                 for (eventBusName in eventBusNames) {
-                    val escapedBusName = Regex.escape(eventBusName)
                     val listenerLine = "$eventBusName.addListener($registryName::registerSpawnPlacements);"
-                    val inserted = insertModBusListenerAfter(
-                        modified,
-                        listenerLine,
-                        listOf(
-                            Regex("""(?m)^([ \t]*)$escapedBusName\.addListener\(${Regex.escape(registryName)}::(?:registerAttributes|addEntityAttributes)\);\s*$"""),
-                            Regex("""(?m)^([ \t]*)$escapedBusName\.addListener\([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*::(?:registerAttributes|addEntityAttributes)\);\s*$"""),
-                            Regex("""(?m)^([ \t]*)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.(?:ENTITY_TYPES|ENTITIES)\.register\($escapedBusName\);\s*$"""),
-                            Regex("""(?m)^([ \t]*)IEventBus\s+$escapedBusName\s*=\s*[^;]+;\s*$""")
-                        )
-                    )
+                    val inserted = insertModBusLineAfterBusDeclaration(modified, eventBusName, listenerLine)
                     if (inserted != null) {
                         modified = inserted
                         break
@@ -3557,16 +3614,6 @@ $body
         return if (packageName.isNullOrBlank()) className else "$packageName.$className"
     }
 
-    private fun insertModBusListenerAfter(content: String, listenerLine: String, anchors: List<Regex>): String? {
-        for (anchor in anchors) {
-            val match = anchor.find(content) ?: continue
-            val indent = match.groupValues.getOrNull(1).orEmpty()
-            val insertion = "${match.value}\n$indent$listenerLine"
-            return content.replaceRange(match.range, insertion)
-        }
-        return null
-    }
-
     private fun transformGradleProperties(
         file: Path, dryRun: Boolean
     ): Pair<List<Change>, List<String>> {
@@ -3586,27 +3633,29 @@ $body
         )) {
             if (pattern.containsMatchIn(content)) {
                 val match = pattern.find(content)!!
+                val replacement = "neo_forge_version=$targetNeoForgeVersion"
                 changes.add(Change(
                     file = file, line = content.lineNumberAt(match.range.first),
-                    description = "Replace forge/neoforge version with neo_forge_version=21.1.219",
+                    description = "Replace forge/neoforge version with $replacement",
                     before = match.value,
-                    after = "neo_forge_version=21.1.219",
+                    after = replacement,
                     confidence = Confidence.HIGH,
                     ruleId = "build-props-version"
                 ))
-                content = content.replace(match.value, "neo_forge_version=21.1.219")
+                content = content.replace(match.value, replacement)
                 foundForgeVersion = true
                 break  // Only replace first match
             }
         }
         // Ensure neo_forge_version exists even if no forge version property was found
         if (!foundForgeVersion && !Regex("""(?m)^neo_forge_version\s*=""").containsMatchIn(content)) {
-            content += "\n# Added by modporter\nneo_forge_version=21.1.219\n"
+            val replacement = "neo_forge_version=$targetNeoForgeVersion"
+            content += "\n# Added by modporter\n$replacement\n"
             changes.add(Change(
                 file = file, line = content.lines().size,
                 description = "Add neo_forge_version property (required by neoForge block)",
                 before = "(missing)",
-                after = "neo_forge_version=21.1.219",
+                after = replacement,
                 confidence = Confidence.HIGH,
                 ruleId = "build-props-version-add"
             ))
@@ -5763,17 +5812,9 @@ public abstract class ModPorterAbstractTreeGrower extends TreeGrower {
                         modified = ensureJavaImport(modified, "${material.packageName}.${material.enumName}")
                     }
                     val lines = modified.lines().toMutableList()
-                    val firstRegisterIdx = lines.indexOfFirst { Regex("""\.register\(\s*${Regex.escape(busName)}\s*\)""").containsMatchIn(it) }
-                    val addListenerIdx = lines.indexOfFirst { it.contains("$busName.addListener") }
-                    val eventBusIdx = lines.indexOfFirst { Regex("""\bIEventBus\s+${Regex.escape(busName)}\b""").containsMatchIn(it) }
-                    val insertIdx = when {
-                        firstRegisterIdx >= 0 -> firstRegisterIdx
-                        eventBusIdx >= 0 -> eventBusIdx + 1
-                        addListenerIdx >= 0 -> addListenerIdx + 1
-                        else -> -1
-                    }
+                    val insertIdx = modBusDeclarationInsertIndex(lines, busName)
                     if (insertIdx >= 0) {
-                        val indent = lines.getOrNull(insertIdx - 1)?.takeWhile { it.isWhitespace() } ?: "        "
+                        val indent = modBusDeclarationInsertionIndent(lines, insertIdx)
                         lines.add(insertIdx, "$indent$registration")
                         modified = lines.joinToString("\n")
                     }
@@ -5795,6 +5836,33 @@ public abstract class ModPorterAbstractTreeGrower extends TreeGrower {
                 }
             }
         return changes
+    }
+
+    private fun insertModBusLineAfterBusDeclaration(content: String, busName: String, line: String): String? {
+        val lines = content.lines().toMutableList()
+        val insertIdx = modBusDeclarationInsertIndex(lines, busName)
+        if (insertIdx < 0) return null
+        val indent = modBusDeclarationInsertionIndent(lines, insertIdx)
+        lines.add(insertIdx, "$indent$line")
+        return lines.joinToString("\n")
+    }
+
+    private fun modBusDeclarationInsertIndex(lines: List<String>, busName: String): Int {
+        val eventBusIdx = lines.indexOfFirst {
+            Regex("""\bIEventBus\s+${Regex.escape(busName)}\b""").containsMatchIn(it)
+        }
+        if (eventBusIdx < 0) return -1
+        var idx = eventBusIdx
+        while (idx < lines.size && !lines[idx].contains("{") && !lines[idx].contains(";")) {
+            idx++
+        }
+        return if (idx < lines.size) idx + 1 else -1
+    }
+
+    private fun modBusDeclarationInsertionIndent(lines: List<String>, insertIdx: Int): String {
+        val anchor = lines.getOrNull(insertIdx - 1) ?: return "        "
+        val base = anchor.takeWhile { it.isWhitespace() }
+        return if (anchor.trimEnd().endsWith("{")) base + "    " else base
     }
 
     private fun rewriteLegacyTreeGrowers(projectDir: Path, dryRun: Boolean): List<Change> {
