@@ -9437,6 +9437,651 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates placement ban recipes to idless codec backed structure`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val metaInf = tempDir.resolve("src/main/resources/META-INF")
+        metaInf.createDirectories()
+        metaInf.resolve("neoforge.mods.toml").writeText("""
+            modLoader="javafml"
+            [[mods]]
+            modId="example_mod"
+        """.trimIndent())
+        srcDir.resolve("AbstractPlacementBanRecipe.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.biome.Biome;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            import javax.annotation.Nullable;
+            import java.util.function.Predicate;
+
+            public abstract class AbstractPlacementBanRecipe<T, S extends Predicate<T>> implements Recipe<Container> {
+                protected final RecipeType<?> type;
+                protected final ResourceLocation id;
+                @Nullable
+                private final ResourceKey<Biome> biomeKey;
+                @Nullable
+                private final TagKey<Biome> biomeTag;
+                protected final BlockStateIngredient bypassBlock;
+                protected final S ingredient;
+
+                public AbstractPlacementBanRecipe(RecipeType<?> type, ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient bypassBlock, S ingredient) {
+                    this.type = type;
+                    this.id = id;
+                    this.biomeKey = biomeKey;
+                    this.biomeTag = biomeTag;
+                    this.bypassBlock = bypassBlock;
+                    this.ingredient = ingredient;
+                }
+
+                public boolean matches(Level level, BlockPos pos, T object) {
+                    if (this.bypassBlock.isEmpty() || !this.bypassBlock.test(level.getBlockState(pos))) {
+                        if (this.biomeKey != null) {
+                            return this.getIngredient().test(object) && level.getBiome(pos).is(this.biomeKey);
+                        } else if (this.biomeTag != null) {
+                            return this.getIngredient().test(object) && level.getBiome(pos).is(this.biomeTag);
+                        } else {
+                            return this.getIngredient().test(object);
+                        }
+                    }
+                    return false;
+                }
+
+                @Nullable
+                public ResourceKey<Biome> getBiomeKey() { return this.biomeKey; }
+                @Nullable
+                public TagKey<Biome> getBiomeTag() { return this.biomeTag; }
+                public BlockStateIngredient getBypassBlock() { return this.bypassBlock; }
+                public S getIngredient() { return this.ingredient; }
+                public RecipeType<?> getType() { return this.type; }
+                public ResourceLocation getId() { return this.id; }
+                public boolean matches(Container container, Level level) { return false; }
+                public boolean canCraftInDimensions(int width, int height) { return false; }
+                public ItemStack assemble(Container container, RegistryAccess registryAccess) { return ItemStack.EMPTY; }
+                public ItemStack getResultItem(RegistryAccess registryAccess) { return ItemStack.EMPTY; }
+            }
+        """.trimIndent())
+        srcDir.resolve("PlacementBanRecipeSerializer.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.aetherteam.nitrogen.recipe.BlockStateRecipeUtil;
+            import com.google.gson.JsonObject;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.level.biome.Biome;
+            import java.util.function.Predicate;
+            import javax.annotation.Nullable;
+
+            public class PlacementBanRecipeSerializer<T, S extends Predicate<T>, F extends AbstractPlacementBanRecipe<T, S>> implements RecipeSerializer<F> {
+                private final PlacementBanRecipeSerializer.CookieBaker<T, S, F> factory;
+                public PlacementBanRecipeSerializer(PlacementBanRecipeSerializer.CookieBaker<T, S, F> factory) { this.factory = factory; }
+                public F fromJson(ResourceLocation id, JsonObject json) { return this.factory.create(id, null, null, BlockStateIngredient.EMPTY); }
+                public F fromNetwork(ResourceLocation id, FriendlyByteBuf buffer) {
+                    ResourceKey<Biome> biomeKey = BlockStateRecipeUtil.readBiomeKey(buffer);
+                    TagKey<Biome> biomeTag = BlockStateRecipeUtil.readBiomeTag(buffer);
+                    BlockStateIngredient bypassBlock = BlockStateIngredient.fromNetwork(buffer);
+                    return this.factory.create(id, biomeKey, biomeTag, bypassBlock);
+                }
+                public void toNetwork(FriendlyByteBuf buffer, F recipe) {
+                    BlockStateRecipeUtil.writeBiomeKey(buffer, recipe.getBiomeKey());
+                    BlockStateRecipeUtil.writeBiomeTag(buffer, recipe.getBiomeTag());
+                    recipe.getBypassBlock().toNetwork(buffer);
+                }
+                public interface CookieBaker<T, S extends Predicate<T>, F extends AbstractPlacementBanRecipe<T, S>> {
+                    F create(ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient bypassBlock);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ItemBanRecipe.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.aetherteam.nitrogen.recipe.BlockStateRecipeUtil;
+            import com.google.gson.JsonElement;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSyntaxException;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.level.biome.Biome;
+            import javax.annotation.Nullable;
+
+            public class ItemBanRecipe extends AbstractPlacementBanRecipe<ItemStack, Ingredient> {
+                public ItemBanRecipe(ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient bypassBlock, Ingredient ingredient) {
+                    super(ExampleRecipeTypes.ITEM.get(), id, biomeKey, biomeTag, bypassBlock, ingredient);
+                }
+                public ItemBanRecipe(ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient bypassBlock) {
+                    this(id, biomeKey, biomeTag, bypassBlock, Ingredient.EMPTY);
+                }
+                public static class Serializer extends PlacementBanRecipeSerializer<ItemStack, Ingredient, ItemBanRecipe> {
+                    public Serializer() { super(ItemBanRecipe::new); }
+                    public ItemBanRecipe fromJson(ResourceLocation id, JsonObject json) {
+                        ItemBanRecipe recipe = super.fromJson(id, json);
+                        JsonElement jsonElement = GsonHelper.getAsJsonObject(json, "ingredient");
+                        Ingredient ingredient = Ingredient.fromJson(jsonElement);
+                        return new ItemBanRecipe(id, recipe.getBiomeKey(), recipe.getBiomeTag(), recipe.getBypassBlock(), ingredient);
+                    }
+                    public ItemBanRecipe fromNetwork(ResourceLocation id, FriendlyByteBuf buffer) {
+                        ResourceKey<Biome> biomeKey = BlockStateRecipeUtil.readBiomeKey(buffer);
+                        TagKey<Biome> biomeTag = BlockStateRecipeUtil.readBiomeTag(buffer);
+                        BlockStateIngredient bypassBlock = BlockStateIngredient.fromNetwork(buffer);
+                        Ingredient ingredient = Ingredient.fromNetwork(buffer);
+                        return new ItemBanRecipe(id, biomeKey, biomeTag, bypassBlock, ingredient);
+                    }
+                    public void toNetwork(FriendlyByteBuf buffer, ItemBanRecipe recipe) {
+                        super.toNetwork(buffer, recipe);
+                        recipe.getIngredient().toNetwork(buffer);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BlockBanRecipe.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.biome.Biome;
+            import net.minecraft.world.level.block.state.BlockState;
+            import javax.annotation.Nullable;
+
+            public class BlockBanRecipe extends AbstractPlacementBanRecipe<BlockState, BlockStateIngredient> {
+                public BlockBanRecipe(ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient bypassBlock, BlockStateIngredient ingredient) {
+                    super(ExampleRecipeTypes.BLOCK.get(), id, biomeKey, biomeTag, bypassBlock, ingredient);
+                }
+                public BlockBanRecipe(ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient bypassBlock) {
+                    this(id, biomeKey, biomeTag, bypassBlock, BlockStateIngredient.EMPTY);
+                }
+                public static class Serializer extends PlacementBanRecipeSerializer<BlockState, BlockStateIngredient, BlockBanRecipe> {
+                    public Serializer() { super(BlockBanRecipe::new); }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("PlacementBanRecipeDisplay.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.rei.REIUtils;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import me.shedaniel.rei.api.common.category.CategoryIdentifier;
+            import me.shedaniel.rei.api.common.display.basic.BasicDisplay;
+            import me.shedaniel.rei.api.common.entry.EntryIngredient;
+            import me.shedaniel.rei.api.common.util.EntryIngredients;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.biome.Biome;
+            import java.util.ArrayList;
+            import java.util.List;
+            import java.util.Optional;
+
+            public class PlacementBanRecipeDisplay<R extends AbstractPlacementBanRecipe<?, ?>> extends BasicDisplay {
+                private final CategoryIdentifier<?> categoryIdentifier;
+                private final BlockStateIngredient bypassBlock;
+                private final Optional<ResourceKey<Biome>> biomeKey;
+                private final Optional<TagKey<Biome>> biomeTag;
+                private final Optional<BlockStateIngredient> blockStateIngredient;
+
+                protected PlacementBanRecipeDisplay(CategoryIdentifier<? extends PlacementBanRecipeDisplay<R>> categoryIdentifier, List<EntryIngredient> inputs, BlockStateIngredient bypassBlock, Optional<ResourceKey<Biome>> biomeKey, Optional<TagKey<Biome>> biomeTag, Optional<BlockStateIngredient> blockStateIngredient, Optional<ResourceLocation> location) {
+                    super(inputs, List.of(), location);
+                    this.bypassBlock = bypassBlock;
+                    this.biomeKey = biomeKey;
+                    this.biomeTag = biomeTag;
+                    this.blockStateIngredient = blockStateIngredient;
+                    this.categoryIdentifier = categoryIdentifier;
+                }
+
+                protected PlacementBanRecipeDisplay(R recipe, CategoryIdentifier<? extends PlacementBanRecipeDisplay<R>> categoryIdentifier, List<EntryIngredient> inputs) {
+                    this(categoryIdentifier,
+                            inputs,
+                            recipe.getBypassBlock(),
+                            Optional.ofNullable(recipe.getBiomeKey()),
+                            Optional.ofNullable(recipe.getBiomeTag()),
+                            Optional.ofNullable((recipe.getIngredient() instanceof BlockStateIngredient ingredient) ? ingredient : null),
+                            Optional.of(recipe.getId()));
+                }
+
+                public static PlacementBanRecipeDisplay<ItemBanRecipe> ofItem(ItemBanRecipe recipe) {
+                    var list = new ArrayList<>(REIUtils.toIngredientList(recipe.getBypassBlock().getPairs()));
+                    list.add(EntryIngredients.ofIngredient(recipe.getIngredient()));
+                    return new PlacementBanRecipeDisplay<>(recipe, null, list);
+                }
+
+                public BlockStateIngredient getBypassBlock() { return this.bypassBlock; }
+                public ResourceKey<Biome> getBiomeKey() { return this.biomeKey.orElse(null); }
+                public TagKey<Biome> getBiomeTag() { return this.biomeTag.orElse(null); }
+            }
+        """.trimIndent())
+        srcDir.resolve("AbstractPlacementBanRecipeCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.jei.BlockStateRenderer;
+            import com.aetherteam.nitrogen.integration.jei.FluidStateRenderer;
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import mezz.jei.api.constants.VanillaTypes;
+            import mezz.jei.api.gui.builder.IRecipeLayoutBuilder;
+            import mezz.jei.api.helpers.IPlatformFluidHelper;
+            import mezz.jei.api.recipe.IFocusGroup;
+            import mezz.jei.api.recipe.RecipeIngredientRole;
+            import mezz.jei.common.platform.Services;
+            import java.util.List;
+            import java.util.function.Predicate;
+
+            public abstract class AbstractPlacementBanRecipeCategory<T, S extends Predicate<T>, R extends AbstractPlacementBanRecipe<T, S>> {
+                public void setRecipe(IRecipeLayoutBuilder builder, R recipe, IFocusGroup focusGroup) {
+                    BlockStateIngredient bypassBlockIngredient = recipe.getBypassBlock();
+                    BlockPropertyPair[] pairs = bypassBlockIngredient.getPairs();
+                    if (pairs != null) {
+                        List<Object> ingredients = this.setupIngredients(pairs);
+                        builder.addSlot(RecipeIngredientRole.INPUT, 99, 1).addIngredientsUnsafe(ingredients)
+                                .setCustomRenderer(Services.PLATFORM.getFluidHelper().getFluidIngredientType(), new FluidStateRenderer(Services.PLATFORM.getFluidHelper()))
+                                .setCustomRenderer(VanillaTypes.ITEM_STACK, new BlockStateRenderer(pairs));
+                    }
+                }
+
+                protected abstract List<Object> setupIngredients(BlockPropertyPair[] pairs);
+                protected void populateAdditionalInformation(R recipe, List<Object> tooltip) {
+                    this.populateBiomeInformation(recipe.getBiomeKey(), recipe.getBiomeTag(), tooltip);
+                }
+                protected abstract void populateBiomeInformation(Object left, Object right, List<Object> tooltip);
+            }
+        """.trimIndent())
+        srcDir.resolve("ReiPlacementBanRecipeCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.rei.REIClientUtils;
+            import me.shedaniel.math.Rectangle;
+            import me.shedaniel.rei.api.client.gui.widgets.Tooltip;
+            import me.shedaniel.rei.api.client.gui.widgets.Widget;
+            import java.util.List;
+            import java.util.function.Predicate;
+
+            public abstract class ReiPlacementBanRecipeCategory<T, S extends Predicate<T>, R extends AbstractPlacementBanRecipe<T, S>> {
+                public List<Widget> setupDisplay(PlacementBanRecipeDisplay<R> display, Rectangle bounds) {
+                    List<Widget> widgets = List.of();
+                    var bypassBlock = display.getBypassBlock();
+                    if (bypassBlock != null && !bypassBlock.isEmpty()) {
+                        REIClientUtils.setupRendering(display.getInputEntries().get(0), bypassBlock.getPairs(), (tooltip) -> this.populateTooltip(display, tooltip));
+                    }
+                    return widgets;
+                }
+                protected void populateTooltip(PlacementBanRecipeDisplay<R> display, Tooltip tooltip) {
+                    this.populateBiomeInformation(display.getBiomeKey(), display.getBiomeTag(), tooltip);
+                }
+                protected abstract void populateBiomeInformation(Object left, Object right, Tooltip tooltip);
+            }
+        """.trimIndent())
+        srcDir.resolve("ItemBanRecipeCategory.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Ingredient;
+
+            public class ItemBanRecipeCategory extends AbstractPlacementBanRecipeCategory<ItemStack, Ingredient, ItemBanRecipe> {
+            }
+        """.trimIndent())
+        srcDir.resolve("BlockBanRecipeCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class BlockBanRecipeCategory extends AbstractPlacementBanRecipeCategory<BlockState, BlockStateIngredient, BlockBanRecipe> {
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleRecipeSerializers.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleRecipeSerializers {
+                public static final DeferredHolder<PlacementBanRecipeSerializer<ItemStack, Ingredient, ItemBanRecipe>, PlacementBanRecipeSerializer<ItemStack, Ingredient, ItemBanRecipe>> ITEM_PLACEMENT_BAN = null;
+                public static final DeferredHolder<PlacementBanRecipeSerializer<BlockState, BlockStateIngredient, BlockBanRecipe>, PlacementBanRecipeSerializer<BlockState, BlockStateIngredient, BlockBanRecipe>> BLOCK_PLACEMENT_BAN = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("PlacementBanBuilder.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.google.gson.JsonObject;
+            import net.minecraft.data.recipes.RecipeBuilder;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.level.biome.Biome;
+            import javax.annotation.Nullable;
+
+            public abstract class PlacementBanBuilder implements RecipeBuilder {
+                private final BlockStateIngredient bypassBlock;
+                @Nullable
+                private final ResourceKey<Biome> biomeKey;
+                @Nullable
+                private final TagKey<Biome> biomeTag;
+                private final RecipeSerializer<?> serializer;
+                public PlacementBanBuilder(BlockStateIngredient bypassBlock, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, RecipeSerializer<?> serializer) {
+                    this.bypassBlock = bypassBlock;
+                    this.biomeKey = biomeKey;
+                    this.biomeTag = biomeTag;
+                    this.serializer = serializer;
+                }
+                public RecipeBuilder group(@Nullable String group) { return this; }
+                public BlockStateIngredient getBypassBlock() { return this.bypassBlock; }
+                public ResourceKey<Biome> getBiomeKey() { return this.biomeKey; }
+                public TagKey<Biome> getBiomeTag() { return this.biomeTag; }
+                public RecipeSerializer<?> getSerializer() { return this.serializer; }
+                public Item getResult() { return Items.AIR; }
+                public RecipeBuilder unlockedBy(String name, net.minecraft.advancements.Criterion<?> criterion) { return this; }
+                public static class Result implements RecipeOutput {
+                    public Result(ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient bypassBlock, RecipeSerializer<?> serializer) {}
+                    public void serializeRecipeData(JsonObject json) {}
+                    public RecipeSerializer<?> getType() { return null; }
+                    public ResourceLocation getId() { return null; }
+                    public JsonObject serializeAdvancement() { return null; }
+                    public ResourceLocation getAdvancementId() { return null; }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ItemBanBuilder.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.level.biome.Biome;
+            import javax.annotation.Nullable;
+
+            public class ItemBanBuilder extends PlacementBanBuilder {
+                private final Ingredient ingredient;
+                public ItemBanBuilder(Ingredient ingredient, @Nullable BlockStateIngredient bypassBlock, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, PlacementBanRecipeSerializer<ItemStack, Ingredient, ItemBanRecipe> serializer) {
+                    super(bypassBlock, biomeKey, biomeTag, serializer);
+                    this.ingredient = ingredient;
+                }
+                public void save(RecipeOutput output, ResourceLocation id) {
+                    output.accept(new ItemBanBuilder.Result(id, this.getBiomeKey(), this.getBiomeTag(), this.getBypassBlock(), this.ingredient, this.getSerializer()));
+                }
+                public static class Result extends PlacementBanBuilder.Result {
+                    public Result(ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient bypassBlock, Ingredient ingredient, net.minecraft.world.item.crafting.RecipeSerializer<?> serializer) {
+                        super(id, biomeKey, biomeTag, bypassBlock, serializer);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BlockBanBuilder.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.biome.Biome;
+            import net.minecraft.world.level.block.state.BlockState;
+            import javax.annotation.Nullable;
+
+            public class BlockBanBuilder extends PlacementBanBuilder {
+                private final BlockStateIngredient ingredient;
+                public BlockBanBuilder(BlockStateIngredient ingredient, @Nullable BlockStateIngredient bypassBlock, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, PlacementBanRecipeSerializer<BlockState, BlockStateIngredient, BlockBanRecipe> serializer) {
+                    super(bypassBlock, biomeKey, biomeTag, serializer);
+                    this.ingredient = ingredient;
+                }
+                public void save(RecipeOutput output, ResourceLocation id) {
+                    output.accept(new BlockBanBuilder.Result(id, this.getBiomeKey(), this.getBiomeTag(), this.getBypassBlock(), this.ingredient, this.getSerializer()));
+                }
+                public static class Result extends PlacementBanBuilder.Result {
+                    public Result(ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient bypassBlock, BlockStateIngredient ingredient, net.minecraft.world.item.crafting.RecipeSerializer<?> serializer) {
+                        super(id, biomeKey, biomeTag, bypassBlock, serializer);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleRecipeProvider.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.mojang.datafixers.util.Either;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.level.biome.Biome;
+            import java.util.Optional;
+
+            public class ExampleRecipeProvider {
+                protected PlacementBanBuilder banItem(Ingredient ingredient, TagKey<Biome> biome) {
+                    return ItemBanBuilder.recipe(ingredient, BlockStateIngredient.EMPTY, biome, ExampleRecipeSerializers.ITEM_PLACEMENT_BAN.get());
+                }
+                protected PlacementBanBuilder banBlock(BlockStateIngredient ingredient, BlockStateIngredient bypass, ResourceKey<Biome> biome) {
+                    return BlockBanBuilder.recipe(ingredient, bypass, biome, ExampleRecipeSerializers.BLOCK_PLACEMENT_BAN.get());
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CookingRecipeDisplay.java").writeText("""
+            package com.example;
+
+            import me.shedaniel.rei.api.common.display.basic.BasicDisplay;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.crafting.Recipe;
+            import java.util.List;
+            import java.util.Optional;
+
+            public class CookingRecipeDisplay<T extends Recipe<?>> extends BasicDisplay {
+                public CookingRecipeDisplay(Optional<ResourceLocation> location) {
+                    super(List.of(), List.of(), location);
+                }
+                public static <T extends Recipe<?>> CookingRecipeDisplay<T> of(T recipe) {
+                    return new CookingRecipeDisplay<>(Optional.of(recipe.getId()));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BiomeTooltip.java").writeText("""
+            package com.example;
+
+            import me.shedaniel.rei.api.client.gui.widgets.Tooltip;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.biome.Biome;
+            import javax.annotation.Nullable;
+
+            public interface BiomeTooltip {
+                default void populateBiomeInformation(@Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, Tooltip tooltip) {
+                    if (biomeKey != null || biomeTag != null) {
+                        tooltip.add(net.minecraft.network.chat.Component.literal(biomeKey.location().toString()));
+                        tooltip.add(net.minecraft.network.chat.Component.literal("#" + biomeTag.location()));
+                        net.minecraft.client.Minecraft.getInstance().level.registryAccess().registryOrThrow(Registries.BIOME).getTagOrEmpty(biomeTag);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BiomeParameterRecipeCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.rei.displays.BlockStateRecipeDisplay;
+            import me.shedaniel.rei.api.client.gui.widgets.Tooltip;
+
+            public class BiomeParameterRecipeCategory<R extends AbstractBiomeParameterRecipe> {
+                protected void populateTooltip(BlockStateRecipeDisplay<R> display, Tooltip tooltip) {
+                    this.populateBiomeInformation(display.getRecipe().getBiomeKey(), display.getRecipe().getBiomeTag(), tooltip);
+                }
+                protected void populateBiomeInformation(Object left, Object right, Tooltip tooltip) {}
+            }
+        """.trimIndent())
+        srcDir.resolve("JeiBiomeParameterRecipeCategory.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.network.chat.Component;
+            import java.util.List;
+
+            public class JeiBiomeParameterRecipeCategory<T extends AbstractBiomeParameterRecipe> {
+                protected void populateAdditionalInformation(T recipe, List<Component> tooltip) {
+                    if (Minecraft.getInstance().level != null) {
+                        this.populateBiomeInformation(recipe.getBiomeKey(), recipe.getBiomeTag(), tooltip);
+                    }
+                }
+                protected void populateBiomeInformation(Object left, Object right, List<Component> tooltip) {}
+            }
+        """.trimIndent())
+        srcDir.resolve("SkyrootBucketItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.item.BucketItem;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.LiquidBlockContainer;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class SkyrootBucketItem extends BucketItem {
+                public void place(LiquidBlockContainer liquidBlockContainer, Level level, BlockPos pos, BlockState state) {
+                    if (liquidBlockContainer.canPlaceLiquid(null, level, pos, state, this.getFluid())) {
+                        liquidBlockContainer.placeLiquid(level, pos, state, this.getFluid().defaultFluidState());
+                    }
+                    this.getFluid().defaultFluidState();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SkyrootBucketWrapper.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.fluids.FluidStack;
+            import net.neoforged.neoforge.fluids.FluidType;
+
+            public class SkyrootBucketWrapper {
+                public FluidType wrap(FluidStack fluid) {
+                    boolean allowed = fluid.getFluid().is(ExampleTags.Fluids.ALLOWED_BUCKET_PICKUP);
+                    return fluid.getFluid().getFluidType();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LazyOptionalConsumer.java").writeText("""
+            package com.example;
+
+            public class LazyOptionalConsumer {
+                private LazyOptional<String> value;
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val abstractRecipe = srcDir.resolve("AbstractPlacementBanRecipe.java").readText()
+        val serializer = srcDir.resolve("PlacementBanRecipeSerializer.java").readText()
+        val itemRecipe = srcDir.resolve("ItemBanRecipe.java").readText()
+        val blockRecipe = srcDir.resolve("BlockBanRecipe.java").readText()
+        val display = srcDir.resolve("PlacementBanRecipeDisplay.java").readText()
+        val category = srcDir.resolve("AbstractPlacementBanRecipeCategory.java").readText()
+        val reiCategory = srcDir.resolve("ReiPlacementBanRecipeCategory.java").readText()
+        val itemCategory = srcDir.resolve("ItemBanRecipeCategory.java").readText()
+        val blockCategory = srcDir.resolve("BlockBanRecipeCategory.java").readText()
+        val serializers = srcDir.resolve("ExampleRecipeSerializers.java").readText()
+        val baseBuilder = srcDir.resolve("PlacementBanBuilder.java").readText()
+        val itemBuilder = srcDir.resolve("ItemBanBuilder.java").readText()
+        val blockBuilder = srcDir.resolve("BlockBanBuilder.java").readText()
+        val provider = srcDir.resolve("ExampleRecipeProvider.java").readText()
+        val cookingDisplay = srcDir.resolve("CookingRecipeDisplay.java").readText()
+        val reiBiomeTooltip = srcDir.resolve("BiomeTooltip.java").readText()
+        val biomeParameterCategory = srcDir.resolve("BiomeParameterRecipeCategory.java").readText()
+        val jeiBiomeParameterCategory = srcDir.resolve("JeiBiomeParameterRecipeCategory.java").readText()
+        val bucketItem = srcDir.resolve("SkyrootBucketItem.java").readText()
+        val bucketWrapper = srcDir.resolve("SkyrootBucketWrapper.java").readText()
+        val lazyOptionalConsumer = srcDir.resolve("LazyOptionalConsumer.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(abstractRecipe.contains("class AbstractPlacementBanRecipe<T, S extends Predicate<T>, R extends RecipeInput> implements Recipe<R>"), abstractRecipe)
+        assertTrue(abstractRecipe.contains("private final Either<ResourceKey<Biome>, TagKey<Biome>> biome;"), abstractRecipe)
+        assertTrue(abstractRecipe.contains("protected final Optional<BlockStateIngredient> bypassBlock;"), abstractRecipe)
+        assertTrue(abstractRecipe.contains("public Either<ResourceKey<Biome>, TagKey<Biome>> getBiome()"), abstractRecipe)
+        assertFalse(abstractRecipe.contains("ResourceLocation id"), abstractRecipe)
+        assertFalse(abstractRecipe.contains("getId()"), abstractRecipe)
+        assertTrue(serializer.contains("public abstract class PlacementBanRecipeSerializer<T, S extends Predicate<T>, R extends RecipeInput, F extends AbstractPlacementBanRecipe<T, S, R>> implements RecipeSerializer<F>"), serializer)
+        assertTrue(serializer.contains("extends Function3<Either<ResourceKey<Biome>, TagKey<Biome>>, Optional<BlockStateIngredient>, S, F>"), serializer)
+        assertTrue(serializer.contains("BlockStateRecipeUtil.STREAM_CODEC.encode(buffer, recipe.getBiome());"), serializer)
+        assertFalse(serializer.contains("fromJson(ResourceLocation"), serializer)
+        assertFalse(serializer.contains("readBiomeKey"), serializer)
+        assertTrue(itemRecipe.contains("class ItemBanRecipe extends AbstractPlacementBanRecipe<ItemStack, Ingredient, SingleRecipeInput>"), itemRecipe)
+        assertTrue(itemRecipe.contains("public ItemBanRecipe(Either<ResourceKey<Biome>, TagKey<Biome>> biome, Optional<BlockStateIngredient> bypassBlock, Ingredient ingredient)"), itemRecipe)
+        assertTrue(itemRecipe.contains("public MapCodec<ItemBanRecipe> codec()"), itemRecipe)
+        assertTrue(itemRecipe.contains("public StreamCodec<RegistryFriendlyByteBuf, ItemBanRecipe> streamCodec()"), itemRecipe)
+        assertTrue(itemRecipe.contains("Ingredient.CONTENTS_STREAM_CODEC.encode(buffer, recipe.getIngredient());"), itemRecipe)
+        assertFalse(itemRecipe.contains("fromJson(ResourceLocation"), itemRecipe)
+        assertFalse(itemRecipe.contains("readBiomeKey"), itemRecipe)
+        assertTrue(blockRecipe.contains("class BlockBanRecipe extends AbstractPlacementBanRecipe<BlockState, BlockStateIngredient, BlockStateRecipeInput>"), blockRecipe)
+        assertTrue(blockRecipe.contains("BlockStateIngredient.CODEC.fieldOf(\"ingredient\").forGetter(BlockBanRecipe::getIngredient)"), blockRecipe)
+        assertTrue(display.contains("R extends AbstractPlacementBanRecipe<?, ?, ?>"), display)
+        assertTrue(display.contains("this(categoryIdentifier,\n                inputs,\n                recipe.getBiome(),\n                recipe.getBypassBlock(),"), display)
+        assertTrue(display.contains("new ArrayList<>(recipe.getBypassBlock().map(blockStateIngredient -> REIUtils.toIngredientList(blockStateIngredient.getPairs())).orElse(List.of()))"), display)
+        assertFalse(display.contains("recipe.getId()"), display)
+        assertTrue(category.contains("F extends RecipeInput, R extends AbstractPlacementBanRecipe<T, S, F>"), category)
+        assertTrue(category.contains("Optional<BlockStateIngredient> bypassBlockIngredient = recipe.getBypassBlock();"), category)
+        assertTrue(category.contains("if (bypassBlockIngredient.isPresent() && !bypassBlockIngredient.get().isEmpty())"), category)
+        assertFalse(category.contains("BlockPropertyPair[] pairs = bypassBlockIngredient.getPairs();"), category)
+        assertTrue(reiCategory.contains("F extends RecipeInput, R extends AbstractPlacementBanRecipe<T, S, F>"), reiCategory)
+        assertTrue(reiCategory.contains("Optional<BlockStateIngredient> bypassBlock = display.getBypassBlock();"), reiCategory)
+        assertTrue(reiCategory.contains("bypassBlock.isPresent() && !bypassBlock.get().isEmpty()"), reiCategory)
+        assertTrue(reiCategory.contains("display.getInputEntries().get(1), bypassBlock.get().getPairs()"), reiCategory)
+        assertTrue(reiCategory.contains("this.populateBiomeInformation(display.getBiome().left(), display.getBiome().right(), tooltip);"), reiCategory)
+        assertTrue(itemCategory.contains("AbstractPlacementBanRecipeCategory<ItemStack, Ingredient, SingleRecipeInput, ItemBanRecipe>"), itemCategory)
+        assertTrue(blockCategory.contains("AbstractPlacementBanRecipeCategory<BlockState, BlockStateIngredient, BlockStateRecipeInput, BlockBanRecipe>"), blockCategory)
+        assertTrue(serializers.contains("DeferredHolder<RecipeSerializer<?>, PlacementBanRecipeSerializer<ItemStack, Ingredient, SingleRecipeInput, ItemBanRecipe>> ITEM_PLACEMENT_BAN"), serializers)
+        assertTrue(serializers.contains("DeferredHolder<RecipeSerializer<?>, PlacementBanRecipeSerializer<BlockState, BlockStateIngredient, BlockStateRecipeInput, BlockBanRecipe>> BLOCK_PLACEMENT_BAN"), serializers)
+        assertTrue(baseBuilder.contains("private final Optional<BlockStateIngredient> bypassBlock;"), baseBuilder)
+        assertTrue(baseBuilder.contains("private final Either<ResourceKey<Biome>, TagKey<Biome>> biome;"), baseBuilder)
+        assertFalse(baseBuilder.contains("class Result implements RecipeOutput"), baseBuilder)
+        assertTrue(itemBuilder.contains("public ItemBanBuilder(Ingredient ingredient, Optional<BlockStateIngredient> bypassBlock, Either<ResourceKey<Biome>, TagKey<Biome>> biome)"), itemBuilder)
+        assertTrue(itemBuilder.contains("output.accept(id, new ItemBanRecipe(this.getBiome(), this.getBypassBlock(), this.ingredient), null);"), itemBuilder)
+        assertTrue(blockBuilder.contains("output.accept(id, new BlockBanRecipe(this.getBiome(), this.getBypassBlock(), this.ingredient), null);"), blockBuilder)
+        assertTrue(provider.contains("ItemBanBuilder.recipe(ingredient, Optional.empty(), Either.right(biome))"), provider)
+        assertTrue(provider.contains("BlockBanBuilder.recipe(ingredient, Optional.of(bypass), Either.left(biome))"), provider)
+        assertTrue(cookingDisplay.contains("new CookingRecipeDisplay<>(Optional.empty())"), cookingDisplay)
+        assertFalse(cookingDisplay.contains("recipe.getId()"), cookingDisplay)
+        assertTrue(reiBiomeTooltip.contains("populateBiomeInformation(Optional<ResourceKey<Biome>> biomeKey, Optional<TagKey<Biome>> biomeTag, Tooltip tooltip)"), reiBiomeTooltip)
+        assertTrue(reiBiomeTooltip.contains("biomeKey.isPresent() || biomeTag.isPresent()"), reiBiomeTooltip)
+        assertTrue(reiBiomeTooltip.contains("biomeKey.get().location()"), reiBiomeTooltip)
+        assertTrue(reiBiomeTooltip.contains("getTagOrEmpty(biomeTag.get())"), reiBiomeTooltip)
+        assertTrue(biomeParameterCategory.contains("if (display.getRecipe().getBiome().isPresent())"), biomeParameterCategory)
+        assertTrue(biomeParameterCategory.contains("this.populateBiomeInformation(display.getRecipe().getBiome().get().left(), display.getRecipe().getBiome().get().right(), tooltip);"), biomeParameterCategory)
+        assertTrue(jeiBiomeParameterCategory.contains("Minecraft.getInstance().level != null && recipe.getBiome().isPresent()"), jeiBiomeParameterCategory)
+        assertTrue(jeiBiomeParameterCategory.contains("recipe.getBiome().get().left().orElse(null), recipe.getBiome().get().right().orElse(null)"), jeiBiomeParameterCategory)
+        assertTrue(bucketItem.contains("liquidBlockContainer.canPlaceLiquid(null, level, pos, state, this.content)"), bucketItem)
+        assertTrue(bucketItem.contains("liquidBlockContainer.placeLiquid(level, pos, state, this.content.defaultFluidState())"), bucketItem)
+        assertFalse(bucketItem.contains("this.getFluid()"), bucketItem)
+        assertTrue(bucketWrapper.contains("boolean allowed = fluid.is(ExampleTags.Fluids.ALLOWED_BUCKET_PICKUP);"), bucketWrapper)
+        assertTrue(bucketWrapper.contains("return fluid.getFluidType();"), bucketWrapper)
+        assertFalse(bucketWrapper.contains("fluid.getFluid().getFluidType()"), bucketWrapper)
+        assertTrue(lazyOptionalConsumer.contains("import com.modporter.generated.example_mod.compat.LazyOptional;"), lazyOptionalConsumer)
+    }
+
+    @Test
     fun `migrates nitrogen recipe builders from project source structure`() {
         val recipeDir = tempDir.resolve("src/main/java/com/example/recipe/recipes/block")
         val serializerDir = tempDir.resolve("src/main/java/com/example/recipe/serializer")
@@ -14091,6 +14736,7 @@ class StructuralRefactorExtraTest {
             import net.minecraft.core.BlockPos;
             import net.minecraft.resources.ResourceKey;
             import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.server.level.ServerPlayer;
             import net.minecraft.world.entity.Entity;
             import net.minecraft.world.level.Level;
 
@@ -14105,6 +14751,16 @@ class StructuralRefactorExtraTest {
 
                     entity.changeDimension(serverWorld, makeReturnPortal ? new DemoTeleporter(forcedEntry) : new NoReturnTeleporter());
                 }
+
+                public void sendPattern(EntityHolder holder, ServerLevel serverWorld) {
+                    if (holder.getEntity() instanceof ServerPlayer serverPlayer) {
+                        holder.getEntity().changeDimension(serverWorld, new DemoTeleporter(false));
+                    }
+                }
+            }
+
+            interface EntityHolder {
+                Entity getEntity();
             }
         """.trimIndent())
         srcDir.resolve("NoReturnTeleporter.java").writeText("""
@@ -14132,8 +14788,10 @@ class StructuralRefactorExtraTest {
         assertTrue(teleporter.contains("new DimensionTransition(level, pos, Vec3.ZERO, entity.getYRot(), entity.getXRot(), DimensionTransition.PLACE_PORTAL_TICKET)"))
         assertTrue(caller.contains("entity.canChangeDimensions(entity.level(), serverWorld)"), caller)
         assertTrue(caller.contains("entity.changeDimension(makeReturnPortal ? new DemoTeleporter(forcedEntry).getPortalInfo(entity, serverWorld) : new NoReturnTeleporter().getPortalInfo(entity, serverWorld))"))
+        assertTrue(caller.contains("serverPlayer.changeDimension(new DemoTeleporter(false).getPortalInfo(serverPlayer, serverWorld))"), caller)
         assertTrue(!caller.contains("entity.canChangeDimensions())"))
         assertTrue(!caller.contains("changeDimension(serverWorld,"))
+        assertFalse(caller.contains("holder.getEntity().changeDimension"), caller)
     }
 
     @Test
@@ -15982,7 +16640,9 @@ class StructuralRefactorExtraTest {
         assertTrue(blocks.contains("import net.minecraft.world.level.block.entity.BannerPatternLayers;"), blocks)
 
         assertTrue(items.contains("public static ItemStack createExampleBannerItemStack(HolderGetter<BannerPattern> patternRegistry)"), items)
+        assertTrue(items.contains("bannerStack.set(DataComponents.CUSTOM_NAME, Component.literal(\"example\").withStyle(ChatFormatting.GOLD));"), items)
         assertTrue(items.contains("bannerStack.set(DataComponents.BANNER_PATTERNS, ExampleBlocks.EXAMPLE_PATTERN(patternRegistry));"), items)
+        assertFalse(items.contains(".setHoverName("), items)
         assertFalse(items.contains("BlockItem.setBlockEntityData"), items)
         assertFalse(items.contains("toListTag"), items)
 
@@ -15996,6 +16656,80 @@ class StructuralRefactorExtraTest {
         assertTrue(loreBook.contains("Optional<String> key = LORE_ENTRY_OVERRIDES.entrySet().stream().filter(e -> e.getKey().apply(this.loreInventory.player.registryAccess()).test(stack)).findAny().map(Map.Entry::getValue);"), loreBook)
         assertTrue(loreBook.contains("return key.orElseGet(() -> \"lore.\" + stack.getDescriptionId());"), loreBook)
         assertTrue(loreClient.contains("LoreBookMenu.addLoreEntryOverride(registryAccess -> stack -> ItemStack.isSameItemSameComponents(stack, ExampleItems.createExampleBannerItemStack(registryAccess.registryOrThrow(Registries.BANNER_PATTERN).asLookup())), \"lore.example\")"), loreClient)
+    }
+
+    @Test
+    fun `migrates creative tab entries hover names and uuid map writers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("CreativeAndNetworkSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.component.DataComponents;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+            import net.minecraft.world.item.CreativeModeTab;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent;
+            import java.util.Map;
+            import java.util.UUID;
+
+            public class CreativeAndNetworkSurface {
+                public void build(BuildCreativeModeTabContentsEvent event) {
+                    event.getEntries().putAfter(new ItemStack(Items.LEATHER_BOOTS), new ItemStack(Items.DIAMOND_BOOTS), CreativeModeTab.TabVisibility.PARENT_AND_SEARCH_TABS);
+                }
+
+                public ItemStack named() {
+                    ItemStack stack = new ItemStack(Items.DIAMOND).setHoverName(Component.literal("named"));
+                    stack.setHoverName(Component.literal("updated"));
+                    return stack;
+                }
+
+                public void encode(FriendlyByteBuf buf, Map<UUID, DeveloperGlow> glows) {
+                    buf.writeMap(glows, FriendlyByteBuf::writeUUID, DeveloperGlow::write);
+                }
+
+                public Map<UUID, DeveloperGlow> decode(FriendlyByteBuf buf) {
+                    return buf.readMap(FriendlyByteBuf::readUUID, DeveloperGlow::read);
+                }
+
+                public record Apply(UUID playerUUID, DeveloperGlow glow) implements CustomPacketPayload {
+                    public void execute() {
+                    }
+                }
+            }
+
+            class DeveloperGlow {
+                static void write(FriendlyByteBuf buf, DeveloperGlow glow) {}
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val surface = srcDir.resolve("CreativeAndNetworkSurface.java").readText()
+
+        assertTrue(surface.contains("event.insertAfter(new ItemStack(Items.LEATHER_BOOTS), new ItemStack(Items.DIAMOND_BOOTS), CreativeModeTab.TabVisibility.PARENT_AND_SEARCH_TABS);"), surface)
+        assertFalse(surface.contains("getEntries().putAfter"), surface)
+        assertTrue(surface.contains("ItemStack stack = new ItemStack(Items.DIAMOND);"), surface)
+        assertTrue(surface.contains("stack.set(DataComponents.CUSTOM_NAME, Component.literal(\"named\"));"), surface)
+        assertTrue(surface.contains("stack.set(DataComponents.CUSTOM_NAME, Component.literal(\"updated\"));"), surface)
+        assertFalse(surface.contains(".setHoverName("), surface)
+        assertTrue(surface.contains("buf.writeMap(glows, (buffer, value) -> buffer.writeUUID(value), (buffer, value) -> DeveloperGlow.write(buffer, value));"), surface)
+        assertTrue(surface.contains("return buf.readMap(buffer -> buffer.readUUID(), buffer -> DeveloperGlow.read(buffer));"), surface)
+        assertTrue(surface.contains("public static final CustomPacketPayload.Type<Apply> TYPE"), surface)
+        assertTrue(surface.contains("ResourceLocation.fromNamespaceAndPath(\"example\", \"creative_and_network_surface_apply\")"), surface)
+        assertTrue(surface.contains("public CustomPacketPayload.Type<? extends CustomPacketPayload> type()"), surface)
+        assertTrue(surface.contains("import net.minecraft.resources.ResourceLocation;"), surface)
     }
 
     @Test

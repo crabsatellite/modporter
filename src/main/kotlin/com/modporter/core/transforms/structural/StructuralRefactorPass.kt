@@ -4955,7 +4955,9 @@ $helpers
         expression.trim().removeSuffix(".dimension()")
 
     private fun detectGeneratedCompatPackage(projectDir: Path): String {
-        val modId = detectModId(projectDir) ?: projectDir.fileName.toString()
+        val modId = detectModId(projectDir)
+            ?: projectMetadataModId(projectDir)
+            ?: projectDir.fileName.toString()
         val sanitized = modId.lowercase()
             .replace(Regex("""[^a-z0-9_]"""), "_")
             .trim('_')
@@ -7916,6 +7918,10 @@ $fields
         val javaInheritanceIndex = collectJavaInheritanceIndex(javaFiles)
         val inheritedRecipeStateAccessors = collectInheritedRecipeStateAccessors(javaFiles)
         val holderLookupCompoundTagMethods = collectHolderLookupCompoundTagMethods(javaFiles)
+        val legacyPlacementBanBaseClasses = collectLegacyPlacementBanBaseClasses(javaFiles)
+        val legacyPlacementBanBuilderClasses = collectLegacyPlacementBanBuilderClasses(javaFiles)
+        val modId = detectModId(projectDir) ?: projectMetadataModId(projectDir)
+        val generatedCompatPackage = detectGeneratedCompatPackage(projectDir)
         val deferredHolderFields = collectDeferredHolderFields(srcDir)
         val gameEventDeferredHolderFields = collectDeferredHolderFieldsOf(srcDir, "GameEvent")
         val soundEventSupplierConstructors = collectSoundEventSupplierConstructors(javaFiles)
@@ -8354,7 +8360,11 @@ $fields
                     attributeModifierIdMethodArguments,
                     attributeHolderAccessHints,
                     optionalCompoundRecipeTagOwners,
-                    javaInheritanceIndex
+                    javaInheritanceIndex,
+                    legacyPlacementBanBaseClasses,
+                    legacyPlacementBanBuilderClasses,
+                    modId.orEmpty(),
+                    generatedCompatPackage
                 )
                 if (vanilla121Migrated != text) {
                     changes.add(Change(
@@ -12890,7 +12900,11 @@ ${indent}}
         attributeModifierIdMethodArguments: Set<AttributeModifierIdMethodArgument> = emptySet(),
         attributeHolderAccessHints: AttributeHolderAccessHints = AttributeHolderAccessHints(emptySet()),
         optionalCompoundRecipeTagOwners: Set<String> = emptySet(),
-        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY,
+        legacyPlacementBanBaseClasses: Set<String> = emptySet(),
+        legacyPlacementBanBuilderClasses: Set<String> = emptySet(),
+        modId: String = "",
+        generatedCompatPackage: String = ""
     ): String {
         var result = source
         var needsEntityTypeTags = false
@@ -13164,11 +13178,18 @@ ${indent}}
         result = migrateLegacyRegistryObjectReflection(result)
         result = migratePayloadContextServerPlayer(result)
         result = migrateFoodComponentAccess(result)
+        result = migrateBucketItemFluidAccessSource(result)
+        result = migrateCreativeTabEntriesAccessSource(result)
+        result = migrateItemStackHoverNameSource(result)
+        result = migrateFriendlyByteBufAmbiguousMethodReferencesSource(result)
+        result = migrateCustomPacketPayloadRecordContractsSource(result, modId)
         result = migrateSupplierValueCalls(result)
         result = migrateUnboundLevelRegistryAccessCalls(result)
         result = migrateNitrogenBlockStateRecipeConstructors(result)
         result = migrateNitrogenBiomeParameterRecipeSource(result)
         result = migrateNitrogenBiomeParameterRecipeSerializerSource(result)
+        result = migrateReiBiomeTooltipOptionalSource(result)
+        result = migrateBiomeParameterRecipeCategoryBiomeAccessSource(result)
         result = migrateIngredientNetworkCodecs(result, javaInheritanceIndex)
         result = migrateCacheableFunctionOptionalBoundaries(result)
         result = migrateRecipeHolderAccess(result)
@@ -13177,6 +13198,8 @@ ${indent}}
         result = migrateRecipeBookCategoryFinderRecipeHolders(result)
         result = migrateLegacyCraftingRecipeBoundaries(result)
         result = migrateGenericRecipeInputImplementations(result)
+        result = migrateLegacyPlacementBanRecipeSource(result, legacyPlacementBanBaseClasses, legacyPlacementBanBuilderClasses)
+        result = migrateRecipeDisplayRecipeIdWithoutHolderSource(result)
         result = migrateRecipeHolderOptionalMapLambdaValueAccess(result)
         result = migrateMerchantOfferItemCosts(result)
         result = migrateItemUseDurationCalls(result)
@@ -13186,6 +13209,7 @@ ${indent}}
         result = migrateLegacyDoEnchantDamageEffectsSource(result)
         result = migrateMobEffectApplicableEventSource(result)
         result = migrateLivingDamageEventBoundarySource(result)
+        result = migrateGeneratedLazyOptionalImportSource(result, generatedCompatPackage)
 
         if (result.contains(".effects()") && result.contains("mapOfKeys(")) {
             Regex("""mapOfKeys\(\s*[A-Za-z_$][\w$]*\.class\s*,\s*([A-Za-z_$][\w$]*)\s*->""")
@@ -21136,14 +21160,15 @@ ${indent}if ($handlerVar != null) $statement"""
             }
         }
 
-        result = Regex(
-            """([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.changeDimension\(\s*([A-Za-z_$][\w$]*)\s*,\s*new\s+([A-Za-z_$][\w$]*)\(([^)]*)\)\s*\)"""
-        ).replace(result) { match ->
-            val entity = match.groupValues[1]
-            val dest = match.groupValues[2]
-            val teleporterClass = match.groupValues[3]
-            val args = match.groupValues[4].trim()
-            "$entity.changeDimension(new $teleporterClass($args).getPortalInfo($entity, $dest))"
+        val dimensionSource = result
+        result = rewriteJavaCallWithOffset(result, "changeDimension") { receiver, args, callOffset ->
+            if (args.size != 2) return@rewriteJavaCallWithOffset null
+            val entity = legacyChangeDimensionEntityExpression(dimensionSource, receiver, callOffset)
+                ?: return@rewriteJavaCallWithOffset null
+            val dest = args[0].trim()
+            val teleporter = legacyTeleporterConstructorParts(args[1].trim())
+                ?: return@rewriteJavaCallWithOffset null
+            "$entity.changeDimension(new ${teleporter.first}(${teleporter.second}).getPortalInfo($entity, $dest))"
         }
         result = Regex(
             """([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.changeDimension\(\s*([A-Za-z_$][\w$]*)\s*,\s*([^?;\r\n]+?)\?\s*new\s+([A-Za-z_$][\w$]*)\(([^)]*)\)\s*:\s*new\s+([A-Za-z_$][\w$]*)\(([^)]*)\)\s*\)"""
@@ -21158,6 +21183,37 @@ ${indent}if ($handlerVar != null) $statement"""
             "$entity.changeDimension($condition ? new $trueClass($trueArgs).getPortalInfo($entity, $dest) : new $falseClass($falseArgs).getPortalInfo($entity, $dest))"
         }
         return result
+    }
+
+    private fun legacyChangeDimensionEntityExpression(source: String, receiver: String, callOffset: Int): String? {
+        val trimmed = receiver.trim()
+        if (!trimmed.contains("(")) return trimmed
+
+        val range = enclosingMethodRange(source, callOffset) ?: return null
+        val prefix = source.substring(range.first, callOffset)
+        val patternVariable = Regex(
+            """if\s*\(\s*${Regex.escape(trimmed)}\s+instanceof\s+(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)(?:\s*<[^(){};]+>)?\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
+        ).findAll(prefix)
+            .lastOrNull { match ->
+                val openBrace = range.first + match.range.last
+                val closeBrace = findMatchingBrace(source, openBrace)
+                closeBrace > callOffset
+            }
+            ?.groupValues
+            ?.get(1)
+        return patternVariable
+    }
+
+    private fun legacyTeleporterConstructorParts(expression: String): Pair<String, String>? {
+        val trimmed = expression.trim()
+        val match = Regex("""new\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\(""")
+            .find(trimmed)
+            ?: return null
+        if (match.range.first != 0) return null
+        val openParen = match.range.last
+        val closeParen = findMatchingParen(trimmed, openParen)
+        if (closeParen != trimmed.lastIndex) return null
+        return match.groupValues[1] to trimmed.substring(openParen + 1, closeParen).trim()
     }
 
     private data class LegacyPortalInfoSignature(
@@ -28615,6 +28671,185 @@ ${modifierLines.joinToString("\n")}
         return result
     }
 
+    private fun migrateBucketItemFluidAccessSource(source: String): String {
+        if (!source.contains(".getFluid()") && !source.contains("getFluidType()")) return source
+        var result = source
+        var changed = false
+        if (result.contains("extends BucketItem")) {
+            val before = result
+            result = result.replace("this.getFluid()", "this.content")
+            if (result != before) changed = true
+        }
+        val fluidStackVariables = Regex("""\bFluidStack\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(result)
+            .map { it.groupValues[1] }
+            .toSet()
+        fluidStackVariables.forEach { variable ->
+            val before = result
+            result = Regex("""\b${Regex.escape(variable)}\.getFluid\(\)\.is\(""")
+                .replace(result, "$variable.is(")
+            result = Regex("""\b${Regex.escape(variable)}\.getFluid\(\)\.getFluidType\(\)""")
+                .replace(result, "$variable.getFluidType()")
+            if (result != before) changed = true
+        }
+        return if (changed) result else source
+    }
+
+    private fun migrateCreativeTabEntriesAccessSource(source: String): String {
+        if (!source.contains(".getEntries().putAfter(")) return source
+        return rewriteJavaCall(source, "putAfter") { receiver, args ->
+            if (args.size != 3 || !receiver.endsWith(".getEntries()")) return@rewriteJavaCall null
+            val eventReceiver = receiver.removeSuffix(".getEntries()")
+            "$eventReceiver.insertAfter(${args.joinToString(", ") { it.trim() }})"
+        }
+    }
+
+    private fun migrateItemStackHoverNameSource(source: String): String {
+        if (!source.contains(".setHoverName(")) return source
+
+        var result = source
+        var changed = false
+        result = Regex(
+            """(?m)^([ \t]*)ItemStack\s+([A-Za-z_$][\w$]*)\s*=\s*(new\s+ItemStack\s*\([^;\r\n]*\))\.setHoverName\((.*)\)\s*;[ \t]*$"""
+        ).replace(result) { match ->
+            changed = true
+            val indent = match.groupValues[1]
+            val variable = match.groupValues[2]
+            val stackExpression = match.groupValues[3].trim()
+            val nameExpression = match.groupValues[4].trim()
+            "${indent}ItemStack $variable = $stackExpression;\n" +
+                "${indent}$variable.set(DataComponents.CUSTOM_NAME, $nameExpression);"
+        }
+        result = rewriteJavaCall(result, "setHoverName") { receiver, args ->
+            if (args.size != 1) {
+                null
+            } else {
+                changed = true
+                "$receiver.set(DataComponents.CUSTOM_NAME, ${args[0].trim()})"
+            }
+        }
+        if (!changed) return source
+        return addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
+    }
+
+    private fun migrateFriendlyByteBufAmbiguousMethodReferencesSource(source: String): String {
+        if (!source.contains(".writeMap(") &&
+            !source.contains(".readMap(") &&
+            !source.contains("FriendlyByteBuf::writeUUID") &&
+            !source.contains("FriendlyByteBuf::readUUID")) {
+            return source
+        }
+        var result = rewriteJavaCall(source, "writeMap") { receiver, args ->
+            if (args.size != 3) return@rewriteJavaCall null
+            val keyWriter = streamEncoderMethodReferenceLambda(args[1].trim()) ?: args[1].trim()
+            val valueWriter = streamEncoderMethodReferenceLambda(args[2].trim()) ?: args[2].trim()
+            if (keyWriter == args[1].trim() && valueWriter == args[2].trim()) {
+                null
+            } else {
+                "$receiver.writeMap(${args[0].trim()}, $keyWriter, $valueWriter)"
+            }
+        }
+        result = rewriteJavaCall(result, "readMap") { receiver, args ->
+            if (args.size != 2) return@rewriteJavaCall null
+            val keyReader = streamDecoderMethodReferenceLambda(args[0].trim()) ?: args[0].trim()
+            val valueReader = streamDecoderMethodReferenceLambda(args[1].trim()) ?: args[1].trim()
+            if (keyReader == args[0].trim() && valueReader == args[1].trim()) {
+                null
+            } else {
+                "$receiver.readMap($keyReader, $valueReader)"
+            }
+        }
+        return result
+    }
+
+    private fun streamEncoderMethodReferenceLambda(expression: String): String? {
+        val match = Regex("""^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)::([A-Za-z_$][\w$]*)$""")
+            .find(expression)
+            ?: return null
+        val owner = match.groupValues[1]
+        val method = match.groupValues[2]
+        return if (owner.substringAfterLast('.') == "FriendlyByteBuf") {
+            "(buffer, value) -> buffer.$method(value)"
+        } else {
+            "(buffer, value) -> $owner.$method(buffer, value)"
+        }
+    }
+
+    private fun streamDecoderMethodReferenceLambda(expression: String): String? {
+        val match = Regex("""^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)::([A-Za-z_$][\w$]*)$""")
+            .find(expression)
+            ?: return null
+        val owner = match.groupValues[1]
+        val method = match.groupValues[2]
+        return if (owner.substringAfterLast('.') == "FriendlyByteBuf") {
+            "buffer -> buffer.$method()"
+        } else {
+            "buffer -> $owner.$method(buffer)"
+        }
+    }
+
+    private fun migrateCustomPacketPayloadRecordContractsSource(source: String, modId: String): String {
+        if (modId.isBlank() ||
+            !source.contains("record ") ||
+            !source.contains("implements CustomPacketPayload")) {
+            return source
+        }
+
+        val topLevelClass = Regex("""(?m)^[ \t]*(?:public\s+)?(?:final\s+)?class\s+([A-Za-z_$][\w$]*)\b""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+        val recordPattern = Regex(
+            """(?m)^([ \t]*)(?:public\s+)?record\s+([A-Za-z_$][\w$]*)\s*\([^{};]*\)\s+implements\s+CustomPacketPayload\s*\{"""
+        )
+        val insertions = recordPattern.findAll(source).mapNotNull { match ->
+            val openBrace = match.range.last
+            val closeBrace = findMatchingBrace(source, openBrace)
+            if (closeBrace <= openBrace) return@mapNotNull null
+            val body = source.substring(openBrace + 1, closeBrace)
+            val recordName = match.groupValues[2]
+            if (body.contains("CustomPacketPayload.Type<$recordName> TYPE") ||
+                Regex("""\btype\s*\(\s*\)""").containsMatchIn(body)) {
+                return@mapNotNull null
+            }
+            val indent = match.groupValues[1] + "    "
+            val payloadName = if (topLevelClass != null && topLevelClass != recordName) {
+                payloadPathName("${topLevelClass}_${recordName}")
+            } else {
+                payloadPathName(recordName)
+            }
+            val insert = """
+
+${indent}public static final CustomPacketPayload.Type<$recordName> TYPE =
+${indent}        new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath("$modId", "$payloadName"));
+
+${indent}@Override
+${indent}public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
+${indent}    return TYPE;
+${indent}}
+""".trimEnd()
+            openBrace to insert
+        }.toList()
+        if (insertions.isEmpty()) return source
+
+        var result = source
+        for ((index, text) in insertions.asReversed()) {
+            result = result.substring(0, index + 1) + text + result.substring(index + 1)
+        }
+        result = addImportIfMissing(result, "net.minecraft.resources.ResourceLocation")
+        return result
+    }
+
+    private fun migrateGeneratedLazyOptionalImportSource(source: String, generatedCompatPackage: String): String {
+        if (generatedCompatPackage.isBlank() ||
+            !source.contains("LazyOptional<") ||
+            source.contains("import $generatedCompatPackage.LazyOptional;") ||
+            Regex("""(?m)^package\s+${Regex.escape(generatedCompatPackage)}\s*;""").containsMatchIn(source)) {
+            return source
+        }
+        return addImportIfMissing(source, "$generatedCompatPackage.LazyOptional")
+    }
+
     private fun migrateNitrogenBlockStateRecipeConstructors(source: String): String {
         if (!source.contains("BlockStateIngredient") ||
             !source.contains("BlockPropertyPair") ||
@@ -28834,6 +29069,61 @@ public class $className<T extends $recipeBase> extends BlockStateRecipeSerialize
 """.trimStart()
     }
 
+    private fun migrateReiBiomeTooltipOptionalSource(source: String): String {
+        if (!source.contains("interface BiomeTooltip") ||
+            !source.contains("Tooltip tooltip") ||
+            !source.contains("@Nullable ResourceKey<Biome>") ||
+            !source.contains("@Nullable TagKey<Biome>")) {
+            return source
+        }
+        var result = source
+        result = result.replace(
+            "populateBiomeInformation(@Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, Tooltip tooltip)",
+            "populateBiomeInformation(Optional<ResourceKey<Biome>> biomeKey, Optional<TagKey<Biome>> biomeTag, Tooltip tooltip)"
+        )
+        result = result
+            .replace("(biomeKey != null || biomeTag != null)", "(biomeKey.isPresent() || biomeTag.isPresent())")
+            .replace("biomeKey != null", "biomeKey.isPresent()")
+            .replace("biomeKey.location()", "biomeKey.get().location()")
+            .replace("biomeTag.location()", "biomeTag.get().location()")
+            .replace("getTagOrEmpty(biomeTag)", "getTagOrEmpty(biomeTag.get())")
+        result = addImportIfMissing(result, "java.util.Optional")
+        result = removeImport(result, "javax.annotation.Nullable")
+        if (!Regex("""\bResourceLocation\b""").containsMatchIn(removeImport(result, "net.minecraft.resources.ResourceLocation"))) {
+            result = removeImport(result, "net.minecraft.resources.ResourceLocation")
+        }
+        return result
+    }
+
+    private fun migrateBiomeParameterRecipeCategoryBiomeAccessSource(source: String): String {
+        if (!source.contains("AbstractBiomeParameterRecipe") ||
+            (!source.contains("getBiomeKey()") && !source.contains("getBiomeTag()"))) {
+            return source
+        }
+        var result = source
+        result = Regex(
+            """if\s*\(\s*Minecraft\.getInstance\(\)\.level\s*!=\s*null\s*\)\s*\{\s*this\.populateBiomeInformation\(\s*recipe\.getBiomeKey\(\)\s*,\s*recipe\.getBiomeTag\(\)\s*,\s*tooltip\s*\)\s*;\s*\}"""
+        ).replace(result) {
+            "if (Minecraft.getInstance().level != null && recipe.getBiome().isPresent()) {\n" +
+                "            this.populateBiomeInformation(recipe.getBiome().get().left().orElse(null), recipe.getBiome().get().right().orElse(null), tooltip);\n" +
+                "        }"
+        }
+        result = Regex(
+            """this\.populateBiomeInformation\(\s*display\.getRecipe\(\)\.getBiomeKey\(\)\s*,\s*display\.getRecipe\(\)\.getBiomeTag\(\)\s*,\s*tooltip\s*\)\s*;"""
+        ).replace(result) {
+            "if (display.getRecipe().getBiome().isPresent()) {\n" +
+                "            this.populateBiomeInformation(display.getRecipe().getBiome().get().left(), display.getRecipe().getBiome().get().right(), tooltip);\n" +
+                "        }"
+        }
+        result = result.replace(
+            "this.populateBiomeInformation(recipe.getBiomeKey(), recipe.getBiomeTag(), tooltip);",
+            "if (recipe.getBiome().isPresent()) {\n" +
+                "            this.populateBiomeInformation(recipe.getBiome().get().left().orElse(null), recipe.getBiome().get().right().orElse(null), tooltip);\n" +
+                "        }"
+        )
+        return result
+    }
+
     private fun migrateIngredientNetworkCodecs(
         source: String,
         javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
@@ -28929,6 +29219,831 @@ public class $className<T extends $recipeBase> extends BlockStateRecipeSerialize
             result = addImportIfMissing(result, "net.minecraft.network.RegistryFriendlyByteBuf")
         }
         return result
+    }
+
+    private fun collectLegacyPlacementBanBaseClasses(javaFiles: List<Path>): Set<String> {
+        val id = """[A-Za-z_$][\w$]*"""
+        return javaFiles.mapNotNull { javaFile ->
+            val source = javaFile.readText()
+            val className = Regex(
+                """\bclass\s+($id)\s*<\s*($id)\s*,\s*($id)\s+extends\s+Predicate\s*<\s*\2\s*>\s*>\s+implements\s+Recipe\s*<"""
+            ).find(source)?.groupValues?.get(1) ?: return@mapNotNull null
+            className.takeIf {
+                source.contains("ResourceKey<Biome>") &&
+                    source.contains("TagKey<Biome>") &&
+                    source.contains("BlockStateIngredient") &&
+                    source.contains("ResourceLocation") &&
+                    source.contains("getBiomeKey()") &&
+                    source.contains("getBiomeTag()") &&
+                    source.contains("getBypassBlock()") &&
+                    Regex("""\bResourceLocation\s+[A-Za-z_$][\w$]*\s*;""").containsMatchIn(source)
+            }
+        }.toSet()
+    }
+
+    private fun collectLegacyPlacementBanBuilderClasses(javaFiles: List<Path>): Set<String> {
+        val id = """[A-Za-z_$][\w$]*"""
+        return javaFiles.mapNotNull { javaFile ->
+            val source = javaFile.readText()
+            val className = javaTopLevelTypeName(source) ?: return@mapNotNull null
+            className.takeIf {
+                Regex("""\bclass\s+${Regex.escape(className)}\s+extends\s+($id\.)?PlacementBanBuilder\b""")
+                    .containsMatchIn(source) &&
+                    source.contains("PlacementBanRecipeSerializer") &&
+                    source.contains("BlockStateIngredient") &&
+                    source.contains("ResourceKey<Biome>") &&
+                    source.contains("TagKey<Biome>")
+            }
+        }.toSet()
+    }
+
+    private fun migrateLegacyPlacementBanRecipeSource(
+        source: String,
+        placementBanBaseClasses: Set<String>,
+        placementBanBuilderClasses: Set<String>
+    ): String {
+        if (placementBanBaseClasses.isEmpty()) return source
+        if (!source.contains("BlockStateIngredient") &&
+            !source.contains("PlacementBanRecipeSerializer") &&
+            !source.contains("PlacementBanBuilder") &&
+            placementBanBaseClasses.none { source.contains(it) } &&
+            placementBanBuilderClasses.none { source.contains("$it.recipe(") }) {
+            return source
+        }
+        var result = source
+        result = migrateLegacyPlacementBanBaseRecipeSource(result, placementBanBaseClasses)
+        result = migrateLegacyPlacementBanBaseSerializerSource(result, placementBanBaseClasses)
+        result = migrateLegacyPlacementBanConcreteRecipeSource(result, placementBanBaseClasses)
+        result = migrateLegacyPlacementBanBuilderSource(result)
+        result = migrateLegacyPlacementBanReferenceAritiesSource(result)
+        result = migrateLegacyPlacementBanBuilderCallSitesSource(result, placementBanBuilderClasses)
+        result = migrateLegacyPlacementBanDisplaySource(result, placementBanBaseClasses)
+        result = migrateNitrogenBlockPropertyPairRuntimeAccess(result)
+        result = migrateRecipeDisplayRecipeIdWithoutHolderSource(result)
+        return result
+    }
+
+    private fun migrateLegacyPlacementBanBaseRecipeSource(
+        source: String,
+        placementBanBaseClasses: Set<String>
+    ): String {
+        val className = javaTopLevelTypeName(source) ?: return source
+        if (className !in placementBanBaseClasses) return source
+        if (!source.contains("biomeKey") || !source.contains("biomeTag") || !source.contains("bypassBlock")) {
+            return source
+        }
+
+        val id = """[A-Za-z_$][\w$]*"""
+        var result = source
+        var changed = false
+
+        result = Regex(
+            """class\s+${Regex.escape(className)}\s*<\s*($id)\s*,\s*($id)\s+extends\s+Predicate\s*<\s*\1\s*>\s*>\s+implements\s+Recipe\s*<\s*[^>]+>"""
+        ).replace(result) { match ->
+            changed = true
+            "class $className<${match.groupValues[1]}, ${match.groupValues[2]} extends Predicate<${match.groupValues[1]}>, R extends RecipeInput> implements Recipe<R>"
+        }
+
+        result = Regex(
+            """(?s)\s*(?:protected|private)\s+final\s+ResourceLocation\s+$id\s*;\s*@Nullable\s*\r?\n\s*private\s+final\s+ResourceKey\s*<\s*Biome\s*>\s+$id\s*;\s*@Nullable\s*\r?\n\s*private\s+final\s+TagKey\s*<\s*Biome\s*>\s+$id\s*;\s*(?:protected|private)\s+final\s+BlockStateIngredient\s+$id\s*;"""
+        ).replace(result) {
+            changed = true
+            "\n    private final Either<ResourceKey<Biome>, TagKey<Biome>> biome;\n    protected final Optional<BlockStateIngredient> bypassBlock;"
+        }
+
+        result = Regex(
+            """(?s)public\s+${Regex.escape(className)}\s*\(\s*RecipeType<\?>\s+($id)\s*,\s*ResourceLocation\s+$id\s*,\s*@Nullable\s+ResourceKey\s*<\s*Biome\s*>\s+$id\s*,\s*@Nullable\s+TagKey\s*<\s*Biome\s*>\s+$id\s*,\s*BlockStateIngredient\s+$id\s*,\s*($id)\s+($id)\s*\)\s*\{.*?\}"""
+        ).replace(result) { match ->
+            changed = true
+            val typeName = match.groupValues[1]
+            val ingredientType = match.groupValues[2]
+            val ingredientName = match.groupValues[3]
+            "public $className(RecipeType<?> $typeName, Either<ResourceKey<Biome>, TagKey<Biome>> biome, Optional<BlockStateIngredient> bypassBlock, $ingredientType $ingredientName) {\n" +
+                "        this.type = $typeName;\n" +
+                "        this.biome = biome;\n" +
+                "        this.bypassBlock = bypassBlock;\n" +
+                "        this.ingredient = $ingredientName;\n" +
+                "    }"
+        }
+
+        result = result
+            .replace(
+                "this.bypassBlock.isEmpty() || !this.bypassBlock.test(level.getBlockState(pos))",
+                "this.bypassBlock.isEmpty() || this.bypassBlock.get().isEmpty() || !this.bypassBlock.get().test(level.getBlockState(pos))"
+            )
+            .replace("this.biomeKey != null", "this.biome.left().isPresent()")
+            .replace("this.biomeTag != null", "this.biome.right().isPresent()")
+            .replace("level.getBiome(pos).is(this.biomeKey)", "level.getBiome(pos).is(this.biome.left().get())")
+            .replace("level.getBiome(pos).is(this.biomeTag)", "level.getBiome(pos).is(this.biome.right().get())")
+
+        result = Regex(
+            """(?s)\s*@Nullable\s*\r?\n\s*public\s+ResourceKey\s*<\s*Biome\s*>\s+getBiomeKey\s*\(\s*\)\s*\{\s*return\s+this\.[A-Za-z_$][\w$]*\s*;\s*\}\s*@Nullable\s*\r?\n\s*public\s+TagKey\s*<\s*Biome\s*>\s+getBiomeTag\s*\(\s*\)\s*\{\s*return\s+this\.[A-Za-z_$][\w$]*\s*;\s*\}"""
+        ).replace(result) {
+            changed = true
+            "\n\n    public Either<ResourceKey<Biome>, TagKey<Biome>> getBiome() {\n" +
+                "        return this.biome;\n" +
+                "    }"
+        }
+
+        result = Regex("""public\s+BlockStateIngredient\s+getBypassBlock\s*\(\s*\)""")
+            .replace(result) {
+                changed = true
+                "public Optional<BlockStateIngredient> getBypassBlock()"
+            }
+        result = Regex(
+            """(?s)\s*(?:@Override\s*\r?\n\s*)?public\s+ResourceLocation\s+getId\(\)\s*\{\s*return\s+this\.[A-Za-z_$][\w$]*\s*;\s*\}\s*"""
+        ).replace(result) {
+            changed = true
+            "\n"
+        }
+        result = Regex("""boolean\s+matches\s*\(\s*(?:RecipeInput|Container)\s+([A-Za-z_$][\w$]*)\s*,\s*Level\s+([A-Za-z_$][\w$]*)\s*\)""")
+            .replace(result) { match ->
+                changed = true
+                "boolean matches(R ${match.groupValues[1]}, Level ${match.groupValues[2]})"
+            }
+        result = Regex("""ItemStack\s+assemble\s*\(\s*(?:RecipeInput|Container)\s+([A-Za-z_$][\w$]*)\s*,\s*(?:HolderLookup\.Provider|RegistryAccess)\s+([A-Za-z_$][\w$]*)\s*\)""")
+            .replace(result) { match ->
+                changed = true
+                "ItemStack assemble(R ${match.groupValues[1]}, HolderLookup.Provider ${match.groupValues[2]})"
+            }
+        result = Regex("""ItemStack\s+getResultItem\s*\(\s*(?:HolderLookup\.Provider|RegistryAccess)\s+([A-Za-z_$][\w$]*)\s*\)""")
+            .replace(result) { match ->
+                changed = true
+                "ItemStack getResultItem(HolderLookup.Provider ${match.groupValues[1]})"
+            }
+
+        if (!changed) return source
+        result = addImportIfMissing(result, "com.mojang.datafixers.util.Either")
+        result = addImportIfMissing(result, "java.util.Optional")
+        result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeInput")
+        result = addImportIfMissing(result, "net.minecraft.core.HolderLookup")
+        result = removeImport(result, "net.minecraft.core.RegistryAccess")
+        result = removeImport(result, "net.minecraft.world.Container")
+        if (!hasSimpleTypeReference(removeImport(result, "net.minecraft.resources.ResourceLocation"), "ResourceLocation")) {
+            result = removeImport(result, "net.minecraft.resources.ResourceLocation")
+        }
+        if (!Regex("""\b@Nullable\b""").containsMatchIn(result)) {
+            result = removeImport(result, "javax.annotation.Nullable")
+        }
+        return result
+    }
+
+    private fun migrateLegacyPlacementBanBaseSerializerSource(
+        source: String,
+        placementBanBaseClasses: Set<String>
+    ): String {
+        if (!source.contains("RecipeSerializer") ||
+            !source.contains("readBiomeKey") ||
+            !source.contains("writeBiomeKey") ||
+            !source.contains("CookieBaker")) {
+            return source
+        }
+
+        val id = """[A-Za-z_$][\w$]*"""
+        val baseAlternation = placementBanBaseClasses.joinToString("|") { Regex.escape(it) }
+        val classMatch = Regex(
+            """public\s+class\s+($id)\s*<\s*T\s*,\s*S\s+extends\s+Predicate\s*<\s*T\s*>\s*,\s*F\s+extends\s+($baseAlternation)\s*<\s*T\s*,\s*S\s*>\s*>\s+implements\s+RecipeSerializer\s*<\s*F\s*>"""
+        ).find(source) ?: return source
+        val className = classMatch.groupValues[1]
+        val recipeBase = classMatch.groupValues[2]
+        val packageLine = Regex("""(?m)^package\s+[^;]+;""").find(source)?.value ?: return source
+        val recipeImport = Regex("""(?m)^import\s+([^;]+\.${Regex.escape(recipeBase)});""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+        val recipeImportLine = recipeImport?.let { "import $it;\n" }.orEmpty()
+
+        return """
+$packageLine
+
+${recipeImportLine}import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+import com.aetherteam.nitrogen.recipe.BlockStateRecipeUtil;
+import com.mojang.datafixers.util.Either;
+import com.mojang.datafixers.util.Function3;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.tags.TagKey;
+import net.minecraft.world.item.crafting.RecipeInput;
+import net.minecraft.world.item.crafting.RecipeSerializer;
+import net.minecraft.world.level.biome.Biome;
+
+import java.util.Optional;
+import java.util.function.Predicate;
+
+public abstract class $className<T, S extends Predicate<T>, R extends RecipeInput, F extends $recipeBase<T, S, R>> implements RecipeSerializer<F> {
+    private final $className.CookieBaker<T, S, R, F> factory;
+
+    public $className($className.CookieBaker<T, S, R, F> factory) {
+        this.factory = factory;
+    }
+
+    public void toNetwork(RegistryFriendlyByteBuf buffer, F recipe) {
+        BlockStateRecipeUtil.STREAM_CODEC.encode(buffer, recipe.getBiome());
+        buffer.writeOptional(recipe.getBypassBlock(), (buf, blockStateIngredient) -> BlockStateIngredient.CONTENTS_STREAM_CODEC.encode((RegistryFriendlyByteBuf) buf, blockStateIngredient));
+    }
+
+    public CookieBaker<T, S, R, F> getFactory() {
+        return this.factory;
+    }
+
+    public interface CookieBaker<T, S extends Predicate<T>, R extends RecipeInput, F extends $recipeBase<T, S, R>> extends Function3<Either<ResourceKey<Biome>, TagKey<Biome>>, Optional<BlockStateIngredient>, S, F> {
+        @Override
+        F apply(Either<ResourceKey<Biome>, TagKey<Biome>> biome, Optional<BlockStateIngredient> bypassBlock, S ingredient);
+    }
+}
+""".trimStart()
+    }
+
+    private fun migrateLegacyPlacementBanConcreteRecipeSource(
+        source: String,
+        placementBanBaseClasses: Set<String>
+    ): String {
+        val className = javaTopLevelTypeName(source) ?: return source
+        if (!source.contains("extends") || !source.contains("PlacementBanRecipeSerializer")) return source
+        val id = """[A-Za-z_$][\w$]*"""
+        val baseAlternation = placementBanBaseClasses.joinToString("|") { Regex.escape(it) }
+        val extendsMatch = Regex(
+            """class\s+${Regex.escape(className)}\s+extends\s+($baseAlternation)\s*<\s*([^,>]+)\s*,\s*([^>]+)\s*>"""
+        ).find(source) ?: return source
+        val recipeBase = extendsMatch.groupValues[1]
+        val objectType = extendsMatch.groupValues[2].trim()
+        val ingredientType = extendsMatch.groupValues[3].trim()
+        val recipeInputType = placementBanRecipeInputType(objectType, ingredientType)
+        val ingredientCodec = placementBanIngredientCodec(ingredientType) ?: return source
+
+        var result = source
+        var changed = false
+        result = result.replaceRange(
+            extendsMatch.range,
+            "class $className extends $recipeBase<$objectType, $ingredientType, $recipeInputType>"
+        )
+        changed = true
+
+        val fullConstructor = Regex(
+            """(?s)public\s+${Regex.escape(className)}\s*\(\s*ResourceLocation\s+$id\s*,\s*@Nullable\s+ResourceKey\s*<\s*Biome\s*>\s+$id\s*,\s*@Nullable\s+TagKey\s*<\s*Biome\s*>\s+$id\s*,\s*BlockStateIngredient\s+$id\s*,\s*${Regex.escape(ingredientType)}\s+($id)\s*\)\s*\{\s*super\(\s*([^,]+?)\s*,\s*$id\s*,\s*$id\s*,\s*$id\s*,\s*$id\s*,\s*\1\s*\)\s*;\s*\}"""
+        )
+        result = fullConstructor.replace(result) { match ->
+            val ingredientName = match.groupValues[1]
+            val recipeType = match.groupValues[2].trim()
+            "public $className(Either<ResourceKey<Biome>, TagKey<Biome>> biome, Optional<BlockStateIngredient> bypassBlock, $ingredientType $ingredientName) {\n" +
+                "        super($recipeType, biome, bypassBlock, $ingredientName);\n" +
+                "    }"
+        }
+
+        val simpleConstructor = Regex(
+            """(?s)public\s+${Regex.escape(className)}\s*\(\s*ResourceLocation\s+$id\s*,\s*@Nullable\s+ResourceKey\s*<\s*Biome\s*>\s+$id\s*,\s*@Nullable\s+TagKey\s*<\s*Biome\s*>\s+$id\s*,\s*BlockStateIngredient\s+$id\s*\)\s*\{\s*this\(\s*$id\s*,\s*$id\s*,\s*$id\s*,\s*$id\s*,\s*([^;)]+?)\s*\)\s*;\s*\}"""
+        )
+        result = simpleConstructor.replace(result) { match ->
+            val defaultIngredient = match.groupValues[1].trim()
+            "public $className(Either<ResourceKey<Biome>, TagKey<Biome>> biome, Optional<BlockStateIngredient> bypassBlock) {\n" +
+                "        this(biome, bypassBlock, $defaultIngredient);\n" +
+                "    }"
+        }
+
+        val nestedSerializer = Regex("""class\s+Serializer\s+extends\s+PlacementBanRecipeSerializer\s*<""").find(result)
+        if (nestedSerializer != null) {
+            result = replaceNestedClass(result, "Serializer", placementBanConcreteSerializerBody(className, objectType, ingredientType, recipeInputType, ingredientCodec))
+        }
+
+        result = addImportIfMissing(result, "com.mojang.datafixers.util.Either")
+        result = addImportIfMissing(result, "com.mojang.serialization.MapCodec")
+        result = addImportIfMissing(result, "com.mojang.serialization.codecs.RecordCodecBuilder")
+        result = addImportIfMissing(result, "net.minecraft.network.RegistryFriendlyByteBuf")
+        result = addImportIfMissing(result, "net.minecraft.network.codec.StreamCodec")
+        result = addImportIfMissing(result, "java.util.Optional")
+        result = addPlacementBanRecipeInputImport(result, recipeInputType)
+        listOf(
+            "com.google.gson.JsonElement",
+            "com.google.gson.JsonObject",
+            "com.google.gson.JsonSyntaxException",
+            "net.minecraft.network.FriendlyByteBuf",
+            "net.minecraft.resources.ResourceLocation",
+            "net.minecraft.util.GsonHelper",
+            "javax.annotation.Nullable"
+        ).forEach { result = removeImport(result, it) }
+        if (!changed) return source
+        return result
+    }
+
+    private fun placementBanRecipeInputType(objectType: String, ingredientType: String): String {
+        val objectSimple = objectType.substringAfterLast('.').trim()
+        val ingredientSimple = ingredientType.substringAfterLast('.').trim()
+        return when {
+            objectSimple == "ItemStack" && ingredientSimple == "Ingredient" -> "SingleRecipeInput"
+            objectSimple == "BlockState" && ingredientSimple == "BlockStateIngredient" -> "BlockStateRecipeInput"
+            else -> "RecipeInput"
+        }
+    }
+
+    private fun placementBanIngredientCodec(ingredientType: String): String? =
+        when (ingredientType.substringAfterLast('.').trim()) {
+            "Ingredient" -> "Ingredient"
+            "BlockStateIngredient" -> "BlockStateIngredient"
+            else -> null
+        }
+
+    private fun addPlacementBanRecipeInputImport(source: String, recipeInputType: String): String =
+        when (recipeInputType) {
+            "SingleRecipeInput" -> addImportIfMissing(source, "net.minecraft.world.item.crafting.SingleRecipeInput")
+            "BlockStateRecipeInput" -> addImportIfMissing(source, "com.aetherteam.nitrogen.recipe.input.BlockStateRecipeInput")
+            else -> addImportIfMissing(source, "net.minecraft.world.item.crafting.RecipeInput")
+        }
+
+    private fun placementBanConcreteSerializerBody(
+        className: String,
+        objectType: String,
+        ingredientType: String,
+        recipeInputType: String,
+        ingredientCodecOwner: String
+    ): String = """
+public static class Serializer extends PlacementBanRecipeSerializer<$objectType, $ingredientType, $recipeInputType, $className> {
+    public Serializer() {
+        super($className::new);
+    }
+
+    @Override
+    public MapCodec<$className> codec() {
+        return RecordCodecBuilder.mapCodec(inst -> inst.group(
+                BlockStateRecipeUtil.KEY_CODEC.fieldOf("biome").forGetter($className::getBiome),
+                BlockStateIngredient.CODEC.optionalFieldOf("bypass").forGetter($className::getBypassBlock),
+                $ingredientCodecOwner.CODEC.fieldOf("ingredient").forGetter($className::getIngredient)
+        ).apply(inst, this.getFactory()));
+    }
+
+    @Override
+    public StreamCodec<RegistryFriendlyByteBuf, $className> streamCodec() {
+        return StreamCodec.of(this::toNetwork, this::fromNetwork);
+    }
+
+    public $className fromNetwork(RegistryFriendlyByteBuf buffer) {
+        Either<ResourceKey<Biome>, TagKey<Biome>> biome = BlockStateRecipeUtil.STREAM_CODEC.decode(buffer);
+        Optional<BlockStateIngredient> bypassBlock = buffer.readOptional((buf) -> BlockStateIngredient.CONTENTS_STREAM_CODEC.decode((RegistryFriendlyByteBuf) buf));
+        $ingredientType ingredient = $ingredientCodecOwner.CONTENTS_STREAM_CODEC.decode(buffer);
+        return new $className(biome, bypassBlock, ingredient);
+    }
+
+    public void toNetwork(RegistryFriendlyByteBuf buffer, $className recipe) {
+        super.toNetwork(buffer, recipe);
+        $ingredientCodecOwner.CONTENTS_STREAM_CODEC.encode(buffer, recipe.getIngredient());
+    }
+}
+""".trimIndent()
+
+    private fun migrateLegacyPlacementBanReferenceAritiesSource(source: String): String {
+        if (!source.contains("PlacementBanRecipeSerializer<") &&
+            !source.contains("AbstractPlacementBanRecipeCategory<")) {
+            return source
+        }
+        var result = source
+        var changed = false
+        val inputTypes = linkedSetOf<String>()
+        listOf("PlacementBanRecipeSerializer", "AbstractPlacementBanRecipeCategory").forEach { typeName ->
+            result = Regex("""\b${Regex.escape(typeName)}\s*<\s*([^,<>]+)\s*,\s*([^,<>]+)\s*,\s*([^,<>]+)\s*>""")
+                .replace(result) { match ->
+                    val objectType = match.groupValues[1].trim()
+                    val ingredientType = match.groupValues[2].trim()
+                    val recipeType = match.groupValues[3].trim()
+                    val inputType = placementBanRecipeInputType(objectType, ingredientType)
+                    inputTypes += inputType
+                    changed = true
+                    "$typeName<$objectType, $ingredientType, $inputType, $recipeType>"
+                }
+        }
+        result = Regex(
+            """DeferredHolder\s*<\s*(PlacementBanRecipeSerializer\s*<[^;\r\n=]+?>)\s*,\s*(PlacementBanRecipeSerializer\s*<[^;\r\n=]+?>)\s*>"""
+        ).replace(result) { match ->
+            changed = true
+            "DeferredHolder<RecipeSerializer<?>, ${match.groupValues[2].trim()}>"
+        }
+        if (!changed) return source
+        inputTypes.forEach { result = addPlacementBanRecipeInputImport(result, it) }
+        if (result.contains("DeferredHolder<RecipeSerializer<?>")) {
+            result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeSerializer")
+        }
+        return result
+    }
+
+    private fun migrateLegacyPlacementBanBuilderSource(source: String): String {
+        if (!source.contains("PlacementBanBuilder") && !source.contains("implements RecipeBuilder")) return source
+        migrateLegacyPlacementBanBaseBuilderSource(source)?.let { return it }
+        migrateLegacyPlacementBanChildBuilderSource(source)?.let { return it }
+        return source
+    }
+
+    private fun migrateLegacyPlacementBanBaseBuilderSource(source: String): String? {
+        val className = javaTopLevelTypeName(source) ?: return null
+        if (!source.contains("implements RecipeBuilder") ||
+            !source.contains("BlockStateIngredient") ||
+            !source.contains("biomeKey") ||
+            !source.contains("biomeTag") ||
+            !source.contains("getBypassBlock()") ||
+            !source.contains("getBiomeKey()") ||
+            !source.contains("getBiomeTag()")) {
+            return null
+        }
+        if (source.contains("Either<ResourceKey<Biome>, TagKey<Biome>> biome") &&
+            source.contains("Optional<BlockStateIngredient> bypassBlock")) {
+            return null
+        }
+        val packageLine = Regex("""(?m)^package\s+[^;]+;""").find(source)?.value ?: return null
+        val blockStateIngredientImport = javaImportForSimpleType(source, "BlockStateIngredient")
+            ?: "com.aetherteam.nitrogen.recipe.BlockStateIngredient"
+        return """
+$packageLine
+
+import $blockStateIngredientImport;
+import com.mojang.datafixers.util.Either;
+import net.minecraft.advancements.Criterion;
+import net.minecraft.data.recipes.RecipeBuilder;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.tags.TagKey;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.level.biome.Biome;
+
+import java.util.Optional;
+import javax.annotation.Nullable;
+
+public abstract class $className implements RecipeBuilder {
+    private final Optional<BlockStateIngredient> bypassBlock;
+    private final Either<ResourceKey<Biome>, TagKey<Biome>> biome;
+
+    public $className(Optional<BlockStateIngredient> bypassBlock, Either<ResourceKey<Biome>, TagKey<Biome>> biome) {
+        this.bypassBlock = bypassBlock;
+        this.biome = biome;
+    }
+
+    @Override
+    public RecipeBuilder group(@Nullable String group) {
+        return this;
+    }
+
+    public Optional<BlockStateIngredient> getBypassBlock() {
+        return this.bypassBlock;
+    }
+
+    public Either<ResourceKey<Biome>, TagKey<Biome>> getBiome() {
+        return this.biome;
+    }
+
+    @Override
+    public Item getResult() {
+        return Items.AIR;
+    }
+
+    @Override
+    public RecipeBuilder unlockedBy(String name, Criterion<?> criterion) {
+        return this;
+    }
+}
+""".trimStart()
+    }
+
+    private fun migrateLegacyPlacementBanChildBuilderSource(source: String): String? {
+        val className = javaTopLevelTypeName(source) ?: return null
+        if (!source.contains("extends PlacementBanBuilder") ||
+            !source.contains("PlacementBanRecipeSerializer") ||
+            !source.contains("RecipeOutput") ||
+            source.contains("Either<ResourceKey<Biome>, TagKey<Biome>> biome")) {
+            return null
+        }
+        val serializerMatch = Regex(
+            """PlacementBanRecipeSerializer\s*<\s*([^,<>]+)\s*,\s*([^,<>]+)\s*,\s*(?:(?:SingleRecipeInput|BlockStateRecipeInput|RecipeInput)\s*,\s*)?([^,<>]+)\s*>"""
+        ).find(source) ?: return null
+        val ingredientType = serializerMatch.groupValues[2].trim().substringAfterLast('.')
+        val recipeClassName = serializerMatch.groupValues[3].trim().substringAfterLast('.')
+        val id = """[A-Za-z_$][\w$]*"""
+        val fieldName = Regex("""private\s+final\s+${Regex.escape(ingredientType)}\s+($id)\s*;""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?: return null
+        val packageLine = Regex("""(?m)^package\s+[^;]+;""").find(source)?.value ?: return null
+        val recipeImport = javaImportForSimpleType(source, recipeClassName)?.let { "import $it;\n" }.orEmpty()
+        val blockStateIngredientImport = javaImportForSimpleType(source, "BlockStateIngredient")
+            ?: "com.aetherteam.nitrogen.recipe.BlockStateIngredient"
+        val ingredientImport = if (ingredientType == "BlockStateIngredient") {
+            ""
+        } else {
+            javaImportForSimpleType(source, ingredientType)?.let { "import $it;\n" }.orEmpty()
+        }
+        return """
+$packageLine
+
+${recipeImport}import $blockStateIngredientImport;
+${ingredientImport}import com.mojang.datafixers.util.Either;
+import net.minecraft.data.recipes.RecipeOutput;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.tags.TagKey;
+import net.minecraft.world.level.biome.Biome;
+
+import java.util.Optional;
+
+public class $className extends PlacementBanBuilder {
+    private final $ingredientType $fieldName;
+
+    public $className($ingredientType $fieldName, Optional<BlockStateIngredient> bypassBlock, Either<ResourceKey<Biome>, TagKey<Biome>> biome) {
+        super(bypassBlock, biome);
+        this.$fieldName = $fieldName;
+    }
+
+    public static PlacementBanBuilder recipe($ingredientType $fieldName, Optional<BlockStateIngredient> bypassBlock, Either<ResourceKey<Biome>, TagKey<Biome>> biome) {
+        return new $className($fieldName, bypassBlock, biome);
+    }
+
+    @Override
+    public void save(RecipeOutput output, ResourceLocation id) {
+        output.accept(id, new $recipeClassName(this.getBiome(), this.getBypassBlock(), this.$fieldName), null);
+    }
+}
+""".trimStart()
+    }
+
+    private fun migrateLegacyPlacementBanBuilderCallSitesSource(
+        source: String,
+        placementBanBuilderClasses: Set<String>
+    ): String {
+        if (placementBanBuilderClasses.isEmpty() || !source.contains(".recipe(")) return source
+        val nullableBypassVariables = Regex("""@Nullable\s+BlockStateIngredient\s+([A-Za-z_$][\w$]*)""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        var changed = false
+        var result = rewriteJavaCallWithOffset(source, "recipe") { receiver, args, callOffset ->
+            val receiverName = receiver.substringAfterLast('.')
+            if (receiverName !in placementBanBuilderClasses || args.size !in 3..5) return@rewriteJavaCallWithOffset null
+            if (!args.last().trim().endsWith(".get()")) return@rewriteJavaCallWithOffset null
+            val scope = enclosingJavaMethodText(source, callOffset) ?: source
+            val biomeKinds = collectPlacementBanBiomeExpressionKinds(scope)
+            val ingredient = args[0].trim()
+            val bypassExpression: String
+            val biomeExpression: String
+            when (args.size) {
+                3 -> {
+                    bypassExpression = "Optional.empty()"
+                    biomeExpression = placementBanBiomeEitherExpression(args[1], biomeKinds) ?: return@rewriteJavaCallWithOffset null
+                }
+                4 -> {
+                    bypassExpression = placementBanBypassOptionalExpression(args[1], nullableBypassVariables)
+                    biomeExpression = placementBanBiomeEitherExpression(args[2], biomeKinds) ?: return@rewriteJavaCallWithOffset null
+                }
+                else -> {
+                    bypassExpression = placementBanBypassOptionalExpression(args[1], nullableBypassVariables)
+                    val keyExpression = placementBanBiomeEitherExpression(args[2], biomeKinds)
+                    val tagExpression = placementBanBiomeEitherExpression(args[3], biomeKinds)
+                    biomeExpression = when {
+                        args[2].trim() == "null" && tagExpression != null -> tagExpression
+                        args[3].trim() == "null" && keyExpression != null -> keyExpression
+                        else -> return@rewriteJavaCallWithOffset null
+                    }
+                }
+            }
+            changed = true
+            "$receiver.recipe($ingredient, $bypassExpression, $biomeExpression)"
+        }
+        if (!changed) return source
+        result = addImportIfMissing(result, "com.mojang.datafixers.util.Either")
+        result = addImportIfMissing(result, "java.util.Optional")
+        return result
+    }
+
+    private fun enclosingJavaMethodText(source: String, offset: Int): String? {
+        val methodPattern = Regex(
+            """(?m)^[ \t]*(?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*)*(?:(?:public|protected|private|static|final|default|abstract|synchronized)\s+)*(?:<[^>{;]+>\s+)?[\w$.\[\]<>?,\s]+\s+[A-Za-z_$][\w$]*\s*\([^;{}]*\)\s*\{"""
+        )
+        return methodPattern.findAll(source)
+            .filter { it.range.first <= offset }
+            .mapNotNull { match ->
+                val openBrace = source.indexOf('{', match.range.last - 1)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+                if (openBrace >= 0 && closeBrace >= offset) {
+                    source.substring(match.range.first, closeBrace + 1)
+                } else {
+                    null
+                }
+            }
+            .lastOrNull()
+    }
+
+    private fun collectPlacementBanBiomeExpressionKinds(source: String): Map<String, String> {
+        val id = """[A-Za-z_$][\w$]*"""
+        val result = linkedMapOf<String, String>()
+        Regex("""ResourceKey\s*<\s*Biome\s*>\s+($id)\b""")
+            .findAll(source)
+            .forEach { result[it.groupValues[1]] = "key" }
+        Regex("""TagKey\s*<\s*Biome\s*>\s+($id)\b""")
+            .findAll(source)
+            .forEach { result[it.groupValues[1]] = "tag" }
+        return result
+    }
+
+    private fun placementBanBiomeEitherExpression(rawExpression: String, biomeKinds: Map<String, String>): String? {
+        val expression = rawExpression.trim()
+        if (expression == "null") return null
+        if (expression.startsWith("Either.left(") || expression.startsWith("Either.right(")) return expression
+        val variable = expression.removePrefix("this.")
+        return when (biomeKinds[variable]) {
+            "key" -> "Either.left($expression)"
+            "tag" -> "Either.right($expression)"
+            else -> null
+        }
+    }
+
+    private fun placementBanBypassOptionalExpression(
+        rawExpression: String,
+        nullableBypassVariables: Set<String>
+    ): String {
+        val expression = rawExpression.trim()
+        if (expression == "null" || expression.endsWith(".EMPTY")) return "Optional.empty()"
+        if (expression.startsWith("Optional.")) return expression
+        val variable = expression.removePrefix("this.")
+        return if (variable in nullableBypassVariables) {
+            "Optional.ofNullable($expression)"
+        } else {
+            "Optional.of($expression)"
+        }
+    }
+
+    private fun javaImportForSimpleType(source: String, simpleType: String): String? =
+        Regex("""(?m)^import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.${Regex.escape(simpleType)})\s*;""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+
+    private fun migrateNitrogenBlockPropertyPairRuntimeAccess(source: String): String {
+        if (!source.contains("BlockPropertyPair")) return source
+        var result = source
+        var changed = false
+        if (result.contains(".getFluid()") && result.contains("LiquidBlock")) {
+            result = Regex("""\b([A-Za-z_$][\w$]*)\.getFluid\(\)""")
+                .replace(result) { match ->
+                    changed = true
+                    "${match.groupValues[1]}.fluid.builtInRegistryHolder()"
+                }
+        }
+        val id = """[A-Za-z_$][\w$]*"""
+        val loopPattern = Regex(
+            """(?m)^([ \t]*)for\s*\(\s*Map\.Entry\s*<\s*Property\s*<\s*\?\s*>\s*,\s*Comparable\s*<\s*\?\s*>\s*>\s+($id)\s*:\s*($id)\.properties\(\)\.entrySet\(\)\s*\)\s*\{"""
+        )
+        var cursor = 0
+        while (true) {
+            val match = loopPattern.find(result, cursor) ?: break
+            val openBrace = result.indexOf('{', match.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val indent = match.groupValues[1]
+            val entry = match.groupValues[2]
+            val pair = match.groupValues[3]
+            val body = result.substring(openBrace + 1, closeBrace)
+            val shiftedBody = body.lines().joinToString("\n") { line ->
+                if (line.isBlank()) line else "    $line"
+            }
+            val replacement = "${indent}if ($pair.properties().isPresent()) {\n" +
+                "${indent}    for (Map.Entry<Property<?>, Comparable<?>> $entry : $pair.properties().get().entrySet()) {$shiftedBody\n" +
+                "${indent}    }\n" +
+                "${indent}}"
+            result = result.substring(0, match.range.first) + replacement + result.substring(closeBrace + 1)
+            cursor = match.range.first + replacement.length
+            changed = true
+        }
+        return if (changed) result else source
+    }
+
+    private fun migrateRecipeDisplayRecipeIdWithoutHolderSource(source: String): String {
+        if (!source.contains("extends BasicDisplay") ||
+            !source.contains("Recipe<?>") ||
+            !source.contains("Optional.of(") ||
+            !source.contains(".getId()")) {
+            return source
+        }
+        return Regex("""Optional\.of\(\s*recipe\.getId\(\)\s*\)""")
+            .replace(source, "Optional.empty()")
+    }
+
+    private fun migrateLegacyPlacementBanDisplaySource(
+        source: String,
+        placementBanBaseClasses: Set<String>
+    ): String {
+        if (source.contains("PlacementBanRecipeSerializer")) return source
+        if (placementBanBaseClasses.none { source.contains(it) }) return source
+        var result = source
+        var changed = false
+        placementBanBaseClasses.forEach { baseClass ->
+            result = Regex("""${Regex.escape(baseClass)}\s*<\s*\?\s*,\s*\?\s*>""")
+                .replace(result) {
+                    changed = true
+                    "$baseClass<?, ?, ?>"
+                }
+            result = Regex("""([A-Za-z_$][\w$]*)\s+extends\s+${Regex.escape(baseClass)}\s*<\s*([^,>]+)\s*,\s*([^,>]+)\s*>""")
+                .replace(result) { match ->
+                    changed = true
+                    "F extends RecipeInput, ${match.groupValues[1]} extends $baseClass<${match.groupValues[2].trim()}, ${match.groupValues[3].trim()}, F>"
+                }
+        }
+        result = result.replace("BlockStateIngredient bypassBlockIngredient = recipe.getBypassBlock();", "Optional<BlockStateIngredient> bypassBlockIngredient = recipe.getBypassBlock();")
+        result = result.replace("var bypassBlock = display.getBypassBlock();", "Optional<BlockStateIngredient> bypassBlock = display.getBypassBlock();")
+        result = replacePlacementBanJeiSetRecipe(result)
+        result = result.replace("recipe.getBypassBlock() == null || recipe.getBypassBlock().isEmpty()", "recipe.getBypassBlock().isEmpty() || recipe.getBypassBlock().get().isEmpty()")
+        result = result.replace("display.getBypassBlock() == null || display.getBypassBlock().isEmpty()", "display.getBypassBlock().isEmpty() || display.getBypassBlock().get().isEmpty()")
+        result = result.replace("bypassBlock != null && !bypassBlock.isEmpty()", "bypassBlock.isPresent() && !bypassBlock.get().isEmpty()")
+        result = result.replace("recipe.getBypassBlock().getPairs()", "recipe.getBypassBlock().get().getPairs()")
+        result = result.replace("bypassBlock.getPairs()", "bypassBlock.get().getPairs()")
+        result = result.replace("display.getInputEntries().get(0), bypassBlock.get().getPairs()", "display.getInputEntries().get(1), bypassBlock.get().getPairs()")
+        result = result.replace("new ArrayList<>(REIUtils.toIngredientList(recipe.getBypassBlock().get().getPairs()))", "new ArrayList<>(recipe.getBypassBlock().map(blockStateIngredient -> REIUtils.toIngredientList(blockStateIngredient.getPairs())).orElse(List.of()))")
+        result = result.replace("Optional.of(recipe.getId())", "Optional.empty()")
+        result = result.replace("Optional.ofNullable(recipe.getBiomeKey()),\n                Optional.ofNullable(recipe.getBiomeTag())", "recipe.getBiome()")
+        result = Regex("""this\(\s*categoryIdentifier,\s*inputs,\s*recipe\.getBypassBlock\(\),\s*recipe\.getBiome\(\),""")
+            .replace(result, "this(categoryIdentifier,\n                inputs,\n                recipe.getBiome(),\n                recipe.getBypassBlock(),")
+        result = result.replace("recipe.getBiomeKey(), recipe.getBiomeTag()", "recipe.getBiome().left().orElse(null), recipe.getBiome().right().orElse(null)")
+        result = result.replace("this.populateBiomeInformation(display.getBiomeKey(), display.getBiomeTag(), tooltip);", "this.populateBiomeInformation(display.getBiome().left(), display.getBiome().right(), tooltip);")
+        result = result.replace("this.populateBiomeInformation(recipe.getBiomeKey(), recipe.getBiomeTag(), tooltip);", "this.populateBiomeInformation(recipe.getBiome().left().orElse(null), recipe.getBiome().right().orElse(null), tooltip);")
+
+        result = Regex("""private\s+final\s+BlockStateIngredient\s+bypassBlock\s*;""")
+            .replace(result) {
+                changed = true
+                "private final Optional<BlockStateIngredient> bypassBlock;"
+            }
+        result = Regex(
+            """(?s)\s*private\s+final\s+Optional\s*<\s*ResourceKey\s*<\s*Biome\s*>\s*>\s+biomeKey\s*;\s*private\s+final\s+Optional\s*<\s*TagKey\s*<\s*Biome\s*>\s*>\s+biomeTag\s*;"""
+        ).replace(result) {
+            changed = true
+            "\n    private final Either<ResourceKey<Biome>, TagKey<Biome>> biome;"
+        }
+        result = Regex(
+            """CategoryIdentifier<\? extends PlacementBanRecipeDisplay<([A-Za-z_$][\w$]*)>>\s+categoryIdentifier,\s*List<EntryIngredient>\s+inputs,\s*BlockStateIngredient\s+bypassBlock,\s*Optional<ResourceKey<Biome>>\s+biomeKey,\s*Optional<TagKey<Biome>>\s+biomeTag"""
+        ).replace(result) { match ->
+            changed = true
+            "CategoryIdentifier<? extends PlacementBanRecipeDisplay<${match.groupValues[1]}>> categoryIdentifier, List<EntryIngredient> inputs, Either<ResourceKey<Biome>, TagKey<Biome>> biome, Optional<BlockStateIngredient> bypassBlock"
+        }
+        result = result
+            .replace("this.bypassBlock = bypassBlock;\n        this.biomeKey = biomeKey;\n        this.biomeTag = biomeTag;", "this.biome = biome;\n        this.bypassBlock = bypassBlock;")
+            .replace("this(categoryIdentifier, inputs, recipe.getBypassBlock(), recipe.getBiome(), Optional.ofNullable((recipe.getIngredient() instanceof BlockStateIngredient ingredient) ? ingredient : null), Optional.empty())", "this(categoryIdentifier, inputs, recipe.getBiome(), recipe.getBypassBlock(), Optional.ofNullable((recipe.getIngredient() instanceof BlockStateIngredient ingredient) ? ingredient : null), Optional.empty())")
+
+        result = Regex("""public\s+BlockStateIngredient\s+getBypassBlock\s*\(\s*\)""")
+            .replace(result) {
+                changed = true
+                "public Optional<BlockStateIngredient> getBypassBlock()"
+            }
+        result = Regex(
+            """(?s)@Nullable\s*\r?\n\s*public\s+ResourceKey\s*<\s*Biome\s*>\s+getBiomeKey\s*\(\s*\)\s*\{\s*return\s+this\.biomeKey\.orElse\(null\)\s*;\s*\}\s*@Nullable\s*\r?\n\s*public\s+TagKey\s*<\s*Biome\s*>\s+getBiomeTag\s*\(\s*\)\s*\{\s*return\s+this\.biomeTag\.orElse\(null\)\s*;\s*\}"""
+        ).replace(result) {
+            changed = true
+            "public Either<ResourceKey<Biome>, TagKey<Biome>> getBiome() {\n" +
+                "        return this.biome;\n" +
+                "    }"
+        }
+
+        if (!changed && result == source) return source
+        if (result.contains("Either<ResourceKey<Biome>, TagKey<Biome>>")) {
+            result = addImportIfMissing(result, "com.mojang.datafixers.util.Either")
+        }
+        if (result.contains("Optional<BlockStateIngredient>") || result.contains("Optional.empty()")) {
+            result = addImportIfMissing(result, "java.util.Optional")
+        }
+        if (result.contains("BlockStateIngredient")) {
+            result = addImportIfMissing(result, javaImportForSimpleType(source, "BlockStateIngredient") ?: "com.aetherteam.nitrogen.recipe.BlockStateIngredient")
+        }
+        if (result.contains("RecipeInput")) {
+            result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeInput")
+        }
+        return result
+    }
+
+    private fun replacePlacementBanJeiSetRecipe(source: String): String {
+        if (!source.contains("void setRecipe(") ||
+            !source.contains("IRecipeLayoutBuilder") ||
+            !source.contains("recipe.getBypassBlock()") ||
+            !source.contains("this.setupIngredients(pairs)")) {
+            return source
+        }
+        val signature = Regex(
+            """(?m)^([ \t]*)public\s+void\s+setRecipe\s*\(\s*IRecipeLayoutBuilder\s+([A-Za-z_$][\w$]*)\s*,\s*R\s+([A-Za-z_$][\w$]*)\s*,\s*IFocusGroup\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
+        ).find(source) ?: return source
+        val openBrace = source.indexOf('{', signature.range.last - 1)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        if (openBrace < 0 || closeBrace < 0) return source
+        val indent = signature.groupValues[1]
+        val builder = signature.groupValues[2]
+        val recipe = signature.groupValues[3]
+        val replacement = """
+${indent}public void setRecipe(IRecipeLayoutBuilder $builder, R $recipe, IFocusGroup ${signature.groupValues[4]}) {
+${indent}    Optional<BlockStateIngredient> bypassBlockIngredient = $recipe.getBypassBlock();
+${indent}    if (bypassBlockIngredient.isPresent() && !bypassBlockIngredient.get().isEmpty()) {
+${indent}        BlockPropertyPair[] pairs = bypassBlockIngredient.get().getPairs();
+${indent}        if (pairs != null) {
+${indent}            List<Object> ingredients = this.setupIngredients(pairs);
+${indent}            $builder.addSlot(RecipeIngredientRole.INPUT, 99, 1).addIngredientsUnsafe(ingredients)
+${indent}                    .setCustomRenderer(Services.PLATFORM.getFluidHelper().getFluidIngredientType(), new FluidStateRenderer(Services.PLATFORM.getFluidHelper()))
+${indent}                    .setCustomRenderer(VanillaTypes.ITEM_STACK, new BlockStateRenderer(pairs));
+${indent}        }
+${indent}    }
+${indent}}
+""".trimEnd()
+        return source.substring(0, signature.range.first) + replacement + source.substring(closeBrace + 1)
     }
 
     private fun recipeLikeBaseTypes(): Set<String> = setOf(
