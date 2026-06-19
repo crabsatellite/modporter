@@ -13169,6 +13169,7 @@ ${indent}}
         result = migrateNitrogenBlockStateRecipeConstructors(result)
         result = migrateNitrogenBiomeParameterRecipeSource(result)
         result = migrateNitrogenBiomeParameterRecipeSerializerSource(result)
+        result = migrateIngredientNetworkCodecs(result, javaInheritanceIndex)
         result = migrateCacheableFunctionOptionalBoundaries(result)
         result = migrateRecipeHolderAccess(result)
         result = migrateRecipeManagerByKeyHolderAccessSource(result)
@@ -28833,6 +28834,157 @@ public class $className<T extends $recipeBase> extends BlockStateRecipeSerialize
 """.trimStart()
     }
 
+    private fun migrateIngredientNetworkCodecs(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
+        if (!source.contains("fromNetwork(") && !source.contains(".toNetwork(")) return source
+        if (!source.contains("Ingredient") && !source.contains("BlockStateIngredient")) return source
+        if (source.contains("implements RecipeSerializer<") &&
+            (migrateLegacyStructuredRecipeSerializerSource(source) != source ||
+                migrateLegacyFactoryCookingRecipeSerializerSource(source) != source)
+        ) {
+            return source
+        }
+
+        val id = """[A-Za-z_$][\w$]*"""
+        fun registryBufferExpression(buffer: String): String =
+            if (Regex("""\bRegistryFriendlyByteBuf\s+${Regex.escape(buffer)}\b""").containsMatchIn(source)) {
+                buffer
+            } else {
+                "(RegistryFriendlyByteBuf) $buffer"
+            }
+
+        var result = source
+        var changed = false
+
+        result = Regex("""\bBlockStateIngredient\.fromNetwork\s*\(\s*($id)\s*\)""")
+            .replace(result) { match ->
+                changed = true
+                "BlockStateIngredient.CONTENTS_STREAM_CODEC.decode(${registryBufferExpression(match.groupValues[1])})"
+            }
+        result = Regex("""\bIngredient\.fromNetwork\s*\(\s*($id)\s*\)""")
+            .replace(result) { match ->
+                changed = true
+                "Ingredient.CONTENTS_STREAM_CODEC.decode(${registryBufferExpression(match.groupValues[1])})"
+            }
+
+        val blockStateIngredientReceivers = declaredVariablesOfSimpleType(source, "BlockStateIngredient").toMutableSet()
+        val ingredientReceivers = declaredVariablesOfSimpleType(source, "Ingredient").toMutableSet()
+        if (source.contains("BlockStateIngredient getBypassBlock(") || source.contains("BlockStateIngredient getBypassBlock()")) {
+            blockStateIngredientReceivers.addRegexReceiver("getBypassBlock")
+        }
+
+        val placementIngredientCodecByClass = Regex("""\bclass\s+($id)(?:\s*<[^>{}]+>)?\s+extends\s+AbstractPlacementBanRecipe\s*<\s*[^,>]+,\s*([^,>]+)""")
+            .findAll(source)
+            .mapNotNull { match ->
+                val codec = when (match.groupValues[2].trim().substringAfterLast('.')) {
+                    "Ingredient" -> "Ingredient.CONTENTS_STREAM_CODEC"
+                    "BlockStateIngredient" -> "BlockStateIngredient.CONTENTS_STREAM_CODEC"
+                    else -> null
+                } ?: return@mapNotNull null
+                match.groupValues[1] to codec
+            }
+            .toMap()
+        val placementIngredientCodecByVariable = placementIngredientCodecByClass.flatMap { (className, codec) ->
+            Regex("""\b${Regex.escape(className)}\s+($id)\b""")
+                .findAll(source)
+                .map { it.groupValues[1] to codec }
+                .toList()
+        }.toMap()
+
+        result = replaceNetworkEncodeCalls(result, blockStateIngredientReceivers, "BlockStateIngredient.CONTENTS_STREAM_CODEC", ::registryBufferExpression) {
+            changed = true
+        }
+        result = replaceNetworkEncodeCalls(result, ingredientReceivers, "Ingredient.CONTENTS_STREAM_CODEC", ::registryBufferExpression) {
+            changed = true
+        }
+        val recipeIngredientReceivers = declaredVariablesOfSimpleTypes(
+            source,
+            recipeLikeGenericTypeVariables(source, javaInheritanceIndex) + recipeLikeBaseTypes()
+        )
+        recipeIngredientReceivers.forEach { receiver ->
+            result = Regex("""(?<![\w$])${Regex.escape(receiver)}\.getIngredients\(\)\.get\(\s*([^)]*?)\s*\)\.toNetwork\s*\(\s*($id)\s*\)""")
+                .replace(result) { match ->
+                    changed = true
+                    val index = match.groupValues[1].trim()
+                    "Ingredient.CONTENTS_STREAM_CODEC.encode(${registryBufferExpression(match.groupValues[2])}, $receiver.getIngredients().get($index))"
+                }
+        }
+        result = Regex("""\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*\(\))*)\.getBypassBlock\(\)\.toNetwork\s*\(\s*($id)\s*\)""")
+            .replace(result) { match ->
+                changed = true
+                "BlockStateIngredient.CONTENTS_STREAM_CODEC.encode(${registryBufferExpression(match.groupValues[2])}, ${match.groupValues[1]}.getBypassBlock())"
+            }
+        placementIngredientCodecByVariable.forEach { (variable, codec) ->
+            result = Regex("""(?<![\w$])${Regex.escape(variable)}\.getIngredient\(\)\.toNetwork\s*\(\s*($id)\s*\)""")
+                .replace(result) { match ->
+                    changed = true
+                    "$codec.encode(${registryBufferExpression(match.groupValues[1])}, $variable.getIngredient())"
+                }
+        }
+
+        if (!changed) return source
+        if (result.contains("(RegistryFriendlyByteBuf)")) {
+            result = addImportIfMissing(result, "net.minecraft.network.RegistryFriendlyByteBuf")
+        }
+        return result
+    }
+
+    private fun recipeLikeBaseTypes(): Set<String> = setOf(
+        "Recipe",
+        "CraftingRecipe",
+        "AbstractCookingRecipe",
+        "SingleItemRecipe"
+    )
+
+    private fun recipeLikeGenericTypeVariables(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): Set<String> =
+        Regex("""\b([A-Z][A-Za-z0-9_$]*)\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)(?:\s*<[^>{}]+>)?""")
+            .findAll(source)
+            .mapNotNull { match ->
+                val bound = match.groupValues[2].substringAfterLast('.')
+                match.groupValues[1].takeIf {
+                    bound in recipeLikeBaseTypes() || javaInheritanceIndex.inherits(bound, recipeLikeBaseTypes())
+                }
+            }
+            .toSet()
+
+    private fun MutableSet<String>.addRegexReceiver(methodName: String) {
+        add("""[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*\(\))*\.${Regex.escape(methodName)}\(\)""")
+    }
+
+    private fun declaredVariablesOfSimpleType(source: String, simpleType: String): Set<String> =
+        Regex("""\b${Regex.escape(simpleType)}(?:\s*<[^;=(){}]+>)?\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+
+    private fun declaredVariablesOfSimpleTypes(source: String, simpleTypes: Set<String>): Set<String> =
+        simpleTypes.flatMap { declaredVariablesOfSimpleType(source, it) }.toSet()
+
+    private fun replaceNetworkEncodeCalls(
+        source: String,
+        receivers: Set<String>,
+        codec: String,
+        bufferExpression: (String) -> String,
+        onChange: () -> Unit
+    ): String {
+        if (receivers.isEmpty()) return source
+        var result = source
+        receivers.forEach { receiver ->
+            val receiverPattern = if (receiver.contains("\\")) receiver else Regex.escape(receiver)
+            result = Regex("""(?<![\w$])($receiverPattern)\.toNetwork\s*\(\s*([A-Za-z_$][\w$]*)\s*\)""")
+                .replace(result) { match ->
+                    onChange()
+                    "$codec.encode(${bufferExpression(match.groupValues[2])}, ${match.groupValues[1]})"
+                }
+        }
+        return result
+    }
+
     private fun migrateCacheableFunctionOptionalBoundaries(source: String): String {
         if (!source.contains("CacheableFunction") ||
             (!source.contains("getFunction()") && !source.contains("BlockStateRecipeUtil.executeFunction("))) {
@@ -30968,6 +31120,21 @@ $encodeLines
             ?: return source
         val categoryType = categoryMatch.groupValues[1]
         if (categoryType != categoryMatch.groupValues[3]) return source
+        val id = """[A-Za-z_$][\w$]*"""
+        val categoryWriteMatch = Regex("""Objects\.requireNonNullElse\(\s*recipe\.($id)\(\)\s*,\s*${Regex.escape(categoryType)}\.($id)\s*\)""")
+            .find(toNetworkMethod)
+            ?: return source
+        val categoryAccessor = categoryWriteMatch.groupValues[1]
+        val categoryDefault = categoryWriteMatch.groupValues[2]
+        val resultAccessor = Regex("""ItemStack\.STREAM_CODEC\.encode\(\s*buffer\s*,\s*recipe\.($id)\(\)\s*\)""")
+            .find(toNetworkMethod)
+            ?.groupValues
+            ?.get(1)
+            ?: Regex("""buffer\.writeItem\(\s*recipe\.($id)\(\)\s*\)""")
+                .find(toNetworkMethod)
+                ?.groupValues
+                ?.get(1)
+            ?: return source
         if (!fromJsonMethod.contains("$categoryType.CODEC.byName(") ||
             !fromJsonMethod.contains("Ingredient.fromJson(") ||
             !fromNetworkMethod.contains("Ingredient.fromNetwork(buffer)") ||
@@ -30987,9 +31154,9 @@ $encodeLines
                     this.factory = factory;
                     this.codec = RecordCodecBuilder.mapCodec((instance) -> instance.group(
                             Codec.STRING.optionalFieldOf("group", "").forGetter(AbstractCookingRecipe::getGroup),
-                            $categoryType.CODEC.fieldOf("category").forGetter($recipeBase::aetherCategory),
+                            $categoryType.CODEC.fieldOf("category").forGetter($recipeBase::$categoryAccessor),
                             Ingredient.CODEC_NONEMPTY.fieldOf("ingredient").forGetter((recipe) -> recipe.getIngredients().get(0)),
-                            ItemStack.CODEC.fieldOf("result").forGetter($recipeBase::getResult),
+                            ItemStack.CODEC.fieldOf("result").forGetter($recipeBase::$resultAccessor),
                             Codec.FLOAT.fieldOf("experience").orElse(0.0F).forGetter(AbstractCookingRecipe::getExperience),
                             Codec.INT.fieldOf("cookingtime").orElse(defaultCookingTime).forGetter(AbstractCookingRecipe::getCookingTime)
                     ).apply(instance, factory::create));
@@ -31018,9 +31185,9 @@ $encodeLines
 
                 public void toNetwork(RegistryFriendlyByteBuf buffer, T recipe) {
                     buffer.writeUtf(recipe.getGroup());
-                    buffer.writeEnum(Objects.requireNonNullElse(recipe.aetherCategory(), $categoryType.UNKNOWN));
+                    buffer.writeEnum(Objects.requireNonNullElse(recipe.$categoryAccessor(), $categoryType.$categoryDefault));
                     Ingredient.CONTENTS_STREAM_CODEC.encode(buffer, recipe.getIngredients().get(0));
-                    ItemStack.STREAM_CODEC.encode(buffer, recipe.getResult());
+                    ItemStack.STREAM_CODEC.encode(buffer, recipe.$resultAccessor());
                     buffer.writeFloat(recipe.getExperience());
                     buffer.writeVarInt(recipe.getCookingTime());
                 }

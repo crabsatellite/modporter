@@ -4458,6 +4458,81 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `factory cooking serializers derive category and result accessors from source`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("SpecialCookingSerializer.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonElement;
+            import com.google.gson.JsonObject;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import java.util.Objects;
+
+            public class SpecialCookingSerializer<T extends AbstractSpecialCookingRecipe> implements RecipeSerializer<T> {
+                private final int defaultCookingTime;
+                private final SpecialCookingSerializer.CookieBaker<T> factory;
+
+                public SpecialCookingSerializer(SpecialCookingSerializer.CookieBaker<T> factory, int defaultCookingTime) {
+                    this.defaultCookingTime = defaultCookingTime;
+                    this.factory = factory;
+                }
+
+                public T fromJson(ResourceLocation id, JsonObject json) {
+                    String group = GsonHelper.getAsString(json, "group", "");
+                    BookCategory bookCategory = BookCategory.CODEC.byName(GsonHelper.getAsString(json, "category", null), BookCategory.HEATED);
+                    JsonElement ingredientJson = GsonHelper.getAsJsonObject(json, "ingredient");
+                    Ingredient ingredient = Ingredient.fromJson(ingredientJson);
+                    ItemStack result = ItemStack.EMPTY;
+                    float experience = GsonHelper.getAsFloat(json, "experience", 0.0F);
+                    int cookingTime = GsonHelper.getAsInt(json, "cookingtime", this.defaultCookingTime);
+                    return this.factory.create(id, group, bookCategory, ingredient, result, experience, cookingTime);
+                }
+
+                public T fromNetwork(ResourceLocation id, FriendlyByteBuf buffer) {
+                    String group = buffer.readUtf();
+                    BookCategory bookCategory = buffer.readEnum(BookCategory.class);
+                    Ingredient ingredient = Ingredient.fromNetwork(buffer);
+                    ItemStack result = buffer.readItem();
+                    float experience = buffer.readFloat();
+                    int cookingTime = buffer.readVarInt();
+                    return this.factory.create(id, group, bookCategory, ingredient, result, experience, cookingTime);
+                }
+
+                public void toNetwork(FriendlyByteBuf buffer, T recipe) {
+                    buffer.writeUtf(recipe.getGroup());
+                    buffer.writeEnum(Objects.requireNonNullElse(recipe.bookCategory(), BookCategory.HEATED));
+                    recipe.getIngredients().get(0).toNetwork(buffer);
+                    buffer.writeItem(recipe.output());
+                    buffer.writeFloat(recipe.getExperience());
+                    buffer.writeVarInt(recipe.getCookingTime());
+                }
+
+                public interface CookieBaker<T extends AbstractSpecialCookingRecipe> {
+                    T create(ResourceLocation id, String group, BookCategory category, Ingredient ingredient, ItemStack result, float experience, int cookingTime);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val serializer = srcDir.resolve("SpecialCookingSerializer.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-recipe-codec-121" })
+        assertTrue(serializer.contains("public StreamCodec<RegistryFriendlyByteBuf, T> streamCodec()"), serializer)
+        assertTrue(serializer.contains("""BookCategory.CODEC.fieldOf("category").forGetter(AbstractSpecialCookingRecipe::bookCategory)"""), serializer)
+        assertTrue(serializer.contains("""ItemStack.CODEC.fieldOf("result").forGetter(AbstractSpecialCookingRecipe::output)"""), serializer)
+        assertTrue(serializer.contains("buffer.writeEnum(Objects.requireNonNullElse(recipe.bookCategory(), BookCategory.HEATED));"), serializer)
+        assertTrue(serializer.contains("ItemStack.STREAM_CODEC.encode(buffer, recipe.output());"), serializer)
+        assertFalse(serializer.contains("aetherCategory"), serializer)
+        assertFalse(serializer.contains("fromJson(ResourceLocation"), serializer)
+    }
+
+    @Test
     fun `datagen registry and loot table key wrappers migrate by declared key structure`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -9259,6 +9334,106 @@ class StructuralRefactorExtraTest {
         assertTrue(serializer.contains("Optional<ResourceLocation> function = buffer.readOptional(FriendlyByteBuf::readResourceLocation);"), serializer)
         assertFalse(serializer.contains("CookieBaker"), serializer)
         assertFalse(serializer.contains("fromJson(ResourceLocation id, JsonObject json)"), serializer)
+    }
+
+    @Test
+    fun `migrates ingredient network codecs with receiver type evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("IngredientNetworkSurface.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.level.biome.Biome;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class IngredientNetworkSurface {
+                static class AbstractPlacementBanRecipe<T, S> {
+                    public BlockStateIngredient getBypassBlock() { return BlockStateIngredient.EMPTY; }
+                    public S getIngredient() { return null; }
+                }
+
+                static class ItemBanRecipe extends AbstractPlacementBanRecipe<ItemStack, Ingredient> {
+                    void read(FriendlyByteBuf buffer) {
+                        BlockStateIngredient bypassBlock = BlockStateIngredient.fromNetwork(buffer);
+                        Ingredient ingredient = Ingredient.fromNetwork(buffer);
+                    }
+
+                    void write(FriendlyByteBuf buffer, ItemBanRecipe recipe, UnknownNetworkValue unknown) {
+                        recipe.getBypassBlock().toNetwork(buffer);
+                        recipe.getIngredient().toNetwork(buffer);
+                        unknown.toNetwork(buffer);
+                    }
+                }
+
+                static class BlockBanRecipe extends AbstractPlacementBanRecipe<BlockState, BlockStateIngredient> {
+                    void read(FriendlyByteBuf buffer) {
+                        BlockStateIngredient ingredient = BlockStateIngredient.fromNetwork(buffer);
+                    }
+
+                    void write(FriendlyByteBuf buffer, BlockBanRecipe recipe, BlockStateIngredient localIngredient) {
+                        recipe.getIngredient().toNetwork(buffer);
+                        localIngredient.toNetwork(buffer);
+                    }
+                }
+
+                interface UnknownNetworkValue {
+                    void toNetwork(FriendlyByteBuf buffer);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("AbstractExampleCookingRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+
+            public abstract class AbstractExampleCookingRecipe extends AbstractCookingRecipe {
+            }
+        """.trimIndent())
+        srcDir.resolve("GenericCookingSerializer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.RegistryFriendlyByteBuf;
+            import net.minecraft.world.item.crafting.Ingredient;
+
+            public class GenericCookingSerializer<T extends AbstractExampleCookingRecipe> {
+                void write(RegistryFriendlyByteBuf buffer, T recipe, NotARecipe notRecipe) {
+                    recipe.getIngredients().get(0).toNetwork(buffer);
+                    notRecipe.getIngredients().get(0).toNetwork(buffer);
+                }
+
+                interface NotARecipe {
+                    java.util.List<UnknownNetworkValue> getIngredients();
+                }
+
+                interface UnknownNetworkValue {
+                    void toNetwork(RegistryFriendlyByteBuf buffer);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("IngredientNetworkSurface.java").readText()
+        val genericSerializer = srcDir.resolve("GenericCookingSerializer.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("import net.minecraft.network.RegistryFriendlyByteBuf;"), transformed)
+        assertTrue(transformed.contains("BlockStateIngredient bypassBlock = BlockStateIngredient.CONTENTS_STREAM_CODEC.decode((RegistryFriendlyByteBuf) buffer);"), transformed)
+        assertTrue(transformed.contains("Ingredient ingredient = Ingredient.CONTENTS_STREAM_CODEC.decode((RegistryFriendlyByteBuf) buffer);"), transformed)
+        assertTrue(transformed.contains("BlockStateIngredient.CONTENTS_STREAM_CODEC.encode((RegistryFriendlyByteBuf) buffer, recipe.getBypassBlock());"), transformed)
+        assertTrue(transformed.contains("Ingredient.CONTENTS_STREAM_CODEC.encode((RegistryFriendlyByteBuf) buffer, recipe.getIngredient());"), transformed)
+        assertTrue(transformed.contains("BlockStateIngredient.CONTENTS_STREAM_CODEC.encode((RegistryFriendlyByteBuf) buffer, recipe.getIngredient());"), transformed)
+        assertTrue(transformed.contains("BlockStateIngredient.CONTENTS_STREAM_CODEC.encode((RegistryFriendlyByteBuf) buffer, localIngredient);"), transformed)
+        assertTrue(transformed.contains("unknown.toNetwork(buffer);"), transformed)
+        assertFalse(transformed.contains("Ingredient.fromNetwork(buffer)"), transformed)
+        assertFalse(transformed.contains("BlockStateIngredient.fromNetwork(buffer)"), transformed)
+        assertTrue(genericSerializer.contains("Ingredient.CONTENTS_STREAM_CODEC.encode(buffer, recipe.getIngredients().get(0));"), genericSerializer)
+        assertTrue(genericSerializer.contains("notRecipe.getIngredients().get(0).toNetwork(buffer);"), genericSerializer)
     }
 
     @Test
