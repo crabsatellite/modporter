@@ -14649,6 +14649,43 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `mob effect tick trailing return is added after nested lambda blocks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RemedyEffect.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectCategory;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public class RemedyEffect extends MobEffect {
+                public RemedyEffect() {
+                    super(MobEffectCategory.BENEFICIAL, 0x123456);
+                }
+
+                @Override
+                public boolean applyEffectTick(LivingEntity livingEntity, int amplifier) {
+                    Optional.of(livingEntity).ifPresent((entity) -> {
+                        if (entity.isAlive()) {
+                            entity.clearFire();
+                        }
+                    });
+                    livingEntity.setTicksFrozen(0);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("RemedyEffect.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(Regex("""(?s)\}\);\s*livingEntity\.setTicksFrozen\(0\);\s*return true;\s*\}""").containsMatchIn(migrated), migrated)
+        assertFalse(Regex("""(?s)ifPresent\s*\([^;]+return true;[^;]+;""").containsMatchIn(migrated), migrated)
+    }
+
+    @Test
     fun `migrates legacy blocked path type constants only for proven blocked consumers`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

@@ -1858,14 +1858,6 @@
       "isRegex": false
     },
     {
-      "id": "effect-applyEffectTick-return-true",
-      "pattern": "(public boolean applyEffectTick\\([^)]*\\)\\s*\\{(?:(?!\\n\\s*return\\s+)[\\s\\S])*?)(\\n\\s*\\})",
-      "replacement": "$1\n        return true;$2",
-      "description": "Old void MobEffect.applyEffectTick() implementations need true return after signature migration",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "effect-isDurationEffectTick-rename",
       "pattern": "isDurationEffectTick(",
       "replacement": "shouldApplyEffectTickThisTick(",

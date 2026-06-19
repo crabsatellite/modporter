@@ -26563,9 +26563,8 @@ protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
                 if (openBrace < 0 || closeBrace < 0) return@mapNotNull null
                 val body = source.substring(openBrace + 1, closeBrace)
                 if (!mobEffectBooleanMethodNeedsTrailingTrue(body)) return@mapNotNull null
-                val lineStart = source.lastIndexOf('\n', match.range.first).let { if (it < 0) 0 else it + 1 }
-                val indent = source.substring(lineStart, match.range.first).takeWhile { it == ' ' || it == '\t' }
-                closeBrace to "\n${indent}\treturn true;"
+                val indent = match.value.takeWhile { it == ' ' || it == '\t' }
+                closeBrace to "\n${indent}    return true;\n$indent"
             }
             .toList()
         if (insertions.isEmpty()) return source

@@ -1,6 +1,7 @@
 package com.modporter.transforms
 
 import com.modporter.core.pipeline.Confidence
+import com.modporter.core.transforms.structural.StructuralRefactorPass
 import com.modporter.core.transforms.text.TextReplacementPass
 import com.modporter.mapping.MappingDatabase
 import org.junit.jupiter.api.Test
@@ -2194,7 +2195,7 @@ class TextReplacementTest {
     }
 
     @Test
-    fun `effect tick signature migration adds boolean return`() {
+    fun `effect tick signature migration defers trailing return to structural pass`() {
         val projectDir = createTestFile("""
             package com.example;
 
@@ -2219,13 +2220,18 @@ class TextReplacementTest {
         val pass = TextReplacementPass(db)
         pass.apply(projectDir)
 
+        val afterText = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(afterText.contains("public boolean applyEffectTick(LivingEntity entity, int amplifier)"))
+        assertFalse(afterText.contains("return true;"))
+        assertTrue(afterText.contains("shouldApplyEffectTickThisTick(int duration, int amplifier)"))
+        assertFalse(afterText.contains("public void applyEffectTick"))
+        assertFalse(afterText.contains("isDurationEffectTick("))
+
+        StructuralRefactorPass().apply(projectDir)
         val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
 
-        assertTrue(transformed.contains("public boolean applyEffectTick(LivingEntity entity, int amplifier)"))
         assertTrue(transformed.contains("return true;"))
-        assertTrue(transformed.contains("shouldApplyEffectTickThisTick(int duration, int amplifier)"))
-        assertFalse(transformed.contains("public void applyEffectTick"))
-        assertFalse(transformed.contains("isDurationEffectTick("))
     }
 
     @Test
