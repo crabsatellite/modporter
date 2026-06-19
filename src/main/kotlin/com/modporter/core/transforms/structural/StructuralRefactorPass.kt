@@ -280,6 +280,13 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            val recipeBookTypeEnumExtensionChanges = migrateLegacyRecipeBookTypeEnumExtensions(projectDir, dryRun)
+            changes.addAll(recipeBookTypeEnumExtensionChanges)
+        } catch (e: Exception) {
+            errors.add("Recipe book type enum extension migration error: ${e.message}")
+        }
+
+        try {
             val mobCategoryEnumExtensionChanges = migrateLegacyMobCategoryEnumExtensions(projectDir, dryRun)
             changes.addAll(mobCategoryEnumExtensionChanges)
         } catch (e: Exception) {
@@ -9506,6 +9513,7 @@ $fields
         val sourceFile: Path,
         val packageName: String,
         val rarityName: String,
+        val serializedName: String,
         val colorName: String,
         val enumName: String,
         val methodName: String
@@ -9529,6 +9537,10 @@ $fields
         val enumName: String,
         val methodName: String,
         val iconExpressions: List<String>
+    )
+
+    private data class LegacyRecipeBookTypeExtension(
+        val enumName: String
     )
 
     private data class LegacyMobCategoryExtension(
@@ -9559,12 +9571,37 @@ $fields
         val name: String
     )
 
+    private fun enumExtensionNamePart(value: String): String =
+        value.uppercase().replace(Regex("""[^A-Z0-9_]+"""), "_").trim('_').ifBlank { "CUSTOM" }
+
+    private fun prefixedEnumExtensionName(modId: String, legacyName: String): String {
+        val enumPrefix = enumExtensionNamePart(modId)
+        val rawEnumName = enumExtensionNamePart(legacyName)
+        return if (rawEnumName.startsWith("${enumPrefix}_")) rawEnumName else "${enumPrefix}_$rawEnumName"
+    }
+
+    private fun legacyRaritySerializedName(modId: String, legacyName: String): String {
+        val trimmed = legacyName.trim()
+        if (Regex("""^[a-z0-9_.-]+:[a-z0-9_./-]+$""").matches(trimmed)) return trimmed
+        val namespaceDotPrefix = "$modId."
+        if (trimmed.startsWith(namespaceDotPrefix)) {
+            val path = trimmed.removePrefix(namespaceDotPrefix)
+                .lowercase()
+                .replace(Regex("""[^a-z0-9_./-]+"""), "_")
+                .trim('_', '.', '/', '-')
+            if (path.isNotBlank()) return "$modId:$path"
+        }
+        val path = trimmed.lowercase()
+            .replace(Regex("""[^a-z0-9_./-]+"""), "_")
+            .trim('_', '.', '/', '-')
+            .ifBlank { "custom" }
+        return "$modId:$path"
+    }
+
     private fun migrateLegacyRarityEnumExtensions(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return emptyList()
-        val modId = detectModId(projectDir) ?: return emptyList()
-        val enumPrefix = modId.uppercase().replace(Regex("""[^A-Z0-9_]+"""), "_").trim('_')
-        val rarityPattern = Regex("""Rarity\.create\(\s*"([A-Za-z0-9_]+)"\s*,\s*ChatFormatting\.([A-Z0-9_]+)\s*\)""")
+        val modId = detectModId(projectDir) ?: projectMetadataModId(projectDir) ?: return emptyList()
         val javaFiles = Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .toList()
@@ -9576,17 +9613,39 @@ $fields
             if (!original.contains("Rarity.create(")) return@forEach
             val packageName = packageNameOf(original)
             var migrated = original
-            rarityPattern.findAll(original).forEach { match ->
-                val rarityName = match.groupValues[1]
-                val colorName = match.groupValues[2]
-                val enumName = "${enumPrefix}_${rarityName.uppercase()}"
-                val methodName = "Rarity_${rarityName.uppercase().replace(Regex("""[^A-Z0-9_]+"""), "_")}"
-                extensions[enumName] = LegacyRarityExtension(file, packageName, rarityName, colorName, enumName, methodName)
+            val replacements = mutableListOf<Pair<String, String>>()
+            var cursor = 0
+            while (true) {
+                val match = Regex("""Rarity\.create\s*\(""").find(original, cursor) ?: break
+                val openParen = original.indexOf('(', match.range.last - 1)
+                val closeParen = if (openParen >= 0) findMatchingParen(original, openParen) else -1
+                if (closeParen < 0) {
+                    cursor = match.range.last + 1
+                    continue
+                }
+                val args = splitTopLevelJavaArgs(original.substring(openParen + 1, closeParen))
+                val rarityName = args.getOrNull(0)?.let { javaStringLiteralValue(it.trim()) }
+                val colorName = args.getOrNull(1)
+                    ?.trim()
+                    ?.let { Regex("""(?:net\.minecraft\.)?ChatFormatting\.([A-Z0-9_]+)""").matchEntire(it)?.groupValues?.get(1) }
+                if (args.size == 2 && rarityName != null && colorName != null) {
+                    val enumName = prefixedEnumExtensionName(modId, rarityName)
+                    val methodName = "Rarity_${enumName}".replace(Regex("""[^A-Za-z0-9_]+"""), "_")
+                    extensions[enumName] = LegacyRarityExtension(
+                        sourceFile = file,
+                        packageName = packageName,
+                        rarityName = rarityName,
+                        serializedName = legacyRaritySerializedName(modId, rarityName),
+                        colorName = colorName,
+                        enumName = enumName,
+                        methodName = methodName
+                    )
+                    replacements += original.substring(match.range.first, closeParen + 1) to """Rarity.valueOf("$enumName")"""
+                }
+                cursor = closeParen + 1
             }
-            migrated = rarityPattern.replace(migrated) { match ->
-                val rarityName = match.groupValues[1]
-                val enumName = "${enumPrefix}_${rarityName.uppercase()}"
-                """Rarity.valueOf("$enumName")"""
+            replacements.forEach { (before, after) ->
+                migrated = migrated.replace(before, after)
             }
             if (!migrated.contains("ChatFormatting.")) {
                 migrated = removeImport(migrated, "net.minecraft.ChatFormatting")
@@ -9609,7 +9668,7 @@ $fields
         val packageName = extensions.values.first().packageName
         val helperClass = "NeoForgeEnumExtensions"
         val helperFile = srcDir.resolve(packageName.replace('.', '/')).resolve("$helperClass.java")
-        val helperSource = rarityEnumExtensionHelperSource(packageName, helperClass, modId, extensions.values.toList())
+        val helperSource = rarityEnumExtensionHelperSource(packageName, helperClass, extensions.values.toList())
         changes.add(Change(
             file = helperFile,
             line = 0,
@@ -9621,14 +9680,19 @@ $fields
         ))
         if (!dryRun) {
             helperFile.parent.createDirectories()
-            helperFile.writeText(helperSource)
+            val merged = if (helperFile.exists()) {
+                mergeRarityEnumExtensionHelperMethods(helperFile.readText(), extensions.values.toList(), helperSource)
+            } else {
+                helperSource
+            }
+            helperFile.writeText(merged)
         }
 
         val resourcesDir = projectDir.resolve("src/main/resources")
         val metaInf = resourcesDir.resolve("META-INF")
         val enumExtensionFile = metaInf.resolve("enumextensions.json")
         val helperInternalName = if (packageName.isBlank()) helperClass else "${packageName.replace('.', '/')}/$helperClass"
-        val enumJson = rarityEnumExtensionsJson(helperInternalName, extensions.values.toList())
+        val enumEntries = extensions.values.map { rarityEnumExtensionJsonEntry(helperInternalName, it) }
         changes.add(Change(
             file = enumExtensionFile,
             line = 0,
@@ -9640,7 +9704,7 @@ $fields
         ))
         if (!dryRun) {
             metaInf.createDirectories()
-            enumExtensionFile.writeText(enumJson)
+            mergeEnumExtensionEntries(enumExtensionFile, enumEntries)
             ensureEnumExtensionsTomlEntry(metaInf)
         }
         return changes
@@ -9649,26 +9713,13 @@ $fields
     private fun rarityEnumExtensionHelperSource(
         packageName: String,
         helperClass: String,
-        modId: String,
         extensions: List<LegacyRarityExtension>
     ): String {
         val packageLine = if (packageName.isBlank()) "" else "package $packageName;\n\n"
         val methods = extensions.joinToString("\n\n") { extension ->
-            val path = extension.rarityName.lowercase().replace(Regex("""[^a-z0-9_]+"""), "_")
-            """
-	public static Object ${extension.methodName}(int idx, Class<?> type) {
-		return type.cast(switch (idx) {
-			case 0 -> -1;
-			case 1 -> "$modId:$path";
-			case 2 -> (UnaryOperator<Style>) style -> style.withColor(ChatFormatting.${extension.colorName});
-			default -> throw new IllegalArgumentException("Unexpected parameter index: " + idx);
-		});
-	}
-            """.trimEnd()
+            rarityEnumExtensionMethod(extension)
         }
         return """${packageLine}import net.minecraft.ChatFormatting;
-import net.minecraft.network.chat.Style;
-import java.util.function.UnaryOperator;
 
 @SuppressWarnings("unused")
 public final class $helperClass {
@@ -9680,24 +9731,46 @@ $methods
 """
     }
 
-    private fun rarityEnumExtensionsJson(helperInternalName: String, extensions: List<LegacyRarityExtension>): String {
-        val entries = extensions.joinToString(",\n") { extension ->
-            """    {
+    private fun rarityEnumExtensionMethod(extension: LegacyRarityExtension): String =
+        """
+	public static Object ${extension.methodName}(int idx, Class<?> type) {
+		return type.cast(switch (idx) {
+			case 0 -> -1;
+			case 1 -> "${extension.serializedName}";
+			case 2 -> ChatFormatting.${extension.colorName};
+			default -> throw new IllegalArgumentException("Unexpected parameter index: " + idx);
+		});
+	}
+        """.trimEnd()
+
+    private fun mergeRarityEnumExtensionHelperMethods(
+        existing: String,
+        extensions: List<LegacyRarityExtension>,
+        freshSource: String
+    ): String {
+        var result = addImportIfMissing(existing, "net.minecraft.ChatFormatting")
+        val missingMethods = extensions
+            .filterNot { result.contains(" ${it.methodName}(int idx, Class<?> type)") }
+            .joinToString("\n\n") { rarityEnumExtensionMethod(it) }
+        if (missingMethods.isBlank()) return result
+        val insertIndex = result.lastIndexOf('}')
+        return if (insertIndex >= 0) {
+            result.substring(0, insertIndex).trimEnd() + "\n\n" + missingMethods + "\n" + result.substring(insertIndex)
+        } else {
+            result + "\n\n" + freshSource.substringAfter("{").substringBeforeLast("}").trim()
+        }
+    }
+
+    private fun rarityEnumExtensionJsonEntry(helperInternalName: String, extension: LegacyRarityExtension): String {
+        return """    {
       "enum": "net/minecraft/world/item/Rarity",
       "name": "${extension.enumName}",
-      "constructor": "(ILjava/lang/String;Ljava/util/function/UnaryOperator;)V",
+      "constructor": "(ILjava/lang/String;Lnet/minecraft/ChatFormatting;)V",
       "parameters": {
         "class": "$helperInternalName",
         "method": "${extension.methodName}"
       }
     }"""
-        }
-        return """{
-  "entries": [
-$entries
-  ]
-}
-"""
     }
 
     private fun ensureEnumExtensionsTomlEntry(metaInf: Path) {
@@ -9745,8 +9818,7 @@ $entries
         val changes = mutableListOf<Change>()
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return changes
-        val modId = detectModId(projectDir) ?: return changes
-        val enumPrefix = modId.uppercase().replace(Regex("""[^A-Z0-9_]+"""), "_").trim('_')
+        val modId = detectModId(projectDir) ?: projectMetadataModId(projectDir) ?: return changes
         val javaFiles = Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .toList()
@@ -9780,8 +9852,7 @@ $entries
                     cursor = closeParen + 1
                     continue
                 }
-                val rawEnumName = categoryName.uppercase().replace(Regex("""[^A-Z0-9_]+"""), "_").trim('_')
-                val enumName = if (rawEnumName.startsWith("${enumPrefix}_")) rawEnumName else "${enumPrefix}_$rawEnumName"
+                val enumName = prefixedEnumExtensionName(modId, categoryName)
                 val methodName = "RecipeBookCategory_${enumName}".replace(Regex("""[^A-Za-z0-9_]+"""), "_")
                 val iconExpressions = args.drop(1).map { it.trim() }.filter { it.isNotBlank() }
                 if (iconExpressions.isEmpty()) {
@@ -9859,6 +9930,87 @@ $entries
             ensureEnumExtensionsTomlEntry(metaInf)
         }
         return changes
+    }
+
+    private fun migrateLegacyRecipeBookTypeEnumExtensions(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+        val modId = detectModId(projectDir) ?: projectMetadataModId(projectDir) ?: return changes
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .toList()
+        val extensions = linkedMapOf<String, LegacyRecipeBookTypeExtension>()
+
+        javaFiles.forEach { javaFile ->
+            val original = javaFile.readText()
+            if (!original.contains("RecipeBookType.create(")) return@forEach
+            var migrated = original
+            val replacements = mutableListOf<Pair<String, String>>()
+            var cursor = 0
+            while (true) {
+                val match = Regex("""RecipeBookType\.create\s*\(""").find(original, cursor) ?: break
+                val openParen = original.indexOf('(', match.range.last - 1)
+                val closeParen = if (openParen >= 0) findMatchingParen(original, openParen) else -1
+                if (closeParen < 0) {
+                    cursor = match.range.last + 1
+                    continue
+                }
+                val args = splitTopLevelJavaArgs(original.substring(openParen + 1, closeParen))
+                val typeName = if (args.size == 1) javaStringLiteralValue(args[0].trim()) else null
+                if (typeName != null) {
+                    val enumName = prefixedEnumExtensionName(modId, typeName)
+                    extensions.putIfAbsent(enumName, LegacyRecipeBookTypeExtension(enumName))
+                    replacements += original.substring(match.range.first, closeParen + 1) to """RecipeBookType.valueOf("$enumName")"""
+                }
+                cursor = closeParen + 1
+            }
+            if (replacements.isNotEmpty()) {
+                replacements.forEach { (before, after) -> migrated = migrated.replace(before, after) }
+                if (migrated != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate legacy RecipeBookType.create() to NeoForge enum extension lookup",
+                        before = "RecipeBookType.create(name)",
+                        after = "RecipeBookType.valueOf(generated enum extension name)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-recipebook-type-enum-extension"
+                    ))
+                    if (!dryRun) javaFile.writeText(migrated)
+                }
+            }
+        }
+
+        if (extensions.isEmpty()) return changes
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        val metaInf = resourcesDir.resolve("META-INF")
+        val enumExtensionFile = metaInf.resolve("enumextensions.json")
+        val entries = extensions.values.map { recipeBookTypeEnumExtensionJsonEntry(it) }
+        changes.add(Change(
+            file = enumExtensionFile,
+            line = 0,
+            description = "Declare NeoForge enum extension metadata for legacy recipe book types",
+            before = "(missing recipe book type enum extension entries)",
+            after = "META-INF/enumextensions.json",
+            confidence = Confidence.HIGH,
+            ruleId = "struct-recipebook-type-enum-extension-json"
+        ))
+        if (!dryRun) {
+            metaInf.createDirectories()
+            mergeEnumExtensionEntries(enumExtensionFile, entries)
+            ensureEnumExtensionsTomlEntry(metaInf)
+        }
+        return changes
+    }
+
+    private fun recipeBookTypeEnumExtensionJsonEntry(extension: LegacyRecipeBookTypeExtension): String {
+        return """    {
+      "enum": "net/minecraft/world/inventory/RecipeBookType",
+      "name": "${extension.enumName}",
+      "constructor": "()V",
+      "parameters": [ ]
+    }"""
     }
 
     private fun importsUsedByExpressions(source: String, expressions: List<String>): List<String> {
@@ -9962,8 +10114,7 @@ $methods
         val changes = mutableListOf<Change>()
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return changes
-        val modId = detectModId(projectDir) ?: return changes
-        val enumPrefix = modId.uppercase().replace(Regex("""[^A-Z0-9_]+"""), "_").trim('_')
+        val modId = detectModId(projectDir) ?: projectMetadataModId(projectDir) ?: return changes
         val javaFiles = Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .toList()
@@ -9985,7 +10136,7 @@ $methods
                     continue
                 }
                 val args = splitTopLevelJavaArgs(original.substring(openParen + 1, closeParen))
-                val extension = legacyMobCategoryExtension(args, enumPrefix, packageName, javaFile)
+                val extension = legacyMobCategoryExtension(args, modId, packageName, javaFile)
                 if (extension != null) {
                     extensions.putIfAbsent(extension.enumName, extension)
                     val callText = original.substring(match.range.first, closeParen + 1)
@@ -10058,7 +10209,7 @@ $methods
 
     private fun legacyMobCategoryExtension(
         args: List<String>,
-        enumPrefix: String,
+        modId: String,
         packageName: String,
         sourceFile: Path
     ): LegacyMobCategoryExtension? {
@@ -10075,9 +10226,7 @@ $methods
             !isJavaIntegerLiteral(despawnDistance)) {
             return null
         }
-        val rawEnumName = enumNameArgument.uppercase().replace(Regex("""[^A-Z0-9_]+"""), "_").trim('_')
-        if (rawEnumName.isBlank()) return null
-        val enumName = if (rawEnumName.startsWith("${enumPrefix}_")) rawEnumName else "${enumPrefix}_$rawEnumName"
+        val enumName = prefixedEnumExtensionName(modId, enumNameArgument)
         val methodName = "MobCategory_${enumName}".replace(Regex("""[^A-Za-z0-9_]+"""), "_")
         return LegacyMobCategoryExtension(
             sourceFile = sourceFile,

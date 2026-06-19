@@ -2324,23 +2324,43 @@ class StructuralRefactorExtraTest {
                 public static final Supplier<RecipeBookCategories> MAGIC_SEARCH = Suppliers.memoize(() -> RecipeBookCategories.create("MAGIC_SEARCH", new ItemStack(Items.COMPASS), new ItemStack(ExampleItems.WAND.get())));
             }
         """.trimIndent())
+        srcDir.resolve("ExampleRecipeBookTypes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.inventory.RecipeBookType;
+
+            public class ExampleRecipeBookTypes {
+                public static final RecipeBookType ALTAR = RecipeBookType.create("ALTAR");
+                public static final RecipeBookType FREEZER = RecipeBookType.create("examplemod.freezer");
+            }
+        """.trimIndent())
 
         val result = StructuralRefactorPass().apply(tempDir)
 
         val categories = srcDir.resolve("ExampleRecipeCategories.java").readText()
+        val types = srcDir.resolve("ExampleRecipeBookTypes.java").readText()
         val helper = srcDir.resolve("NeoForgeEnumExtensions.java").readText()
         val enumExtensions = resourcesDir.resolve("enumextensions.json").readText()
         val toml = resourcesDir.resolve("neoforge.mods.toml").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-recipebook-category-enum-extension" })
+        assertTrue(result.changes.any { it.ruleId == "struct-recipebook-type-enum-extension" })
         assertTrue(categories.contains("RecipeBookCategories.valueOf(\"EXAMPLEMOD_MAGIC_SEARCH\")"), categories)
         assertFalse(categories.contains("RecipeBookCategories.create"), categories)
+        assertTrue(types.contains("RecipeBookType.valueOf(\"EXAMPLEMOD_ALTAR\")"), types)
+        assertTrue(types.contains("RecipeBookType.valueOf(\"EXAMPLEMOD_FREEZER\")"), types)
+        assertFalse(types.contains("RecipeBookType.create"), types)
         assertTrue(helper.contains("public static Object RecipeBookCategory_EXAMPLEMOD_MAGIC_SEARCH(int idx, Class<?> type)"), helper)
         assertTrue(helper.contains("(Supplier<List<ItemStack>>) () -> List.of(new ItemStack(Items.COMPASS), new ItemStack(ExampleItems.WAND.get()))"), helper)
         assertTrue(helper.contains("import com.example.registry.ExampleItems;"), helper)
         assertTrue(enumExtensions.contains("\"enum\": \"net/minecraft/client/RecipeBookCategories\""), enumExtensions)
         assertTrue(enumExtensions.contains("\"name\": \"EXAMPLEMOD_MAGIC_SEARCH\""), enumExtensions)
         assertTrue(enumExtensions.contains("\"constructor\": \"(Ljava/util/function/Supplier;)V\""), enumExtensions)
+        assertTrue(enumExtensions.contains("\"enum\": \"net/minecraft/world/inventory/RecipeBookType\""), enumExtensions)
+        assertTrue(enumExtensions.contains("\"name\": \"EXAMPLEMOD_ALTAR\""), enumExtensions)
+        assertTrue(enumExtensions.contains("\"name\": \"EXAMPLEMOD_FREEZER\""), enumExtensions)
+        assertTrue(enumExtensions.contains("\"constructor\": \"()V\""), enumExtensions)
+        assertTrue(enumExtensions.contains("\"parameters\": [ ]"), enumExtensions)
         assertTrue(toml.contains("enumExtensions=\"META-INF/enumextensions.json\""), toml)
     }
 
@@ -13790,6 +13810,7 @@ class StructuralRefactorExtraTest {
             public class LegacyRarityMod {
                 public static final String ID = "examplemod";
                 private static final Rarity rarity = Rarity.create("TWILIGHT", ChatFormatting.DARK_GREEN);
+                private static final Rarity lootRarity = Rarity.create("examplemod.loot", ChatFormatting.GREEN);
 
                 public static Rarity getRarity() {
                     return rarity;
@@ -14461,12 +14482,18 @@ class StructuralRefactorExtraTest {
         assertTrue(legacyForgeBusBindingSurface.contains("NeoForge.EVENT_BUS.addListener(ExampleEvents::listen);"), legacyForgeBusBindingSurface)
         assertTrue(!legacyForgeBusBindingSurface.contains("Bindings.getForgeBus()"), legacyForgeBusBindingSurface)
         assertTrue(legacyRarityMod.contains("Rarity.valueOf(\"EXAMPLEMOD_TWILIGHT\")"), legacyRarityMod)
+        assertTrue(legacyRarityMod.contains("Rarity.valueOf(\"EXAMPLEMOD_LOOT\")"), legacyRarityMod)
         assertTrue(!legacyRarityMod.contains("Rarity.create("), legacyRarityMod)
         assertTrue(!legacyRarityMod.contains("ChatFormatting"), legacyRarityMod)
         assertTrue(enumExtensions.contains("\"name\": \"EXAMPLEMOD_TWILIGHT\""), enumExtensions)
-        assertTrue(enumExtensions.contains("\"method\": \"Rarity_TWILIGHT\""), enumExtensions)
+        assertTrue(enumExtensions.contains("\"name\": \"EXAMPLEMOD_LOOT\""), enumExtensions)
+        assertTrue(enumExtensions.contains("\"constructor\": \"(ILjava/lang/String;Lnet/minecraft/ChatFormatting;)V\""), enumExtensions)
+        assertTrue(enumExtensions.contains("\"method\": \"Rarity_EXAMPLEMOD_TWILIGHT\""), enumExtensions)
+        assertTrue(enumExtensions.contains("\"method\": \"Rarity_EXAMPLEMOD_LOOT\""), enumExtensions)
         assertTrue(enumHelper.contains("case 1 -> \"examplemod:twilight\";"), enumHelper)
-        assertTrue(enumHelper.contains("style.withColor(ChatFormatting.DARK_GREEN)"), enumHelper)
+        assertTrue(enumHelper.contains("case 1 -> \"examplemod:loot\";"), enumHelper)
+        assertTrue(enumHelper.contains("case 2 -> ChatFormatting.DARK_GREEN;"), enumHelper)
+        assertTrue(enumHelper.contains("case 2 -> ChatFormatting.GREEN;"), enumHelper)
         assertTrue(legacyDeferredRegisterMain.contains("com.example.LegacyDeferredRegisterOwner.CARVER_TYPES.register(modbus);"), legacyDeferredRegisterMain)
         assertTrue(!legacyDeferredRegisterMain.contains("::register"), legacyDeferredRegisterMain)
         assertTrue(legacyBiomeSourceSurface.contains("public static final MapCodec<LegacyBiomeSourceSurface> LEGACY_CODEC = RecordCodecBuilder.mapCodec("), legacyBiomeSourceSurface)
