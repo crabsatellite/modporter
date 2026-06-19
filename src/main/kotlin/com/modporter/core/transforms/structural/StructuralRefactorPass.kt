@@ -23775,7 +23775,8 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
     private fun migrateLegacyEventHooks121(source: String): String {
         if (!source.contains("EventHooks.")) return source
 
-        var result = source.replace("EventHooks.getMobGriefingEvent(", "EventHooks.canEntityGrief(")
+        var result = removeRemovedBucketUseHookGuard(source)
+        result = result.replace("EventHooks.getMobGriefingEvent(", "EventHooks.canEntityGrief(")
         if (result.contains("EventHooks.onFinalizeSpawn(")) {
             result = result.replace("EventHooks.onFinalizeSpawn(", "EventHooks.finalizeMobSpawn(")
             result = migrateMethodCalls(result, "EventHooks.finalizeMobSpawn") { args ->
@@ -23803,6 +23804,23 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
             }
         }
         return result
+    }
+
+    private fun removeRemovedBucketUseHookGuard(source: String): String {
+        if (!source.contains("EventHooks.onBucketUse(")) return source
+        var result = source
+        val inlineGuard = Regex(
+            """(?m)^[ \t]*(?:(?:var|[\w.]+(?:\s*<[^=\r\n;]+>)?)\s+)([A-Za-z_$][\w$]*)\s*=\s*(?:net\.neoforged\.neoforge\.event\.)?EventHooks\.onBucketUse\s*\([^;\r\n]*\);\s*\r?\n[ \t]*if\s*\(\s*\1\s*!=\s*null\s*\)\s*return\s+\1\s*;\s*\r?\n?"""
+        )
+        result = inlineGuard.replace(result, "")
+        val blockGuard = Regex(
+            """(?m)^[ \t]*(?:(?:var|[\w.]+(?:\s*<[^=\r\n;]+>)?)\s+)([A-Za-z_$][\w$]*)\s*=\s*(?:net\.neoforged\.neoforge\.event\.)?EventHooks\.onBucketUse\s*\([^;\r\n]*\);\s*\r?\n[ \t]*if\s*\(\s*\1\s*!=\s*null\s*\)\s*\{\s*\r?\n[ \t]*return\s+\1\s*;\s*\r?\n[ \t]*\}\s*\r?\n?"""
+        )
+        result = blockGuard.replace(result, "")
+        if (!Regex("""\bEventHooks\.""").containsMatchIn(result)) {
+            result = removeImport(result, "net.neoforged.neoforge.event.EventHooks")
+        }
+        return cleanupRedundantBlankLines(result)
     }
 
     private fun migrateLegacyLootAndRegistryAccess(source: String): String {

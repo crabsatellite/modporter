@@ -1479,6 +1479,67 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `removes removed bucket use hook guard without dropping bucket flow`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/items")
+        srcDir.createDirectories()
+
+        srcDir.resolve("HookedBucketItem.java").writeText("""
+            package com.example.items;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.stats.Stats;
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.InteractionResultHolder;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.BucketItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.ClipContext;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.material.Fluid;
+            import net.minecraft.world.phys.BlockHitResult;
+            import net.minecraft.world.phys.HitResult;
+            import net.neoforged.neoforge.event.EventHooks;
+
+            public class HookedBucketItem extends BucketItem {
+                public HookedBucketItem(Fluid fluid, Properties properties) {
+                    super(fluid, properties);
+                }
+
+                @Override
+                public InteractionResultHolder<ItemStack> use(Level level, Player player, InteractionHand hand) {
+                    ItemStack heldStack = player.getItemInHand(hand);
+                    BlockHitResult blockHitResult = getPlayerPOVHitResult(level, player, ClipContext.Fluid.NONE);
+                    InteractionResultHolder<ItemStack> interactionResult = net.neoforged.neoforge.event.EventHooks.onBucketUse(player, level, heldStack, blockHitResult);
+                    if (interactionResult != null) return interactionResult;
+                    if (blockHitResult.getType() == HitResult.Type.MISS) {
+                        return InteractionResultHolder.pass(heldStack);
+                    } else {
+                        BlockPos blockPos = blockHitResult.getBlockPos();
+                        Direction direction = blockHitResult.getDirection();
+                        BlockPos targetPos = blockPos.relative(direction);
+                        if (level.mayInteract(player, blockPos) && player.mayUseItemAt(targetPos, direction, heldStack)) {
+                            player.awardStat(Stats.ITEM_USED.get(this));
+                            return InteractionResultHolder.sidedSuccess(heldStack, level.isClientSide());
+                        }
+                    }
+                    return super.use(level, player, hand);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("HookedBucketItem.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertFalse(migrated.contains("onBucketUse"), migrated)
+        assertFalse(migrated.contains("EventHooks"), migrated)
+        assertTrue(migrated.contains("if (blockHitResult.getType() == HitResult.Type.MISS)"), migrated)
+        assertTrue(migrated.contains("player.awardStat(Stats.ITEM_USED.get(this));"), migrated)
+        assertTrue(migrated.contains("return super.use(level, player, hand);"), migrated)
+    }
+
+    @Test
     fun `migrates proven curative item effect calls to EffectCures`() {
         val srcDir = tempDir.resolve("src/main/java/com/example/items")
         srcDir.createDirectories()
