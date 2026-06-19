@@ -3356,12 +3356,20 @@ class TextReplacementTest {
         clientDir.resolve("ColorResolver.java").writeText("""
             package com.example.client;
 
+            import com.example.item.LeatherGlovesItem;
             import net.minecraft.world.item.DyeableLeatherItem;
             import net.minecraft.world.item.ItemStack;
 
             public class ColorResolver {
                 public int color(ItemStack stack, int tintIndex) {
                     return tintIndex > 0 ? -1 : ((DyeableLeatherItem) stack.getItem()).getColor(stack);
+                }
+
+                public int colors(ItemStack stack) {
+                    if (stack.getItem() instanceof LeatherGlovesItem leatherGlovesItem) {
+                        return leatherGlovesItem.getColor(stack);
+                    }
+                    return 0xFFFFFF;
                 }
             }
         """.trimIndent())
@@ -3376,6 +3384,7 @@ class TextReplacementTest {
         assertTrue(item.contains("public class LeatherGlovesItem extends GlovesItem"))
         assertFalse(item.contains("DyeableLeatherItem"))
         assertTrue(colorResolver.contains("DyedItemColor.getOrDefault(stack, DyedItemColor.LEATHER_COLOR)"))
+        assertTrue(colorResolver.contains("return DyedItemColor.getOrDefault(stack, DyedItemColor.LEATHER_COLOR);"))
         assertTrue(colorResolver.contains("import net.minecraft.world.item.component.DyedItemColor;"))
         assertFalse(colorResolver.contains("DyeableLeatherItem"))
         assertFalse(colorResolver.contains(".getColor(stack)"))

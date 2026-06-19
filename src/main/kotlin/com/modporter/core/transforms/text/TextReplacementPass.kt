@@ -37,6 +37,7 @@ class TextReplacementPass(
 
         val javaFiles = findJavaFiles(projectDir)
         logger.info { "Found ${javaFiles.size} Java files to process" }
+        val legacyDyeableLeatherItemClasses = collectLegacyDyeableLeatherItemClasses(javaFiles)
 
         try {
             migrateLegacyCustomEnchantmentData(projectDir, javaFiles, changes, errors, dryRun)
@@ -47,7 +48,7 @@ class TextReplacementPass(
 
         for (file in javaFiles) {
             try {
-                val result = processFile(projectDir, file, rules, dryRun, errors)
+                val result = processFile(projectDir, file, rules, dryRun, errors, legacyDyeableLeatherItemClasses)
                 changes.addAll(result)
             } catch (e: Exception) {
                 errors.add("Error processing ${file}: ${e.message}")
@@ -63,7 +64,8 @@ class TextReplacementPass(
         file: Path,
         rules: List<TextReplacement>,
         dryRun: Boolean,
-        errors: MutableList<String>
+        errors: MutableList<String>,
+        legacyDyeableLeatherItemClasses: Set<String>
     ): List<Change> {
         val originalContent = file.readText()
         var content = originalContent
@@ -278,7 +280,7 @@ class TextReplacementPass(
         }
 
         val beforeDyeableLeather = content
-        content = migrateDyeableLeatherItemColors(content)
+        content = migrateDyeableLeatherItemColors(content, legacyDyeableLeatherItemClasses)
         if (content != beforeDyeableLeather) {
             changes.add(
                 Change(
@@ -862,16 +864,31 @@ $streamFields,
         return source.removeRange(lineStart, end)
     }
 
-    private fun migrateDyeableLeatherItemColors(source: String): String {
+    private fun collectLegacyDyeableLeatherItemClasses(javaFiles: List<Path>): Set<String> =
+        javaFiles.mapNotNull { file ->
+            val source = runCatching { file.readText() }.getOrNull() ?: return@mapNotNull null
+            Regex(
+                """(?s)\bclass\s+([A-Za-z_$][\w$]*)\b[^{;]*\bimplements\b[^{;]*\b(?:net\.minecraft\.world\.item\.)?DyeableLeatherItem\b"""
+            ).findAll(source).map { it.groupValues[1] }.toList()
+        }.flatten().toSet()
+
+    private fun migrateDyeableLeatherItemColors(
+        source: String,
+        legacyDyeableLeatherItemClasses: Set<String> = emptySet()
+    ): String {
         val sourceHasLegacyColorMethods = source.contains("DataComponents.CUSTOM_DATA") &&
             Regex("""\bpublic\s+boolean\s+hasCustomColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(source) &&
             Regex("""\bpublic\s+void\s+setColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*,\s*int\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(source)
-        if (!source.contains("DyeableLeatherItem") && !sourceHasLegacyColorMethods) {
+        val sourceHasKnownDyeableColorCallSites = legacyDyeableLeatherItemClasses.any { className ->
+            source.contains("instanceof $className") && source.contains(".getColor(")
+        }
+        if (!source.contains("DyeableLeatherItem") && !sourceHasLegacyColorMethods && !sourceHasKnownDyeableColorCallSites) {
             return source
         }
 
         var result = source
         result = migrateDyeableLeatherGetColorCallSites(result)
+        result = migrateDyeableLeatherInstanceofGetColorCallSites(result, legacyDyeableLeatherItemClasses)
         result = result.replace(Regex("""extends\s+ArmorItem\s+implements\s+DyeableLeatherItem"""), "extends ArmorItem")
         result = result.replace(Regex("""\s+implements\s+DyeableLeatherItem\b"""), "")
         result = result.replace(Regex("""implements\s+DyeableLeatherItem\s*,\s*"""), "implements ")
@@ -941,6 +958,47 @@ $streamFields,
         ).replace(source) { match ->
             "DyedItemColor.getOrDefault(${match.groupValues[1]}, DyedItemColor.LEATHER_COLOR)"
         }
+
+    private fun migrateDyeableLeatherInstanceofGetColorCallSites(
+        source: String,
+        legacyDyeableLeatherItemClasses: Set<String>
+    ): String {
+        if (legacyDyeableLeatherItemClasses.isEmpty() || !source.contains(".getColor(")) return source
+        var result = source
+        legacyDyeableLeatherItemClasses.forEach { className ->
+            val instanceofPattern = Regex(
+                """([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*(?:\([^)]*\))?)*)\.getItem\(\)\s+instanceof\s+(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(className)}\s+([A-Za-z_$][\w$]*)"""
+            )
+            var cursor = 0
+            while (true) {
+                val match = instanceofPattern.find(result, cursor) ?: break
+                val stackExpression = match.groupValues[1]
+                val itemVariable = match.groupValues[2]
+                val openBrace = result.indexOf('{', match.range.last)
+                if (openBrace < 0) {
+                    cursor = match.range.last + 1
+                    continue
+                }
+                val closeBrace = findMatchingBrace(result, openBrace)
+                if (closeBrace < 0) {
+                    cursor = match.range.last + 1
+                    continue
+                }
+                val body = result.substring(openBrace + 1, closeBrace)
+                val colorCallPattern = Regex("""\b${Regex.escape(itemVariable)}\.getColor\(\s*${Regex.escape(stackExpression)}\s*\)""")
+                val migratedBody = colorCallPattern.replace(body) {
+                    "DyedItemColor.getOrDefault($stackExpression, DyedItemColor.LEATHER_COLOR)"
+                }
+                if (migratedBody == body) {
+                    cursor = closeBrace + 1
+                    continue
+                }
+                result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
+                cursor = openBrace + 1 + migratedBody.length
+            }
+        }
+        return result
+    }
 
     private fun insertDyeableDefaultColor(source: String): String {
         if (source.contains("DEFAULT_COLOR")) return source
