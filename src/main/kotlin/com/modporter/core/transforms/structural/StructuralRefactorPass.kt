@@ -2589,14 +2589,7 @@ ${registrations.distinct().joinToString("\n")}
             val javaFiles = Files.walk(srcDir).filter { it.toString().endsWith(".java") }.toList()
             for (file in javaFiles) {
                 val text = file.readText()
-                val directMatch = Regex("""@Mod\s*\(\s*"(\w+)"\s*\)""").find(text)
-                if (directMatch != null) return directMatch.groupValues[1]
-                val constRef = Regex("""@Mod\s*\(\s*(\w+)\.(\w+)\s*\)""").find(text)
-                if (constRef != null) {
-                    val constName = constRef.groupValues[2]
-                    val constVal = Regex("${constName}\\s*=\\s*\"(\\w+)\"").find(text)
-                    if (constVal != null) return constVal.groupValues[1]
-                }
+                detectModIdFromText(text)?.let { return it }
             }
         } catch (_: Exception) {}
         return null
@@ -6809,16 +6802,62 @@ public final class DirtinessAttachment {
         return detectModIdFromText(mainText)?.let { "\"$it\"" } ?: "\"${mainPackage.substringAfterLast('.', "modid")}\""
     }
 
+    private fun explicitModIdReferenceForGeneratedClass(
+        mainClass: Path?,
+        mainText: String,
+        generatedPackage: String,
+        metadataModId: String?
+    ): String? {
+        if (mainClass != null && mainText.isNotBlank()) {
+            val mainPackage = packageNameOf(mainText)
+            val className = mainClass.fileName.toString().removeSuffix(".java")
+            val classRef = if (mainPackage.isBlank() || mainPackage == generatedPackage) {
+                className
+            } else {
+                "$mainPackage.$className"
+            }
+            Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)""")
+                .find(mainText)
+                ?.let { return "\"${it.groupValues[1]}\"" }
+
+            val modArgument = Regex("""@Mod\s*\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\)""")
+                .find(mainText)
+                ?.groupValues
+                ?.get(1)
+            val constName = when {
+                modArgument == null -> null
+                !modArgument.contains('.') -> modArgument
+                modArgument.substringBeforeLast('.') == className -> modArgument.substringAfterLast('.')
+                modArgument.substringBeforeLast('.') == "$mainPackage.$className" -> modArgument.substringAfterLast('.')
+                else -> null
+            }
+            if (constName != null && hasStaticFinalStringConstant(mainText, constName)) {
+                return "$classRef.$constName"
+            }
+
+            Regex("""(?m)\b(?:public|private|protected)?\s*static\s+final\s+String\s+(MOD_ID|MODID)\s*=\s*"[^"]+"""")
+                .find(mainText)
+                ?.let { return "$classRef.${it.groupValues[1]}" }
+        }
+        return metadataModId
+            ?.takeIf { it.isNotBlank() }
+            ?.let { "\"$it\"" }
+    }
+
     private fun detectModIdFromText(text: String): String? {
         Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)""").find(text)?.let { return it.groupValues[1] }
-        val constRef = Regex("""@Mod\s*\(\s*\w+\.(\w+)\s*\)""").find(text)
+        val constRef = Regex("""@Mod\s*\(\s*(?:[A-Za-z_$][\w$]*\.)?([A-Za-z_$][\w$]*)\s*\)""").find(text)
         if (constRef != null) {
-            Regex("""${Regex.escape(constRef.groupValues[1])}\s*=\s*"([^"]+)"""")
+            Regex("""(?m)\b(?:public|private|protected)?\s*static\s+final\s+String\s+${Regex.escape(constRef.groupValues[1])}\s*=\s*"([^"]+)"""")
                 .find(text)
                 ?.let { return it.groupValues[1] }
         }
         return null
     }
+
+    private fun hasStaticFinalStringConstant(source: String, name: String): Boolean =
+        Regex("""(?m)\b(?:public|private|protected)?\s*static\s+final\s+String\s+${Regex.escape(name)}\s*=""")
+            .containsMatchIn(source)
 
     private data class AdvancementTriggerSpec(
         val namespace: String,
@@ -8125,6 +8164,8 @@ $fields
         val legacyPlacementBanBuilderClasses = collectLegacyPlacementBanBuilderClasses(javaFiles)
         val savedDataClassNames = collectJavaClassNamesExtending(javaFiles, setOf("SavedData"), javaInheritanceIndex)
         val modId = detectModId(projectDir) ?: projectMetadataModId(projectDir)
+        val mainClass = detectModMainClass(projectDir)
+        val mainText = mainClass?.readText().orEmpty()
         val generatedCompatPackage = detectGeneratedCompatPackage(projectDir)
         val deferredHolderFields = collectDeferredHolderFields(srcDir)
         val gameEventDeferredHolderFields = collectDeferredHolderFieldsOf(srcDir, "GameEvent")
@@ -8570,7 +8611,13 @@ $fields
                     legacyPlacementBanBuilderClasses,
                     modId.orEmpty(),
                     generatedCompatPackage,
-                    savedDataClassNames
+                    savedDataClassNames,
+                    attributeModifierNamespaceExpression = explicitModIdReferenceForGeneratedClass(
+                        mainClass,
+                        mainText,
+                        packageNameOf(text),
+                        modId
+                    )
                 )
                 if (vanilla121Migrated != text) {
                     changes.add(Change(
@@ -13299,7 +13346,8 @@ ${indent}}
         legacyPlacementBanBuilderClasses: Set<String> = emptySet(),
         modId: String = "",
         generatedCompatPackage: String = "",
-        savedDataClassNames: Set<String> = emptySet()
+        savedDataClassNames: Set<String> = emptySet(),
+        attributeModifierNamespaceExpression: String? = null
     ): String {
         var result = source
         var needsEntityTypeTags = false
@@ -13456,7 +13504,8 @@ ${indent}}
             attributeModifierIdReferences,
             attributeModifierMethods,
             genericMethodReturnTypes,
-            attributeModifierIdMethodArguments
+            attributeModifierIdMethodArguments,
+            projectModIdExpression = attributeModifierNamespaceExpression
         )
         result = migrateAttributeModifierMultimapHolderTypes(result)
         result = migrateEntityRidingOffsetExpressions(result, javaInheritanceIndex)
@@ -20693,7 +20742,8 @@ ${indent}}"""
         crossFileAttributeModifierIds: Set<String> = emptySet(),
         attributeModifierMethods: Map<String, Set<String>> = emptyMap(),
         genericMethodReturnTypes: Map<String, String> = emptyMap(),
-        attributeModifierIdMethodArguments: Set<AttributeModifierIdMethodArgument> = emptySet()
+        attributeModifierIdMethodArguments: Set<AttributeModifierIdMethodArgument> = emptySet(),
+        projectModIdExpression: String? = null
     ): String {
         val ownerName = javaTopLevelTypeName(source)
         val hasAttributeModifierIdMethodArguments = ownerName != null &&
@@ -20714,80 +20764,100 @@ ${indent}}"""
         }
 
         val namespace = inferModAccess(source)?.modIdExpression
-            ?: "\"${Regex("""(?m)^package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
-                .find(source)
-                ?.groupValues
-                ?.get(1)
-                ?.substringBefore('.')
-                ?: "modporter"}\""
-        fun idExpression(path: String): String =
-            "net.minecraft.resources.ResourceLocation.fromNamespaceAndPath($namespace, \"$path\")"
+            ?: projectModIdExpression
 
         val idAliases = mutableMapOf<String, String>()
         var result = source
+        fun isDeclaredResourceLocationExpression(expression: String): Boolean {
+            val trimmed = expression.trim()
+            if (trimmed.startsWith("ResourceLocation.") ||
+                trimmed.startsWith("net.minecraft.resources.ResourceLocation.")) {
+                return true
+            }
+            if (!Regex("""^[A-Za-z_$][\w$]*$""").matches(trimmed)) return false
+            val declaration = Regex("""\b(?:net\.minecraft\.resources\.)?ResourceLocation\s+${Regex.escape(trimmed)}\b""")
+            return declaration.containsMatchIn(source) || declaration.containsMatchIn(result)
+        }
 
-        result = Regex("""\bUUID\s+([A-Z0-9_]*MODIFIER[A-Z0-9_]*)\s*=\s*UUID\.fromString\(\s*"[^"]+"\s*\)""")
-            .replace(result) { match ->
-                val name = match.groupValues[1]
-                if (!isAttributeModifierIdUse(source, name, crossFileAttributeModifierIds, ownerName)) {
-                    return@replace match.value
+        if (namespace != null) {
+            fun idExpression(path: String): String =
+                "net.minecraft.resources.ResourceLocation.fromNamespaceAndPath($namespace, \"$path\")"
+
+            result = Regex("""\bUUID\s+([A-Z0-9_]*MODIFIER[A-Z0-9_]*)\s*=\s*UUID\.fromString\(\s*"[^"]+"\s*\)""")
+                .replace(result) { match ->
+                    val name = match.groupValues[1]
+                    if (!isAttributeModifierIdUse(source, name, crossFileAttributeModifierIds, ownerName)) {
+                        return@replace match.value
+                    }
+                    val id = idExpression(modifierConstantPathName(name))
+                    idAliases[name] = id
+                    "net.minecraft.resources.ResourceLocation $name = $id"
                 }
-                val id = idExpression(modifierConstantPathName(name))
-                idAliases[name] = id
-                "net.minecraft.resources.ResourceLocation $name = $id"
-            }
-        result = Regex("""\bUUID\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*_[A-Z0-9_]*MODIFIER[A-Z0-9_]*)\s*;""")
-            .replace(result) { match ->
-                val alias = match.groupValues[1]
-                val target = match.groupValues[2]
-                if (!isAttributeModifierIdUse(source, alias, crossFileAttributeModifierIds, ownerName) &&
-                    !isAttributeModifierIdUse(source, target, crossFileAttributeModifierIds, ownerName)) {
-                    return@replace match.value
+            result = Regex("""\bUUID\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*_[A-Z0-9_]*MODIFIER[A-Z0-9_]*)\s*;""")
+                .replace(result) { match ->
+                    val alias = match.groupValues[1]
+                    val target = match.groupValues[2]
+                    if (!isAttributeModifierIdUse(source, alias, crossFileAttributeModifierIds, ownerName) &&
+                        !isAttributeModifierIdUse(source, target, crossFileAttributeModifierIds, ownerName)) {
+                        return@replace match.value
+                    }
+                    "net.minecraft.resources.ResourceLocation $alias = $target;"
                 }
-                "net.minecraft.resources.ResourceLocation $alias = $target;"
+            result = Regex(
+                """new\s+AttributeModifier\(\s*"([^"]+)"\s*,\s*([^,]+)\s*,\s*AttributeModifier\.Operation\.([A-Z_]+)\s*\)"""
+            ).replace(result) { match ->
+                val id = idExpression(modifierPathName(match.groupValues[1]))
+                "new AttributeModifier($id, ${match.groupValues[2].trim()}, AttributeModifier.Operation.${match.groupValues[3]})"
             }
-        result = Regex(
-            """new\s+AttributeModifier\(\s*"([^"]+)"\s*,\s*([^,]+)\s*,\s*AttributeModifier\.Operation\.([A-Z_]+)\s*\)"""
-        ).replace(result) { match ->
-            val id = idExpression(modifierPathName(match.groupValues[1]))
-            "new AttributeModifier($id, ${match.groupValues[2].trim()}, AttributeModifier.Operation.${match.groupValues[3]})"
-        }
-        result = Regex(
-            """new\s+AttributeModifier\(\s*([^,\r\n]+)\s*,\s*"([^"]+)"\s*,\s*([^,]+)\s*,\s*AttributeModifier\.Operation\.([A-Z_]+)\s*\)"""
-        ).replace(result) { match ->
-            val oldId = match.groupValues[1].trim()
-            val id = idExpression(modifierPathName(match.groupValues[2]))
-            idAliases[oldId] = id
-            "new AttributeModifier($id, ${match.groupValues[3].trim()}, AttributeModifier.Operation.${match.groupValues[4]})"
-        }
-        result = rewriteJavaNew(result, "AttributeModifier") { args ->
-            if (args.size != 4) return@rewriteJavaNew null
-            val legacyName = args[1].trim()
-            val amount = args[2].trim()
-            val operation = args[3].trim()
-            if (!legacyName.startsWith("\"") && !legacyName.endsWith(".toString()")) return@rewriteJavaNew null
-            val id = if (legacyName.endsWith(".toString()")) {
-                legacyName.removeSuffix(".toString()").trim()
-            } else {
-                args[0].trim()
+            result = Regex(
+                """new\s+AttributeModifier\(\s*([^,\r\n]+)\s*,\s*"([^"]+)"\s*,\s*([^,]+)\s*,\s*AttributeModifier\.Operation\.([A-Z_]+)\s*\)"""
+            ).replace(result) { match ->
+                val oldId = match.groupValues[1].trim()
+                val id = idExpression(modifierPathName(match.groupValues[2]))
+                idAliases[oldId] = id
+                "new AttributeModifier($id, ${match.groupValues[3].trim()}, AttributeModifier.Operation.${match.groupValues[4]})"
             }
-            "new AttributeModifier($id, $amount, $operation)"
+            result = rewriteJavaNew(result, "AttributeModifier") { args ->
+                if (args.size != 4) return@rewriteJavaNew null
+                val legacyName = args[1].trim()
+                val amount = args[2].trim()
+                val operation = args[3].trim()
+                val id = when {
+                    legacyName.endsWith(".toString()") -> {
+                        val existingId = legacyName.removeSuffix(".toString()").trim()
+                        if (!isDeclaredResourceLocationExpression(existingId)) return@rewriteJavaNew null
+                        existingId
+                    }
+                    legacyName.startsWith("\"") -> {
+                        val existingId = args[0].trim()
+                        if (isDeclaredResourceLocationExpression(existingId)) {
+                            existingId
+                        } else {
+                            idExpression(modifierPathName(legacyName.trim('"')))
+                        }
+                    }
+                    else -> return@rewriteJavaNew null
+                }
+                "new AttributeModifier($id, $amount, $operation)"
+            }
+            result = Regex("""\.addAttributeModifier\(\s*([^,]+)\s*,\s*"([^"]+)"\s*,""")
+                .replace(result) { match ->
+                    val id = idExpression(modifierPathName(match.groupValues[2]))
+                    ".addAttributeModifier(${match.groupValues[1].trim()}, $id,"
+                }
+
+            for ((oldId, newId) in idAliases) {
+                val escaped = Regex.escape(oldId)
+                result = Regex("""\.(getModifier|hasModifier|removeModifier)\(\s*$escaped\s*\)""")
+                    .replace(result) { match -> ".${match.groupValues[1]}($newId)" }
+            }
         }
         result = Regex("""\.addAttributeModifier\(\s*([^,]+)\s*,\s*([^,\r\n]+)\.toString\(\)\s*,""")
             .replace(result) { match ->
-                ".addAttributeModifier(${match.groupValues[1].trim()}, ${match.groupValues[2].trim()},"
-            }
-        result = Regex("""\.addAttributeModifier\(\s*([^,]+)\s*,\s*"([^"]+)"\s*,""")
-            .replace(result) { match ->
-                val id = idExpression(modifierPathName(match.groupValues[2]))
+                val id = match.groupValues[2].trim()
+                if (!isDeclaredResourceLocationExpression(id)) return@replace match.value
                 ".addAttributeModifier(${match.groupValues[1].trim()}, $id,"
             }
-
-        for ((oldId, newId) in idAliases) {
-            val escaped = Regex.escape(oldId)
-            result = Regex("""\.(getModifier|hasModifier|removeModifier)\(\s*$escaped\s*\)""")
-                .replace(result) { match -> ".${match.groupValues[1]}($newId)" }
-        }
 
         val modifierVariables = Regex("""\bAttributeModifier\s+([A-Za-z_$][\w$]*)\b""")
             .findAll(result)

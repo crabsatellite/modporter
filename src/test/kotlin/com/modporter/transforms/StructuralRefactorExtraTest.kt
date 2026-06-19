@@ -11280,6 +11280,16 @@ class StructuralRefactorExtraTest {
     fun `migrates attribute modifier ids and calls to resource locations`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+            }
+        """.trimIndent())
         srcDir.resolve("AttributeShapes.java").writeText("""
             package com.example;
 
@@ -11314,15 +11324,48 @@ class StructuralRefactorExtraTest {
         val transformed = srcDir.resolve("AttributeShapes.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
-        assertTrue(transformed.contains("net.minecraft.resources.ResourceLocation REACH_MODIFIER = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(\"com\", \"reach_modifier\")"))
-        assertTrue(transformed.contains("new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(\"com\", \"active_boost\"), 1.0D, AttributeModifier.Operation.ADD_VALUE)"))
+        assertTrue(transformed.contains("net.minecraft.resources.ResourceLocation REACH_MODIFIER = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, \"reach_modifier\")"))
+        assertTrue(transformed.contains("new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, \"active_boost\"), 1.0D, AttributeModifier.Operation.ADD_VALUE)"))
         assertTrue(transformed.contains("net.minecraft.resources.ResourceLocation oldId = REACH_MODIFIER;"))
-        assertTrue(transformed.contains("new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(\"com\", \"segment_count_speed_boost\"), 0.1D, AttributeModifier.Operation.ADD_VALUE)"))
+        assertTrue(transformed.contains("new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, \"segment_count_speed_boost\"), 0.1D, AttributeModifier.Operation.ADD_VALUE)"))
         assertTrue(transformed.contains("new AttributeModifier(DAMAGE_MODIFIER, this.calculateIncrease(map, stack), AttributeModifier.Operation.ADD_VALUE)"), transformed)
-        assertTrue(transformed.contains("instance.removeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(\"com\", \"segment_count_speed_boost\"));"))
+        assertTrue(transformed.contains("instance.removeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, \"segment_count_speed_boost\"));"))
         assertTrue(transformed.contains("instance.hasModifier(ACTIVE.id())"))
         assertTrue(transformed.contains("instance.removeModifier(speed.id())"))
+        assertTrue(!transformed.contains("fromNamespaceAndPath(\"com\""), transformed)
         assertTrue(!transformed.contains("import java.util.UUID;"))
+    }
+
+    @Test
+    fun `does not synthesize attribute modifier namespace from package name`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AttributeShapes.java").writeText("""
+            package com.example;
+
+            import java.util.UUID;
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class AttributeShapes {
+                static final UUID REACH_MODIFIER = UUID.fromString("00000000-0000-0000-0000-000000000001");
+                static final AttributeModifier ACTIVE = new AttributeModifier("Active Boost", 1.0D, AttributeModifier.Operation.ADD_VALUE);
+
+                void update(AttributeInstance instance) {
+                    instance.removeModifier(REACH_MODIFIER);
+                    if (!instance.hasModifier(ACTIVE)) {
+                        instance.addTransientModifier(ACTIVE);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("AttributeShapes.java").readText()
+
+        assertTrue(!transformed.contains("fromNamespaceAndPath(\"com\""), transformed)
+        assertTrue(transformed.contains("static final UUID REACH_MODIFIER = UUID.fromString"), transformed)
+        assertTrue(transformed.contains("new AttributeModifier(\"Active Boost\", 1.0D, AttributeModifier.Operation.ADD_VALUE)"), transformed)
     }
 
     @Test
@@ -11471,6 +11514,16 @@ class StructuralRefactorExtraTest {
     fun `migrates cross file attribute modifier id constants without touching non attribute ids`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+            }
+        """.trimIndent())
         srcDir.resolve("ModifierIds.java").writeText("""
             package com.example;
 
@@ -11516,12 +11569,13 @@ class StructuralRefactorExtraTest {
         val temperature = srcDir.resolve("TemperatureUse.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
-        assertTrue(ids.contains("public static final net.minecraft.resources.ResourceLocation REACH_MODIFIER = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(\"com\", \"reach_modifier\")"))
+        assertTrue(ids.contains("public static final net.minecraft.resources.ResourceLocation REACH_MODIFIER = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, \"reach_modifier\")"))
         assertTrue(ids.contains("public static final UUID TEMP_MODIFIER_UUID = UUID.fromString"))
         assertTrue(use.contains("net.minecraft.resources.ResourceLocation uuidForOppositeHand = ModifierIds.REACH_MODIFIER;"))
         assertTrue(use.contains("attackRange.getModifier(uuidForOppositeHand)"))
         assertTrue(use.contains("attackRange.removeModifier(giantModifier.id())"))
         assertTrue(temperature.contains("TemperatureUtil.addTemperatureModifier(player, 1.0D, ModifierIds.TEMP_MODIFIER_UUID)"))
+        assertTrue(!ids.contains("fromNamespaceAndPath(\"com\""), ids)
         assertTrue(!temperature.contains("ResourceLocation"))
     }
 
