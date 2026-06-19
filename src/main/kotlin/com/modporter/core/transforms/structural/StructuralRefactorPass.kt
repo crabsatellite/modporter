@@ -21480,24 +21480,190 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         return result
     }
 
+    private val vanillaArmorMaterialConstants = setOf(
+        "LEATHER",
+        "CHAIN",
+        "IRON",
+        "GOLD",
+        "DIAMOND",
+        "TURTLE",
+        "NETHERITE",
+        "ARMADILLO"
+    )
+
     private fun migrateLegacyArmorMaterialsHolderSource(source: String): String {
-        if (!source.contains("ArmorMaterials.CODEC") && !source.contains("Map<ArmorMaterials")) return source
+        if (!source.contains("ArmorMaterials")) return source
         var result = source
         var needsBuiltInRegistriesImport = false
+        var needsHolderImport = false
+        var needsArmorMaterialImport = false
         if (result.contains("ArmorMaterials.CODEC")) {
             result = result.replace("ArmorMaterials.CODEC", "BuiltInRegistries.ARMOR_MATERIAL.holderByNameCodec()")
             needsBuiltInRegistriesImport = true
         }
+        result = migrateLegacyArmorMaterialInstanceofPatterns(result)
         result = Regex("""\bArmorMaterials\s+([A-Za-z_$][\w$]*)""")
-            .replace(result, "Holder<ArmorMaterial> $1")
+            .replace(result) {
+                needsHolderImport = true
+                needsArmorMaterialImport = true
+                "Holder<ArmorMaterial> ${it.groupValues[1]}"
+            }
         result = Regex("""\bMap\s*<\s*ArmorMaterials\s*,\s*String\s*>""")
-            .replace(result, "Map<Holder<ArmorMaterial>, String>")
-        result = addImportIfMissing(result, "net.minecraft.core.Holder")
+            .replace(result) {
+                needsHolderImport = true
+                needsArmorMaterialImport = true
+                "Map<Holder<ArmorMaterial>, String>"
+            }
+        val switchMigrated = migrateLegacyArmorMaterialSwitches(result)
+        if (switchMigrated != result) {
+            result = switchMigrated
+            needsHolderImport = true
+            needsArmorMaterialImport = true
+        }
+        if (result.contains("Holder<ArmorMaterial>")) {
+            needsHolderImport = true
+            needsArmorMaterialImport = true
+        }
+        if (needsHolderImport) {
+            result = addImportIfMissing(result, "net.minecraft.core.Holder")
+        }
         if (needsBuiltInRegistriesImport) {
             result = addImportIfMissing(result, "net.minecraft.core.registries.BuiltInRegistries")
         }
-        result = addImportIfMissing(result, "net.minecraft.world.item.ArmorMaterial")
+        if (needsArmorMaterialImport) {
+            result = addImportIfMissing(result, "net.minecraft.world.item.ArmorMaterial")
+        }
         return result
+    }
+
+    private fun migrateLegacyArmorMaterialInstanceofPatterns(source: String): String {
+        if (!source.contains("instanceof ArmorMaterials")) return source
+        val pattern = Regex("""if\s*\(\s*([^\r\n{};]+?)\s+instanceof\s+ArmorMaterials\s+([A-Za-z_$][\w$]*)\s*\)\s*\{""")
+        var result = source
+        var cursor = 0
+        while (true) {
+            val match = pattern.find(result, cursor) ?: break
+            val openBrace = result.indexOf('{', match.range.last)
+            if (openBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val indentStart = result.lastIndexOf('\n', match.range.first).let { if (it < 0) 0 else it + 1 }
+            val indent = result.substring(indentStart, match.range.first).takeWhile { it == ' ' || it == '\t' }
+            val materialExpression = match.groupValues[1].trim()
+            val variable = match.groupValues[2]
+            val body = result.substring(openBrace + 1, closeBrace)
+            val vanillaGuard = vanillaArmorMaterialConstants.joinToString(" || ") {
+                "$variable.is(ArmorMaterials.$it)"
+            }
+            val replacement = "{\n" +
+                "$indent    Holder<ArmorMaterial> $variable = $materialExpression;\n" +
+                "$indent    if ($vanillaGuard) {$body\n" +
+                "$indent    }\n" +
+                "$indent}"
+            result = result.substring(0, match.range.first) + replacement + result.substring(closeBrace + 1)
+            cursor = match.range.first + replacement.length
+        }
+        return result
+    }
+
+    private data class ArmorMaterialSwitchCase(
+        val constants: List<String>,
+        val body: String
+    )
+
+    private fun migrateLegacyArmorMaterialSwitches(source: String): String {
+        if (!source.contains("switch") || !source.contains("Holder<ArmorMaterial>")) return source
+        var result = source
+        var cursor = 0
+        val switchPattern = Regex("""switch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{""")
+        while (true) {
+            val match = switchPattern.find(result, cursor) ?: break
+            val variable = match.groupValues[1]
+            if (!holderArmorMaterialVariables(result).contains(variable)) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val openBrace = result.indexOf('{', match.range.last)
+            if (openBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val switchBody = result.substring(openBrace + 1, closeBrace)
+            val cases = parseArmorMaterialSwitchCases(switchBody)
+            if (cases == null) {
+                cursor = closeBrace + 1
+                continue
+            }
+            val indentStart = result.lastIndexOf('\n', match.range.first).let { if (it < 0) 0 else it + 1 }
+            val indent = result.substring(indentStart, match.range.first).takeWhile { it == ' ' || it == '\t' }
+            val replacement = buildString {
+                cases.forEachIndexed { index, case ->
+                    if (index > 0) append(" else ")
+                    append("if")
+                    append(" (")
+                    append(case.constants.joinToString(" || ") { "$variable.is(ArmorMaterials.$it)" })
+                    append(") {")
+                    append(case.body.trimEnd())
+                    append("\n")
+                    append(indent)
+                    append("}")
+                }
+            }
+            result = result.substring(0, match.range.first) + replacement + result.substring(closeBrace + 1)
+            cursor = match.range.first + replacement.length
+        }
+        return result
+    }
+
+    private fun holderArmorMaterialVariables(source: String): Set<String> =
+        Regex("""\bHolder\s*<\s*ArmorMaterial\s*>\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+
+    private fun parseArmorMaterialSwitchCases(body: String): List<ArmorMaterialSwitchCase>? {
+        val cases = mutableListOf<ArmorMaterialSwitchCase>()
+        var cursor = 0
+        while (true) {
+            while (cursor < body.length && body[cursor].isWhitespace()) cursor++
+            if (cursor >= body.length) break
+            val match = Regex("""case\s+([A-Z0-9_,.\s]+?)\s*->""").find(body, cursor)
+                ?: return null
+            if (match.range.first != cursor) return null
+            val constants = match.groupValues[1]
+                .split(',')
+                .map { it.trim().removePrefix("ArmorMaterials.") }
+                .filter { it.isNotEmpty() }
+            if (constants.isEmpty() || constants.any { it !in vanillaArmorMaterialConstants }) return null
+            cursor = match.range.last + 1
+            while (cursor < body.length && body[cursor].isWhitespace()) cursor++
+            val caseBody = if (cursor < body.length && body[cursor] == '{') {
+                val closeBrace = findMatchingBrace(body, cursor)
+                if (closeBrace < 0) return null
+                val text = body.substring(cursor + 1, closeBrace)
+                cursor = closeBrace + 1
+                text
+            } else {
+                val semicolon = body.indexOf(';', cursor)
+                if (semicolon < 0) return null
+                val text = body.substring(cursor, semicolon + 1)
+                cursor = semicolon + 1
+                "\n$text"
+            }
+            cases += ArmorMaterialSwitchCase(constants, caseBody)
+        }
+        return cases.takeIf { it.isNotEmpty() }
     }
 
     private fun migrateTextColorParseColorLiteralSource(source: String): String {

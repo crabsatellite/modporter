@@ -5074,6 +5074,63 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy armor material parameters instanceof filters and switches to holder identity checks`() {
+        val projectDir = createFile("LegacyArmorMaterialSelection.java", """
+            package com.example;
+
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.item.ArmorItem;
+            import net.minecraft.world.item.ArmorMaterials;
+            import net.minecraft.world.item.Item;
+
+            public class LegacyArmorMaterialSelection {
+                public void equip(Mob mob, ArmorItem armorItem) {
+                    if (armorItem.getMaterial() instanceof ArmorMaterials armorMaterials) {
+                        this.equip(mob, armorMaterials);
+                    }
+                }
+
+                private void equip(Mob mob, ArmorMaterials armorMaterials) {
+                    Item item = this.itemFor(armorMaterials);
+                    if (item != null) {
+                        mob.setItemSlot(net.minecraft.world.entity.EquipmentSlot.HEAD, item.getDefaultInstance());
+                    }
+                }
+
+                private Item itemFor(ArmorMaterials armorMaterials) {
+                    switch (armorMaterials) {
+                        case LEATHER -> {
+                            return ExampleItems.LEATHER_HAT.get();
+                        }
+                        case GOLD, IRON -> {
+                            return ExampleItems.METAL_HAT.get();
+                        }
+                        case DIAMOND -> {
+                            return ExampleItems.DIAMOND_HAT.get();
+                        }
+                    }
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/LegacyArmorMaterialSelection.java").readText()
+
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.item.ArmorMaterial;"), migrated)
+        assertTrue(migrated.contains("Holder<ArmorMaterial> armorMaterials = armorItem.getMaterial();"), migrated)
+        assertTrue(migrated.contains("armorMaterials.is(ArmorMaterials.LEATHER) || armorMaterials.is(ArmorMaterials.CHAIN)"), migrated)
+        assertTrue(migrated.contains("private void equip(Mob mob, Holder<ArmorMaterial> armorMaterials)"), migrated)
+        assertTrue(migrated.contains("private Item itemFor(Holder<ArmorMaterial> armorMaterials)"), migrated)
+        assertTrue(migrated.contains("if (armorMaterials.is(ArmorMaterials.LEATHER))"), migrated)
+        assertTrue(migrated.contains("else if (armorMaterials.is(ArmorMaterials.GOLD) || armorMaterials.is(ArmorMaterials.IRON))"), migrated)
+        assertFalse(migrated.contains("instanceof ArmorMaterials"), migrated)
+        assertFalse(migrated.contains("switch (armorMaterials)"), migrated)
+        assertFalse(migrated.contains("ArmorMaterials armorMaterials"), migrated)
+    }
+
+    @Test
     fun `migrates indirect block loot subprovider constructors to holder lookup registries`() {
         val projectDir = createFile("LibraryBlockLootSurface.java", """
             package com.example;
