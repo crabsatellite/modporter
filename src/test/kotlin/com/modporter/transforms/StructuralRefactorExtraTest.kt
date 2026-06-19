@@ -6672,6 +6672,49 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `aligns deferred holder base generic with owning deferred register`() {
+        val projectDir = createFile("TypedRegistries.java", """
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.item.crafting.SimpleCraftingRecipeSerializer;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.PosRuleTestType;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class TypedRegistries {
+                public static final DeferredRegister<LootItemFunctionType> LOOT_FUNCTION_TYPES =
+                        DeferredRegister.create(Registries.LOOT_FUNCTION_TYPE, "example");
+                public static final DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<DoubleDrops>> DOUBLE_DROPS =
+                        LOOT_FUNCTION_TYPES.register("double_drops", () -> new LootItemFunctionType<>(DoubleDrops.CODEC));
+
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS =
+                        DeferredRegister.create(Registries.RECIPE_SERIALIZER, "example");
+                public static final DeferredHolder<AetherCookingSerializer<EnchantingRecipe>, AetherCookingSerializer<EnchantingRecipe>> ENCHANTING =
+                        RECIPE_SERIALIZERS.register("enchanting", EnchantingRecipe.Serializer::new);
+                public static final DeferredHolder<RecipeSerializer<?>, SwetBannerRecipe> SWET_BANNER =
+                        RECIPE_SERIALIZERS.register("swet_banner", () -> new SimpleCraftingRecipeSerializer<>(SwetBannerRecipe::new));
+
+                public static final DeferredRegister<PosRuleTestType<?>> POS_RULE_TESTS =
+                        DeferredRegister.create(Registries.POS_RULE_TEST, "example");
+                public static final DeferredHolder<PosRuleTestType<BorderBoxPosTest>, PosRuleTestType<BorderBoxPosTest>> BORDER_BOX =
+                        POS_RULE_TESTS.register("border_box", () -> () -> BorderBoxPosTest.CODEC);
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = projectDir.resolve("src/main/java/com/example/TypedRegistries.java").readText()
+        assertTrue(migrated.contains("DeferredRegister<LootItemFunctionType<?>> LOOT_FUNCTION_TYPES"))
+        assertTrue(migrated.contains("DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<DoubleDrops>> DOUBLE_DROPS"))
+        assertTrue(migrated.contains("DeferredHolder<RecipeSerializer<?>, AetherCookingSerializer<EnchantingRecipe>> ENCHANTING"))
+        assertTrue(migrated.contains("DeferredHolder<RecipeSerializer<?>, SimpleCraftingRecipeSerializer<SwetBannerRecipe>> SWET_BANNER"))
+        assertTrue(migrated.contains("DeferredHolder<PosRuleTestType<?>, PosRuleTestType<BorderBoxPosTest>> BORDER_BOX"))
+    }
+
+    @Test
     fun `migrates Sakura loot feature and item component compile surfaces`() {
         val projectDir = createFile("SakuraBlockLoot.java", """
             package com.example;
@@ -7023,9 +7066,9 @@ class StructuralRefactorExtraTest {
         assertTrue(!crops.contains(", false)"))
         assertTrue(blockItems.contains("DeferredHolder.class.isAssignableFrom(f.getType())"))
         assertTrue(blockItems.contains("BlockItemRegistry has no DeferredHolder fields"))
-        assertTrue(specialItems.contains("import net.minecraft.core.component.DataComponents;"))
+        assertTrue(!specialItems.contains("import net.minecraft.core.component.DataComponents;"))
         assertTrue(specialItems.contains("ItemStack stack = new ItemStack(ItemRegistry.HYDRA_RAMEN.get());"))
-        assertTrue(specialItems.contains("FoodProperties food = stack.get(DataComponents.FOOD);"))
+        assertTrue(specialItems.contains("FoodProperties food = stack.getFoodProperties(null);"))
         assertTrue(specialItems.contains("food.nutrition()"))
         assertTrue(cuisines.contains("import net.minecraft.world.item.Item;"))
         assertTrue(cuisines.contains("DeferredHolder<Item, ItemFoodBase> obj"))
@@ -7038,6 +7081,70 @@ class StructuralRefactorExtraTest {
         assertTrue(recipes.contains("r.value().getResultItem(helper.getLevel().registryAccess())"))
         assertTrue(recipes.contains("HolderLookup.Provider ra"))
         assertTrue(trades.contains("new MerchantOffer(new net.minecraft.world.item.trading.ItemCost(item, count), java.util.Optional.empty(), coinStack, maxTrades, xp, 0.05F)"))
+    }
+
+    @Test
+    fun `migrates legacy item edible semantics to food properties override`() {
+        val projectDir = createFile("ConfigurableFoodItem.java", """
+            package com.example;
+
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.InteractionResultHolder;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.food.FoodProperties;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            public class ConfigurableFoodItem extends Item {
+                public ConfigurableFoodItem(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public InteractionResultHolder<ItemStack> use(Level level, Player player, InteractionHand hand) {
+                    ItemStack heldStack = player.getItemInHand(hand);
+                    if (this.isEdible()) {
+                        FoodProperties foodProperties = this.getFoodProperties(heldStack, player);
+                        if (foodProperties != null && player.canEat(foodProperties.canAlwaysEat())) {
+                            player.startUsingItem(hand);
+                            return InteractionResultHolder.consume(heldStack);
+                        }
+                    }
+                    return InteractionResultHolder.fail(heldStack);
+                }
+
+                @Override
+                public ItemStack finishUsingItem(ItemStack stack, Level level, LivingEntity user) {
+                    if (this.has(net.minecraft.core.component.DataComponents.FOOD)) {
+                        return user.eat(level, stack);
+                    }
+                    return stack;
+                }
+
+                @Override
+                public boolean isEdible() {
+                    return Config.enabled();
+                }
+
+                public boolean check(Item item, ItemStack stack) {
+                    return item.isEdible() && stack.getItem().isEdible();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = projectDir.resolve("src/main/java/com/example/ConfigurableFoodItem.java").readText()
+        assertTrue(migrated.contains("public boolean isEdible()"))
+        assertTrue(!migrated.contains("@Override\n    public boolean isEdible()"))
+        assertTrue(migrated.contains("public FoodProperties getFoodProperties(ItemStack stack, LivingEntity entity)"))
+        assertTrue(migrated.contains("return this.isEdible() ? stack.get(DataComponents.FOOD) : null;"))
+        assertTrue(migrated.contains("if (this.isEdible())"))
+        assertTrue(migrated.contains("return item.getDefaultInstance().getFoodProperties(null) != null && stack.getFoodProperties(null) != null;"))
+        assertTrue(migrated.contains("import net.minecraft.core.component.DataComponents;"))
+        assertTrue(!migrated.contains("this.has(net.minecraft.core.component.DataComponents.FOOD)"))
     }
 
     @Test

@@ -1866,14 +1866,6 @@
       "isRegex": false
     },
     {
-      "id": "isEdible-to-hasFoodComponent",
-      "pattern": "\\.isEdible\\(\\)",
-      "replacement": ".has(net.minecraft.core.component.DataComponents.FOOD)",
-      "description": "Item.isEdible() -> has(DataComponents.FOOD) in 1.21 data components",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "getUseDuration-add-livingentity",
       "pattern": "public int getUseDuration\\((?:@(?:[\\w.]+\\.)?\\w+\\s+)?ItemStack\\s+(\\w+)\\)\\s*\\{",
       "replacement": "public int getUseDuration(ItemStack $1, net.minecraft.world.entity.LivingEntity entity) {",

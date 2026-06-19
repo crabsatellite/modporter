@@ -13330,7 +13330,7 @@ ${indent}}
         result = migrateBonemealableTargetCalls(result)
         result = migrateLegacyRegistryObjectReflection(result)
         result = migratePayloadContextServerPlayer(result)
-        result = migrateFoodComponentAccess(result)
+        result = migrateFoodComponentAccess(result, javaInheritanceIndex)
         result = migrateBucketItemFluidAccessSource(result)
         result = migrateCreativeTabEntriesAccessSource(result)
         result = migrateItemStackHoverNameSource(result)
@@ -29094,33 +29094,165 @@ ${modifierLines.joinToString("\n")}
         return result
     }
 
-    private fun migrateFoodComponentAccess(source: String): String {
+    private fun migrateFoodComponentAccess(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
         if (!source.contains(".getFoodProperties()") &&
             !source.contains(".getNutrition()") &&
-            !source.contains(".getItem().has(")) {
+            !source.contains(".getItem().has(") &&
+            !source.contains(".isEdible()") &&
+            !source.contains("isEdible()") &&
+            !source.contains(".has(")) {
             return source
         }
-        var result = source
+        var result = migrateLegacyItemIsEdibleOverrides(source, javaInheritanceIndex)
+        result = migrateLegacyItemIsEdibleCalls(result, javaInheritanceIndex)
         val itemStackVariables = Regex("""\bItemStack\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(source)
+            .findAll(result)
+            .map { it.groupValues[1] }
+            .toSet()
+        val itemVariables = Regex("""\bItem\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(result)
             .map { it.groupValues[1] }
             .toSet()
         result = Regex(
             """(?m)^([ \t]*)Item\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\r\n]+);\s*\r?\n\1FoodProperties\s+([A-Za-z_$][\w$]*)\s*=\s*\2\.getFoodProperties\(\);"""
         ).replace(result) { match ->
             "${match.groupValues[1]}ItemStack stack = new ItemStack(${match.groupValues[3].trim()});\n" +
-                "${match.groupValues[1]}FoodProperties ${match.groupValues[4]} = stack.get(DataComponents.FOOD);"
+                "${match.groupValues[1]}FoodProperties ${match.groupValues[4]} = stack.getFoodProperties(null);"
         }
         for (variable in itemStackVariables) {
             result = Regex("""\b${Regex.escape(variable)}\.getItem\(\)\.has\(\s*((?:net\.minecraft\.core\.component\.)?DataComponents\.[A-Za-z_$][\w$]*)\s*\)""")
                 .replace(result) { match -> "$variable.has(${match.groupValues[1]})" }
         }
+        result = migrateItemFoodComponentHasCalls(result, itemVariables, javaInheritanceIndex)
         result = result.replace(".getNutrition()", ".nutrition()")
         if (result.contains("DataComponents.FOOD")) {
             result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
         }
         return result
     }
+
+    private fun migrateLegacyItemIsEdibleOverrides(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String {
+        if (!source.contains("isEdible()")) return source
+        var result = source
+        collectJavaClassDeclarations(source).asReversed().forEach { declaration ->
+            if (!javaClassExtendsAny(declaration, setOf("Item"), javaInheritanceIndex)) return@forEach
+            val classBody = source.substring(declaration.bodyRange.first + 1, declaration.bodyRange.last)
+            if (Regex("""\bgetFoodProperties\s*\(\s*ItemStack\b""").containsMatchIn(classBody)) return@forEach
+            val methodPattern = Regex(
+                """(?m)^[ \t]*(?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*\r?\n[ \t]*)*public\s+boolean\s+isEdible\s*\(\s*\)\s*\{"""
+            )
+            val method = methodPattern.findAll(classBody).firstOrNull() ?: return@forEach
+            val methodStart = declaration.bodyRange.first + 1 + method.range.first
+            val openBrace = result.indexOf('{', methodStart)
+            if (openBrace < 0) return@forEach
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace < 0) return@forEach
+            val body = result.substring(openBrace + 1, closeBrace)
+            if (Regex("""(?s)^\s*return\s+.+?;\s*$""").matches(body).not()) return@forEach
+            val methodText = result.substring(methodStart, closeBrace + 1)
+            val helperMethod = Regex("""(?m)^[ \t]*@Override\s*\r?\n""")
+                .replace(methodText, "")
+            val indent = Regex("""(?m)^([ \t]*)public\s+boolean\s+isEdible\b""")
+                .find(helperMethod)
+                ?.groupValues
+                ?.get(1)
+                ?: ""
+            val foodPropertiesOverride = """
+
+${indent}@Override
+${indent}public FoodProperties getFoodProperties(ItemStack stack, LivingEntity entity) {
+${indent}    return this.isEdible() ? stack.get(DataComponents.FOOD) : null;
+${indent}}
+""".trimEnd()
+            result = result.substring(0, methodStart) +
+                helperMethod +
+                foodPropertiesOverride +
+                result.substring(closeBrace + 1)
+        }
+        if (result != source) {
+            result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
+            result = addImportIfMissing(result, "net.minecraft.world.entity.LivingEntity")
+            result = addImportIfMissing(result, "net.minecraft.world.food.FoodProperties")
+            result = addImportIfMissing(result, "net.minecraft.world.item.ItemStack")
+        }
+        return result
+    }
+
+    private fun migrateLegacyItemIsEdibleCalls(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String {
+        if (!source.contains(".isEdible()")) return source
+        val itemVariables = Regex("""\bItem\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        return rewriteJavaCallWithOffset(source, "isEdible") { receiver, args, offset ->
+            if (args.isNotEmpty()) return@rewriteJavaCallWithOffset null
+            val trimmedReceiver = receiver.trim()
+            if (trimmedReceiver.endsWith(".getItem()")) {
+                val stackReceiver = trimmedReceiver.removeSuffix(".getItem()")
+                return@rewriteJavaCallWithOffset "$stackReceiver.getFoodProperties(null) != null"
+            }
+            if (trimmedReceiver in itemVariables) {
+                return@rewriteJavaCallWithOffset "$trimmedReceiver.getDefaultInstance().getFoodProperties(null) != null"
+            }
+            if (trimmedReceiver == "this") {
+                val declaration = enclosingJavaClassDeclaration(source, offset) ?: return@rewriteJavaCallWithOffset null
+                if (!javaClassExtendsAny(declaration, setOf("Item"), javaInheritanceIndex)) return@rewriteJavaCallWithOffset null
+                val classBody = source.substring(declaration.bodyRange.first + 1, declaration.bodyRange.last)
+                if (Regex("""\bpublic\s+boolean\s+isEdible\s*\(""").containsMatchIn(classBody)) {
+                    return@rewriteJavaCallWithOffset null
+                }
+                return@rewriteJavaCallWithOffset "this.components().has(DataComponents.FOOD)"
+            }
+            null
+        }.let { migrated ->
+            if (migrated.contains("DataComponents.FOOD")) {
+                addImportIfMissing(migrated, "net.minecraft.core.component.DataComponents")
+            } else {
+                migrated
+            }
+        }
+    }
+
+    private fun migrateItemFoodComponentHasCalls(
+        source: String,
+        itemVariables: Set<String>,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String =
+        rewriteJavaCallWithOffset(source, "has") { receiver, args, offset ->
+            if (args.size != 1) return@rewriteJavaCallWithOffset null
+            val component = args[0].trim()
+            if (!Regex("""^(?:net\.minecraft\.core\.component\.)?DataComponents\.[A-Za-z_$][\w$]*$""").matches(component)) {
+                return@rewriteJavaCallWithOffset null
+            }
+            val trimmedReceiver = receiver.trim()
+            if (trimmedReceiver.endsWith(".getItem()")) {
+                val stackReceiver = trimmedReceiver.removeSuffix(".getItem()")
+                return@rewriteJavaCallWithOffset "$stackReceiver.has($component)"
+            }
+            if (trimmedReceiver in itemVariables) {
+                return@rewriteJavaCallWithOffset "$trimmedReceiver.components().has($component)"
+            }
+            if (trimmedReceiver == "this") {
+                val declaration = enclosingJavaClassDeclaration(source, offset) ?: return@rewriteJavaCallWithOffset null
+                if (!javaClassExtendsAny(declaration, setOf("Item"), javaInheritanceIndex)) return@rewriteJavaCallWithOffset null
+                val classBody = source.substring(declaration.bodyRange.first + 1, declaration.bodyRange.last)
+                if (component.endsWith("DataComponents.FOOD") &&
+                    Regex("""\bpublic\s+boolean\s+isEdible\s*\(""").containsMatchIn(classBody)) {
+                    return@rewriteJavaCallWithOffset "this.isEdible()"
+                }
+                return@rewriteJavaCallWithOffset "this.components().has($component)"
+            }
+            null
+        }
 
     private fun migrateBucketItemFluidAccessSource(source: String): String {
         if (!source.contains(".getFluid()") && !source.contains("getFluidType()")) return source
@@ -31944,6 +32076,20 @@ $encodeLines
         return -1
     }
 
+    private fun findMatchingAngle(source: String, openAngle: Int): Int {
+        var depth = 0
+        for (i in openAngle until source.length) {
+            when (source[i]) {
+                '<' -> depth++
+                '>' -> {
+                    depth--
+                    if (depth == 0) return i
+                }
+            }
+        }
+        return -1
+    }
+
     private fun rewriteJavaCall(
         source: String,
         methodName: String,
@@ -33156,6 +33302,7 @@ $writeLines
         deferredHolderRegistryBaseHints: Map<String, String> = emptyMap()
     ): String {
         var result = source
+        result = result.replace("DeferredRegister<LootItemFunctionType>", "DeferredRegister<LootItemFunctionType<?>>")
         deferredHolderRegistryBaseHints.forEach { (concrete, base) ->
             result = Regex("""DeferredHolder\s*<\s*${Regex.escape(concrete)}\s*,\s*${Regex.escape(concrete)}\s*>""")
                 .replace(result, "DeferredHolder<$base, $concrete>")
@@ -33239,6 +33386,11 @@ $writeLines
         }
         result = Regex("""DeferredHolder<RecipeSerializer<\s*([^>]+?)\s*>,\s*RecipeSerializer<\s*([^>]+?)\s*>>""")
             .replace(result) { match -> "DeferredHolder<RecipeSerializer<?>, RecipeSerializer<${match.groupValues[2].trim()}>>" }
+        result = Regex(
+            """DeferredHolder<RecipeSerializer<\?>,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)>\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\.register\(\s*"([^"]+)"\s*,\s*\(\)\s*->\s*new\s+SimpleCraftingRecipeSerializer<>\(\s*\1::new\s*\)\s*\)"""
+        ).replace(result) { match ->
+            "DeferredHolder<RecipeSerializer<?>, SimpleCraftingRecipeSerializer<${match.groupValues[1]}>> ${match.groupValues[2]} = ${match.groupValues[3]}.register(\"${match.groupValues[4]}\", () -> new SimpleCraftingRecipeSerializer<>(${match.groupValues[1]}::new))"
+        }
         result = Regex("""DeferredHolder<RecipeType<\s*([^>]+?)\s*>,\s*RecipeType<\s*([^>]+?)\s*>>""")
             .replace(result) { match -> "DeferredHolder<RecipeType<?>, RecipeType<${match.groupValues[2].trim()}>>" }
         result = Regex("""DeferredHolder<Feature<\s*([^>]+?)\s*>,\s*Feature<\s*([^>]+?)\s*>>""")
@@ -33293,6 +33445,7 @@ $writeLines
                 "DeferredHolder<$registryType<?>, $registryType<P>> ${match.groupValues[1]}("
             }
         }
+        result = migrateDeferredHolderRegisterBaseGenerics(result)
         result = Regex("""registerBlockItem\s*\(\s*String\s+name\s*,\s*DeferredHolder\s*<\s*T\s*,\s*T\s*>\s+block\s*\)""")
             .replace(result, "registerBlockItem(String name, DeferredHolder<Block, T> block)")
         result = Regex("""registerBlockItem\s*\(\s*String\s+name\s*,\s*DeferredHolder\s*<\s*Block\s*,\s*T\s*>\s+block\s*\)""")
@@ -33307,6 +33460,54 @@ $writeLines
         }
         if (result.contains("DeferredHolder<Block,") || result.contains("DeferredHolder<Block,")) {
             result = addImportIfMissing(result, "net.minecraft.world.level.block.Block")
+        }
+        return result
+    }
+
+    private fun migrateDeferredHolderRegisterBaseGenerics(source: String): String {
+        if (!source.contains("DeferredRegister<") || !source.contains("DeferredHolder")) return source
+        val registryBaseByName = Regex(
+            """\bDeferredRegister\s*<\s*(.+?)\s*>\s+([A-Za-z_$][\w$]*)\s*="""
+        ).findAll(source)
+            .associate { match -> match.groupValues[2] to match.groupValues[1].trim() }
+        if (registryBaseByName.isEmpty()) return source
+
+        var result = source
+        var cursor = 0
+        val holderPattern = Regex("""DeferredHolder\s*<""")
+        while (true) {
+            val match = holderPattern.find(result, cursor) ?: break
+            val openAngle = result.indexOf('<', match.range.first)
+            if (openAngle < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val closeAngle = findMatchingAngle(result, openAngle)
+            if (closeAngle < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val afterHolder = result.substring(closeAngle + 1)
+            val assignment = Regex("""^\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\.register\s*\(""")
+                .find(afterHolder)
+            if (assignment == null) {
+                cursor = closeAngle + 1
+                continue
+            }
+            val registryName = assignment.groupValues[2]
+            val registryBase = registryBaseByName[registryName]
+            if (registryBase == null) {
+                cursor = closeAngle + 1
+                continue
+            }
+            val holderArgs = splitTopLevelJavaArgs(result.substring(openAngle + 1, closeAngle))
+            if (holderArgs.size != 2 || holderArgs[0].trim() == registryBase) {
+                cursor = closeAngle + 1
+                continue
+            }
+            val replacementArgs = "$registryBase, ${holderArgs[1].trim()}"
+            result = result.substring(0, openAngle + 1) + replacementArgs + result.substring(closeAngle)
+            cursor = openAngle + 1 + replacementArgs.length
         }
         return result
     }
