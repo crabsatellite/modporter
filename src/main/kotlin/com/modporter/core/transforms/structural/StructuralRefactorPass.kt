@@ -13377,6 +13377,7 @@ ${indent}}
         result = migrateCuriosInventoryOptionalTypes(result)
         result = migrateCuriosAttributeModifierHolderTypes(result)
         result = migrateLegacyOptionalValueCalls(result)
+        result = migrateLegacyCurativeItemEffectsSource(result)
         if (result.contains("IEntityAdditionalSpawnData")) {
             result = result
                 .replace(
@@ -28469,6 +28470,33 @@ ${indent}}
         return result
     }
 
+    private fun migrateLegacyCurativeItemEffectsSource(source: String): String {
+        if (!source.contains(".curePotionEffects(")) return source
+        var changed = false
+        val migrated = rewriteJavaCall(source, "curePotionEffects") { receiver, args ->
+            if (args.size != 1) return@rewriteJavaCall null
+            val cure = legacyCurativeItemEffectCure(args[0]) ?: return@rewriteJavaCall null
+            changed = true
+            "$receiver.removeEffectsCuredBy(EffectCures.$cure)"
+        }
+        return if (changed) {
+            addImportIfMissing(migrated, "net.neoforged.neoforge.common.EffectCures")
+        } else {
+            source
+        }
+    }
+
+    private fun legacyCurativeItemEffectCure(argument: String): String? {
+        val itemStackPattern = Regex(
+            """^\s*new\s+(?:net\.minecraft\.world\.item\.)?ItemStack\s*\(\s*(?:net\.minecraft\.world\.item\.)?Items\.([A-Z0-9_]+)\s*\)\s*$"""
+        )
+        return when (itemStackPattern.find(argument)?.groupValues?.get(1)) {
+            "MILK_BUCKET" -> "MILK"
+            "HONEY_BOTTLE" -> "HONEY"
+            else -> null
+        }
+    }
+
     private fun migrateLegacyChunkGeneratorAsyncSignatures(source: String): String {
         if (!source.contains("fillFromNoise(") && !source.contains("createBiomes(")) return source
         var result = source
@@ -36506,6 +36534,10 @@ public class ${builder.className} implements RecipeBuilder {
             for ((owner, name) in staticHolderRefs) {
                 content = content.replace("$owner.$name.isPresent()", "$owner.$name.isBound()")
             }
+            content = Regex("""\bNeoForgeMod\.([A-Z][A-Z0-9_]*)\.isPresent\(\)""")
+                .replace(content, "NeoForgeMod.$1.isBound()")
+            content = Regex("""\bnet\.neoforged\.neoforge\.common\.NeoForgeMod\.([A-Z][A-Z0-9_]*)\.isPresent\(\)""")
+                .replace(content, "net.neoforged.neoforge.common.NeoForgeMod.$1.isBound()")
 
             if (content != original) {
                 changes.add(Change(

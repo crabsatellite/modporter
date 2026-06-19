@@ -280,6 +280,8 @@ class StructuralRefactorExtraTest {
             public class ContentRegistryTest {
                 public void verify(Optional<String> optional) {
                     boolean registryBound = EntityRegistry.DEER.isPresent();
+                    boolean milkBound = net.neoforged.neoforge.common.NeoForgeMod.MILK.isPresent();
+                    boolean milkTypeBound = NeoForgeMod.MILK_TYPE.isPresent();
                     boolean optionalPresent = optional.isPresent();
                 }
             }
@@ -291,8 +293,11 @@ class StructuralRefactorExtraTest {
 
         assertTrue(result.changes.any { it.ruleId == "struct-deferredholder-isbound" })
         assertTrue(transformed.contains("EntityRegistry.DEER.isBound()"))
+        assertTrue(transformed.contains("net.neoforged.neoforge.common.NeoForgeMod.MILK.isBound()"))
+        assertTrue(transformed.contains("NeoForgeMod.MILK_TYPE.isBound()"))
         assertTrue(transformed.contains("optional.isPresent()"))
         assertTrue(!transformed.contains("EntityRegistry.DEER.isPresent()"))
+        assertTrue(!transformed.contains("NeoForgeMod.MILK_TYPE.isPresent()"))
     }
 
     @Test
@@ -1384,6 +1389,37 @@ class StructuralRefactorExtraTest {
         assertTrue(bucket.contains("protected boolean canBlockContainFluid(Player player, BlockGetter level, BlockPos pos, BlockState state)"), bucket)
         assertTrue(bucket.contains("liquidBlockContainer.canPlaceLiquid(player, level, pos, state, this.content)"), bucket)
         assertFalse(bucket.contains("this.getFluid()"), bucket)
+    }
+
+    @Test
+    fun `migrates proven curative item effect calls to EffectCures`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/items")
+        srcDir.createDirectories()
+
+        srcDir.resolve("LegacyCurativeItem.java").writeText("""
+            package com.example.items;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+
+            public class LegacyCurativeItem {
+                public void cure(LivingEntity user, ItemStack dynamicStack) {
+                    user.curePotionEffects(new ItemStack(Items.MILK_BUCKET));
+                    user.curePotionEffects(new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.HONEY_BOTTLE));
+                    user.curePotionEffects(dynamicStack);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LegacyCurativeItem.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("import net.neoforged.neoforge.common.EffectCures;"), migrated)
+        assertTrue(migrated.contains("user.removeEffectsCuredBy(EffectCures.MILK);"), migrated)
+        assertTrue(migrated.contains("user.removeEffectsCuredBy(EffectCures.HONEY);"), migrated)
+        assertTrue(migrated.contains("user.curePotionEffects(dynamicStack);"), migrated)
     }
 
     @Test
