@@ -458,27 +458,95 @@ class RealModBenchmarkTest {
     }
 
     @Test
-    fun `runtime log audit allowlists Twilight duplicate glass sword only with source evidence`(@TempDir tempDir: Path) {
-        val projectDir = tempDir.resolve("work/twilight")
-        val sourceDir = tempDir.resolve("sources/twilight")
-        writeTwilightGlassSwordDuplicateEvidence(projectDir, includeSubtypeFix = false)
-        writeTwilightGlassSwordDuplicateEvidence(sourceDir, includeSubtypeFix = false)
-        val logFile = tempDir.resolve("twilight-client-world.log")
-        logFile.writeText(twilightGlassSwordDuplicateLog())
+    fun `runtime log audit allows external dependency creative tab duplicate warning with dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "maven.modrinth:quark:4.1-480"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("external-creative-duplicate.log")
+        logFile.writeText("""
+            [05:05:50] [main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/]:
+                 Mod List:
+                    Quark 4.1-480 (quark)
+                    The Aether 0.0NONE (aether)
+            [07:58:51] [Render thread/WARN] [me.je.li.pl.va.in.ItemStackListFactory/]: 52 duplicate items were found in 'Tools & Utilities' creative tab's: displayItems
+            This may indicate that these types of item need a subtype interpreter added to JEI:
+            [quark:seed_pouch, quark:pathfinders_quill]
+            [07:58:51] [Render thread/DEBUG] [zeta/]: minecraft:combat - 0/0/0 - 0/0
+        """.trimIndent() + "\n")
 
         val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
 
+        assertTrue(audit.findings.isEmpty(), "Expected external dependency creative duplicate warning to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("duplicate item ids [quark:seed_pouch, quark:pathfinders_quill] belong to external dependency namespace(s) quark") },
+            "Expected machine evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps external creative tab duplicate warning when target source references item`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        val javaDir = projectDir.resolve("src/main/java/example")
+        javaDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "maven.modrinth:quark:4.1-480"
+            }
+        """.trimIndent() + "\n")
+        javaDir.resolve("Integration.java").writeText("""
+            package example;
+
+            final class Integration {
+                static final String ITEM = "quark:seed_pouch";
+            }
+        """.trimIndent())
+        val logFile = tempDir.resolve("referenced-external-creative-duplicate.log")
+        logFile.writeText("""
+            [07:58:51] [Render thread/WARN] [me.je.li.pl.va.in.ItemStackListFactory/]: 52 duplicate items were found in 'Tools & Utilities' creative tab's: displayItems
+            [quark:seed_pouch, quark:pathfinders_quill]
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("duplicate items were found") },
+            "Target source references to the item must keep warning fatal"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allowlists source inherited creative tab duplicate only with source evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeSourceInheritedCreativeDuplicateEvidence(projectDir, includeSubtypeFix = false)
+        writeSourceInheritedCreativeDuplicateEvidence(sourceDir, includeSubtypeFix = false)
+        val logFile = tempDir.resolve("example-client-world.log")
+        logFile.writeText(sourceInheritedCreativeDuplicateLog())
+
+        assertTrue(projectHasCreativeDuplicateItemSourceShape(projectDir, "example:variant_tool"))
+        assertTrue(projectHasCreativeDuplicateItemSourceShape(sourceDir, "example:variant_tool"))
+        assertTrue(!projectRegistersJeiSubtypeForItem(projectDir, "example:variant_tool"))
+        assertTrue(detectBenchmarkModId(projectDir) == "example")
+        assertTrue(creativeTabDuplicateWarning(logFile.readText().lines(), 0)?.itemIds == listOf("example:variant_tool"))
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
         assertTrue(audit.findings.isEmpty(), "Expected source-inherited issue to be allowlisted: ${audit.findings}")
         assertTrue(
-            audit.allowedIssues.any { it.contains("input and converted sources have two GLASS_SWORD creative outputs") },
+            audit.allowedIssues.any { it.contains("input and converted sources duplicate creative-tab item id(s) example:variant_tool") },
             "Expected allowlist evidence trace, got: ${audit.allowedIssues}"
         )
     }
 
     @Test
-    fun `runtime log audit keeps Twilight duplicate glass sword warning without evidence`(@TempDir tempDir: Path) {
-        val logFile = tempDir.resolve("twilight-client-world.log")
-        logFile.writeText(twilightGlassSwordDuplicateLog())
+    fun `runtime log audit keeps source inherited creative tab duplicate warning without evidence`(@TempDir tempDir: Path) {
+        val logFile = tempDir.resolve("example-client-world.log")
+        logFile.writeText(sourceInheritedCreativeDuplicateLog())
 
         val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = tempDir.resolve("missing-project"))
 
@@ -489,15 +557,15 @@ class RealModBenchmarkTest {
     }
 
     @Test
-    fun `runtime log audit rejects Twilight duplicate glass sword allowlist after porter subtype fix`(@TempDir tempDir: Path) {
-        val projectDir = tempDir.resolve("work/twilight")
-        val sourceDir = tempDir.resolve("sources/twilight")
-        writeTwilightGlassSwordDuplicateEvidence(projectDir, includeSubtypeFix = true)
-        writeTwilightGlassSwordDuplicateEvidence(sourceDir, includeSubtypeFix = false)
-        val logFile = tempDir.resolve("twilight-client-world.log")
-        logFile.writeText(twilightGlassSwordDuplicateLog())
+    fun `runtime log audit rejects source inherited creative tab duplicate allowlist after subtype fix`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeSourceInheritedCreativeDuplicateEvidence(projectDir, includeSubtypeFix = true)
+        writeSourceInheritedCreativeDuplicateEvidence(sourceDir, includeSubtypeFix = false)
+        val logFile = tempDir.resolve("example-client-world.log")
+        logFile.writeText(sourceInheritedCreativeDuplicateLog())
 
-        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
 
         assertTrue(
             audit.findings.any { it.contains("duplicate items were found") },
@@ -1642,68 +1710,69 @@ class RealModBenchmarkTest {
         }
     }
 
-    private fun twilightGlassSwordDuplicateLog(): String = """
-        [Render thread/WARN] [net.neoforged.neoforge.common.CreativeModeTabRegistry/]: duplicate items were found in 'Twilight Forest: Equipment' creative tab's: displayItems
-        [Render thread/WARN] [net.neoforged.neoforge.common.CreativeModeTabRegistry/]: [twilightforest:glass_sword]
+    private fun sourceInheritedCreativeDuplicateLog(): String = """
+        [Render thread/WARN] [net.neoforged.neoforge.common.CreativeModeTabRegistry/]: duplicate items were found in 'Example Equipment' creative tab's: displayItems
+        [Render thread/WARN] [net.neoforged.neoforge.common.CreativeModeTabRegistry/]: [example:variant_tool]
     """.trimIndent() + "\n"
 
-    private fun writeTwilightGlassSwordDuplicateEvidence(projectDir: Path, includeSubtypeFix: Boolean) {
+    private fun writeSourceInheritedCreativeDuplicateEvidence(projectDir: Path, includeSubtypeFix: Boolean) {
         val sourceRoot = projectDir.resolve("src/main/java")
-        val initDir = sourceRoot.resolve("twilightforest/init")
-        val jeiDir = sourceRoot.resolve("twilightforest/compat/jei")
+        val initDir = sourceRoot.resolve("example/init")
+        val jeiDir = sourceRoot.resolve("example/compat/jei")
         initDir.createDirectories()
         jeiDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
 
-        initDir.resolve("TFCreativeTabs.java").writeText("""
-            package twilightforest.init;
+        initDir.resolve("ExampleCreativeTabs.java").writeText("""
+            package example.init;
 
             import net.minecraft.network.chat.Component;
             import net.minecraft.world.item.CreativeModeTab;
             import net.minecraft.world.item.ItemStack;
 
-            public class TFCreativeTabs {
-                public static final String EQUIPMENT = "Twilight Forest: Equipment";
+            public class ExampleCreativeTabs {
+                public static final String EQUIPMENT = "Example Equipment";
 
-                private static void createGlassSwordAndLoreVer(CreativeModeTab.Output output) {
-                    output.accept(TFItems.GLASS_SWORD.get());
-                    ItemStack loreSword = new ItemStack(TFItems.GLASS_SWORD.get());
-                    loreSword.setHoverName(Component.translatable("item.twilightforest.glass_sword.desc"));
-                    output.accept(loreSword);
+                private static void createVariantToolOutputs(CreativeModeTab.Output output) {
+                    output.accept(ExampleItems.VARIANT_TOOL.get());
+                    ItemStack namedTool = new ItemStack(ExampleItems.VARIANT_TOOL.get());
+                    namedTool.setHoverName(Component.translatable("item.example.variant_tool.desc"));
+                    output.accept(namedTool);
                 }
             }
         """.trimIndent())
 
         val jeiBody = if (includeSubtypeFix) {
             """
-            package twilightforest.compat.jei;
+            package example.compat.jei;
 
             import mezz.jei.api.IModPlugin;
             import mezz.jei.api.registration.ISubtypeRegistration;
-            import twilightforest.compat.jei.subtype.GlassSwordSubtypeInterpreter;
-            import twilightforest.init.TFItems;
+            import example.compat.jei.subtype.VariantToolSubtypeInterpreter;
+            import example.init.ExampleItems;
 
-            public class JEICompat implements IModPlugin {
+            public class ExampleJeiCompat implements IModPlugin {
                 @Override
                 public void registerItemSubtypes(ISubtypeRegistration registration) {
-                    registration.registerSubtypeInterpreter(TFItems.GLASS_SWORD.get(), GlassSwordSubtypeInterpreter.INSTANCE);
+                    registration.registerSubtypeInterpreter(ExampleItems.VARIANT_TOOL.get(), VariantToolSubtypeInterpreter.INSTANCE);
                 }
             }
             """.trimIndent()
         } else {
             """
-            package twilightforest.compat.jei;
+            package example.compat.jei;
 
             import mezz.jei.api.IModPlugin;
             import mezz.jei.api.registration.IRecipeTransferRegistration;
 
-            public class JEICompat implements IModPlugin {
+            public class ExampleJeiCompat implements IModPlugin {
                 @Override
                 public void registerRecipeTransferHandlers(IRecipeTransferRegistration registration) {
                 }
             }
             """.trimIndent()
         }
-        jeiDir.resolve("JEICompat.java").writeText(jeiBody)
+        jeiDir.resolve("ExampleJeiCompat.java").writeText(jeiBody)
     }
 
     private fun writeMissingSoundEvidence(projectDir: Path, includeMissingEventInSoundsJson: Boolean) {
@@ -2490,15 +2559,14 @@ class RealModBenchmarkTest {
         externalDependencyConfigCorrectionEvidence(lines, index, evidenceCache)?.let {
             return "external dependency config correction warning ($it)"
         }
+        externalDependencyCreativeTabDuplicateEvidence(lines, index, evidenceCache)?.let {
+            return "external dependency creative-tab duplicate item warning ($it)"
+        }
+        sourceInheritedCreativeTabDuplicateEvidence(lines, index, evidenceCache)?.let {
+            return "source-inherited creative-tab duplicate item warning ($it)"
+        }
         sourceInheritedMissingSoundEvidence(lines[index], evidenceCache)?.let {
             return "source-inherited missing sound definition warning ($it)"
-        }
-        if (isTwilightGlassSwordDuplicateWarning(lines, index)) {
-            val evidence = twilightGlassSwordDuplicateEvidence(
-                evidenceCache.projectDir ?: return null,
-                evidenceCache.inputSourceDir
-            ) ?: return null
-            return "Twilight Forest source-inherited creative-tab duplicate glass_sword warning ($evidence)"
         }
         return null
     }
@@ -2665,6 +2733,77 @@ class RealModBenchmarkTest {
         if (resourceDefinesSoundEvent(sourceDir, namespace, soundPath)) return null
         return "input and converted sources declare sound event '$namespace:$soundPath' but their sounds.json resources omit it"
     }
+
+    private fun externalDependencyCreativeTabDuplicateEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val warning = creativeTabDuplicateWarning(lines, index) ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (warning.itemIds.any { it.substringBefore(':') == targetMod }) return null
+        if (warning.itemIds.any { evidenceCache.containsText(it) }) return null
+
+        val loadedModIds = loadedRuntimeModIds(lines)
+        val namespaces = warning.itemIds.map { it.substringBefore(':') }.distinct()
+        val namespaceEvidence = namespaces.map { namespace ->
+            val activeDependency = evidenceCache.buildFileContainsDependencyId(namespace)
+            val loadedMod = namespace in loadedModIds
+            when {
+                activeDependency && loadedMod -> "$namespace: active build dependency and loaded runtime mod"
+                activeDependency -> "$namespace: active build dependency"
+                loadedMod -> "$namespace: loaded runtime mod"
+                else -> return null
+            }
+        }
+        return "duplicate item ids [${warning.itemIds.joinToString(", ")}] belong to external dependency namespace(s) " +
+            "${namespaces.joinToString(", ")} with ${namespaceEvidence.joinToString("; ")} and are absent from converted/input project sources"
+    }
+
+    private fun sourceInheritedCreativeTabDuplicateEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val warning = creativeTabDuplicateWarning(lines, index) ?: return null
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (warning.itemIds.any { it.substringBefore(':') != targetMod }) return null
+        if (warning.itemIds.any { !projectHasCreativeDuplicateItemSourceShape(project, it) }) return null
+        if (warning.itemIds.any { !projectHasCreativeDuplicateItemSourceShape(sourceDir, it) }) return null
+        if (warning.itemIds.any { projectRegistersJeiSubtypeForItem(project, it) }) return null
+        return "input and converted sources duplicate creative-tab item id(s) ${warning.itemIds.joinToString(", ")} " +
+            "and converted source has no JEI subtype registration for those item id(s)"
+    }
+
+    private fun creativeTabDuplicateWarning(lines: List<String>, index: Int): CreativeTabDuplicateWarning? {
+        val duplicatePattern = Regex("""(?:\b\d+\s+)?duplicate items were found in '([^']+)' creative tab's: displayItems""")
+        val duplicateIndex = when {
+            duplicatePattern.containsMatchIn(lines[index]) -> index
+            else -> ((index - 3).coerceAtLeast(0) until index)
+                .lastOrNull { duplicatePattern.containsMatchIn(lines[it]) }
+        } ?: return null
+        val tabName = duplicatePattern.find(lines[duplicateIndex])?.groupValues?.get(1) ?: return null
+        val itemLines = if (duplicateIndex == index) {
+            lines.drop(index + 1).take(4)
+        } else {
+            listOf(lines[index])
+        }
+        val itemIdPattern = Regex("""[a-z0-9_.-]+:[a-z0-9_./-]+""")
+        val itemLine = itemLines.firstOrNull { itemIdPattern.containsMatchIn(it) } ?: return null
+        val itemIds = itemIdPattern.findAll(itemLine)
+            .map { it.value }
+            .distinct()
+            .toList()
+        if (itemIds.isEmpty()) return null
+        return CreativeTabDuplicateWarning(tabName, itemIds)
+    }
+
+    private data class CreativeTabDuplicateWarning(
+        val tabName: String,
+        val itemIds: List<String>
+    )
 
     private inner class RuntimeLogEvidenceCache(
         val projectDir: Path?,
@@ -2864,31 +3003,6 @@ class RealModBenchmarkTest {
             projectDir.resolve("src/generated/resources/assets/$namespace/sounds.json")
         )
 
-    private fun isTwilightGlassSwordDuplicateWarning(lines: List<String>, index: Int): Boolean {
-        val line = lines[index]
-        val duplicateMessage = "duplicate items were found in 'Twilight Forest: Equipment' creative tab's: displayItems"
-        if (line.contains(duplicateMessage)) {
-            return lines.drop(index + 1).take(3).any { it.contains("[twilightforest:glass_sword]") }
-        }
-        if (line.contains("[twilightforest:glass_sword]")) {
-            return lines.take(index).takeLast(3).any { it.contains(duplicateMessage) }
-        }
-        return false
-    }
-
-    private fun twilightGlassSwordDuplicateEvidence(projectDir: Path, inputSourceDir: Path?): String? {
-        if (!hasTwilightGlassSwordDuplicateSourceShape(projectDir)) return null
-
-        val sourceDir = inputSourceDir ?: benchmarkInputSourceDir(projectDir)
-        if (sourceDir != null && !hasTwilightGlassSwordDuplicateSourceShape(sourceDir)) return null
-
-        return if (sourceDir != null) {
-            "input and converted sources have two GLASS_SWORD creative outputs and no GLASS_SWORD JEI subtype registration"
-        } else {
-            "converted source has two GLASS_SWORD creative outputs and no GLASS_SWORD JEI subtype registration"
-        }
-    }
-
     private fun benchmarkInputSourceDir(projectDir: Path): Path? {
         val caseId = projectDir.fileName?.toString() ?: return null
         val tmpRoot = projectDir.parent?.parent ?: return null
@@ -2896,21 +3010,63 @@ class RealModBenchmarkTest {
         return candidate.takeIf { it.exists() }
     }
 
-    private fun hasTwilightGlassSwordDuplicateSourceShape(projectDir: Path): Boolean {
-        val creativeTabs = projectDir.resolve("src/main/java/twilightforest/init/TFCreativeTabs.java")
-        val jeiCompat = projectDir.resolve("src/main/java/twilightforest/compat/jei/JEICompat.java")
-        if (!creativeTabs.exists() || !jeiCompat.exists()) return false
+    private fun projectHasCreativeDuplicateItemSourceShape(projectDir: Path, itemId: String): Boolean {
+        if (!projectDir.exists()) return false
+        val patterns = itemReferencePatterns(itemId)
+        for (file in javaAndKotlinSourceFiles(projectDir)) {
+            val relativePath = projectDir.relativize(file).toString().replace('\\', '/').lowercase()
+            val active = activeCode(file.readText())
+            val creativeContext = relativePath.contains("creative") ||
+                relativePath.contains("tab") ||
+                active.contains("CreativeModeTab") ||
+                active.contains("output.accept") ||
+                active.contains("displayItems")
+            if (!creativeContext) continue
+            val referenceCount = patterns.sumOf { pattern -> pattern.findAll(active).count() }
+            if (referenceCount >= 2) return true
+        }
+        return false
+    }
 
-        val creativeSource = activeCode(creativeTabs.readText())
-        val hasPlainSword = creativeSource.contains("output.accept(TFItems.GLASS_SWORD.get())")
-        val hasLoreSword = creativeSource.contains("output.accept(loreSword)")
-        val hasLegacyLoreMarker = creativeSource.contains("item.twilightforest.glass_sword.desc")
-        if (!hasPlainSword || !hasLoreSword || !hasLegacyLoreMarker) return false
+    private fun projectRegistersJeiSubtypeForItem(projectDir: Path, itemId: String): Boolean {
+        if (!projectDir.exists()) return false
+        val patterns = itemReferencePatterns(itemId)
+        for (file in javaAndKotlinSourceFiles(projectDir)) {
+            val active = activeCode(file.readText())
+            if (!active.contains("registerSubtypeInterpreter")) continue
+            if (patterns.any { it.containsMatchIn(active) }) return true
+        }
+        return false
+    }
 
-        val jeiSource = activeCode(jeiCompat.readText())
-        val porterSubtypeFix = jeiSource.contains("GlassSwordSubtypeInterpreter") ||
-            Regex("""registerSubtypeInterpreter\s*\(\s*TFItems\.GLASS_SWORD\.get\(\)""").containsMatchIn(jeiSource)
-        return !porterSubtypeFix
+    private fun itemReferencePatterns(itemId: String): List<Regex> {
+        val namespace = itemId.substringBefore(':')
+        val path = itemId.substringAfter(':')
+        val constant = path.uppercase().replace(Regex("""[^A-Z0-9]"""), "_")
+        return listOf(
+            Regex("""["']${Regex.escape(namespace)}:${Regex.escape(path)}["']"""),
+            Regex("""["']${Regex.escape(path)}["']"""),
+            Regex("""\b${Regex.escape(constant)}\b""")
+        )
+    }
+
+    private fun javaAndKotlinSourceFiles(projectDir: Path): List<Path> {
+        val roots = listOf(
+            projectDir.resolve("src/main/java"),
+            projectDir.resolve("src/main/kotlin"),
+            projectDir.resolve("src/generated/java"),
+            projectDir.resolve("src/generated/kotlin")
+        ).filter { it.exists() }
+        val files = mutableListOf<Path>()
+        for (root in roots) {
+            Files.walk(root).use { stream ->
+                stream
+                    .filter { Files.isRegularFile(it) }
+                    .filter { it.fileName.toString().endsWith(".java") || it.fileName.toString().endsWith(".kt") }
+                    .forEach { files.add(it) }
+            }
+        }
+        return files
     }
 
     private fun logTail(logFile: Path, lines: Int = 40): String {

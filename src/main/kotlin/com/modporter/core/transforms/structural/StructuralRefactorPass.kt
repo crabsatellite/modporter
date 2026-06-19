@@ -2251,7 +2251,8 @@ $registrations
         val referenceName: String,
         val bufferType: String,
         val direction: String,
-        val registerable: Boolean
+        val registerable: Boolean,
+        val handlerExpression: String = "(payload, context) -> payload.execute(context.player())"
     )
 
     private fun migrateBasePacketPayloads(projectDir: Path, dryRun: Boolean): List<Change> {
@@ -2325,7 +2326,6 @@ $registrations
             }
         }
 
-        if (payloads.isEmpty()) return changes
         changes.addAll(rewriteBasePacketHandlers(projectDir, srcDir, modId, payloads, dryRun))
         changes.addAll(rewritePacketRelayCalls(srcDir, dryRun))
         return changes
@@ -2339,7 +2339,7 @@ $registrations
     ): List<BasePacketPayloadInfo> {
         val results = mutableListOf<BasePacketPayloadInfo>()
         val decodePattern = Regex(
-            """public\s+static\s+([A-Za-z_$][\w$]*)\s+decode\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+([A-Za-z_$][\w$]*)\s*\)"""
+            """public\s+static\s+(?:[A-Za-z_$][\w$]*\.)*([A-Za-z_$][\w$]*)\s+decode\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+([A-Za-z_$][\w$]*)\s*\)"""
         )
         for (decode in decodePattern.findAll(source)) {
             val simpleName = decode.groupValues[1]
@@ -2436,8 +2436,9 @@ $registrations
                         val packetRef = match.groupValues[1]
                         val payload = payloads[packetRef]
                             ?: uniquePayloadBySimpleName[packetRef.substringAfterLast('.')]
+                            ?: registeredPacketPayloadInfo(srcDir, packetRef)
                             ?: return@mapNotNull null
-                        "        registrar.${payload.direction}(${payload.referenceName}.TYPE, ${payload.referenceName}.STREAM_CODEC, (payload, context) -> payload.execute(context.player()));"
+                        "        registrar.${payload.direction}(${payload.referenceName}.TYPE, ${payload.referenceName}.STREAM_CODEC, ${payload.handlerExpression});"
                     }
                     .toList()
                 if (registrations.isEmpty()) return@forEach
@@ -2497,6 +2498,69 @@ ${registrations.distinct().joinToString("\n")}
                 }
             }
         return changes
+    }
+
+    private fun registeredPacketPayloadInfo(srcDir: Path, packetRef: String): BasePacketPayloadInfo? {
+        val simpleName = packetRef.substringAfterLast('.')
+        val refSegments = packetRef.split('.')
+        val candidateTypeNames = buildSet {
+            add(simpleName)
+            refSegments.dropLast(1).forEach { add(it) }
+        }
+        val javaFiles = Files.walk(srcDir).use { stream ->
+            stream
+                .filter { it.extension == "java" && it.fileName.toString().removeSuffix(".java") in candidateTypeNames }
+                .toList()
+        }
+        for (file in javaFiles) {
+            val source = file.readText()
+            val packageName = packageNameOf(source)
+            val fileClassName = file.fileName.toString().removeSuffix(".java")
+            val decode = Regex(
+                """public\s+static\s+(?:(?:${Regex.escape(packetRef)})|(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(simpleName)})\s+decode\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+[A-Za-z_$][\w$]*\s*\)"""
+            ).find(source) ?: continue
+            if (!hasRegisteredPayloadSourceShape(source, fileClassName, simpleName)) continue
+            return BasePacketPayloadInfo(
+                file = file,
+                packageName = packageName,
+                fileClassName = fileClassName,
+                simpleName = simpleName,
+                referenceName = packetRef,
+                bufferType = decode.groupValues[1],
+                direction = packetDirectionFromPackage(packageName),
+                registerable = true,
+                handlerExpression = registeredPacketHandlerExpression(source, packageName)
+            )
+        }
+        return null
+    }
+
+    private fun registeredPacketHandlerExpression(source: String, packageName: String): String {
+        val imports = javaNonStaticImports(source)
+        val entityPacket = resolveJavaTypeReference("SyncEntityPacket", packageName, imports)
+        val levelPacket = resolveJavaTypeReference("SyncLevelPacket", packageName, imports)
+        return when {
+            source.contains("extends SyncEntityPacket<") && entityPacket != null ->
+                "(payload, context) -> $entityPacket.execute(payload, context.player())"
+            source.contains("extends SyncLevelPacket<") && levelPacket != null ->
+                "(payload, context) -> $levelPacket.execute(payload, context.player())"
+            else -> "(payload, context) -> payload.execute(context.player())"
+        }
+    }
+
+    private fun hasRegisteredPayloadSourceShape(source: String, fileClassName: String, simpleName: String): Boolean {
+        val typeStart = findTypeDeclarationStart(source, simpleName) ?: findTypeDeclarationStart(source, fileClassName) ?: return false
+        val openBrace = source.indexOf('{', typeStart)
+        if (openBrace < 0) return false
+        val closeBrace = findMatchingBrace(source, openBrace)
+        if (closeBrace <= openBrace) return false
+        val header = source.substring(typeStart, openBrace)
+        val body = source.substring(openBrace + 1, closeBrace)
+        return header.contains("implements BasePacket") ||
+            header.contains("extends SyncEntityPacket<") ||
+            header.contains("extends SyncLevelPacket<") ||
+            body.contains("CustomPacketPayload.Type<") ||
+            body.contains("CustomPacketPayload.Type<${simpleName}>")
     }
 
     private fun rewritePacketRelayCalls(srcDir: Path, dryRun: Boolean): List<Change> {
@@ -5486,6 +5550,16 @@ $helpers
             new net.minecraft.network.protocol.common.custom.CustomPacketPayload.Type<>(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath("$modId", "${payloadPathName(className)}"));
 """.trimEnd()
             result = result.substring(0, openBrace + 1) + typeField + result.substring(openBrace + 1)
+        }
+        if (!Regex("""\bSTREAM_CODEC\s*=""").containsMatchIn(result)) {
+            val refreshedOpenBrace = result.indexOf('{', findTypeDeclarationStart(result, className) ?: return result)
+            if (refreshedOpenBrace < 0) return result
+            val streamCodecField = """
+
+    public static final net.minecraft.network.codec.StreamCodec<net.minecraft.network.RegistryFriendlyByteBuf, $className> STREAM_CODEC =
+            net.minecraft.network.codec.StreamCodec.of((buf, packet) -> packet.write(buf), ${className}::decode);
+""".trimEnd()
+            result = result.substring(0, refreshedOpenBrace + 1) + streamCodecField + result.substring(refreshedOpenBrace + 1)
         }
         if (Regex("""\btype\s*\(\s*\)""").containsMatchIn(result)) return result
         val refreshedOpenBrace = result.indexOf('{', findTypeDeclarationStart(result, className) ?: return result)
@@ -28700,7 +28774,7 @@ $methodBody
         body = Regex("""(?m)^[ \t]*${Regex.escape(oldCallbackName)}\.cancel\(\);\s*(?:\r?\n)?""")
             .replace(body, "")
 
-        val rewrittenHeader = header
+        val rewrittenHeader = rewriteLegacyDisconnectScreenInjectPoint(header)
             .replace(legacyDescriptor, "createDisconnectScreen(Lnet/minecraft/network/DisconnectionDetails;)Lnet/minecraft/client/gui/screens/Screen;")
             .replace(
                 Regex("""(?m)^([ \t]*(?:private|protected|public)\s+(?:static\s+)?void\s+$id\s*)\([^)]*\)\s*\{""")
@@ -28727,6 +28801,25 @@ $methodBody
             Regex("""(?<![\w$])CallbackInfo(?![\w$])""")
         )
         return result
+    }
+
+    private fun rewriteLegacyDisconnectScreenInjectPoint(header: String): String {
+        val legacyJoinScreenCtor =
+            "Lnet/minecraft/client/gui/screens/multiplayer/JoinMultiplayerScreen;<init>(Lnet/minecraft/client/gui/screens/Screen;)V"
+        val targetIndex = header.indexOf(legacyJoinScreenCtor)
+        if (targetIndex < 0) return header
+        val atIndex = header.lastIndexOf("@At", targetIndex)
+        if (atIndex < 0) return header
+        val atOpen = header.indexOf('(', atIndex)
+        if (atOpen < 0 || atOpen > targetIndex) return header
+        val atClose = findMatchingParen(header, atOpen)
+        if (atClose < targetIndex) return header
+        val injectIndex = header.lastIndexOf("@Inject", atIndex)
+        if (injectIndex < 0) return header
+        val injectOpen = header.indexOf('(', injectIndex)
+        val injectClose = if (injectOpen >= 0) findMatchingParen(header, injectOpen) else -1
+        if (injectOpen < 0 || injectClose < atClose) return header
+        return header.substring(0, atIndex) + "@At(\"HEAD\")" + header.substring(atClose + 1)
     }
 
     private fun migrateLegacySingleplayerWorldFlowSource(source: String): String {

@@ -1095,7 +1095,7 @@ class StructuralRefactorExtraTest {
                         super(bossID);
                     }
 
-                    public static Display decode(FriendlyByteBuf buf) {
+                    public static BossPacket.Display decode(FriendlyByteBuf buf) {
                         return new Display(buf.readInt());
                     }
 
@@ -2983,6 +2983,30 @@ class StructuralRefactorExtraTest {
                 }
             }
         """.trimIndent())
+        srcDir.resolve("network/ExamplePacketHandler.java").writeText("""
+            package com.example.network;
+
+            import com.aetherteam.nitrogen.network.BasePacket;
+            import com.example.network.packet.SynchedDataSyncPacket;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+            import java.util.function.Function;
+
+            public class ExamplePacketHandler {
+                public static final SimpleChannel INSTANCE = NetworkRegistry.newSimpleChannel(ResourceLocation.fromNamespaceAndPath("examplemod", "main"), () -> "1", "1"::equals, "1"::equals);
+                private static int index;
+
+                public static synchronized void register() {
+                    register(SynchedDataSyncPacket.class, SynchedDataSyncPacket::decode);
+                }
+
+                private static <MSG extends BasePacket> void register(final Class<MSG> packet, Function<FriendlyByteBuf, MSG> decoder) {
+                    INSTANCE.messageBuilder(packet, index++).encoder(BasePacket::encode).decoder(decoder).consumerMainThread(BasePacket::handle).add();
+                }
+            }
+        """.trimIndent())
         capabilityDir.resolve("SynchedData.java").writeText("""
             package com.example.capability;
 
@@ -3166,6 +3190,7 @@ class StructuralRefactorExtraTest {
         val impl = capabilityDir.resolve("SynchedDataCapability.java").readText()
         val hooks = capabilityDir.resolve("SynchedDataHooks.java").readText()
         val packet = networkDir.resolve("SynchedDataSyncPacket.java").readText()
+        val handler = srcDir.resolve("network/ExamplePacketHandler.java").readText()
         val serverPerkData = perkDir.resolve("ServerPerkData.java").readText()
         val mod = srcDir.resolve("ExampleMod.java").readText()
 
@@ -3191,12 +3216,17 @@ class StructuralRefactorExtraTest {
         assertTrue(packet.contains("import com.aetherteam.nitrogen.attachment.INBTSynchable;"), packet)
         assertTrue(packet.contains("RegistryFriendlyByteBuf buf"), packet)
         assertTrue(packet.contains("CustomPacketPayload.Type<SynchedDataSyncPacket> TYPE"), packet)
+        assertTrue(packet.contains("StreamCodec<net.minecraft.network.RegistryFriendlyByteBuf, SynchedDataSyncPacket> STREAM_CODEC"), packet)
+        assertTrue(packet.contains("StreamCodec.of((buf, packet) -> packet.write(buf), SynchedDataSyncPacket::decode)"), packet)
         assertTrue(packet.contains("ResourceLocation.fromNamespaceAndPath(\"examplemod\", \"synched_data_sync\")"), packet)
         assertTrue(packet.contains("public net.minecraft.network.protocol.common.custom.CustomPacketPayload.Type<? extends net.minecraft.network.protocol.common.custom.CustomPacketPayload> type()"), packet)
         assertTrue(packet.contains("public java.util.function.Supplier<net.neoforged.neoforge.attachment.AttachmentType<com.example.capability.SynchedData>> getAttachment()"), packet)
         assertTrue(packet.contains("return com.example.capability.ExampleCapabilities.PLAYER_DATA;"), packet)
         assertFalse(packet.contains("getCapability"), packet)
         assertFalse(packet.contains("LazyOptional"), packet)
+        assertTrue(handler.contains("registrar.playBidirectional(SynchedDataSyncPacket.TYPE, SynchedDataSyncPacket.STREAM_CODEC, (payload, context) -> com.aetherteam.nitrogen.network.packet.SyncEntityPacket.execute(payload, context.player()));"), handler)
+        assertFalse(handler.contains("SimpleChannel"), handler)
+        assertFalse(handler.contains("BasePacket"), handler)
         assertTrue(serverPerkData.contains("import net.minecraft.network.protocol.common.custom.CustomPacketPayload;"), serverPerkData)
         assertTrue(serverPerkData.contains("BiFunction<UUID, T, CustomPacketPayload> applyPacket"), serverPerkData)
         assertTrue(serverPerkData.contains("Function<Map<UUID, T>, CustomPacketPayload> syncPacket"), serverPerkData)
@@ -3205,6 +3235,7 @@ class StructuralRefactorExtraTest {
         assertFalse(serverPerkData.contains("import com.aetherteam.nitrogen.network.packet.SyncPacket;"), serverPerkData)
         assertFalse(serverPerkData.contains(" SyncPacket"), serverPerkData)
         assertTrue(mod.contains("ExampleCapabilities.registerAttachments(modEventBus);"), mod)
+        assertTrue(mod.contains("modEventBus.addListener(ExamplePacketHandler::register);"), mod)
     }
 
     @Test
@@ -9901,12 +9932,14 @@ class StructuralRefactorExtraTest {
         assertTrue(transformed.contains("import net.minecraft.network.DisconnectionDetails;"), transformed)
         assertTrue(transformed.contains("import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;"), transformed)
         assertTrue(transformed.contains("@Mixin(ClientCommonPacketListenerImpl.class)"), transformed)
+        assertTrue(transformed.contains("@Inject(at = @At(\"HEAD\"), method = \"createDisconnectScreen(Lnet/minecraft/network/DisconnectionDetails;)Lnet/minecraft/client/gui/screens/Screen;\", cancellable = true)"), transformed)
         assertTrue(transformed.contains("createDisconnectScreen(Lnet/minecraft/network/DisconnectionDetails;)Lnet/minecraft/client/gui/screens/Screen;"), transformed)
         assertTrue(transformed.contains("public void onDisconnect(DisconnectionDetails details, CallbackInfoReturnable<Screen> cir)"), transformed)
         assertTrue(transformed.contains("cir.setReturnValue(new DisconnectedScreen(new TitleScreen(), Component.translatable(\"disconnect.lost\"), details));"), transformed)
         assertFalse(transformed.contains("import net.minecraft.client.Minecraft;"), transformed)
         assertFalse(transformed.contains("import net.minecraft.client.multiplayer.ClientPacketListener;"), transformed)
         assertFalse(transformed.contains("import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;"), transformed)
+        assertFalse(transformed.contains("JoinMultiplayerScreen;<init>"), transformed)
         assertFalse(transformed.contains("onDisconnect(Lnet/minecraft/network/chat/Component;)V"), transformed)
         assertFalse(transformed.contains("ci.cancel();"), transformed)
     }
