@@ -222,6 +222,7 @@ class ResourceMigrationPass(
                 transformAssetJsonFiles(assetsDir, changes, errors)
                 fillMissingSoundSubtitleTranslations(assetsDir, changes, errors)
                 generateMissingItemModels(projectDir, resourceDir, changes, errors)
+                generateLegacyNitrogenFuelSprites(projectDir, assetsDir, changes, errors)
                 normalizeItemTextureMipDimensions(assetsDir, changes, errors)
             }
 
@@ -2732,6 +2733,182 @@ public class $className extends CustomRecipe {
 """.trimIndent() + "\n"
 
     private data class RegisteredItem(val id: String, val className: String)
+
+    private data class NitrogenFuelSpriteSpec(
+        val namespace: String,
+        val menuTexturePath: String,
+        val spriteStem: String
+    )
+
+    private fun generateLegacyNitrogenFuelSprites(
+        projectDir: Path,
+        assetsDir: Path,
+        changes: MutableList<Change>,
+        errors: MutableList<String>
+    ) {
+        try {
+            val specs = collectNitrogenFuelSpriteSpecs(projectDir)
+            if (specs.isEmpty()) return
+
+            specs.forEach { spec ->
+                val sourceTexture = assetsDir.resolve(spec.namespace).resolve(spec.menuTexturePath)
+                if (!sourceTexture.exists()) return@forEach
+
+                val iconTarget = assetsDir
+                    .resolve(spec.namespace)
+                    .resolve("textures/gui/sprites/modporter/nitrogen_fuel_${spec.spriteStem}_icon.png")
+                val backgroundTarget = assetsDir
+                    .resolve(spec.namespace)
+                    .resolve("textures/gui/sprites/modporter/nitrogen_fuel_${spec.spriteStem}_background.png")
+
+                cropNitrogenFuelSprite(
+                    sourceTexture,
+                    iconTarget,
+                    x = 176,
+                    y = 0,
+                    width = 14,
+                    height = 14,
+                    changes = changes,
+                    description = "Generate Nitrogen fuel icon sprite from legacy menu texture",
+                    ruleId = "res-nitrogen-fuel-icon-sprite"
+                )
+                cropNitrogenFuelSprite(
+                    sourceTexture,
+                    backgroundTarget,
+                    x = 56,
+                    y = 35,
+                    width = 14,
+                    height = 14,
+                    changes = changes,
+                    description = "Generate Nitrogen fuel background sprite from legacy menu texture",
+                    ruleId = "res-nitrogen-fuel-background-sprite"
+                )
+            }
+        } catch (e: Exception) {
+            errors.add("Failed to generate Nitrogen fuel sprites: ${e.message}")
+        }
+    }
+
+    private fun collectNitrogenFuelSpriteSpecs(projectDir: Path): Set<NitrogenFuelSpriteSpec> {
+        val sourceRoots = listOf(
+            projectDir.resolve("src/main/java"),
+            projectDir.resolve("src/generated/java")
+        ).filter { it.exists() }
+        if (sourceRoots.isEmpty()) return emptySet()
+
+        val javaSources = sourceRoots.flatMap { root ->
+            Files.walk(root).use { files ->
+                files
+                    .filter { Files.isRegularFile(it) && it.extension == "java" }
+                    .toList()
+            }
+        }
+        if (javaSources.isEmpty()) return emptySet()
+
+        val sourceTexts = javaSources.associateWith { it.readText() }
+        val stringConstants = collectJavaStringConstants(sourceTexts.values)
+        val specs = linkedSetOf<NitrogenFuelSpriteSpec>()
+        val resourceLocationExpression =
+            """(?:new\s+ResourceLocation|ResourceLocation\.fromNamespaceAndPath|net\.minecraft\.resources\.ResourceLocation\.fromNamespaceAndPath)"""
+        val texturePattern = Regex(
+            """\bResourceLocation\s+[A-Za-z_$][\w$]*\s*=\s*$resourceLocationExpression\s*\(\s*([^,\r\n]+?)\s*,\s*"textures/gui/menu/([^"]+?)\.png"\s*\)\s*;"""
+        )
+
+        sourceTexts.values.forEach { source ->
+            if (!source.contains("com.aetherteam.nitrogen.integration.") ||
+                !source.contains("categories.fuel.AbstractFuelCategory")) {
+                return@forEach
+            }
+            texturePattern.findAll(source).forEach { match ->
+                val namespace = resolveJavaStringExpression(match.groupValues[1].trim(), stringConstants)
+                    ?: return@forEach
+                val textureTail = match.groupValues[2]
+                val spriteStem = textureTail
+                    .substringAfterLast('/')
+                    .replace(Regex("""[^A-Za-z0-9_]+"""), "_")
+                    .trim('_')
+                    .ifBlank { "fuel" }
+                specs += NitrogenFuelSpriteSpec(
+                    namespace = namespace,
+                    menuTexturePath = "textures/gui/menu/$textureTail.png",
+                    spriteStem = spriteStem
+                )
+            }
+        }
+        return specs
+    }
+
+    private fun collectJavaStringConstants(sources: Iterable<String>): Map<String, String> {
+        val constants = linkedMapOf<String, String>()
+        val classPattern = Regex("""\b(?:class|interface|enum)\s+([A-Za-z_$][\w$]*)\b""")
+        val packagePattern = Regex("""(?m)^package\s+([\w.]+)\s*;""")
+        val constantPattern = Regex(
+            """\b(?:public|protected|private)?\s*static\s+final\s+String\s+([A-Za-z_$][\w$]*)\s*=\s*"([^"]+)""""
+        )
+        sources.forEach { source ->
+            val className = classPattern.find(source)?.groupValues?.get(1)
+            val packageName = packagePattern.find(source)?.groupValues?.get(1).orEmpty()
+            constantPattern.findAll(source).forEach { match ->
+                val name = match.groupValues[1]
+                val value = match.groupValues[2]
+                constants.putIfAbsent(name, value)
+                if (className != null) {
+                    constants["$className.$name"] = value
+                    if (packageName.isNotBlank()) {
+                        constants["$packageName.$className.$name"] = value
+                    }
+                }
+            }
+        }
+        return constants
+    }
+
+    private fun resolveJavaStringExpression(expression: String, constants: Map<String, String>): String? {
+        val trimmed = expression.trim()
+        if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+            return trimmed.trim('"')
+        }
+        return constants[trimmed] ?: constants[trimmed.substringAfterLast('.')]
+    }
+
+    private fun cropNitrogenFuelSprite(
+        sourceTexture: Path,
+        target: Path,
+        x: Int,
+        y: Int,
+        width: Int,
+        height: Int,
+        changes: MutableList<Change>,
+        description: String,
+        ruleId: String
+    ) {
+        val sourceImage = ImageIO.read(sourceTexture.toFile())
+            ?: error("Cannot read legacy Nitrogen fuel texture: $sourceTexture")
+        if (sourceImage.width < x + width || sourceImage.height < y + height) {
+            error("Legacy Nitrogen fuel texture is too small for required crop $x,$y ${width}x$height: $sourceTexture")
+        }
+
+        val targetImage = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+        val graphics = targetImage.createGraphics()
+        try {
+            graphics.drawImage(sourceImage, 0, 0, width, height, x, y, x + width, y + height, null)
+        } finally {
+            graphics.dispose()
+        }
+
+        val existed = target.exists()
+        target.parent.createDirectories()
+        ImageIO.write(targetImage, "png", target.toFile())
+        changes.add(Change(
+            file = target,
+            line = 0,
+            description = description,
+            before = if (existed) target.toString() else "(missing sprite)",
+            after = "${sourceTexture.fileName}:$x,$y ${width}x$height",
+            confidence = Confidence.HIGH,
+            ruleId = ruleId
+        ))
+    }
 
     private fun normalizeItemTextureMipDimensions(
         assetsDir: Path,

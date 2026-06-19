@@ -1248,6 +1248,54 @@ class ResourceMigrationTest {
     }
 
     @Test
+    fun `legacy Nitrogen fuel menu textures generate 1_21 sprites from source pixels`() {
+        val projectDir = tempDir.resolve("nitrogenfuel")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val textureDir = projectDir.resolve("src/main/resources/assets/example/textures/gui/menu")
+        srcDir.createDirectories()
+        textureDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleFuelCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleFuelCategory extends AbstractFuelCategory {
+                public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "textures/gui/menu/altar.png");
+            }
+        """.trimIndent())
+
+        val source = BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB)
+        source.setRGB(176, 0, 0xFF112233.toInt())
+        source.setRGB(189, 13, 0xFF445566.toInt())
+        source.setRGB(56, 35, 0xFF778899.toInt())
+        source.setRGB(69, 48, 0xFF99AABB.toInt())
+        ImageIO.write(source, "png", textureDir.resolve("altar.png").toFile())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val icon = ImageIO.read(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_icon.png").toFile())
+        val background = ImageIO.read(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_background.png").toFile())
+        assertTrue(result.changes.any { it.ruleId == "res-nitrogen-fuel-icon-sprite" })
+        assertTrue(result.changes.any { it.ruleId == "res-nitrogen-fuel-background-sprite" })
+        assertEquals(14, icon.width)
+        assertEquals(14, icon.height)
+        assertEquals(0xFF112233.toInt(), icon.getRGB(0, 0))
+        assertEquals(0xFF445566.toInt(), icon.getRGB(13, 13))
+        assertEquals(14, background.width)
+        assertEquals(14, background.height)
+        assertEquals(0xFF778899.toInt(), background.getRGB(0, 0))
+        assertEquals(0xFF99AABB.toInt(), background.getRGB(13, 13))
+    }
+
+    @Test
     fun `dry run does not rename folders`() {
         val projectDir = setupResourceProject()
         val db = MappingDatabase.loadDefault()

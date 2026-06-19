@@ -13895,6 +13895,7 @@ ${indent}}
         result = migrateNitrogenBiomeParameterRecipeSource(result)
         result = migrateNitrogenBiomeParameterRecipeSerializerSource(result)
         result = migrateReiBiomeTooltipOptionalSource(result)
+        result = migrateNitrogenFuelCategorySource(result)
         result = migrateBiomeParameterRecipeCategoryBiomeAccessSource(result)
         result = migrateIngredientNetworkCodecs(result, javaInheritanceIndex)
         result = migrateCacheableFunctionOptionalBoundaries(result)
@@ -27318,7 +27319,8 @@ $methodBody
     private fun migrateLegacySingleplayerWorldFlowSource(source: String): String {
         if (!source.contains("loadLevel(") &&
             !source.contains("clearLevel(") &&
-            !source.contains("getSummary()")) {
+            !source.contains("getSummary()") &&
+            !source.contains("getDataTag()")) {
             return source
         }
 
@@ -27390,6 +27392,11 @@ $methodBody
             if (receiver !in levelStorageAccessVariables) return@rewriteJavaCall null
             "$receiver.getSummary($receiver.getDataTag())"
         }
+        val wrappedDataTagReads = wrapVoidLevelStorageDataTagReads(result, levelStorageAccessVariables)
+        result = wrappedDataTagReads.first
+        if (wrappedDataTagReads.second) {
+            needsIOExceptionImport = true
+        }
 
         if (needsMinecraftImport) {
             result = addImportIfMissing(result, "net.minecraft.client.Minecraft")
@@ -27398,6 +27405,101 @@ $methodBody
             result = addImportIfMissing(result, "java.io.IOException")
         }
         return result
+    }
+
+    private fun wrapVoidLevelStorageDataTagReads(
+        source: String,
+        levelStorageAccessVariables: Set<String>
+    ): Pair<String, Boolean> {
+        if (!source.contains(".getDataTag()") || levelStorageAccessVariables.isEmpty()) return source to false
+
+        var result = source
+        var changed = false
+        for (method in javaMethodRanges(source).asReversed()) {
+            val methodText = result.substring(method.range.first, method.range.last + 1)
+            if (!Regex("""\bvoid\s+${Regex.escape(method.name)}\s*\(""").containsMatchIn(method.header)) continue
+            if (methodText.contains("catch (IOException") || method.header.contains("throws IOException")) continue
+            val wrapped = wrapVoidLevelStorageDataTagIfBlocks(methodText, levelStorageAccessVariables)
+            if (wrapped != methodText) {
+                result = result.substring(0, method.range.first) + wrapped + result.substring(method.range.last + 1)
+                changed = true
+            }
+        }
+        return result to changed
+    }
+
+    private fun wrapVoidLevelStorageDataTagIfBlocks(
+        methodText: String,
+        levelStorageAccessVariables: Set<String>
+    ): String {
+        var result = methodText
+        var changed = false
+        var searchStart = 0
+        while (searchStart < result.length) {
+            val ifMatch = Regex("""(?m)^([ \t]*)if\s*\(""").find(result, searchStart) ?: break
+            val indent = ifMatch.groupValues[1]
+            val openParen = result.indexOf('(', ifMatch.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(result, openParen) else -1
+            if (closeParen < 0) {
+                searchStart = ifMatch.range.last + 1
+                continue
+            }
+            val condition = result.substring(openParen + 1, closeParen)
+            val readsLevelStorageDataTag = levelStorageAccessVariables.any { receiver ->
+                condition.contains("$receiver.getDataTag()")
+            }
+            if (!readsLevelStorageDataTag) {
+                searchStart = closeParen + 1
+                continue
+            }
+            val openBrace = result.indexOf('{', closeParen)
+            if (openBrace < 0) {
+                searchStart = closeParen + 1
+                continue
+            }
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace < 0) {
+                searchStart = openBrace + 1
+                continue
+            }
+            if (isInsideTryBlock(result, ifMatch.range.first)) {
+                searchStart = closeBrace + 1
+                continue
+            }
+
+            val statement = result.substring(ifMatch.range.first, closeBrace + 1)
+            val wrappedStatement = buildString {
+                append(indent).append("try {\n")
+                append(indentJavaStatement(statement, indent))
+                append("\n").append(indent).append("} catch (IOException e) {\n")
+                append(indent).append("    return;\n")
+                append(indent).append("}")
+            }
+            result = result.substring(0, ifMatch.range.first) + wrappedStatement + result.substring(closeBrace + 1)
+            changed = true
+            searchStart = ifMatch.range.first + wrappedStatement.length
+        }
+        return if (changed) result else methodText
+    }
+
+    private fun indentJavaStatement(statement: String, baseIndent: String): String =
+        statement.lines().joinToString("\n") { line ->
+            if (line.startsWith(baseIndent)) {
+                baseIndent + "    " + line.substring(baseIndent.length)
+            } else if (line.isBlank()) {
+                line
+            } else {
+                baseIndent + "    " + line.trimStart()
+            }
+        }
+
+    private fun isInsideTryBlock(source: String, offset: Int): Boolean {
+        val lineStart = source.lastIndexOf('\n', offset).let { if (it < 0) 0 else it + 1 }
+        val beforeLine = source.substring(0, lineStart).lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .lastOrNull()
+        return beforeLine == "try {"
     }
 
     private fun isNullableLevelSummaryMethod(source: String, offset: Int): Boolean {
@@ -28459,6 +28561,7 @@ ${indent}}
             !source.contains("getRarity(") &&
             !source.contains("createArrow(") &&
             !source.contains("setKnockback(") &&
+            !source.contains("finishUsingItem(") &&
             !source.contains("getEquipmentSlotForItem(") &&
             !source.contains(".hurtAndBreak(") &&
             !source.contains("entityLiving")) {
@@ -28573,6 +28676,8 @@ ${indent}}
                 .replace(result, "")
         }
 
+        result = migrateLegacyProjectileWeaponFinishUsingItemSource(result)
+
         val equipmentSlotOwner = Regex("""\bPlayer\s+($id)\b""").find(result)?.groupValues?.get(1)
             ?: Regex("""\bLivingEntity\s+($id)\b""").find(result)?.groupValues?.get(1)
         if (equipmentSlotOwner != null) {
@@ -28613,6 +28718,349 @@ ${indent}}
             result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
         }
         return result
+    }
+
+    private data class NitrogenFuelTextureField(
+        val fieldName: String,
+        val namespaceExpression: String,
+        val menuPath: String,
+        val spriteStem: String
+    )
+
+    private fun migrateNitrogenFuelCategorySource(source: String): String {
+        if (!source.contains("com.aetherteam.nitrogen.integration.") ||
+            !source.contains("categories.fuel.AbstractFuelCategory")) {
+            return source
+        }
+
+        val textureFields = collectNitrogenFuelTextureFields(source)
+        if (textureFields.isEmpty()) return source
+
+        var result = source
+        val jeiFuelCategory =
+            result.contains("com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory")
+        if (jeiFuelCategory && result.contains("getTexture()")) {
+            result = Regex("""\bResourceLocation\s+getTexture\s*\(\s*\)""")
+                .replace(result, "ResourceLocation getBackgroundTexture()")
+            if (!result.contains("getIconTexture()")) {
+                val field = textureFields.firstOrNull { result.contains("return ${it.fieldName};") }
+                    ?: textureFields.first()
+                val iconField = "MODPORTER_NITROGEN_FUEL_ICON_TEXTURE"
+                if (!result.contains(iconField)) {
+                    result = insertNitrogenFuelResourceLocationField(
+                        result,
+                        field.fieldName,
+                        "public static final ResourceLocation $iconField = ResourceLocation.fromNamespaceAndPath(${field.namespaceExpression}, \"textures/gui/sprites/modporter/nitrogen_fuel_${field.spriteStem}_icon.png\");"
+                    )
+                }
+                result = insertBeforeLastClassBrace(result, """
+
+	@Override
+	public ResourceLocation getIconTexture() {
+		return $iconField;
+	}
+""".trimEnd())
+            }
+        }
+
+        val reiFuelCategory =
+            result.contains("com.aetherteam.nitrogen.integration.rei.categories.fuel.AbstractFuelCategory")
+        if (reiFuelCategory && result.contains("new AbstractFuelCategory(")) {
+            val fieldByName = textureFields.associateBy { it.fieldName }
+            collectNewAbstractFuelCategoryTextureFields(result, fieldByName).forEach { field ->
+                val constantStem = nitrogenFuelConstantStem(field.fieldName)
+                val textureConstant = "MODPORTER_NITROGEN_FUEL_${constantStem}_TEXTURE"
+                if (!result.contains(textureConstant)) {
+                    result = insertNitrogenFuelResourceLocationField(
+                        result,
+                        field.fieldName,
+                        "public static final ResourceLocation $textureConstant = ResourceLocation.fromNamespaceAndPath(${field.namespaceExpression}, \"modporter/nitrogen_fuel_${field.spriteStem}_icon\");\n" +
+                            "    public static final ResourceLocation MODPORTER_NITROGEN_FUEL_${constantStem}_BACKGROUND_TEXTURE = ResourceLocation.fromNamespaceAndPath(${field.namespaceExpression}, \"modporter/nitrogen_fuel_${field.spriteStem}_background\");"
+                    )
+                }
+            }
+            result = rewriteNewAbstractFuelCategoryConstructors(result, fieldByName) { field ->
+                val constantStem = nitrogenFuelConstantStem(field.fieldName)
+                "MODPORTER_NITROGEN_FUEL_${constantStem}_TEXTURE" to
+                    "MODPORTER_NITROGEN_FUEL_${constantStem}_BACKGROUND_TEXTURE"
+            }
+        }
+
+        return result
+    }
+
+    private fun collectNitrogenFuelTextureFields(source: String): List<NitrogenFuelTextureField> {
+        val id = """[A-Za-z_$][\w$]*"""
+        val resourceLocationExpression =
+            """(?:new\s+ResourceLocation|ResourceLocation\.fromNamespaceAndPath|net\.minecraft\.resources\.ResourceLocation\.fromNamespaceAndPath)"""
+        val fieldPattern = Regex(
+            """(?m)\bResourceLocation\s+($id)\s*=\s*$resourceLocationExpression\s*\(\s*([^,\r\n]+?)\s*,\s*"textures/gui/menu/([^"]+?)\.png"\s*\)\s*;"""
+        )
+        return fieldPattern.findAll(source).map { match ->
+            val fieldName = match.groupValues[1]
+            val namespaceExpression = match.groupValues[2].trim()
+            val menuPath = "textures/gui/menu/${match.groupValues[3]}.png"
+            val spriteStem = match.groupValues[3]
+                .substringAfterLast('/')
+                .replace(Regex("""[^A-Za-z0-9_]+"""), "_")
+                .trim('_')
+                .ifBlank { fieldName.lowercase() }
+            NitrogenFuelTextureField(fieldName, namespaceExpression, menuPath, spriteStem)
+        }.toList()
+    }
+
+    private fun insertNitrogenFuelResourceLocationField(source: String, afterField: String, declaration: String): String {
+        val fieldPattern = Regex("""(?m)^([ \t]*(?:public|protected|private)\s+(?:static\s+)?(?:final\s+)?)ResourceLocation\s+${Regex.escape(afterField)}\s*=[^\r\n;]+;""")
+        val match = fieldPattern.find(source) ?: return source
+        val lineEnd = source.indexOf('\n', match.range.last).let { if (it < 0) match.range.last + 1 else it + 1 }
+        val indent = source.substring(match.range.first, match.range.first + match.groupValues[1].length)
+            .takeWhile { it == ' ' || it == '\t' }
+        val indentedDeclaration = declaration.lines().joinToString("\n") { line ->
+            if (line.isBlank()) line else indent + line.trimStart()
+        }
+        return source.substring(0, lineEnd) + indentedDeclaration + "\n" + source.substring(lineEnd)
+    }
+
+    private fun nitrogenFuelConstantStem(fieldName: String): String =
+        fieldName.removeSuffix("_TEXTURE").ifBlank { fieldName }
+
+    private fun rewriteNewAbstractFuelCategoryConstructors(
+        source: String,
+        fields: Map<String, NitrogenFuelTextureField>,
+        replacementFields: (NitrogenFuelTextureField) -> Pair<String, String>
+    ): String {
+        var result = source
+        var cursor = 0
+        val token = "new AbstractFuelCategory("
+        while (true) {
+            val tokenIndex = result.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + "new AbstractFuelCategory".length
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            if (args.size != 2) {
+                cursor = closeParen + 1
+                continue
+            }
+            val field = fields[args[1].trim()]
+            if (field == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            val (textureField, backgroundField) = replacementFields(field)
+            val replacementArgs = "${args[0].trim()}, $textureField, $backgroundField"
+            result = result.substring(0, openParen + 1) + replacementArgs + result.substring(closeParen)
+            cursor = openParen + 1 + replacementArgs.length
+        }
+        return result
+    }
+
+    private fun collectNewAbstractFuelCategoryTextureFields(
+        source: String,
+        fields: Map<String, NitrogenFuelTextureField>
+    ): List<NitrogenFuelTextureField> {
+        val found = linkedSetOf<NitrogenFuelTextureField>()
+        var cursor = 0
+        val token = "new AbstractFuelCategory("
+        while (true) {
+            val tokenIndex = source.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + "new AbstractFuelCategory".length
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (args.size == 2) {
+                fields[args[1].trim()]?.let { found += it }
+            }
+            cursor = closeParen + 1
+        }
+        return found.toList()
+    }
+
+    private data class LegacyProjectileWeaponShape(
+        val weaponStack: String,
+        val level: String,
+        val user: String,
+        val player: String,
+        val ammoVariable: String,
+        val projectileItemType: String,
+        val projectileItemVariable: String,
+        val projectileType: String,
+        val projectileVariable: String,
+        val createMethod: String,
+        val fallbackItemExpression: String,
+        val customProjectileMethod: String?,
+        val velocity: String,
+        val inaccuracy: String,
+        val playSoundStatement: String
+    )
+
+    private fun migrateLegacyProjectileWeaponFinishUsingItemSource(source: String): String {
+        if (!source.contains("extends ProjectileWeaponItem") ||
+            !source.contains("finishUsingItem(") ||
+            !source.contains(".getProjectile(") ||
+            !source.contains(".shootFromRotation(") ||
+            !source.contains(".addFreshEntity(")) {
+            return source
+        }
+        val methodText = javaDeclaredMethodText(source, "finishUsingItem") ?: return source
+        val shape = parseLegacyProjectileWeaponShape(methodText) ?: return source
+        var result = source.replace(methodText, modernProjectileWeaponFinishUsingItem(shape))
+
+        if (!result.contains("shootProjectile(LivingEntity shooter, Projectile projectile")) {
+            result = insertBeforeLastClassBrace(result, modernProjectileWeaponShootProjectileMethod())
+        }
+        if (!result.contains("createProjectile(Level level, LivingEntity shooter, ItemStack weapon, ItemStack ammo, boolean isCrit)")) {
+            result = insertBeforeLastClassBrace(result, modernProjectileWeaponCreateProjectileMethod(shape))
+        }
+        if (shape.customProjectileMethod != null) {
+            result = Regex(
+                """public\s+${Regex.escape(shape.projectileType)}\s+${Regex.escape(shape.customProjectileMethod)}\s*\(\s*${Regex.escape(shape.projectileType)}\s+([A-Za-z_$][\w$]*)\s*\)"""
+            ).replace(result) { match ->
+                "public ${shape.projectileType} ${shape.customProjectileMethod}(${shape.projectileType} ${match.groupValues[1]}, ItemStack projectileStack, ItemStack weaponStack)"
+            }
+        }
+
+        result = addImportIfMissing(result, "net.minecraft.server.level.ServerLevel")
+        result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
+        result = addImportIfMissing(result, "net.minecraft.world.entity.projectile.AbstractArrow")
+        result = addImportIfMissing(result, "net.minecraft.world.entity.projectile.Projectile")
+        result = addImportIfMissing(result, "net.minecraft.world.item.enchantment.EnchantmentHelper")
+        result = addImportIfMissing(result, "org.jetbrains.annotations.Nullable")
+        result = addImportIfMissing(result, "java.util.List")
+        return result
+    }
+
+    private fun parseLegacyProjectileWeaponShape(methodText: String): LegacyProjectileWeaponShape? {
+        val id = """[A-Za-z_$][\w$]*"""
+        val signature = Regex(
+            """finishUsingItem\s*\(\s*ItemStack\s+($id)\s*,\s*Level\s+($id)\s*,\s*LivingEntity\s+($id)\s*\)"""
+        ).find(methodText) ?: return null
+        val weaponStack = signature.groupValues[1]
+        val level = signature.groupValues[2]
+        val user = signature.groupValues[3]
+        val player = Regex("""\b${Regex.escape(user)}\s+instanceof\s+Player\s+($id)\b""")
+            .find(methodText)
+            ?.groupValues
+            ?.get(1)
+            ?: return null
+        val ammoVariable = Regex("""\bItemStack\s+($id)\s*=\s*${Regex.escape(player)}\.getProjectile\(\s*${Regex.escape(weaponStack)}\s*\)""")
+            .find(methodText)
+            ?.groupValues
+            ?.get(1)
+            ?: return null
+        val projectileItem = Regex(
+            """\b($id)\s+($id)\s*=\s*\(\s*\1\s*\)\s*\(\s*${Regex.escape(ammoVariable)}\.getItem\(\)\s+instanceof\s+\1\s+$id\s*\?\s*$id\s*:\s*(.+?)\s*\)\s*;"""
+        ).find(methodText) ?: return null
+        val projectileItemType = projectileItem.groupValues[1]
+        val projectileItemVariable = projectileItem.groupValues[2]
+        val fallbackItemExpression = projectileItem.groupValues[3].trim()
+        val projectileCreation = Regex(
+            """\b($id)\s+($id)\s*=\s*${Regex.escape(projectileItemVariable)}\.(create$id)\s*\(\s*${Regex.escape(level)}\s*,\s*${Regex.escape(player)}\s*\)\s*;"""
+        ).find(methodText) ?: return null
+        val projectileType = projectileCreation.groupValues[1]
+        val projectileVariable = projectileCreation.groupValues[2]
+        val createMethod = projectileCreation.groupValues[3]
+        val shoot = Regex(
+            """\b${Regex.escape(projectileVariable)}\.shootFromRotation\(\s*${Regex.escape(player)}\s*,\s*${Regex.escape(player)}\.getXRot\(\)\s*,\s*${Regex.escape(player)}\.getYRot\(\)\s*,\s*0\.0F\s*,\s*([^,]+?)\s*,\s*([^)]+?)\s*\)\s*;"""
+        ).find(methodText) ?: return null
+        val customMethod = Regex(
+            """${Regex.escape(projectileVariable)}\s*=\s*this\.($id)\s*\(\s*${Regex.escape(projectileVariable)}\s*\)\s*;"""
+        ).find(methodText)?.groupValues?.get(1)
+        val playSoundStatement = Regex(
+            """(?m)^[ \t]*${Regex.escape(level)}\.playSound\([^;]+;\s*$"""
+        ).find(methodText)?.value?.trim() ?: return null
+        if (!methodText.contains("$level.addFreshEntity($projectileVariable);")) return null
+        return LegacyProjectileWeaponShape(
+            weaponStack = weaponStack,
+            level = level,
+            user = user,
+            player = player,
+            ammoVariable = ammoVariable,
+            projectileItemType = projectileItemType,
+            projectileItemVariable = projectileItemVariable,
+            projectileType = projectileType,
+            projectileVariable = projectileVariable,
+            createMethod = createMethod,
+            fallbackItemExpression = fallbackItemExpression,
+            customProjectileMethod = customMethod,
+            velocity = shoot.groupValues[1].trim(),
+            inaccuracy = shoot.groupValues[2].trim(),
+            playSoundStatement = playSoundStatement
+        )
+    }
+
+    private fun modernProjectileWeaponFinishUsingItem(shape: LegacyProjectileWeaponShape): String = """
+    @Override
+    public ItemStack finishUsingItem(ItemStack ${shape.weaponStack}, Level ${shape.level}, LivingEntity ${shape.user}) {
+        if (${shape.user} instanceof Player ${shape.player}) {
+            ItemStack itemStack = ${shape.player}.getProjectile(${shape.weaponStack});
+            if (!itemStack.isEmpty()) {
+                net.neoforged.neoforge.event.EventHooks.onArrowLoose(${shape.weaponStack}, ${shape.level}, ${shape.player}, 0, !itemStack.isEmpty());
+
+                List<ItemStack> list = draw(${shape.weaponStack}, itemStack, ${shape.player});
+                if (${shape.level} instanceof ServerLevel serverLevel && !list.isEmpty()) {
+                    this.shoot(serverLevel, ${shape.player}, ${shape.player}.getUsedItemHand(), ${shape.weaponStack}, list, ${shape.velocity}, ${shape.inaccuracy}, false, null);
+                }
+
+                ${shape.playSoundStatement}
+                ${shape.player}.awardStat(Stats.ITEM_USED.get(this));
+            }
+        }
+        return ${shape.weaponStack};
+    }
+""".trimIndent()
+
+    private fun modernProjectileWeaponShootProjectileMethod(): String = """
+
+	@Override
+	protected void shootProjectile(LivingEntity shooter, Projectile projectile, int index, float velocity, float inaccuracy, float angle, @Nullable LivingEntity target) {
+		projectile.shootFromRotation(shooter, shooter.getXRot(), shooter.getYRot(), 0.0F, velocity, inaccuracy);
+	}
+""".trimEnd()
+
+    private fun modernProjectileWeaponCreateProjectileMethod(shape: LegacyProjectileWeaponShape): String {
+        val customReturn = if (shape.customProjectileMethod != null) {
+            "return this.${shape.customProjectileMethod}(${shape.projectileVariable}, ammo, weapon);"
+        } else {
+            "return ${shape.projectileVariable};"
+        }
+        return """
+
+	@Override
+	protected Projectile createProjectile(Level level, LivingEntity shooter, ItemStack weapon, ItemStack ammo, boolean isCrit) {
+		${shape.projectileItemType} ${shape.projectileItemVariable} = ammo.getItem() instanceof ${shape.projectileItemType} projectileItem ? projectileItem : (${shape.projectileItemType}) ${shape.fallbackItemExpression};
+		${shape.projectileType} ${shape.projectileVariable} = ${shape.projectileItemVariable}.${shape.createMethod}(level, shooter);
+		if (${shape.projectileVariable} != null) {
+			${shape.projectileVariable}.setNoGravity(true);
+			if (${shape.projectileVariable} instanceof AbstractArrow abstractArrow) {
+				ItemStack projectileStack = ammo.copyWithCount(1);
+				abstractArrow.getSlot(0).set(projectileStack);
+				abstractArrow.setCustomName(projectileStack.get(DataComponents.CUSTOM_NAME));
+				if (projectileStack.remove(DataComponents.INTANGIBLE_PROJECTILE) != null) {
+					abstractArrow.pickup = AbstractArrow.Pickup.CREATIVE_ONLY;
+				}
+				if (level instanceof ServerLevel serverLevel && !weapon.isEmpty()) {
+					abstractArrow.firedFromWeapon = weapon.copy();
+					int piercing = EnchantmentHelper.getPiercingCount(serverLevel, weapon, projectileStack);
+					if (piercing > 0) {
+						abstractArrow.setPierceLevel((byte) piercing);
+					}
+					EnchantmentHelper.onProjectileSpawned(serverLevel, weapon, abstractArrow, ignored -> abstractArrow.firedFromWeapon = null);
+				}
+			}
+			$customReturn
+		}
+		return super.createProjectile(level, shooter, weapon, ammo, isCrit);
+	}
+""".trimEnd()
     }
 
     private fun migrateLegacyTooltipContextAndEntityDataSource(source: String): String {

@@ -1702,6 +1702,40 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `adds fired weapon arrow access transformer when migrated projectile source needs it`() {
+        val projectDir = tempDir.resolve("projectile-fired-weapon-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.neoforged.moddev' version '2.0.107'
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleProjectileHooks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.projectile.AbstractArrow;
+
+            public class ExampleProjectileHooks {
+                public static void rememberWeapon(AbstractArrow arrow) {
+                    arrow.firedFromWeapon = null;
+                    arrow.setPierceLevel((byte) 1);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        val build = projectDir.resolve("build.gradle").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.world.entity.projectile.AbstractArrow firedFromWeapon"), at)
+        assertTrue(at.contains("public net.minecraft.world.entity.projectile.AbstractArrow setPierceLevel(B)V"), at)
+        assertTrue(build.contains("accessTransformers"), build)
+    }
+
+    @Test
     fun `removes TitleScreen accessors for fields and inner classes removed in 121`() {
         val projectDir = tempDir.resolve("removed-title-screen-accessors")
         val srcDir = projectDir.resolve("src/main/java/com/example")

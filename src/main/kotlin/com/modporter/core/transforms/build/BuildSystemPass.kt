@@ -3083,6 +3083,12 @@ config="$configName"
                 if (source.contains(".pendingBlockEntities")) {
                     entries.add("public net.minecraft.world.level.chunk.ChunkAccess pendingBlockEntities")
                 }
+                if (source.contains(".firedFromWeapon =")) {
+                    entries.add("public net.minecraft.world.entity.projectile.AbstractArrow firedFromWeapon")
+                }
+                if (source.contains(".setPierceLevel(")) {
+                    entries.add("public net.minecraft.world.entity.projectile.AbstractArrow setPierceLevel(B)V")
+                }
                 if (source.contains("CreativeModeInventoryScreen.selectedTab")) {
                     entries.add("public net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen selectedTab")
                 }
