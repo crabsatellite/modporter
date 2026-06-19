@@ -11776,17 +11776,40 @@ ${entries.joinToString(",\n")}
         var needsEntityTickImport = false
         var needsPlayerTickImport = false
 
-        val playerTickHandlerPattern = Regex(
-            """(public\s+static\s+void\s+\w*PlayerTick\w*\s*\(\s*)LivingEvent\.LivingTickEvent(\s+\w+\s*\))"""
+        val livingTickHandlerPattern = Regex(
+            """\b((?:(?:public|protected|private|static|final|synchronized)\s+)*void\s+([A-Za-z_$][\w$]*)\s*\(\s*)LivingEvent\.LivingTickEvent(\s+([A-Za-z_$][\w$]*)\s*\))"""
         )
-        result = playerTickHandlerPattern.replace(result) { match ->
-            needsPlayerTickImport = true
-            "${match.groupValues[1]}PlayerTickEvent.Post${match.groupValues[2]}"
-        }
-
-        if (result.contains("LivingEvent.LivingTickEvent")) {
-            result = result.replace("LivingEvent.LivingTickEvent", "EntityTickEvent.Post")
-            needsEntityTickImport = true
+        var cursor = 0
+        while (true) {
+            val match = livingTickHandlerPattern.find(result, cursor) ?: break
+            val openBrace = result.indexOf('{', match.range.last + 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val methodText = result.substring(match.range.first, closeBrace + 1)
+            val methodName = match.groupValues[2]
+            val eventName = match.groupValues[4]
+            val usesCancellation = Regex("""\b${Regex.escape(eventName)}\.(?:isCanceled\(\)|setCanceled\()""")
+                .containsMatchIn(methodText)
+            val replacementType = when {
+                usesCancellation -> {
+                    needsEntityTickImport = true
+                    "EntityTickEvent.Pre"
+                }
+                methodName.contains("PlayerTick") -> {
+                    needsPlayerTickImport = true
+                    "PlayerTickEvent.Post"
+                }
+                else -> {
+                    needsEntityTickImport = true
+                    "EntityTickEvent.Post"
+                }
+            }
+            val replacement = "${match.groupValues[1]}$replacementType${match.groupValues[3]}"
+            result = result.substring(0, match.range.first) + replacement + result.substring(match.range.last + 1)
+            cursor = match.range.first + replacement.length
         }
 
         if (needsPlayerTickImport) {
@@ -11800,7 +11823,7 @@ ${entries.joinToString(",\n")}
             result = removeImport(result, "net.minecraftforge.event.entity.living.LivingEvent")
         }
 
-        if (result.contains("EntityTickEvent.Post")) {
+        if (result.contains("EntityTickEvent.Post") || result.contains("EntityTickEvent.Pre")) {
             result = Regex(
                 """(?m)^([ \t]*)if\s*\(\s*(\w+)\.getEntity\(\)\.level\(\)\.isClientSide\(\)\s*\)\s*return;\s*\r?\n[ \t]*LivingEntity\s+(\w+)\s*=\s*\2\.getEntity\(\)\s*;"""
             ).replace(result) { match ->
@@ -11822,6 +11845,7 @@ ${entries.joinToString(",\n")}
         }
 
         result = removeLegacyTickPhaseChecks(result)
+        result = migrateSplitLevelTickSideChecks(result)
         result = removeInvalidTickEventImports(result)
 
         val playerTickEventName = Regex("""PlayerTickEvent\.Post\s+([A-Za-z_$][\w$]*)""")
@@ -11834,6 +11858,41 @@ ${entries.joinToString(",\n")}
         }
 
         return result
+    }
+
+    private fun migrateSplitLevelTickSideChecks(source: String): String {
+        if (!source.contains("LevelTickEvent") || !source.contains(".side")) return source
+        var result = source
+        val levelTickEventNames = Regex("""\bLevelTickEvent\.(?:Pre|Post)\s+([A-Za-z_$][\w$]*)""")
+            .findAll(result)
+            .map { it.groupValues[1] }
+            .toSet()
+        levelTickEventNames.forEach { eventName ->
+            val event = Regex.escape(eventName)
+            result = Regex("""\b$event\.side\s*==\s*LogicalSide\.SERVER\b""")
+                .replace(result, "!$eventName.getLevel().isClientSide()")
+            result = Regex("""\bLogicalSide\.SERVER\s*==\s*$event\.side\b""")
+                .replace(result, "!$eventName.getLevel().isClientSide()")
+            result = Regex("""\b$event\.side\s*!=\s*LogicalSide\.SERVER\b""")
+                .replace(result, "$eventName.getLevel().isClientSide()")
+            result = Regex("""\bLogicalSide\.SERVER\s*!=\s*$event\.side\b""")
+                .replace(result, "$eventName.getLevel().isClientSide()")
+            result = Regex("""\b$event\.side\s*==\s*LogicalSide\.CLIENT\b""")
+                .replace(result, "$eventName.getLevel().isClientSide()")
+            result = Regex("""\bLogicalSide\.CLIENT\s*==\s*$event\.side\b""")
+                .replace(result, "$eventName.getLevel().isClientSide()")
+            result = Regex("""\b$event\.side\s*!=\s*LogicalSide\.CLIENT\b""")
+                .replace(result, "!$eventName.getLevel().isClientSide()")
+            result = Regex("""\bLogicalSide\.CLIENT\s*!=\s*$event\.side\b""")
+                .replace(result, "!$eventName.getLevel().isClientSide()")
+        }
+        return removeUnusedSimpleImports(
+            result,
+            listOf(
+                "net.neoforged.fml.LogicalSide",
+                "net.minecraftforge.fml.LogicalSide"
+            )
+        )
     }
 
     private fun removeLegacyTickPhaseChecks(source: String): String {
@@ -19447,6 +19506,7 @@ ${indent}}"""
     private fun migrateLivingDamageEventBoundarySource(source: String): String {
         if (!source.contains("LivingDamageEvent")) return source
         var result = source
+        var needsIncomingDamageImport = false
         val methodPattern = Regex(
             """(?m)(?:^|\r?\n)[ \t]*(?:(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*)(?:(?:public|protected|private|static|final|synchronized)\s+)+[A-Za-z_$][\w$<>\[\].?,\s]*\s+[A-Za-z_$][\w$]*\s*\(([^()]*)\)\s*\{"""
         )
@@ -19463,20 +19523,78 @@ ${indent}}"""
             if (eventVars.isEmpty()) return@forEach
             var replacement = methodText
             eventVars.forEach { eventVar ->
+                val usesCancellationMutation = Regex("""\b${Regex.escape(eventVar)}\.setCanceled\(""")
+                    .containsMatchIn(replacement)
+                val usesCancellationState = Regex("""\b${Regex.escape(eventVar)}\.isCanceled\(\)""")
+                    .containsMatchIn(replacement)
                 val usesMutableDamage = Regex("""\b${Regex.escape(eventVar)}\.setAmount\(""").containsMatchIn(replacement)
-                val nestedType = if (usesMutableDamage) "Pre" else "Post"
-                replacement = Regex("""\bLivingDamageEvent\s+${Regex.escape(eventVar)}\b""")
-                    .replace(replacement, "LivingDamageEvent.$nestedType $eventVar")
-                replacement = Regex("""\b${Regex.escape(eventVar)}\.getAmount\(\)""")
-                    .replace(replacement, "$eventVar.getNewDamage()")
-                replacement = Regex("""\b${Regex.escape(eventVar)}\.setAmount\(""")
-                    .replace(replacement, "$eventVar.setNewDamage(")
+                if (usesCancellationMutation) {
+                    replacement = Regex("""\bLivingDamageEvent\s+${Regex.escape(eventVar)}\b""")
+                        .replace(replacement, "LivingIncomingDamageEvent $eventVar")
+                    needsIncomingDamageImport = true
+                } else {
+                    val nestedType = if (usesMutableDamage) "Pre" else "Post"
+                    replacement = Regex("""\bLivingDamageEvent\s+${Regex.escape(eventVar)}\b""")
+                        .replace(replacement, "LivingDamageEvent.$nestedType $eventVar")
+                    replacement = Regex("""\b${Regex.escape(eventVar)}\.getAmount\(\)""")
+                        .replace(replacement, "$eventVar.getNewDamage()")
+                    replacement = Regex("""\b${Regex.escape(eventVar)}\.setAmount\(""")
+                        .replace(replacement, "$eventVar.setNewDamage(")
+                    if (nestedType == "Post" && usesCancellationState) {
+                        replacement = unwrapSimpleNotCanceledGuards(replacement, eventVar)
+                        replacement = removeNotCanceledConjuncts(replacement, eventVar)
+                    }
+                }
             }
             if (replacement != methodText) {
                 result = result.substring(0, match.range.first) + replacement + result.substring(closeBrace + 1)
             }
         }
+        if (needsIncomingDamageImport) {
+            result = addImportIfMissing(result, "net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent")
+        }
+        result = removeUnusedSimpleImport(
+            result,
+            "net.neoforged.neoforge.event.entity.living.LivingDamageEvent",
+            "LivingDamageEvent"
+        )
         return result
+    }
+
+    private fun unwrapSimpleNotCanceledGuards(source: String, eventVar: String): String {
+        var result = source
+        val pattern = Regex("""if\s*\(\s*!\s*${Regex.escape(eventVar)}\.isCanceled\(\)\s*\)\s*\{""")
+        var cursor = 0
+        while (true) {
+            val match = pattern.find(result, cursor) ?: break
+            val openBrace = result.indexOf('{', match.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val lineStart = result.lastIndexOf('\n', match.range.first).let { if (it < 0) 0 else it + 1 }
+            val guardIndent = lineIndentAt(result, match.range.first)
+            val childIndent = guardIndent + "    "
+            val body = result.substring(openBrace + 1, closeBrace)
+                .replace(Regex("""(?m)^${Regex.escape(childIndent)}"""), guardIndent)
+                .trim('\r', '\n')
+            result = result.substring(0, lineStart) + body + result.substring(closeBrace + 1)
+            cursor = lineStart + body.length
+        }
+        return result
+    }
+
+    private fun removeNotCanceledConjuncts(source: String, eventVar: String): String {
+        val event = Regex.escape(eventVar)
+        return source
+            .replace(Regex("""!\s*$event\.isCanceled\(\)\s*&&\s*"""), "")
+            .replace(Regex("""\s*&&\s*!\s*$event\.isCanceled\(\)"""), "")
+    }
+
+    private fun lineIndentAt(source: String, offset: Int): String {
+        val lineStart = source.lastIndexOf('\n', offset).let { if (it < 0) 0 else it + 1 }
+        return source.substring(lineStart, offset).takeWhile { it == ' ' || it == '\t' }
     }
 
     private fun firstHurtDamageSourceArgument(methodText: String): String? {
@@ -23060,14 +23178,21 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
     }
 
     private fun migrateLegacyCancellableEventHelperParameters(source: String): String {
-        if (!source.contains("PlayerInteractEvent") || (!source.contains(".isCanceled()") && !source.contains(".setCanceled("))) {
+        if (!source.contains(".isCanceled()") && !source.contains(".setCanceled(")) {
             return source
         }
         var result = source
         var cursor = 0
         var changed = false
+        val supportedBroadEventTypes = setOf(
+            "Event",
+            "EntityEvent",
+            "LivingEvent",
+            "PlayerEvent",
+            "PlayerInteractEvent"
+        )
         val signaturePattern = Regex(
-            """\b(private|public|protected)\s+(static\s+)?void\s+([A-Za-z_$][\w$]*)\(\s*PlayerInteractEvent\s+([A-Za-z_$][\w$]*)\s*,"""
+            """\b(private|public|protected)\s+(static\s+)?void\s+([A-Za-z_$][\w$]*)\(\s*((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s+([A-Za-z_$][\w$]*)\s*([,)])"""
         )
         while (true) {
             val match = signaturePattern.find(result, cursor) ?: break
@@ -23077,13 +23202,23 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
                 cursor = match.range.last + 1
                 continue
             }
-            val parameter = match.groupValues[4]
+            val annotationStart = annotationStartBefore(result, match.range.first)
+            if (result.substring(annotationStart, match.range.first).contains("@SubscribeEvent")) {
+                cursor = closeBrace + 1
+                continue
+            }
+            val parameterType = match.groupValues[4]
+            val simpleParameterType = parameterType.substringAfterLast('.')
+            if (simpleParameterType == "ICancellableEvent" || simpleParameterType !in supportedBroadEventTypes) {
+                cursor = closeBrace + 1
+                continue
+            }
+            val parameter = match.groupValues[5]
             val methodText = result.substring(match.range.first, closeBrace + 1)
-            if (methodText.contains("$parameter.isCanceled()") &&
-                methodText.contains("$parameter.setCanceled(") &&
+            if (Regex("""\b${Regex.escape(parameter)}\.(?:isCanceled\(\)|setCanceled\()""").containsMatchIn(methodText) &&
                 !Regex("""\b${Regex.escape(parameter)}\.(?!isCanceled\(\)|setCanceled\()""").containsMatchIn(methodText)
             ) {
-                val replacement = "${match.groupValues[1]} ${match.groupValues[2]}void ${match.groupValues[3]}(ICancellableEvent $parameter,"
+                val replacement = "${match.groupValues[1]} ${match.groupValues[2]}void ${match.groupValues[3]}(ICancellableEvent $parameter${match.groupValues[6]}"
                 result = result.substring(0, match.range.first) + replacement + result.substring(match.range.last + 1)
                 cursor = match.range.first + replacement.length
                 changed = true

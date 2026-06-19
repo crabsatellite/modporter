@@ -4817,8 +4817,10 @@ class StructuralRefactorExtraTest {
             import net.minecraft.server.level.ServerPlayer;
             import net.minecraft.world.entity.LivingEntity;
             import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.LogicalSide;
             import net.neoforged.neoforge.client.event.ClientTickEvent;
             import net.neoforged.neoforge.event.entity.living.LivingEvent;
+            import net.neoforged.neoforge.event.tick.LevelTickEvent;
 
             public class TickHandlers {
                 private static int pending;
@@ -4828,6 +4830,14 @@ class StructuralRefactorExtraTest {
                     if (event.getEntity().level().isClientSide()) return;
                     LivingEntity entity = event.getEntity();
                     use(entity);
+                }
+
+                @SubscribeEvent
+                public static void onCancelableLivingTick(LivingEvent.LivingTickEvent event) {
+                    LivingEntity entity = event.getEntity();
+                    if (!event.isCanceled()) {
+                        use(entity);
+                    }
                 }
 
                 @SubscribeEvent
@@ -4854,6 +4864,13 @@ class StructuralRefactorExtraTest {
                     }
                 }
 
+                @SubscribeEvent
+                public static void onLevelTick(LevelTickEvent.Post event) {
+                    if (event.side == LogicalSide.SERVER) {
+                        ping();
+                    }
+                }
+
                 private static void use(LivingEntity entity) {}
                 private static void ping() {}
             }
@@ -4868,14 +4885,19 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("import net.neoforged.neoforge.event.tick.PlayerTickEvent;"))
         assertTrue(migrated.contains("public static void onLivingTick(EntityTickEvent.Post event)"))
         assertTrue(migrated.contains("if (!(event.getEntity() instanceof LivingEntity entity)) return;"))
+        assertTrue(migrated.contains("public static void onCancelableLivingTick(EntityTickEvent.Pre event)"))
+        assertTrue(migrated.contains("if (!event.isCanceled())"))
         assertTrue(migrated.contains("public static void onPlayerTick(PlayerTickEvent.Post event)"))
         assertTrue(migrated.contains("if (pending <= 0) {"))
         assertTrue(migrated.contains("public static void onNamedClientTick(ClientTickEvent.Post tick)"))
         assertTrue(migrated.contains("if (pending > 0) {"))
+        assertTrue(migrated.contains("if (!event.getLevel().isClientSide()) {"))
         assertTrue(!migrated.contains("LivingEvent.LivingTickEvent"))
         assertTrue(!migrated.contains("TickEvent.Phase"))
         assertTrue(!migrated.contains("event.phase"))
         assertTrue(!migrated.contains("tick.phase"))
+        assertTrue(!migrated.contains("event.side"))
+        assertTrue(!migrated.contains("LogicalSide"))
     }
 
     @Test
@@ -5629,12 +5651,20 @@ class StructuralRefactorExtraTest {
                 }
 
                 public static void onPlayerHurt(LivingDamageEvent event) {
-                    Object entity = event.getEntity();
+                    if (!event.isCanceled()) {
+                        Object entity = event.getEntity();
+                    }
                 }
 
                 public static void clampPlayerHurt(LivingDamageEvent event) {
                     float amount = event.getAmount();
                     event.setAmount(Math.min(amount, 10.0F));
+                }
+
+                public static void cancelPlayerHurt(LivingDamageEvent event) {
+                    if (event.getAmount() > 20.0F) {
+                        event.setCanceled(true);
+                    }
                 }
 
                 static class TrophyType {
@@ -5668,8 +5698,12 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("String modelName = trophyType.getModelName();"))
         assertTrue(migrated.contains("onPlayerHurt(LivingDamageEvent.Post event)"))
         assertTrue(migrated.contains("clampPlayerHurt(LivingDamageEvent.Pre event)"))
+        assertTrue(migrated.contains("cancelPlayerHurt(LivingIncomingDamageEvent event)"))
+        assertTrue(migrated.contains("Object entity = event.getEntity();"))
         assertTrue(migrated.contains("float amount = event.getNewDamage();"))
         assertTrue(migrated.contains("event.setNewDamage(Math.min(amount, 10.0F));"))
+        assertTrue(migrated.contains("import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;"))
+        assertFalse(migrated.contains("if (!event.isCanceled())"))
     }
 
     @Test
@@ -15182,6 +15216,8 @@ class StructuralRefactorExtraTest {
 
             import net.neoforged.bus.api.SubscribeEvent;
             import net.neoforged.bus.api.Event;
+            import net.neoforged.neoforge.event.entity.player.AttackEntityEvent;
+            import net.neoforged.neoforge.event.entity.player.PlayerEvent;
             import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
 
             public class EventSurface {
@@ -15196,7 +15232,17 @@ class StructuralRefactorExtraTest {
                     event.setUseBlock(Event.Result.DENY);
                 }
 
+                public void attack(AttackEntityEvent event) {
+                    checkAttack(event, new Object());
+                }
+
                 private static void checkTooFar(PlayerInteractEvent event, Object target) {
+                    if (!event.isCanceled()) {
+                        event.setCanceled(true);
+                    }
+                }
+
+                private static void checkAttack(PlayerEvent event, Object target) {
                     if (!event.isCanceled()) {
                         event.setCanceled(true);
                     }
@@ -15271,8 +15317,10 @@ class StructuralRefactorExtraTest {
         assertTrue(!copiedTick.contains("xPower"))
         assertTrue(event.contains("event.setUseBlock(TriState.FALSE);"))
         assertTrue(event.contains("private static void checkTooFar(ICancellableEvent event, Object target)"))
+        assertTrue(event.contains("private static void checkAttack(ICancellableEvent event, Object target)"))
         assertTrue(event.contains("public void route(PlayerInteractEvent.RightClickBlock rightClickBlock)"))
         assertTrue(event.contains("checkTooFar(rightClickBlock, new Object())"))
+        assertTrue(event.contains("checkAttack(event, new Object())"))
         assertTrue(!event.contains("void route(PlayerInteractEvent event)"), event)
         assertTrue(spawnEgg.contains("spawnEggItem.getType(stack) == expected"))
     }
