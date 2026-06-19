@@ -1292,6 +1292,101 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates bucket item supplier constructor super calls without capability migration`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/items")
+        srcDir.createDirectories()
+
+        srcDir.resolve("LegacyBucketItem.java").writeText("""
+            package com.example.items;
+
+            import java.util.function.Supplier;
+            import net.minecraft.world.item.BucketItem;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.level.material.Fluid;
+
+            public class LegacyBucketItem extends BucketItem {
+                public LegacyBucketItem(Supplier<? extends Fluid> supplier, Item.Properties properties) {
+                    super(supplier, properties);
+                }
+            }
+        """.trimIndent())
+
+        srcDir.resolve("LegacyMobBucketItem.java").writeText("""
+            package com.example.items;
+
+            import java.util.function.Supplier;
+            import net.minecraft.sounds.SoundEvent;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.MobBucketItem;
+            import net.minecraft.world.level.material.Fluid;
+
+            public class LegacyMobBucketItem extends MobBucketItem {
+                public LegacyMobBucketItem(Supplier<? extends EntityType<?>> entitySupplier,
+                                           Supplier<? extends Fluid> fluidSupplier,
+                                           Supplier<? extends SoundEvent> soundSupplier,
+                                           Item.Properties properties) {
+                    super(entitySupplier, properties.attributes(createAttributes(entitySupplier, fluidSupplier, soundSupplier)));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val bucket = srcDir.resolve("LegacyBucketItem.java").readText()
+        val mobBucket = srcDir.resolve("LegacyMobBucketItem.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(bucket.contains("super(supplier.get(), properties);"), bucket)
+        assertFalse(bucket.contains("super(supplier, properties);"), bucket)
+        assertTrue(mobBucket.contains("super(entitySupplier.get(), fluidSupplier.get(), soundSupplier.get(), properties);"), mobBucket)
+        assertFalse(mobBucket.contains("createAttributes("), mobBucket)
+    }
+
+    @Test
+    fun `migrates bucket canBlockContainFluid helper to explicit player signature`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/items")
+        srcDir.createDirectories()
+
+        srcDir.resolve("LegacyBucketItem.java").writeText("""
+            package com.example.items;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.InteractionResultHolder;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.BucketItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.LiquidBlockContainer;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class LegacyBucketItem extends BucketItem {
+                public InteractionResultHolder<ItemStack> use(Level level, Player player, InteractionHand hand) {
+                    BlockPos pos = BlockPos.ZERO;
+                    BlockState state = level.getBlockState(pos);
+                    BlockPos target = canBlockContainFluid(level, pos, state) ? pos : pos.above();
+                    return InteractionResultHolder.success(new ItemStack(this));
+                }
+
+                protected boolean canBlockContainFluid(Level level, BlockPos pos, BlockState state) {
+                    return state.getBlock() instanceof LiquidBlockContainer liquidBlockContainer
+                        && liquidBlockContainer.canPlaceLiquid(level, pos, state, this.getFluid());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val bucket = srcDir.resolve("LegacyBucketItem.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(bucket.contains("import net.minecraft.world.level.BlockGetter;"), bucket)
+        assertTrue(bucket.contains("BlockPos target = canBlockContainFluid(player, level, pos, state) ? pos : pos.above();"), bucket)
+        assertTrue(bucket.contains("protected boolean canBlockContainFluid(Player player, BlockGetter level, BlockPos pos, BlockState state)"), bucket)
+        assertTrue(bucket.contains("liquidBlockContainer.canPlaceLiquid(player, level, pos, state, this.content)"), bucket)
+        assertFalse(bucket.contains("this.getFluid()"), bucket)
+    }
+
+    @Test
     fun `migrates custom fluid item capabilities to RegisterCapabilitiesEvent`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val customDir = srcDir.resolve("custom_fluid")

@@ -13401,6 +13401,8 @@ ${indent}}
         result = migrateLegacyRegistryObjectReflection(result)
         result = migratePayloadContextServerPlayer(result)
         result = migrateFoodComponentAccess(result, javaInheritanceIndex)
+        result = migrateBucketItemSupplierConstructors(result, javaInheritanceIndex)
+        result = migrateBucketItemCanBlockContainFluidSource(result, javaInheritanceIndex)
         result = migrateBucketItemFluidAccessSource(result)
         result = migrateCreativeTabEntriesAccessSource(result)
         result = migrateItemStackHoverNameSource(result)
@@ -29433,6 +29435,249 @@ ${modifierLines.joinToString("\n")}
         supplierVariables.forEach { variable ->
             result = Regex("""\b${Regex.escape(variable)}\.value\(\)""").replace(result, "$variable.get()")
             result = Regex("""\bthis\.${Regex.escape(variable)}\.value\(\)""").replace(result, "this.$variable.get()")
+        }
+        return result
+    }
+
+    private fun migrateBucketItemSupplierConstructors(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String {
+        if (!source.contains("super(") || !source.contains("Supplier")) return source
+
+        var result = source
+        var cursor = 0
+        var changed = false
+        while (true) {
+            val tokenIndex = result.indexOf("super(", cursor)
+            if (tokenIndex < 0) break
+            if (tokenIndex > 0 && (result[tokenIndex - 1].isLetterOrDigit() || result[tokenIndex - 1] == '_' || result[tokenIndex - 1] == '.')) {
+                cursor = tokenIndex + "super(".length
+                continue
+            }
+            val classDeclaration = enclosingJavaClassDeclaration(result, tokenIndex)
+            val directSuper = classDeclaration?.directSuper?.substringAfterLast('.')
+            if (directSuper != "BucketItem" && directSuper != "MobBucketItem") {
+                cursor = tokenIndex + "super(".length
+                continue
+            }
+            if (!javaClassExtendsAny(classDeclaration, setOf(directSuper), javaInheritanceIndex)) {
+                cursor = tokenIndex + "super(".length
+                continue
+            }
+            val constructorParams = enclosingJavaConstructorParameters(result, classDeclaration.name, tokenIndex)
+            if (constructorParams == null) {
+                cursor = tokenIndex + "super(".length
+                continue
+            }
+            val openParen = tokenIndex + "super".length
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + "super(".length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen)).map { it.trim() }
+            val replacementArgs = when (directSuper) {
+                "BucketItem" -> migrateBucketItemSuperArgs(args, constructorParams)
+                "MobBucketItem" -> migrateMobBucketItemSuperArgs(args, constructorParams)
+                else -> null
+            }
+            if (replacementArgs == null || replacementArgs == args) {
+                cursor = closeParen + 1
+                continue
+            }
+            val replacement = "super(${replacementArgs.joinToString(", ")})"
+            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
+            cursor = tokenIndex + replacement.length
+            changed = true
+        }
+
+        return if (changed) result else source
+    }
+
+    private fun enclosingJavaConstructorParameters(
+        source: String,
+        className: String,
+        index: Int
+    ): Map<String, JavaParameterInfo>? {
+        val constructorPattern = Regex(
+            """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private)\s+)?${Regex.escape(className)}\s*\(([^;{}]*)\)\s*(?:throws\s+[^{]+)?\{"""
+        )
+        return constructorPattern.findAll(source).mapNotNull { match ->
+            val openBrace = source.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0 || index !in openBrace..closeBrace) {
+                null
+            } else {
+                parseJavaParameters(match.groupValues[1]).associateBy { it.name }
+            }
+        }.firstOrNull()
+    }
+
+    private fun migrateBucketItemSuperArgs(
+        args: List<String>,
+        constructorParams: Map<String, JavaParameterInfo>
+    ): List<String>? {
+        if (args.size != 2) return null
+        val fluidArg = args[0]
+        val fluidParam = constructorParams[fluidArg] ?: return null
+        if (!fluidParam.isSupplierParameterOf("Fluid")) return null
+        return listOf("$fluidArg.get()", args[1])
+    }
+
+    private fun migrateMobBucketItemSuperArgs(
+        args: List<String>,
+        constructorParams: Map<String, JavaParameterInfo>
+    ): List<String>? {
+        if (args.size == 4) {
+            val entityArg = args[0]
+            val fluidArg = args[1]
+            val soundArg = args[2]
+            if (!constructorParams.isSupplierArgument(entityArg, "EntityType") ||
+                !constructorParams.isSupplierArgument(fluidArg, "Fluid") ||
+                !constructorParams.isSupplierArgument(soundArg, "SoundEvent")) {
+                return null
+            }
+            return listOf("$entityArg.get()", "$fluidArg.get()", "$soundArg.get()", args[3])
+        }
+
+        if (args.size != 2) return null
+        val entityArg = args[0]
+        if (!constructorParams.isSupplierArgument(entityArg, "EntityType")) return null
+        val attributes = legacyMobBucketAttributesExpression(args[1]) ?: return null
+        val attributeArgs = attributes.second.map { it.trim() }
+        if (attributeArgs.size != 3) return null
+        val fluidArg = attributeArgs[1]
+        val soundArg = attributeArgs[2]
+        if (attributeArgs[0] != entityArg ||
+            !constructorParams.isSupplierArgument(fluidArg, "Fluid") ||
+            !constructorParams.isSupplierArgument(soundArg, "SoundEvent")) {
+            return null
+        }
+        return listOf("$entityArg.get()", "$fluidArg.get()", "$soundArg.get()", attributes.first)
+    }
+
+    private fun legacyMobBucketAttributesExpression(expression: String): Pair<String, List<String>>? {
+        val trimmed = expression.trim()
+        val attributesIndex = trimmed.indexOf(".attributes(")
+        if (attributesIndex <= 0) return null
+        val attributesOpen = attributesIndex + ".attributes".length
+        val attributesClose = findMatchingParen(trimmed, attributesOpen)
+        if (attributesClose != trimmed.lastIndex) return null
+        val propertiesExpression = trimmed.substring(0, attributesIndex).trim()
+        val attributesArg = trimmed.substring(attributesOpen + 1, attributesClose).trim()
+        val createAttributesMatch = Regex("""^(?:(?:[A-Za-z_$][\w$]*\.)*)createAttributes\s*\(""").find(attributesArg)
+            ?: return null
+        val createOpen = attributesArg.indexOf('(', createAttributesMatch.range.last)
+        val createClose = findMatchingParen(attributesArg, createOpen)
+        if (createOpen < 0 || createClose != attributesArg.lastIndex) return null
+        return propertiesExpression to splitTopLevelJavaArgs(attributesArg.substring(createOpen + 1, createClose))
+    }
+
+    private fun Map<String, JavaParameterInfo>.isSupplierArgument(argument: String, simpleTypeName: String): Boolean =
+        this[argument.trim()]?.isSupplierParameterOf(simpleTypeName) == true
+
+    private fun JavaParameterInfo.isSupplierParameterOf(simpleTypeName: String): Boolean {
+        val normalized = type.replace(Regex("""\s+"""), " ")
+        if (!Regex("""(?:^|[.\s])Supplier\s*<""").containsMatchIn(normalized)) return false
+        return Regex("""(?<![\w$])${Regex.escape(simpleTypeName)}(?:\s*<|\b)""").containsMatchIn(normalized)
+    }
+
+    private fun migrateBucketItemCanBlockContainFluidSource(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String {
+        if (!source.contains("canBlockContainFluid(") ||
+            !source.contains("canPlaceLiquid(") ||
+            !source.contains("extends") ||
+            collectJavaClassDeclarations(source).none { javaClassExtendsAny(it, setOf("BucketItem"), javaInheritanceIndex) }) {
+            return source
+        }
+
+        var result = rewriteCanBlockContainFluidCallSitesWithPlayer(source)
+        val helperPattern = Regex(
+            """(?m)^([ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private)\s+)?)boolean\s+canBlockContainFluid\s*\(\s*(?:Level|BlockGetter)\s+([A-Za-z_$][\w$]*)\s*,\s*BlockPos\s+([A-Za-z_$][\w$]*)\s*,\s*BlockState\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
+        )
+        var changed = result != source
+        helperPattern.findAll(result).toList().asReversed().forEach { match ->
+            val openBrace = result.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) return@forEach
+            val levelName = match.groupValues[2]
+            val posName = match.groupValues[3]
+            val stateName = match.groupValues[4]
+            val body = result.substring(openBrace + 1, closeBrace)
+            val rewrittenBody = rewriteJavaCall(body, "canPlaceLiquid") { receiver, args ->
+                if (args.size != 4 ||
+                    args[0].trim() != levelName ||
+                    args[1].trim() != posName ||
+                    args[2].trim() != stateName) {
+                    return@rewriteJavaCall null
+                }
+                "$receiver.canPlaceLiquid(player, $levelName, $posName, $stateName, ${args[3].trim()})"
+            }
+            if (rewrittenBody == body) return@forEach
+            val replacement = "${match.groupValues[1]}boolean canBlockContainFluid(Player player, BlockGetter $levelName, BlockPos $posName, BlockState $stateName) {$rewrittenBody}"
+            result = result.substring(0, match.range.first) + replacement + result.substring(closeBrace + 1)
+            changed = true
+        }
+        if (!changed) return source
+        result = addImportIfMissing(result, "net.minecraft.world.entity.player.Player")
+        result = addImportIfMissing(result, "net.minecraft.world.level.BlockGetter")
+        return result
+    }
+
+    private fun rewriteCanBlockContainFluidCallSitesWithPlayer(source: String): String {
+        val methodPattern = Regex(
+            """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|static|final|synchronized)\s+)+(?:<[^>{};]+>\s*)?[A-Za-z_$][\w$<>\[\].?,\s]*\s+[A-Za-z_$][\w$]*\s*\(([^;{}]*)\)\s*(?:throws\s+[^{;]+)?\{"""
+        )
+        var result = source
+        methodPattern.findAll(source).toList().asReversed().forEach { match ->
+            val params = parseJavaParameters(match.groupValues[1])
+            val playerName = params.firstOrNull { simpleJavaTypeName(it.type) == "Player" }?.name ?: return@forEach
+            val openBrace = result.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) return@forEach
+            val body = result.substring(openBrace + 1, closeBrace)
+            var rewrittenBody = rewriteJavaCall(body, "canBlockContainFluid") { receiver, args ->
+                if (args.size != 3 || (receiver != "this" && receiver != "super")) return@rewriteJavaCall null
+                "$receiver.canBlockContainFluid($playerName, ${args.joinToString(", ") { it.trim() }})"
+            }
+            rewrittenBody = rewriteUnqualifiedCanBlockContainFluidCalls(rewrittenBody, playerName)
+            if (rewrittenBody != body) {
+                result = result.substring(0, openBrace + 1) + rewrittenBody + result.substring(closeBrace)
+            }
+        }
+        return result
+    }
+
+    private fun rewriteUnqualifiedCanBlockContainFluidCalls(source: String, playerName: String): String {
+        var result = source
+        var cursor = 0
+        val methodName = "canBlockContainFluid"
+        val token = "$methodName("
+        while (true) {
+            val tokenIndex = result.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val previous = if (tokenIndex > 0) result[tokenIndex - 1] else '\u0000'
+            if (previous == '.' || previous.isLetterOrDigit() || previous == '_' || previous == '$') {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val openParen = tokenIndex + methodName.length
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen)).map { it.trim() }
+            if (args.size != 3) {
+                cursor = closeParen + 1
+                continue
+            }
+            val replacement = "$methodName($playerName, ${args.joinToString(", ")})"
+            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
+            cursor = tokenIndex + replacement.length
         }
         return result
     }
