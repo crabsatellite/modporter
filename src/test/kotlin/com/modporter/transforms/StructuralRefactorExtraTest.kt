@@ -18990,6 +18990,107 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates legacy random enchantment item stack APIs by typed context`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("GloveLoot.java").writeText("""
+            package com.example;
+
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import java.util.Map;
+
+            public class GloveLoot {
+                protected void apply(ItemStack armorStack, ItemStack template, LootContext context) {
+                    RandomSource randomSource = context.getRandom();
+                    ItemStack gloves = template.copy();
+                    int cost = 0;
+                    boolean isTreasure = false;
+                    for (Map.Entry<Enchantment, Integer> enchantmentInfo : armorStack.getAllEnchantments().entrySet()) {
+                        Enchantment enchantment = enchantmentInfo.getKey();
+                        int enchantmentValue = enchantmentInfo.getValue();
+                        cost = Math.max(cost, enchantment.getMinCost(enchantmentValue));
+                        if (!isTreasure) {
+                            isTreasure = enchantment.isTreasureOnly();
+                        }
+                        if (gloves.canApplyAtEnchantingTable(enchantment)) {
+                            gloves.enchant(enchantment, enchantmentInfo.getValue());
+                        }
+                    }
+                    if (!armorStack.getAllEnchantments().isEmpty() && gloves.getAllEnchantments().isEmpty()) {
+                        EnchantmentHelper.enchantItem(randomSource, gloves, cost, isTreasure);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("MobEquipmentHooks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.DifficultyInstance;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+
+            public class MobEquipmentHooks {
+                private static void enchantAccessory(Mob mob, DifficultyInstance difficulty, ItemStack itemStack) {
+                    RandomSource random = mob.getRandom();
+                    float chanceMultiplier = difficulty.getSpecialMultiplier();
+                    EnchantmentHelper.enchantItem(random, itemStack, (int) (5.0F + chanceMultiplier), false);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SweepBlockingSword.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.SwordItem;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.Enchantments;
+
+            public class SweepBlockingSword extends SwordItem {
+                public SweepBlockingSword(Tier tier, Item.Properties properties) {
+                    super(tier, properties);
+                }
+
+                @Override
+                public boolean supportsEnchantment(ItemStack stack, Holder<Enchantment> enchantment) {
+                    return enchantment.category.canEnchant(stack.getItem()) && enchantment != Enchantments.SWEEPING_EDGE;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val loot = srcDir.resolve("GloveLoot.java").readText()
+        val hooks = srcDir.resolve("MobEquipmentHooks.java").readText()
+        val sword = srcDir.resolve("SweepBlockingSword.java").readText()
+
+        assertTrue(loot.contains("import it.unimi.dsi.fastutil.objects.Object2IntMap;"), loot)
+        assertTrue(loot.contains("import net.minecraft.core.Holder;"), loot)
+        assertTrue(loot.contains("for (Object2IntMap.Entry<Holder<Enchantment>> enchantmentInfo : armorStack.getAllEnchantments(context.getLevel().registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.ENCHANTMENT)).entrySet())"), loot)
+        assertTrue(loot.contains("Holder<Enchantment> enchantment = enchantmentInfo.getKey();"), loot)
+        assertTrue(loot.contains("int enchantmentValue = enchantmentInfo.getIntValue();"), loot)
+        assertTrue(loot.contains("enchantment.value().getMinCost(enchantmentValue)"), loot)
+        assertTrue(loot.contains("enchantment.is(net.minecraft.tags.EnchantmentTags.TREASURE)"), loot)
+        assertTrue(loot.contains("gloves.isPrimaryItemFor(enchantment)"), loot)
+        assertTrue(loot.contains("gloves.enchant(enchantment, enchantmentInfo.getIntValue());"), loot)
+        assertTrue(loot.contains("EnchantmentHelper.enchantItem(randomSource, gloves, cost, context.getLevel().registryAccess(), java.util.Optional.of(context.getLevel().registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(net.minecraft.tags.EnchantmentTags.ON_RANDOM_LOOT)))"), loot)
+        assertFalse(loot.contains("getAllEnchantments()"), loot)
+        assertFalse(loot.contains("isTreasureOnly"), loot)
+        assertFalse(loot.contains("canApplyAtEnchantingTable"), loot)
+        assertTrue(hooks.contains("EnchantmentHelper.enchantItem(random, itemStack, (int) (5.0F + chanceMultiplier), mob.registryAccess(), java.util.Optional.of(mob.registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(net.minecraft.tags.EnchantmentTags.ON_MOB_SPAWN_EQUIPMENT)))"), hooks)
+        assertFalse(hooks.contains(", false)"), hooks)
+        assertTrue(sword.contains("return super.supportsEnchantment(stack, enchantment) && !enchantment.is(Enchantments.SWEEPING_EDGE);"), sword)
+        assertFalse(sword.contains(".category"))
+    }
+
+    @Test
     fun `migrates legacy custom map item saved data and packet APIs by source shape`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

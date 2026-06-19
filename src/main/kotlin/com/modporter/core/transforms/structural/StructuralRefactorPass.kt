@@ -25269,7 +25269,10 @@ $methodBody
 
     private fun migrateLegacyEnchantmentIterationSource(source: String): String {
         if (!source.contains("EnchantmentHelper.getEnchantments(") &&
+            !source.contains("EnchantmentHelper.enchantItem(") &&
             !source.contains(".canApplyAtEnchantingTable(") &&
+            !source.contains(".getAllEnchantments()") &&
+            !source.contains(".category.canEnchant(") &&
             !source.contains(".get().equals(enchantment)") &&
             !source.contains("Objects.equals(") &&
             !source.contains("server.registryAccess().lookup(net.minecraft.core.registries.Registries.ENCHANTMENT)")
@@ -25277,6 +25280,8 @@ $methodBody
             return source
         }
         var result = source.replace("EnchantmentHelper.getEnchantments(", "EnchantmentHelper.getEnchantmentsForCrafting(")
+        result = migrateLegacyItemStackAllEnchantments(result)
+        result = rewriteLegacyRandomEnchantItemCalls(result)
         result = Regex(
             """EnchantmentHelper\.setEnchantments\(\s*EnchantmentHelper\.getEnchantmentsForCrafting\(([^()\r\n;]+)\)\s*,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\)"""
         ).replace(result) { match ->
@@ -25326,6 +25331,8 @@ $methodBody
             }
         result = Regex("""super\.canApplyAtEnchantingTable\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\)""")
             .replace(result) { match -> "super.supportsEnchantment(${match.groupValues[1]}, ${match.groupValues[2]})" }
+        result = rewriteLegacyHolderEnchantmentSupportChecks(result)
+        result = rewriteLegacyEnchantmentHolderComparisons(result)
         result = Regex(
             """server\.registryAccess\(\)\.lookup\(net\.minecraft\.core\.registries\.Registries\.ENCHANTMENT\)\s*\.\s*flatMap\(registry\s*->\s*registry\.get\(([^)]+)\)\)\s*\.\s*map\(holder\s*->\s*EnchantmentHelper\.get(Tag|Item)EnchantmentLevel\(holder,\s*([A-Za-z_$][\w$]*)\)\)\s*\.\s*orElse\(0\)""",
             RegexOption.DOT_MATCHES_ALL
@@ -25334,6 +25341,172 @@ $methodBody
             val kind = match.groupValues[2]
             val stack = match.groupValues[3]
             "EnchantmentHelper.get${kind}EnchantmentLevel(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow($key), $stack)"
+        }
+        return result
+    }
+
+    private fun migrateLegacyItemStackAllEnchantments(source: String): String {
+        if (!source.contains(".getAllEnchantments()")) return source
+        val id = """[A-Za-z_$][\w$]*"""
+        val lootContextVars = Regex("""\bLootContext\s+($id)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .distinct()
+            .toList()
+        if (lootContextVars.size != 1) return source
+        val lookup = "${lootContextVars.single()}.getLevel().registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.ENCHANTMENT)"
+        var result = Regex("""([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.getAllEnchantments\(\)""")
+            .replace(source) { match -> "${match.groupValues[1]}.getAllEnchantments($lookup)" }
+        var convertedMapEntries = false
+        val convertedEntryVars = linkedSetOf<String>()
+        result = Regex(
+            """for\s*\(\s*Map\.Entry\s*<\s*Enchantment\s*,\s*Integer\s*>\s+($id)\s*:\s*([^\r\n]+?\.entrySet\(\))\s*\)\s*\{"""
+        ).replace(result) { match ->
+            convertedMapEntries = true
+            convertedEntryVars += match.groupValues[1]
+            "for (Object2IntMap.Entry<Holder<Enchantment>> ${match.groupValues[1]} : ${match.groupValues[2]}) {"
+        }
+        result = Regex("""\bEnchantment\s+($id)\s*=\s*($id)\.getKey\(\)\s*;""")
+            .replace(result) { match ->
+                if (match.groupValues[2] in convertedEntryVars) {
+                    "Holder<Enchantment> ${match.groupValues[1]} = ${match.groupValues[2]}.getKey();"
+                } else {
+                    match.value
+                }
+            }
+        result = Regex("""\bint\s+($id)\s*=\s*($id)\.getValue\(\)\s*;""")
+            .replace(result) { match ->
+                if (match.groupValues[2] in convertedEntryVars) {
+                    "int ${match.groupValues[1]} = ${match.groupValues[2]}.getIntValue();"
+                } else {
+                    match.value
+                }
+            }
+        result = Regex("""\b($id)\.getMinCost\(""")
+            .replace(result) { match ->
+                val receiver = match.groupValues[1]
+                if (receiver in collectEnchantmentHolderVariables(result)) "$receiver.value().getMinCost(" else match.value
+            }
+        result = Regex("""\b($id)\.isTreasureOnly\(\)""")
+            .replace(result) { match ->
+                val receiver = match.groupValues[1]
+                if (receiver in collectEnchantmentHolderVariables(result)) "$receiver.is(net.minecraft.tags.EnchantmentTags.TREASURE)" else match.value
+            }
+        result = Regex("""([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.canApplyAtEnchantingTable\(\s*($id)\s*\)""")
+            .replace(result) { match ->
+                val enchantment = match.groupValues[2]
+                if (enchantment in collectEnchantmentHolderVariables(result)) {
+                    "${match.groupValues[1]}.isPrimaryItemFor($enchantment)"
+                } else {
+                    match.value
+                }
+            }
+        result = Regex("""\.enchant\(\s*($id)\s*,\s*($id)\.getValue\(\)\s*\)""")
+            .replace(result) { match ->
+                val enchantment = match.groupValues[1]
+                val entry = match.groupValues[2]
+                if (enchantment in collectEnchantmentHolderVariables(result) && entry in convertedEntryVars) {
+                    ".enchant($enchantment, ${match.groupValues[2]}.getIntValue())"
+                } else {
+                    match.value
+                }
+            }
+        if (convertedMapEntries) {
+            result = addImportIfMissing(result, "it.unimi.dsi.fastutil.objects.Object2IntMap")
+            result = addImportIfMissing(result, "net.minecraft.core.Holder")
+            if (!Regex("""\bMap\s*[.<]""").containsMatchIn(removeImport(result, "java.util.Map"))) {
+                result = removeImport(result, "java.util.Map")
+            }
+        }
+        return result
+    }
+
+    private fun rewriteLegacyRandomEnchantItemCalls(source: String): String {
+        if (!source.contains("EnchantmentHelper.enchantItem(")) return source
+        val id = """[A-Za-z_$][\w$]*"""
+        val lootContextVars = Regex("""\bLootContext\s+($id)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .distinct()
+            .toList()
+        val mobVars = Regex("""\bMob\s+($id)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .distinct()
+            .toList()
+        return rewriteJavaInvocationArguments(source, "EnchantmentHelper.enchantItem") { args ->
+            if (args.size != 4) return@rewriteJavaInvocationArguments null
+            val filterArg = args[3].trim()
+            val registryAccess = when {
+                lootContextVars.size == 1 -> "${lootContextVars.single()}.getLevel().registryAccess()"
+                mobVars.size == 1 -> "${mobVars.single()}.registryAccess()"
+                else -> return@rewriteJavaInvocationArguments null
+            }
+            val tag = when {
+                lootContextVars.size == 1 -> "ON_RANDOM_LOOT"
+                mobVars.size == 1 && filterArg == "false" -> "ON_MOB_SPAWN_EQUIPMENT"
+                else -> return@rewriteJavaInvocationArguments null
+            }
+            val lookup = "$registryAccess.lookupOrThrow(net.minecraft.core.registries.Registries.ENCHANTMENT)"
+            listOf(
+                args[0],
+                args[1],
+                args[2],
+                registryAccess,
+                "java.util.Optional.of($lookup.getOrThrow(net.minecraft.tags.EnchantmentTags.$tag))"
+            )
+        }
+    }
+
+    private fun rewriteLegacyHolderEnchantmentSupportChecks(source: String): String {
+        if (!source.contains(".category.canEnchant(")) return source
+        var result = source
+        val id = """[A-Za-z_$][\w$]*"""
+        val methodPattern = Regex(
+            """(?m)(public\s+boolean\s+(supportsEnchantment|isPrimaryItemFor)\s*\([^)]*\bItemStack\s+($id)[^)]*\bHolder\s*<\s*Enchantment\s*>\s+($id)[^)]*\)\s*\{)"""
+        )
+        var cursor = 0
+        while (true) {
+            val match = methodPattern.find(result, cursor) ?: break
+            val openBrace = result.indexOf('{', match.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val methodName = match.groupValues[2]
+            val stack = match.groupValues[3]
+            val enchantment = match.groupValues[4]
+            val body = result.substring(openBrace + 1, closeBrace)
+            val migratedBody = body.replace(
+                Regex("""\b${Regex.escape(enchantment)}\.category\.canEnchant\(\s*${Regex.escape(stack)}\.getItem\(\)\s*\)"""),
+                "super.$methodName($stack, $enchantment)"
+            )
+            if (migratedBody != body) {
+                result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
+                cursor = openBrace + 1 + migratedBody.length
+            } else {
+                cursor = closeBrace + 1
+            }
+        }
+        return result
+    }
+
+    private fun rewriteLegacyEnchantmentHolderComparisons(source: String): String {
+        if (!source.contains("Enchantments.")) return source
+        val holderVariables = collectEnchantmentHolderVariables(source)
+        if (holderVariables.isEmpty()) return source
+        var result = source
+        val key = """[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+"""
+        for (holder in holderVariables) {
+            result = Regex("""\b${Regex.escape(holder)}\s*!=\s*($key)""")
+                .replace(result) { match -> "!$holder.is(${match.groupValues[1]})" }
+            result = Regex("""($key)\s*!=\s*${Regex.escape(holder)}\b""")
+                .replace(result) { match -> "!$holder.is(${match.groupValues[1]})" }
+            result = Regex("""\b${Regex.escape(holder)}\s*==\s*($key)""")
+                .replace(result) { match -> "$holder.is(${match.groupValues[1]})" }
+            result = Regex("""($key)\s*==\s*${Regex.escape(holder)}\b""")
+                .replace(result) { match -> "$holder.is(${match.groupValues[1]})" }
         }
         return result
     }
