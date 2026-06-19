@@ -10661,6 +10661,57 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates top level melee attack reach overrides without dropping custom reach logic`() {
+        val projectDir = createFile("ContinuousMeleeAttackGoal.java", """
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.PathfinderMob;
+            import net.minecraft.world.entity.ai.goal.MeleeAttackGoal;
+
+            public class ContinuousMeleeAttackGoal extends MeleeAttackGoal {
+                private final double speedModifier;
+
+                public ContinuousMeleeAttackGoal(PathfinderMob mob, double speedModifier, boolean followingTargetEvenIfNotSeen) {
+                    super(mob, speedModifier, followingTargetEvenIfNotSeen);
+                    this.speedModifier = speedModifier;
+                }
+
+                /**
+                 * Method override to make the mob walk toward its enemy if there is no path.
+                 */
+                @Override
+                public boolean canUse() {
+                    if (!super.canUse()) {
+                        LivingEntity target = this.mob.getTarget();
+                        if (target != null) {
+                            this.mob.getMoveControl().setWantedPosition(target.getX(), target.getY(), target.getZ(), this.speedModifier);
+                        }
+                        return false;
+                    }
+                    return true;
+                }
+
+                @Override
+                protected double getAttackReachSqr(LivingEntity attackTarget) {
+                    return 2.0F + attackTarget.getBbWidth();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/ContinuousMeleeAttackGoal.java").readText()
+
+        assertTrue(migrated.contains("public boolean canUse()"), migrated)
+        assertTrue(migrated.contains("this.mob.getMoveControl().setWantedPosition"), migrated)
+        assertTrue(migrated.contains("protected boolean canPerformAttack(LivingEntity attackTarget)"), migrated)
+        assertTrue(migrated.contains("(2.0F + attackTarget.getBbWidth()) >= this.mob.distanceToSqr(attackTarget.getX(), attackTarget.getY(), attackTarget.getZ())"), migrated)
+        assertTrue(migrated.contains("this.isTimeToAttack()"), migrated)
+        assertTrue(migrated.contains("this.mob.getSensing().hasLineOfSight(attackTarget)"), migrated)
+        assertFalse(migrated.contains("getAttackReachSqr"), migrated)
+    }
+
+    @Test
     fun `migrates built in registry delegate maps by declared map key type`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val mixinDir = srcDir.resolve("mixin")

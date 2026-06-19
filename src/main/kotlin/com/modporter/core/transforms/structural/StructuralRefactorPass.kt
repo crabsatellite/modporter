@@ -13064,7 +13064,7 @@ ${indent}}
         result = migrateFinalMapDecorationSubclassSource(result)
         result = migrateFinalMapDecorationSubclassUsageSource(result, finalMapDecorationClasses)
         result = migrateLegacyMeleeAttackGoalOverrides(result)
-        result = migrateCustomGoalAttackReach(result)
+        result = migrateCustomGoalAttackReach(result, javaInheritanceIndex)
         result = migrateLegacyParticleCullingOverrides(result)
         result = migrateLegacyItemStackRegistrySerialization(result, javaInheritanceIndex)
         result = migrateLegacyBlockEntityLoadCalls(result, javaInheritanceIndex)
@@ -25323,10 +25323,13 @@ $methodBody
         return result
     }
 
-    private fun migrateCustomGoalAttackReach(source: String): String {
+    private fun migrateCustomGoalAttackReach(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
         if (!source.contains("getAttackReachSqr")) return source
         var result = if (source.contains("MeleeAttackGoal")) {
-            migrateMeleeAttackGoalReachOverrides(source)
+            migrateMeleeAttackGoalReachOverrides(source, javaInheritanceIndex)
         } else {
             source
         }
@@ -25657,7 +25660,10 @@ $methodBody
         return result
     }
 
-    private fun migrateMeleeAttackGoalReachOverrides(source: String): String {
+    private fun migrateMeleeAttackGoalReachOverrides(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String {
         if (!source.contains("extends") && !source.contains("new MeleeAttackGoal")) return source
         var result = source
         var cursor = 0
@@ -25672,10 +25678,9 @@ $methodBody
                 cursor = match.range.last + 1
                 continue
             }
-            val contextStart = (match.range.first - 700).coerceAtLeast(0)
-            val nearbyContext = result.substring(contextStart, match.range.first)
-            val isMeleeContext = nearbyContext.contains("new MeleeAttackGoal") ||
-                Regex("""extends\s+MeleeAttackGoal\b""").containsMatchIn(nearbyContext)
+            val enclosingClass = enclosingJavaClassDeclaration(result, match.range.first)
+            val isMeleeContext = javaClassExtendsAny(enclosingClass, setOf("MeleeAttackGoal"), javaInheritanceIndex) ||
+                isInsideAnonymousMeleeAttackGoal(result, match.range.first)
             if (!isMeleeContext) {
                 cursor = closeBrace + 1
                 continue
@@ -25694,15 +25699,33 @@ $methodBody
             )
             val distance = "this.mob.distanceToSqr($targetName.getX(), $targetName.getY(), $targetName.getZ())"
             val condition = "($migratedReach) >= $distance"
+            val indent = match.value.takeWhile { it == ' ' || it == '\t' }
             val replacement = """
-protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
-		return this.isTimeToAttack() && ($condition) && this.mob.getSensing().hasLineOfSight($targetName);
-	}
+${indent}protected boolean canPerformAttack(${match.groupValues[2]} $targetName) {
+${indent}    return this.isTimeToAttack() && ($condition) && this.mob.getSensing().hasLineOfSight($targetName);
+${indent}}
             """.trimIndent()
             result = result.substring(0, match.range.first) + replacement + result.substring(closeBrace + 1)
             cursor = match.range.first + replacement.length
         }
         return result
+    }
+
+    private fun isInsideAnonymousMeleeAttackGoal(source: String, index: Int): Boolean {
+        val pattern = Regex("""new\s+(?:[A-Za-z_$][\w$]*\.)*MeleeAttackGoal\s*\(""")
+        return pattern.findAll(source)
+            .takeWhile { it.range.first < index }
+            .any { match ->
+                val openParen = source.indexOf('(', match.range.last)
+                val closeParen = if (openParen >= 0) findMatchingParen(source, openParen) else -1
+                if (openParen < 0 || closeParen < 0) return@any false
+                val openBrace = source.indexOf('{', closeParen)
+                if (openBrace < 0) return@any false
+                val between = source.substring(closeParen + 1, openBrace)
+                if (between.any { !it.isWhitespace() }) return@any false
+                val closeBrace = findMatchingBrace(source, openBrace)
+                closeBrace > openBrace && index in openBrace..closeBrace
+            }
     }
 
     private fun migrateLegacyDataAndComponentAccess(source: String): String {
