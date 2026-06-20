@@ -1827,6 +1827,7 @@ ${codecFields.joinToString(",\n")}
 
     private data class LegacyCustomEnchantmentRegistration(
         val file: Path,
+        val ownerPackage: String,
         val ownerClass: String,
         val modId: String,
         val fieldName: String,
@@ -1836,12 +1837,14 @@ ${codecFields.joinToString(",\n")}
     )
 
     private data class LegacyEnchantmentCategorySpec(
+        val ownerPackage: String,
         val ownerClass: String,
         val fieldName: String,
         val itemClassName: String?
     )
 
     private data class RegistryEntryRef(
+        val ownerPackage: String,
         val ownerClass: String,
         val fieldName: String,
         val modId: String,
@@ -1854,6 +1857,20 @@ ${codecFields.joinToString(",\n")}
         val namespace: String,
         val path: String,
         val values: List<String>
+    )
+
+    private data class LegacyJavaContext(
+        val packageName: String,
+        val typeImports: Map<String, String>,
+        val wildcardImports: List<String>,
+        val staticFieldImports: Map<String, String>,
+        val staticWildcardImports: List<String>
+    )
+
+    private data class LegacyReferenceIndex<T>(
+        val byExact: Map<String, T>,
+        val bySimpleOwner: Map<String, T>,
+        val bySimpleField: Map<String, T>
     )
 
     private data class LinearIntValue(val base: Int, val perLevelAboveFirst: Int)
@@ -1889,15 +1906,15 @@ ${codecFields.joinToString(",\n")}
         val registryEntries = collectLegacyRegistryEntries(javaSources, modIds)
         val itemRegistryEntries = collectLegacyItemRegistryEntries(javaSources, modIds)
         val categories = collectLegacyEnchantmentCategories(javaSources)
-        val registrations = collectLegacyCustomEnchantmentRegistrations(javaSources, modIds, errors)
+        val registrations = collectLegacyCustomEnchantmentRegistrations(javaSources, modIds, classSources, errors)
         if (registrations.isEmpty()) return
 
-        val enchantmentRefs = registrations.flatMap { registration ->
-            listOf(
-                registration.fieldName to registration,
-                "${registration.ownerClass}.${registration.fieldName}" to registration
-            )
-        }.toMap()
+        val enchantmentRefs = legacyReferenceIndex(
+            registrations,
+            fieldName = { it.fieldName },
+            ownerClass = { it.ownerClass },
+            ownerPackage = { it.ownerPackage }
+        )
         val writtenTags = linkedSetOf<String>()
 
         for (registration in registrations) {
@@ -1947,16 +1964,146 @@ ${codecFields.joinToString(",\n")}
         }
     }
 
+    private fun legacyJavaPackageName(source: String): String =
+        Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            .orEmpty()
+
+    private fun legacyJavaContext(source: String): LegacyJavaContext {
+        val typeImports = linkedMapOf<String, String>()
+        val wildcardImports = mutableListOf<String>()
+        val staticFieldImports = linkedMapOf<String, String>()
+        val staticWildcardImports = mutableListOf<String>()
+        Regex("""(?m)^\s*import\s+(static\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\.\*)?)\s*;""")
+            .findAll(source)
+            .forEach { match ->
+                val imported = match.groupValues[2]
+                val isStatic = match.groupValues[1].isNotBlank()
+                if (imported.endsWith(".*")) {
+                    val owner = imported.removeSuffix(".*")
+                    if (isStatic) {
+                        staticWildcardImports += owner
+                    } else {
+                        wildcardImports += owner
+                    }
+                } else if (isStatic) {
+                    staticFieldImports[imported.substringAfterLast('.')] = imported
+                } else {
+                    typeImports[imported.substringAfterLast('.')] = imported
+                }
+            }
+        return LegacyJavaContext(
+            packageName = legacyJavaPackageName(source),
+            typeImports = typeImports,
+            wildcardImports = wildcardImports,
+            staticFieldImports = staticFieldImports,
+            staticWildcardImports = staticWildcardImports
+        )
+    }
+
+    private fun <T> legacyReferenceIndex(
+        refs: Iterable<T>,
+        fieldName: (T) -> String,
+        ownerClass: (T) -> String,
+        ownerPackage: (T) -> String
+    ): LegacyReferenceIndex<T> {
+        val byExact = linkedMapOf<String, T>()
+        val simpleOwnerCandidates = linkedMapOf<String, MutableList<T>>()
+        val simpleFieldCandidates = linkedMapOf<String, MutableList<T>>()
+        refs.forEach { ref ->
+            val field = fieldName(ref)
+            val owner = ownerClass(ref)
+            val pkg = ownerPackage(ref)
+            simpleOwnerCandidates.getOrPut("$owner.$field") { mutableListOf() } += ref
+            simpleFieldCandidates.getOrPut(field) { mutableListOf() } += ref
+            if (pkg.isNotBlank()) {
+                byExact["$pkg.$owner.$field"] = ref
+            }
+        }
+        return LegacyReferenceIndex(
+            byExact = byExact,
+            bySimpleOwner = uniqueLegacyReferences(simpleOwnerCandidates),
+            bySimpleField = uniqueLegacyReferences(simpleFieldCandidates)
+        )
+    }
+
+    private fun <T> uniqueLegacyReferences(candidates: Map<String, List<T>>): Map<String, T> =
+        candidates.mapNotNull { (name, refs) ->
+            val unique = refs.distinct()
+            if (unique.size == 1) name to unique.single() else null
+        }.toMap(linkedMapOf())
+
+    private fun <T> resolveLegacyReferenceExpression(
+        expression: String,
+        source: String,
+        index: LegacyReferenceIndex<T>
+    ): T? {
+        val ref = expression.trim()
+        index.byExact[ref]?.let { return it }
+        val field = ref.substringAfterLast('.')
+        val owner = ref.substringBeforeLast('.', missingDelimiterValue = "")
+        val context = legacyJavaContext(source)
+
+        if (owner.isEmpty()) {
+            context.staticFieldImports[field]?.let { imported ->
+                index.byExact[imported]?.let { return it }
+            }
+            context.staticWildcardImports
+                .mapNotNull { staticOwner -> index.byExact["$staticOwner.$field"] }
+                .distinct()
+                .singleOrNull()
+                ?.let { return it }
+            return index.bySimpleField[field]
+        }
+
+        if (owner.contains('.')) {
+            return index.byExact[ref]
+        }
+
+        context.typeImports[owner]?.let { importedOwner ->
+            index.byExact["$importedOwner.$field"]?.let { return it }
+        }
+        if (context.packageName.isNotBlank()) {
+            index.byExact["${context.packageName}.$owner.$field"]?.let { return it }
+        }
+        context.wildcardImports
+            .mapNotNull { packageName -> index.byExact["$packageName.$owner.$field"] }
+            .distinct()
+            .singleOrNull()
+            ?.let { return it }
+        return index.bySimpleOwner[ref]
+    }
+
+    private fun resolveLegacyClassReference(
+        typeName: String,
+        source: String,
+        classSources: Map<String, List<Pair<Path, String>>>
+    ): String {
+        val trimmed = typeName.trim()
+        if (trimmed.contains('.')) return trimmed
+        val context = legacyJavaContext(source)
+        context.typeImports[trimmed]?.let { imported ->
+            if (classSources.containsKey(imported)) return imported
+        }
+        if (context.packageName.isNotBlank()) {
+            val samePackage = "${context.packageName}.$trimmed"
+            if (classSources.containsKey(samePackage)) return samePackage
+        }
+        val wildcardMatches = context.wildcardImports
+            .map { packageName -> "$packageName.$trimmed" }
+            .filter { classSources.containsKey(it) }
+            .distinct()
+        return wildcardMatches.singleOrNull() ?: trimmed
+    }
+
     private fun detectLegacyJavaModIds(javaSources: List<Pair<Path, String>>): Map<String, String> {
         val ids = linkedMapOf<String, String>()
         val simpleValues = linkedMapOf<String, MutableSet<String>>()
         for ((file, source) in javaSources) {
             val className = file.fileName.toString().removeSuffix(".java")
-            val packageName = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""")
-                .find(source)
-                ?.groupValues
-                ?.get(1)
-                .orEmpty()
+            val packageName = legacyJavaPackageName(source)
             Regex("""\bstatic\s+(?:final\s+)?String\s+([A-Za-z_$][\w$]*)\s*=\s*"([^"]+)"""")
                 .findAll(source)
                 .forEach { match ->
@@ -2009,11 +2156,25 @@ ${codecFields.joinToString(",\n")}
         val result = linkedMapOf<String, MutableList<Pair<Path, String>>>()
         val classPattern = Regex("""\b(?:public|protected|private|static|final|\s)*class\s+([A-Za-z_$][\w$]*)\b""")
         for ((file, source) in javaSources) {
+            val packageName = legacyJavaPackageName(source)
             classPattern.findAll(source).forEach { match ->
-                result.getOrPut(match.groupValues[1]) { mutableListOf() }.add(file to source)
+                val className = match.groupValues[1]
+                result.getOrPut(className) { mutableListOf() }.add(file to source)
+                if (packageName.isNotBlank()) {
+                    result.getOrPut("$packageName.$className") { mutableListOf() }.add(file to source)
+                }
             }
         }
         return result
+    }
+
+    private fun uniqueLegacyClassSource(
+        className: String,
+        classSources: Map<String, List<Pair<Path, String>>>
+    ): Pair<Path, String>? {
+        val matches = classSources[className].orEmpty()
+        if (matches.map { it.first }.distinct().size != 1) return null
+        return matches.first()
     }
 
     private fun sourceForLegacyClass(
@@ -2021,14 +2182,13 @@ ${codecFields.joinToString(",\n")}
         classSources: Map<String, List<Pair<Path, String>>>,
         errors: MutableList<String>
     ): Pair<Path, String>? {
-        val simpleName = className.substringAfterLast('.')
-        val matches = classSources[simpleName].orEmpty()
+        val matches = classSources[className].orEmpty()
         if (matches.isEmpty()) {
-            errors.add("Cannot derive custom enchantment data for $simpleName: class source not found")
+            errors.add("Cannot derive custom enchantment data for ${className.substringAfterLast('.')}: class source not found")
             return null
         }
         if (matches.map { it.first }.distinct().size > 1) {
-            errors.add("Cannot derive custom enchantment data for $simpleName: class name is ambiguous")
+            errors.add("Cannot derive custom enchantment data for ${className.substringAfterLast('.')}: class name is ambiguous")
             return null
         }
         return matches.first()
@@ -2037,6 +2197,7 @@ ${codecFields.joinToString(",\n")}
     private fun collectLegacyCustomEnchantmentRegistrations(
         javaSources: List<Pair<Path, String>>,
         modIds: Map<String, String>,
+        classSources: Map<String, List<Pair<Path, String>>>,
         errors: MutableList<String>
     ): List<LegacyCustomEnchantmentRegistration> {
         val id = """[A-Za-z_$][\w$]*"""
@@ -2048,11 +2209,7 @@ ${codecFields.joinToString(",\n")}
 
         for ((file, source) in javaSources) {
             if (!source.contains("DeferredRegister") || !source.contains(".register(") || !source.contains("Enchantment")) continue
-            val ownerClass = Regex("""\b(?:public\s+)?(?:final\s+)?class\s+($id)\b""")
-                .find(source)
-                ?.groupValues
-                ?.get(1)
-                ?: file.fileName.toString().removeSuffix(".java")
+            val ownerPackage = legacyJavaPackageName(source)
 
             for (registerMatch in registerPattern.findAll(source)) {
                 val registerField = registerMatch.groupValues[1]
@@ -2067,6 +2224,8 @@ ${codecFields.joinToString(",\n")}
                     """(?s)(?:public\s+)?static\s+final\s+(?:RegistryObject|DeferredHolder)\s*<[^;=]+>\s+($id)\s*=\s*${Regex.escape(registerField)}\.register\(\s*"([^"]+)"\s*,\s*(.*?)\s*\)\s*;"""
                 )
                 for (entryMatch in entryPattern.findAll(source)) {
+                    val ownerClass = javaTypeNameContainingOffset(source, entryMatch.range.first)
+                        ?: file.fileName.toString().removeSuffix(".java")
                     val supplier = entryMatch.groupValues[3].trim()
                     val newMatch = Regex("""(?s)(?:\(\)\s*->\s*)?new\s+($qualifiedId)\s*\((.*)\)\s*$""").find(supplier)
                     val methodRefMatch = Regex("""^\s*($qualifiedId)::new\s*$""").find(supplier)
@@ -2079,11 +2238,12 @@ ${codecFields.joinToString(",\n")}
                     val constructorArgs = newMatch?.groupValues?.get(2)?.let { splitTopLevelArguments(it) }.orEmpty()
                     results.add(LegacyCustomEnchantmentRegistration(
                         file = file,
+                        ownerPackage = ownerPackage,
                         ownerClass = ownerClass,
                         modId = modId,
                         fieldName = entryMatch.groupValues[1],
                         registryName = entryMatch.groupValues[2],
-                        className = className.substringAfterLast('.'),
+                        className = resolveLegacyClassReference(className, source, classSources),
                         constructorArgs = constructorArgs
                     ))
                 }
@@ -2100,46 +2260,45 @@ ${codecFields.joinToString(",\n")}
 
     private fun collectLegacyEnchantmentCategories(
         javaSources: List<Pair<Path, String>>
-    ): Map<String, LegacyEnchantmentCategorySpec> {
+    ): LegacyReferenceIndex<LegacyEnchantmentCategorySpec> {
         val id = """[A-Za-z_$][\w$]*"""
         val categoryPattern = Regex(
             """(?s)(?:public|private|protected)?\s*static\s+final\s+EnchantmentCategory\s+($id)\s*=\s*EnchantmentCategory\.create\(\s*[^,]+,\s*$id\s*->\s*[^;]*?\binstanceof\s+($id)\b[^;]*?\)\s*;"""
         )
-        val categories = linkedMapOf<String, LegacyEnchantmentCategorySpec>()
+        val categories = mutableListOf<LegacyEnchantmentCategorySpec>()
         for ((file, source) in javaSources) {
-            val ownerClass = Regex("""\b(?:public\s+)?(?:final\s+)?class\s+($id)\b""")
-                .find(source)
-                ?.groupValues
-                ?.get(1)
-                ?: file.fileName.toString().removeSuffix(".java")
+            val ownerPackage = legacyJavaPackageName(source)
             for (match in categoryPattern.findAll(source)) {
+                val ownerClass = javaTypeNameContainingOffset(source, match.range.first)
+                    ?: file.fileName.toString().removeSuffix(".java")
                 val spec = LegacyEnchantmentCategorySpec(
+                    ownerPackage = ownerPackage,
                     ownerClass = ownerClass,
                     fieldName = match.groupValues[1],
                     itemClassName = match.groupValues[2]
                 )
-                categories[spec.fieldName] = spec
-                categories["${spec.ownerClass}.${spec.fieldName}"] = spec
+                categories += spec
             }
         }
-        return categories
+        return legacyReferenceIndex(
+            categories,
+            fieldName = { it.fieldName },
+            ownerClass = { it.ownerClass },
+            ownerPackage = { it.ownerPackage }
+        )
     }
 
     private fun collectLegacyRegistryEntries(
         javaSources: List<Pair<Path, String>>,
         modIds: Map<String, String>
-    ): Map<String, RegistryEntryRef> {
+    ): LegacyReferenceIndex<RegistryEntryRef> {
         val id = """[A-Za-z_$][\w$]*"""
         val registerPattern = Regex(
             """(?s)(?:public\s+)?static\s+final\s+DeferredRegister\s*<[^>]+>\s+($id)\s*=\s*DeferredRegister\.create\(\s*[^,]+,\s*([^)]+?)\s*\)\s*;"""
         )
-        val entries = linkedMapOf<String, RegistryEntryRef>()
+        val entries = mutableListOf<RegistryEntryRef>()
         for ((file, source) in javaSources) {
-            val ownerClass = Regex("""\b(?:public\s+)?(?:final\s+)?class\s+($id)\b""")
-                .find(source)
-                ?.groupValues
-                ?.get(1)
-                ?: file.fileName.toString().removeSuffix(".java")
+            val ownerPackage = legacyJavaPackageName(source)
             for (registerMatch in registerPattern.findAll(source)) {
                 val registerField = registerMatch.groupValues[1]
                 val modId = resolveLegacyModIdExpression(registerMatch.groupValues[2], modIds) ?: continue
@@ -2147,13 +2306,25 @@ ${codecFields.joinToString(",\n")}
                     """(?s)(?:public\s+)?static\s+final\s+(?:RegistryObject|DeferredHolder|DeferredItem)\s*<[^;=]+>\s+($id)\s*=\s*${Regex.escape(registerField)}\.register\(\s*"([^"]+)""""
                 )
                 for (entryMatch in entryPattern.findAll(source)) {
-                    val ref = RegistryEntryRef(ownerClass, entryMatch.groupValues[1], modId, entryMatch.groupValues[2])
-                    entries[ref.fieldName] = ref
-                    entries["${ref.ownerClass}.${ref.fieldName}"] = ref
+                    val ownerClass = javaTypeNameContainingOffset(source, entryMatch.range.first)
+                        ?: file.fileName.toString().removeSuffix(".java")
+                    val ref = RegistryEntryRef(
+                        ownerPackage = ownerPackage,
+                        ownerClass = ownerClass,
+                        fieldName = entryMatch.groupValues[1],
+                        modId = modId,
+                        path = entryMatch.groupValues[2]
+                    )
+                    entries += ref
                 }
             }
         }
-        return entries
+        return legacyReferenceIndex(
+            entries,
+            fieldName = { it.fieldName },
+            ownerClass = { it.ownerClass },
+            ownerPackage = { it.ownerPackage }
+        )
     }
 
     private fun collectLegacyItemRegistryEntries(
@@ -2183,10 +2354,10 @@ ${codecFields.joinToString(",\n")}
     private fun deriveLegacyEnchantmentDefinition(
         registration: LegacyCustomEnchantmentRegistration,
         classSources: Map<String, List<Pair<Path, String>>>,
-        categories: Map<String, LegacyEnchantmentCategorySpec>,
-        registryEntries: Map<String, RegistryEntryRef>,
+        categories: LegacyReferenceIndex<LegacyEnchantmentCategorySpec>,
+        registryEntries: LegacyReferenceIndex<RegistryEntryRef>,
         itemRegistryEntries: Map<String, List<String>>,
-        enchantmentRefs: Map<String, LegacyCustomEnchantmentRegistration>,
+        enchantmentRefs: LegacyReferenceIndex<LegacyCustomEnchantmentRegistration>,
         errors: MutableList<String>
     ): LegacyEnchantmentDefinition? {
         val (_, source) = sourceForLegacyClass(registration.className, classSources, errors) ?: return null
@@ -2221,16 +2392,18 @@ ${codecFields.joinToString(",\n")}
         val maxLevel = parseLegacyIntReturnMethod(source, "getMaxLevel") ?: 1
         val minCost = parseLegacyCostMethod(source, "getMinCost", null) ?: LinearIntValue(1, 10)
         val maxCost = parseLegacyCostMethod(source, "getMaxCost", minCost) ?: LinearIntValue(minCost.base + 5, minCost.perLevelAboveFirst)
-        val treasureOnly = legacyClassChainAny(registration.className, classSources) {
+        val treasureOnly = legacyClassChainAny(registration.className, classSources, errors, registration) {
             legacyBooleanReturn(it, "isTreasureOnly") == true
         }
-        val tradeable = legacyClassChainFirstBoolean(registration.className, classSources, "isTradeable")
-        val discoverable = legacyClassChainFirstBoolean(registration.className, classSources, "isDiscoverable")
+        val tradeable = legacyClassChainFirstBoolean(registration.className, classSources, errors, registration, "isTradeable")
+        val discoverable = legacyClassChainFirstBoolean(registration.className, classSources, errors, registration, "isDiscoverable")
         val lootOnly = treasureOnly && tradeable == false && discoverable == false
         val weight = if (lootOnly) 1 else legacyRarityWeight(rarity)
         val anvilCost = if (lootOnly) 8 else legacyRarityAnvilCost(rarity)
+        val effectErrorsBefore = errors.size
         val effectsJson = deriveLegacyEnchantmentEffects(source, registryEntries, errors, registration)
-        val exclusiveSet = deriveLegacyExclusiveSet(source, enchantmentRefs)
+        if (errors.size > effectErrorsBefore) return null
+        val exclusiveSet = deriveLegacyExclusiveSet(source, enchantmentRefs, errors, registration) ?: return null
 
         return LegacyEnchantmentDefinition(
             registration = registration,
@@ -2259,7 +2432,7 @@ ${codecFields.joinToString(",\n")}
         registration: LegacyCustomEnchantmentRegistration,
         source: String,
         categoryExpression: String,
-        categories: Map<String, LegacyEnchantmentCategorySpec>,
+        categories: LegacyReferenceIndex<LegacyEnchantmentCategorySpec>,
         itemRegistryEntries: Map<String, List<String>>,
         slots: List<String>,
         errors: MutableList<String>
@@ -2286,7 +2459,7 @@ ${codecFields.joinToString(",\n")}
             return LegacyItemTarget("#minecraft:enchantable/mining", null, slotGroupsForLegacySlots(slots, customHand = false), emptyList())
         }
 
-        val customCategory = categories[category] ?: categories[category.substringAfterLast('.')]
+        val customCategory = resolveLegacyReferenceExpression(category, source, categories)
         if (customCategory?.itemClassName != null) {
             return customItemLegacyTarget(registration, customCategory.itemClassName, itemRegistryEntries, slots, errors)
         }
@@ -2368,7 +2541,7 @@ ${codecFields.joinToString(",\n")}
     }
 
     private fun extractLegacyConstructorSuperArgs(source: String, className: String): List<String>? {
-        val constructor = Regex("""(?s)\b${Regex.escape(className)}\s*\([^)]*\)\s*\{""").find(source) ?: return null
+        val constructor = Regex("""(?s)\b${Regex.escape(className.substringAfterLast('.'))}\s*\([^)]*\)\s*\{""").find(source) ?: return null
         val openBrace = source.indexOf('{', constructor.range.last)
         if (openBrace < 0) return null
         val closeBrace = findMatchingBrace(source, openBrace)
@@ -2443,19 +2616,26 @@ ${codecFields.joinToString(",\n")}
     private fun legacyClassChainAny(
         className: String,
         classSources: Map<String, List<Pair<Path, String>>>,
+        errors: MutableList<String>,
+        registration: LegacyCustomEnchantmentRegistration,
         predicate: (String) -> Boolean
     ): Boolean {
         val visited = mutableSetOf<String>()
         fun walk(name: String): Boolean {
             if (!visited.add(name)) return false
-            val source = classSources[name.substringAfterLast('.')].orEmpty().firstOrNull()?.second ?: return false
+            val matches = classSources[name].orEmpty()
+            if (matches.map { it.first }.distinct().size > 1) {
+                errors.add("Cannot derive custom enchantment data for ${registration.className}: class chain source '$name' is ambiguous")
+                return false
+            }
+            val source = uniqueLegacyClassSource(name, classSources)?.second ?: return false
             if (predicate(source)) return true
-            val base = Regex("""\bclass\s+${Regex.escape(name.substringAfterLast('.'))}\s+extends\s+([A-Za-z_$][\w$]*)""")
+            val base = Regex("""\bclass\s+${Regex.escape(name.substringAfterLast('.'))}\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)""")
                 .find(source)
                 ?.groupValues
                 ?.get(1)
                 ?: return false
-            return walk(base)
+            return walk(resolveLegacyClassReference(base, source, classSources))
         }
         return walk(className)
     }
@@ -2463,19 +2643,26 @@ ${codecFields.joinToString(",\n")}
     private fun legacyClassChainFirstBoolean(
         className: String,
         classSources: Map<String, List<Pair<Path, String>>>,
+        errors: MutableList<String>,
+        registration: LegacyCustomEnchantmentRegistration,
         methodName: String
     ): Boolean? {
         val visited = mutableSetOf<String>()
         fun walk(name: String): Boolean? {
             if (!visited.add(name)) return null
-            val source = classSources[name.substringAfterLast('.')].orEmpty().firstOrNull()?.second ?: return null
+            val matches = classSources[name].orEmpty()
+            if (matches.map { it.first }.distinct().size > 1) {
+                errors.add("Cannot derive custom enchantment data for ${registration.className}: class chain source '$name' is ambiguous")
+                return null
+            }
+            val source = uniqueLegacyClassSource(name, classSources)?.second ?: return null
             legacyBooleanReturn(source, methodName)?.let { return it }
-            val base = Regex("""\bclass\s+${Regex.escape(name.substringAfterLast('.'))}\s+extends\s+([A-Za-z_$][\w$]*)""")
+            val base = Regex("""\bclass\s+${Regex.escape(name.substringAfterLast('.'))}\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)""")
                 .find(source)
                 ?.groupValues
                 ?.get(1)
                 ?: return null
-            return walk(base)
+            return walk(resolveLegacyClassReference(base, source, classSources))
         }
         return walk(className)
     }
@@ -2498,31 +2685,41 @@ ${codecFields.joinToString(",\n")}
 
     private fun deriveLegacyExclusiveSet(
         source: String,
-        enchantmentRefs: Map<String, LegacyCustomEnchantmentRegistration>
-    ): List<String> {
+        enchantmentRefs: LegacyReferenceIndex<LegacyCustomEnchantmentRegistration>,
+        errors: MutableList<String>,
+        registration: LegacyCustomEnchantmentRegistration
+    ): List<String>? {
         val body = legacyMethodBody(source, "checkCompatibility") ?: return emptyList()
         val results = linkedSetOf<String>()
+        var unresolved = false
         Regex("""other\s*!=\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.get\(\)""")
             .findAll(body)
             .forEach { match ->
-                val ref = enchantmentRefs[match.groupValues[1]] ?: enchantmentRefs[match.groupValues[1].substringAfterLast('.')]
-                if (ref != null) results.add("${ref.modId}:${ref.registryName}")
+                val expression = match.groupValues[1]
+                val ref = resolveLegacyReferenceExpression(expression, source, enchantmentRefs)
+                if (ref == null) {
+                    unresolved = true
+                    errors.add("Cannot derive custom enchantment data for ${registration.className}: exclusive enchantment reference '$expression' is unresolved")
+                } else {
+                    results.add("${ref.modId}:${ref.registryName}")
+                }
             }
         Regex("""other\s*!=\s*Enchantments\.([A-Z0-9_]+)""")
             .findAll(body)
             .forEach { match -> results.add("minecraft:${match.groupValues[1].lowercase()}") }
+        if (unresolved) return null
         return results.toList()
     }
 
     private fun deriveLegacyEnchantmentEffects(
         source: String,
-        registryEntries: Map<String, RegistryEntryRef>,
+        registryEntries: LegacyReferenceIndex<RegistryEntryRef>,
         errors: MutableList<String>,
         registration: LegacyCustomEnchantmentRegistration
     ): String? {
         val effects = linkedMapOf<String, MutableList<String>>()
         derivePostHurtIgniteEffect(source)?.let { effects.getOrPut("minecraft:post_attack") { mutableListOf() }.add(it) }
-        derivePostHurtMobEffect(source, registryEntries)?.let { effects.getOrPut("minecraft:post_attack") { mutableListOf() }.add(it) }
+        derivePostHurtMobEffect(source, registryEntries, errors, registration)?.let { effects.getOrPut("minecraft:post_attack") { mutableListOf() }.add(it) }
         deriveDamageBonusEffect(source)?.let { effects.getOrPut("minecraft:damage") { mutableListOf() }.add(it) }
 
         val hasPostHurt = legacyMethodBody(source, "doPostHurt") != null
@@ -2574,7 +2771,9 @@ ${codecFields.joinToString(",\n")}
 
     private fun derivePostHurtMobEffect(
         source: String,
-        registryEntries: Map<String, RegistryEntryRef>
+        registryEntries: LegacyReferenceIndex<RegistryEntryRef>,
+        errors: MutableList<String>,
+        registration: LegacyCustomEnchantmentRegistration
     ): String? {
         val body = legacyMethodBody(source, "doPostHurt") ?: return null
         val helperCall = legacyMethodCalls(body)
@@ -2591,7 +2790,11 @@ ${codecFields.joinToString(",\n")}
             ?.groupValues
             ?.get(1)
             ?: return null
-        val effectId = registryEntries[effectRef]?.id ?: registryEntries[effectRef.substringAfterLast('.')]?.id ?: return null
+        val effectId = resolveLegacyReferenceExpression(effectRef, source, registryEntries)?.id
+            ?: run {
+                errors.add("Cannot derive custom enchantment data for ${registration.className}: mob effect reference '$effectRef' is unresolved")
+                return null
+            }
         val durationTicks = helperCall.arguments[1].trim().toDoubleOrNull() ?: return null
         val amplifier = parseLegacyAmplifierExpression(helperCall.arguments[2].trim()) ?: return null
         val chance = legacyRandomChancePerLevel(source) ?: return null

@@ -1461,6 +1461,72 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `custom enchantment data rejects registry reference tail fallback`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            final class ExampleMod {
+                static final String MODID = "example";
+            }
+
+            final class ModEffects {
+                public static final DeferredRegister<MobEffect> EFFECTS = DeferredRegister.create(ForgeRegistries.MOB_EFFECTS, ExampleMod.MODID);
+                public static final DeferredHolder<MobEffect, MobEffect> FROSTY = EFFECTS.register("frosty", FrostyEffect::new);
+            }
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> CHILL_AURA = ENCHANTMENTS.register("chill_aura", () -> new ChillAuraEnchantment(Enchantment.Rarity.UNCOMMON));
+            }
+
+            class FrostyEffect extends MobEffect {
+            }
+
+            class ChillAuraEnchantment extends Enchantment {
+                public ChillAuraEnchantment(Rarity rarity) {
+                    super(rarity, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET});
+                }
+
+                @Override
+                public void doPostHurt(LivingEntity user, Entity attacker, int level) {
+                    if (attacker instanceof LivingEntity entity) {
+                        doChillAuraEffect(entity, 200, level - 1, this.shouldHit(level, user.getRandom()));
+                    }
+                }
+
+                public static void doChillAuraEffect(LivingEntity victim, int duration, int amplifier, boolean shouldHit) {
+                    if (shouldHit) {
+                        victim.addEffect(new MobEffectInstance(MissingEffects.FROSTY.get(), duration, amplifier));
+                    }
+                }
+
+                private boolean shouldHit(int level, RandomSource random) {
+                    return level > 0 && random.nextFloat() < 0.15F * level;
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any { it.contains("mob effect reference 'MissingEffects.FROSTY' is unresolved") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/chill_aura.json").exists())
+    }
+
+    @Test
     fun `legacy enchantment category runtime checks migrate to holder item support`() {
         val projectDir = createTestFile("""
             package com.example;
