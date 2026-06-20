@@ -7444,26 +7444,27 @@ public final class DirtinessAttachment {
         return result
     }
 
-    private fun modIdReferenceForGeneratedClass(mainClass: Path?, mainText: String, generatedPackage: String): String {
-        if (mainClass == null || mainText.isBlank()) {
-            return detectModIdFromText(mainText)?.let { "\"$it\"" } ?: "\"modid\""
+    private fun modIdReferenceForGeneratedClass(mainClass: Path?, mainText: String, generatedPackage: String): String =
+        explicitModIdReferenceForGeneratedClass(mainClass, mainText, generatedPackage, metadataModId = null)
+            ?: throw IllegalStateException("Cannot derive mod id expression for generated class in package $generatedPackage")
+
+    private fun modAnnotationArgumentExpression(source: String): String? {
+        val argument = Regex("""@Mod\s*\(\s*([^)]+?)\s*\)""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
+            ?: return null
+        val value = Regex("""(?:value\s*=\s*)?(.+)""")
+            .matchEntire(argument)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
+            ?: return null
+        if (value.isBlank() || value.any { it == ';' || it == '{' || it == '}' || it == '\n' || it == '\r' }) {
+            return null
         }
-        val mainPackage = packageNameOf(mainText)
-        val className = mainClass.fileName.toString().removeSuffix(".java")
-        val classRef = if (mainPackage.isBlank() || mainPackage == generatedPackage) {
-            className
-        } else {
-            "$mainPackage.$className"
-        }
-        val constRef = Regex("""@Mod\s*\(\s*${Regex.escape(className)}\.(\w+)\s*\)""").find(mainText)
-        if (constRef != null) {
-            return "$classRef.${constRef.groupValues[1]}"
-        }
-        val directConst = Regex("""public\s+static\s+final\s+String\s+(MOD_ID|MODID)\s*=\s*"[^"]+"""").find(mainText)
-        if (directConst != null) {
-            return "$classRef.${directConst.groupValues[1]}"
-        }
-        return detectModIdFromText(mainText)?.let { "\"$it\"" } ?: "\"${mainPackage.substringAfterLast('.', "modid")}\""
+        return value
     }
 
     private fun explicitModIdReferenceForGeneratedClass(
@@ -40815,8 +40816,8 @@ public class ${builder.className} implements RecipeBuilder {
 
                 if (modBusMethods.isEmpty()) return@forEach
 
-                val modidMatch = Regex("""public\s+static\s+final\s+String\s+(\w+)\s*=\s*"(\w+)"""").find(content)
-                val modidRef = modidMatch?.groupValues?.get(1) ?: "\"${modidMatch?.groupValues?.get(2) ?: "modid"}\""
+                val modidRef = modAnnotationArgumentExpression(content)
+                    ?: throw IllegalStateException("Cannot derive mod id expression for mod-bus event extraction in $file")
 
                 val clientMethods = modBusMethods.filter { it.isClientOnly }
                 val commonMethods = modBusMethods.filter { !it.isClientOnly }

@@ -93,7 +93,7 @@
       ],
       "mavenUrl": null,
       "status": "available",
-      "notes": "Alex's Mobs: public NeoForge 1.21.1 community port used for compile-only optional compat"
+      "notes": "Alex's Mobs CurseMaven: 7391745 provides a NeoForge 1.21.1 compatible compile-only optional API target"
     },
     {
       "forgePrefix": "curse.maven:citadel-331936",
@@ -116,7 +116,7 @@
       ],
       "mavenUrl": null,
       "status": "available",
-      "notes": "Alex's Caves: public NeoForge 1.21.1 community port used for compile-only optional compat"
+      "notes": "Alex's Caves CurseMaven: 7485074 provides a NeoForge 1.21.1 compatible compile-only optional API target"
     },
     {
       "forgePrefix": "curse.maven:epic-fight-mod-405076",
@@ -186,7 +186,7 @@
       ],
       "mavenUrl": "https://nexus.resourcefulbees.com/repository/maven-public/",
       "status": "available",
-      "notes": "CrossDimCommands: replaced by CommandStructures NeoForge runtime coordinate used by the upstream 1.21.1 port"
+      "notes": "CrossDimCommands: replaced by a CommandStructures NeoForge runtime coordinate for the compatible structure-command API"
     },
     {
       "forgePrefix": "curse.maven:jade-324717",
@@ -198,12 +198,12 @@
         {
           "name": "jade_version",
           "value": "5813144",
-          "notes": "Jade NeoForge 1.21.1 CurseMaven file used by upstream Aether 1.21.1"
+          "notes": "Jade NeoForge 1.21.1 CurseMaven file"
         }
       ],
       "mavenUrl": null,
       "status": "available",
-      "notes": "Jade CurseMaven: 5813144 is the NeoForge 1.21.1 compile-only API/runtime file used by the upstream Aether 1.21.1 port"
+      "notes": "Jade CurseMaven: 5813144 is the NeoForge 1.21.1 compile-only API/runtime file"
     },
     {
       "forgePrefix": "curse.maven:lootr-361276",
@@ -230,7 +230,7 @@
       ],
       "mavenUrl": null,
       "status": "available",
-      "notes": "JEED CurseMaven: 6550600 is the NeoForge 1.21.1 runtime build used by the upstream 1.21.1 port"
+      "notes": "JEED CurseMaven: 6550600 is a NeoForge 1.21.1 runtime build"
     },
     {
       "forgePrefix": "curse.maven:museum-curator-859070",
@@ -238,7 +238,7 @@
       "neoforgeCoords": [],
       "mavenUrl": null,
       "status": "remove",
-      "notes": "Museum Curator: upstream 1.21.1 port disables this optional runtime integration because no NeoForge 1.21.1 runtime target is declared"
+      "notes": "Museum Curator: remove this optional runtime integration because no NeoForge 1.21.1 runtime target is declared"
     },
     {
       "forgePrefix": "curse.maven:serene-seasons-291874",

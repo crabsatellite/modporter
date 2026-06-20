@@ -192,6 +192,46 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `dependency mapping notes describe artifacts not benchmark upstream ports`() {
+        val text = javaClass.getResourceAsStream("/mappings/forge2neo/neoforge-deps.json")
+            ?.bufferedReader()
+            ?.readText()
+            ?: error("neoforge-deps.json missing")
+        val dependencies = Json.parseToJsonElement(text).jsonObject.getValue("dependencies").jsonArray
+        val forbidden = listOf(
+            "upstream port citation" to Regex("""\bupstream\b""", RegexOption.IGNORE_CASE),
+            "benchmark citation" to Regex("""\bbenchmark\b""", RegexOption.IGNORE_CASE)
+        )
+
+        val offenders = dependencies.flatMapIndexed { index, element ->
+            val dependency = element.jsonObject
+            val dependencyId = dependency["forgePrefix"]?.jsonPrimitive?.content ?: "dependency[$index]"
+            val notes = buildList {
+                dependency["notes"]?.jsonPrimitive?.content?.let { note ->
+                    add("notes" to note)
+                }
+                dependency["versionProperties"]?.jsonArray?.forEach { versionElement ->
+                    val versionProperty = versionElement.jsonObject
+                    val name = versionProperty["name"]?.jsonPrimitive?.content.orEmpty()
+                    versionProperty["notes"]?.jsonPrimitive?.content?.let { note ->
+                        add("versionProperties[$name].notes" to note)
+                    }
+                }
+            }
+            notes.flatMap { (field, note) ->
+                forbidden
+                    .filter { (_, pattern) -> pattern.containsMatchIn(note) }
+                    .map { (label, _) -> "$dependencyId $field contains $label" }
+            }
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Dependency mappings must cite source/target artifacts, not benchmark upstream ports: $offenders"
+        )
+    }
+
+    @Test
     fun `default production migration code has no mod specific rule remnants`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val scannedRoots = listOf(
@@ -518,6 +558,36 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty(),
             "Migration rules must derive mod ids from source structure, not silently synthesize minecraft as a namespace fallback: $offenders"
+        )
+    }
+
+    @Test
+    fun `production migrations do not synthesize placeholder mod id values`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val forbidden = listOf(
+            "literal modid return" to "return \"\\\"modid\\\"\"",
+            "literal modid elvis fallback" to "?: \"\\\"modid\\\"\"",
+            "plain modid elvis fallback" to "?: \"modid\"",
+            "package-tail modid fallback" to "substringAfterLast('.', \"modid\")"
+        )
+
+        val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) && it.extension == "kt" }
+                .flatMap { file ->
+                    val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                    val text = file.readText()
+                    forbidden
+                        .filter { (_, marker) -> text.contains(marker) }
+                        .map { (label, _) -> "$relative contains $label" }
+                        .stream()
+                }
+                .toList()
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Migration rules must fail through source-derived mod id gates, not synthesize placeholder modid values: $offenders"
         )
     }
 

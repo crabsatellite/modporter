@@ -358,6 +358,73 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `extracts mod bus event methods with source derived mod ids`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LiteralMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+            import net.neoforged.neoforge.client.event.RegisterColorHandlersEvent;
+
+            @Mod("literalmod")
+            public class LiteralMod {
+                public LiteralMod(IEventBus modEventBus) {
+                    modEventBus.register(this);
+                }
+
+                @SubscribeEvent
+                public void setup(FMLCommonSetupEvent event) {
+                    event.toString();
+                }
+
+                @SubscribeEvent
+                public void colors(RegisterColorHandlersEvent.Item event) {
+                    event.toString();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ConstantMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+
+            @Mod(ConstantMod.MODID)
+            public class ConstantMod {
+                public static final String MODID = "constantmod";
+
+                public ConstantMod(IEventBus modEventBus) {
+                    modEventBus.register(this);
+                }
+
+                @SubscribeEvent
+                public void setup(FMLCommonSetupEvent event) {
+                    event.toString();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val literal = srcDir.resolve("LiteralMod.java").readText()
+        val constant = srcDir.resolve("ConstantMod.java").readText()
+
+        assertTrue(result.changes.count { it.ruleId == "struct-extract-mod-bus-events" } >= 2)
+        assertTrue(literal.contains("""@EventBusSubscriber(modid = "literalmod", bus = EventBusSubscriber.Bus.MOD)"""), literal)
+        assertTrue(literal.contains("""@EventBusSubscriber(modid = "literalmod", bus = EventBusSubscriber.Bus.MOD, value = net.neoforged.api.distmarker.Dist.CLIENT)"""), literal)
+        assertTrue(constant.contains("@EventBusSubscriber(modid = ConstantMod.MODID, bus = EventBusSubscriber.Bus.MOD)"), constant)
+        assertFalse(literal.contains("modid = \"modid\""), literal)
+        assertFalse(constant.contains("modid = \"modid\""), constant)
+        assertFalse(literal.contains("modEventBus.register(this);"), literal)
+        assertFalse(constant.contains("modEventBus.register(this);"), constant)
+    }
+
+    @Test
     fun `event bus subscriber methods become static for automatic registration`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -19135,7 +19202,8 @@ class StructuralRefactorExtraTest {
         assertTrue(creative.contains("new EnchantmentInstance(enchantment, enchantment.value().getMaxLevel())"))
         assertTrue(misc.contains("REGISTRY.byNameCodec()"))
         assertTrue(misc.contains("BuiltInRegistries.ENTITY_TYPE.byNameCodec()"))
-        assertTrue(misc.contains("Component.Serializer.toJson(Component.literal(\"ok\"))"))
+        assertTrue(misc.contains("net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, Component.literal(\"ok\")).getOrThrow().toString()"))
+        assertFalse(misc.contains("Component.Serializer.toJson(Component.literal(\"ok\"))"))
         assertFalse(misc.contains("this.registryAccess()"))
         assertTrue(!misc.contains("RegistryAccess.EMPTY"))
         assertTrue(!misc.contains("ExtraCodecs.lazyInitializedCodec"))
