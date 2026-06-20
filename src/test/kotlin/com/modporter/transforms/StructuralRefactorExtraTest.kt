@@ -12234,6 +12234,33 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `common LazyOptional import bridge hard gates missing source mod id`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LazyOptionalConsumer.java").writeText("""
+            package com.example;
+
+            public class LazyOptionalConsumer {
+                private LazyOptional<String> value;
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val lazyOptionalConsumer = srcDir.resolve("LazyOptionalConsumer.java").readText()
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Common NeoForge 1.21 API migration error") &&
+                    it.contains("Cannot derive generated compat package") &&
+                    it.contains("common 1.21 LazyOptional import bridge")
+            },
+            "Expected missing mod id hard gate, got: ${result.errors}"
+        )
+        assertFalse(lazyOptionalConsumer.contains("com.modporter.generated.shared"))
+        assertFalse(lazyOptionalConsumer.contains("com.modporter.generated.mod"))
+    }
+
+    @Test
     fun `migrates nitrogen recipe builders from project source structure`() {
         val recipeDir = tempDir.resolve("src/main/java/com/example/recipe/recipes/block")
         val serializerDir = tempDir.resolve("src/main/java/com/example/recipe/serializer")
@@ -12651,6 +12678,7 @@ class StructuralRefactorExtraTest {
     fun `migrates attribute modifier method expressions only when return type is known`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
+        tempDir.resolve("gradle.properties").writeText("mod_id=example\n")
         srcDir.resolve("RideSupport.java").writeText("""
             package com.example;
 

@@ -689,6 +689,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `common LazyOptional import bridge uses required source mod ids`() {
+        val structuralPass = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = structuralPass.indexOf("private fun migrateCommonNeoForge121Apis")
+        assertTrue(start >= 0, "migrateCommonNeoForge121Apis is missing")
+        val end = structuralPass.indexOf("\n    private data class", start).let {
+            if (it < 0) structuralPass.indexOf("\n    private fun migrateVanilla121ApiSource", start) else it
+        }
+        assertTrue(end > start, "migrateCommonNeoForge121Apis boundary is missing")
+        val body = structuralPass.substring(start, end)
+        val offenders = listOf(
+            "placeholder compat resolver" to "detectGeneratedCompatPackage(projectDir)",
+            "shared package fallback" to "?: \"shared\"",
+            "blank mod id fallback" to "ifBlank { \"mod\" }"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Common LazyOptional import bridge must not synthesize generated compat package ids: $offenders"
+        )
+        assertTrue(
+            body.contains("""detectRequiredGeneratedCompatPackage(projectDir, "common 1.21 LazyOptional import bridge")"""),
+            "Common LazyOptional import bridge must use a required source-derived mod id gate"
+        )
+        assertTrue(
+            structuralPass.contains("private fun migrateGeneratedLazyOptionalImportSource(source: String, generatedCompatPackage: () -> String)"),
+            "Generated LazyOptional import migration must resolve compat packages lazily at the import bridge site"
+        )
+    }
+
+    @Test
     fun `resource mod id detection does not infer constant owners from file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot

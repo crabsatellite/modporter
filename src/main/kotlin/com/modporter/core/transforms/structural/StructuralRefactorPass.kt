@@ -9329,7 +9329,6 @@ $fields
         val modId = detectModId(projectDir) ?: projectMetadataModId(projectDir)
         val mainClass = detectModMainClass(projectDir)
         val mainText = mainClass?.readText().orEmpty()
-        val generatedCompatPackage = detectGeneratedCompatPackage(projectDir)
         val deferredHolderFields = collectDeferredHolderFields(srcDir)
         val gameEventDeferredHolderFields = collectDeferredHolderFieldsOf(srcDir, "GameEvent")
         val soundEventSupplierConstructors = collectSoundEventSupplierConstructors(javaFiles)
@@ -9803,7 +9802,7 @@ $fields
                     legacyPlacementBanBaseClasses,
                     legacyPlacementBanBuilderClasses,
                     modId.orEmpty(),
-                    generatedCompatPackage,
+                    { detectRequiredGeneratedCompatPackage(projectDir, "common 1.21 LazyOptional import bridge") },
                     savedDataClassNames,
                     legacyLootTableResourceLocationReferences,
                     attributeModifierNamespaceExpression = explicitModIdReferenceForGeneratedClass(
@@ -14876,7 +14875,7 @@ ${indent}}
         legacyPlacementBanBaseClasses: Set<String> = emptySet(),
         legacyPlacementBanBuilderClasses: Set<String> = emptySet(),
         modId: String = "",
-        generatedCompatPackage: String = "",
+        generatedCompatPackage: () -> String = { "" },
         savedDataClassNames: Set<String> = emptySet(),
         legacyLootTableResourceLocationReferences: Set<String> = emptySet(),
         attributeModifierNamespaceExpression: String? = null
@@ -34528,14 +34527,17 @@ ${indent}}
         return result
     }
 
-    private fun migrateGeneratedLazyOptionalImportSource(source: String, generatedCompatPackage: String): String {
-        if (generatedCompatPackage.isBlank() ||
-            !source.contains("LazyOptional<") ||
-            source.contains("import $generatedCompatPackage.LazyOptional;") ||
-            Regex("""(?m)^package\s+${Regex.escape(generatedCompatPackage)}\s*;""").containsMatchIn(source)) {
+    private fun migrateGeneratedLazyOptionalImportSource(source: String, generatedCompatPackage: () -> String): String {
+        if (!source.contains("LazyOptional<") ||
+            Regex("""(?m)^[ \t]*import\s+com\.modporter\.generated\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.compat\.LazyOptional;\s*$""")
+                .containsMatchIn(source) ||
+            Regex("""(?m)^package\s+com\.modporter\.generated\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.compat\s*;""")
+                .containsMatchIn(source)) {
             return source
         }
-        return addImportIfMissing(source, "$generatedCompatPackage.LazyOptional")
+        val compatPackage = generatedCompatPackage()
+        if (compatPackage.isBlank() || source.contains("import $compatPackage.LazyOptional;")) return source
+        return addImportIfMissing(source, "$compatPackage.LazyOptional")
     }
 
     private fun migrateNitrogenBlockStateRecipeConstructors(source: String): String {
