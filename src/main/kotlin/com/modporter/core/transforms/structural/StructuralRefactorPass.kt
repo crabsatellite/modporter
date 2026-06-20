@@ -2839,7 +2839,7 @@ ${registrations.distinct().joinToString("\n")}
             val javaFiles = Files.walk(srcDir).filter { it.toString().endsWith(".java") }.toList()
             for (file in javaFiles) {
                 val text = file.readText()
-                detectModIdFromText(text)?.let(candidates::add)
+                candidates.addAll(detectModIdsFromText(text))
             }
         } catch (_: Exception) {}
         return candidates.singleOrNull()
@@ -8008,35 +8008,110 @@ public final class ${spec.attachmentClassName} {
             ?.let { "\"$it\"" }
     }
 
-    private fun detectModIdFromText(text: String): String? {
+    private data class JavaTypeBlock(
+        val name: String,
+        val start: Int,
+        val declarationStart: Int,
+        val bodyStart: Int,
+        val end: Int
+    )
+
+    private fun detectModIdsFromText(text: String): Set<String> {
+        val candidates = linkedSetOf<String>()
         val code = maskJavaComments(text)
         val executableCode = maskJavaCommentsAndLiterals(text)
-        Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)""")
-            .find(code)
-            ?.takeIf { match ->
+        val typeBlocks = javaTypeBlocks(text, executableCode)
+        Regex("""@Mod\s*\(\s*(?:value\s*=\s*)?"([^"]+)"\s*\)""")
+            .findAll(code)
+            .filter { match ->
                 executableCode
                     .substring(match.range.first, match.range.last + 1)
                     .contains("@Mod")
             }
-            ?.let { return it.groupValues[1] }
-        val constRef = Regex("""@Mod\s*\(\s*(?:[A-Za-z_$][\w$]*\.)?([A-Za-z_$][\w$]*)\s*\)""")
-            .find(code)
-            ?.takeIf { match ->
+            .forEach { candidates += it.groupValues[1] }
+        Regex("""@Mod\s*\(\s*(?:value\s*=\s*)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\)""")
+            .findAll(code)
+            .filter { match ->
                 executableCode
                     .substring(match.range.first, match.range.last + 1)
                     .contains("@Mod")
             }
-        if (constRef != null) {
-            Regex("""(?m)\b(?:public|private|protected)?\s*static\s+final\s+String\s+${Regex.escape(constRef.groupValues[1])}\s*=\s*"([^"]+)"""")
-                .find(code)
-                ?.takeIf { match ->
-                    val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
-                    executableSegment.contains("String") &&
-                        executableSegment.contains("=")
+            .forEach { match ->
+                val modArgument = match.groupValues[1]
+                val constName = modArgument.substringAfterLast('.')
+                val owner = if (modArgument.contains('.')) {
+                    val ownerName = modArgument.substringBeforeLast('.').substringAfterLast('.')
+                    typeBlocks.singleOrNull { it.name == ownerName }
+                } else {
+                    javaTypeBlockForModAnnotation(match.range.last, typeBlocks)
                 }
-                ?.let { return it.groupValues[1] }
-        }
-        return null
+                if (owner != null) {
+                    javaStaticFinalStringConstant(code, executableCode, owner, constName, typeBlocks)
+                        ?.let { candidates += it }
+                }
+            }
+        return candidates
+    }
+
+    private fun javaTypeBlocks(text: String, executableCode: String): List<JavaTypeBlock> {
+        val identifier = """[A-Za-z_$][\w$]*"""
+        val declaration = Regex(
+            """(?m)^[ \t]*(?:(?:@(?:$identifier\.)*$identifier(?:\s*\([^;\r\n]*\))?|public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*(class|interface|enum|record)\s+($identifier)\b"""
+        )
+        return declaration.findAll(executableCode).mapNotNull { match ->
+            val declarationStart = match.groups[1]?.range?.first ?: match.range.first
+            val name = match.groupValues[2]
+            val openBrace = executableCode.indexOf('{', match.range.last + 1)
+            if (openBrace < 0) return@mapNotNull null
+            val closeBrace = findMatchingBrace(executableCode, openBrace)
+            if (closeBrace < 0 || closeBrace >= text.length) return@mapNotNull null
+            JavaTypeBlock(
+                name = name,
+                start = match.range.first,
+                declarationStart = declarationStart,
+                bodyStart = openBrace,
+                end = closeBrace
+            )
+        }.toList()
+    }
+
+    private fun javaTypeBlockForModAnnotation(annotationEnd: Int, typeBlocks: List<JavaTypeBlock>): JavaTypeBlock? =
+        typeBlocks
+            .filter { it.declarationStart > annotationEnd }
+            .minByOrNull { it.declarationStart }
+
+    private fun javaStaticFinalStringConstant(
+        code: String,
+        executableCode: String,
+        owner: JavaTypeBlock,
+        constName: String,
+        typeBlocks: List<JavaTypeBlock>
+    ): String? {
+        val bodyStart = owner.bodyStart + 1
+        val bodyEnd = owner.end
+        if (bodyStart >= bodyEnd || bodyEnd > code.length) return null
+        val constant = Regex("""(?m)\b((?:(?:public|private|protected|static|final)\s+)*)String\s+${Regex.escape(constName)}\s*=\s*"([^"]+)"""")
+        return constant.findAll(code.substring(bodyStart, bodyEnd))
+            .firstNotNullOfOrNull { match ->
+                val globalStart = bodyStart + match.range.first
+                val globalEnd = bodyStart + match.range.last
+                val executableSegment = executableCode.substring(globalStart, globalEnd + 1)
+                val modifiers = match.groupValues[1]
+                val declaringType = typeBlocks
+                    .filter { globalStart > it.bodyStart && globalStart < it.end }
+                    .minByOrNull { it.end - it.bodyStart }
+                if (
+                    declaringType == owner &&
+                    Regex("""\bstatic\b""").containsMatchIn(modifiers) &&
+                    Regex("""\bfinal\b""").containsMatchIn(modifiers) &&
+                    executableSegment.contains("String") &&
+                    executableSegment.contains("=")
+                ) {
+                    match.groupValues[2]
+                } else {
+                    null
+                }
+            }
     }
 
     private fun hasStaticFinalStringConstant(source: String, name: String): Boolean {
