@@ -30598,6 +30598,10 @@ ${indent}}
             }
             val body = result.substring(openBrace + 1, closeBrace)
             val playerArgument = bucketPickupPlayerArgumentForEnclosingMethod(result, match.range.first)
+            if (playerArgument == null) {
+                cursor = closeBrace + 1
+                continue
+            }
             val migratedBody = migrateLegacyBucketPickupCallsForReceiver(body, receiver, playerArgument)
             if (migratedBody != body) {
                 result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
@@ -30609,11 +30613,11 @@ ${indent}}
 
         cursor = 0
         val parameterPattern = Regex(
-            """\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?[\w<>\[\].?,\s]+\s+[A-Za-z_$][\w$]*\s*\([^;{}()]*\b(?:net\.minecraft\.world\.level\.block\.)?BucketPickup\s+([A-Za-z_$][\w$]*)[^;{}()]*\)\s*(?:throws\s+[^{]+)?\{"""
+            """\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?[\w<>\[\].?,\s]+\s+[A-Za-z_$][\w$]*\s*\(([^;{}()]*\b(?:net\.minecraft\.world\.level\.block\.)?BucketPickup\s+([A-Za-z_$][\w$]*)[^;{}()]*)\)\s*(?:throws\s+[^{]+)?\{"""
         )
         while (true) {
             val match = parameterPattern.find(result, cursor) ?: break
-            val receiver = match.groupValues[1]
+            val receiver = match.groupValues[2]
             val openBrace = match.range.last
             val closeBrace = findMatchingBrace(result, openBrace)
             if (closeBrace <= openBrace) {
@@ -30621,7 +30625,7 @@ ${indent}}
                 continue
             }
             val body = result.substring(openBrace + 1, closeBrace)
-            val playerArgument = bucketPickupPlayerArgumentForEnclosingMethod(result, match.range.first)
+            val playerArgument = singlePlayerParameterName(match.groupValues[1]) ?: "null"
             val migratedBody = migrateLegacyBucketPickupCallsForReceiver(body, receiver, playerArgument)
             if (migratedBody != body) {
                 result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
@@ -30633,7 +30637,7 @@ ${indent}}
 
         cursor = 0
         val methodPattern = Regex(
-            """\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?[\w<>\[\].?,\s]+\s+[A-Za-z_$][\w$]*\s*\([^;{}()]*\)\s*(?:throws\s+[^{]+)?\{"""
+            """\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?[\w<>\[\].?,\s]+\s+[A-Za-z_$][\w$]*\s*\(([^;{}()]*)\)\s*(?:throws\s+[^{]+)?\{"""
         )
         while (true) {
             val match = methodPattern.find(result, cursor) ?: break
@@ -30644,7 +30648,7 @@ ${indent}}
                 continue
             }
             val body = result.substring(openBrace + 1, closeBrace)
-            val playerArgument = bucketPickupPlayerArgumentForEnclosingMethod(result, match.range.first)
+            val playerArgument = singlePlayerParameterName(match.groupValues[1]) ?: "null"
             val migratedBody = migrateLegacyBucketPickupLocalDeclarationBody(body, playerArgument)
             if (migratedBody != body) {
                 result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
@@ -30656,14 +30660,14 @@ ${indent}}
         return result
     }
 
-    private fun bucketPickupPlayerArgumentForEnclosingMethod(source: String, offset: Int): String {
+    private fun bucketPickupPlayerArgumentForEnclosingMethod(source: String, offset: Int): String? {
         val methodPattern = Regex(
             """\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?[\w<>\[\].?,\s]+\s+[A-Za-z_$][\w$]*\s*\(([^;{}()]*)\)\s*(?:throws\s+[^{]+)?\{"""
         )
-        val method = methodPattern.findAll(source.substring(0, offset)).lastOrNull() ?: return "null"
+        val method = methodPattern.findAll(source.substring(0, offset)).lastOrNull() ?: return null
         val openBrace = method.range.last
         val closeBrace = findMatchingBrace(source, openBrace)
-        if (closeBrace <= offset) return "null"
+        if (closeBrace <= offset) return null
         return singlePlayerParameterName(method.groupValues[1]) ?: "null"
     }
 

@@ -18659,6 +18659,41 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy bucket pickup call sites outside method scope are not migrated with synthetic null player`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BucketPickupInitializer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.LevelAccessor;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.BucketPickup;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class BucketPickupInitializer {
+                private Block block;
+                private LevelAccessor level;
+                private BlockPos pos;
+                private BlockState state;
+
+                {
+                    if (block instanceof BucketPickup bucketPickup) {
+                        bucketPickup.pickupBlock(level, pos, state);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("BucketPickupInitializer.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("bucketPickup.pickupBlock(level, pos, state);"), migrated)
+        assertFalse(migrated.contains("bucketPickup.pickupBlock(null, level, pos, state);"), migrated)
+    }
+
+    @Test
     fun `migrates advancement holder predicates registry iteration and parent traversal`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val registerDir = srcDir.resolve("registers")

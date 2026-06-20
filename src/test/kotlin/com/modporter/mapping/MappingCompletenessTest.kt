@@ -616,6 +616,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `bucket pickup call site migration requires method scope before nullable player argument`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyBucketPickupCallSites")
+        assertTrue(start >= 0, "migrateLegacyBucketPickupCallSites is missing")
+        val end = source.indexOf("private fun migrateLegacyBucketPickupLocalDeclarationBody", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "missing enclosing method falls back to null player" to "lastOrNull() ?: return \"null\"",
+            "out-of-scope method falls back to null player" to "if (closeBrace <= offset) return \"null\""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("private fun bucketPickupPlayerArgumentForEnclosingMethod(source: String, offset: Int): String?") &&
+                body.contains("lastOrNull() ?: return null") &&
+                body.contains("if (closeBrace <= offset) return null") &&
+                body.contains("if (playerArgument == null)") &&
+                body.contains("singlePlayerParameterName(method.groupValues[1]) ?: \"null\""),
+            "BucketPickup call-site migration may pass null only after proving an enclosing method with no Player parameter"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "BucketPickup call-site migration must not use nullable player as a fallback for missing method-scope evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `client only build detection ignores comments and strings`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
