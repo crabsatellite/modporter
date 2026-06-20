@@ -817,7 +817,8 @@ class MappingCompletenessTest {
         val forbidden = listOf(
             "java file-name owner" to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
             "type-name elvis file fallback" to Regex("""javaTypeNameContainingOffset\([^)]*\)\s*\?:\s*file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
-            "bare @Mod file owner fallback" to Regex("""ids\.putIfAbsent\([^,\r\n]*className""")
+            "bare @Mod file owner fallback" to Regex("""ids\.putIfAbsent\([^,\r\n]*className"""),
+            "global simple mod id table" to Regex("""\bsimpleValues\b""")
         )
         val offenders = forbidden
             .filter { (_, pattern) -> pattern.containsMatchIn(body) }

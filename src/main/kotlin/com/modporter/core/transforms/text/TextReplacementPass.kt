@@ -2100,7 +2100,6 @@ ${codecFields.joinToString(",\n")}
 
     private fun detectLegacyJavaModIds(javaSources: List<Pair<Path, String>>): Map<String, String> {
         val ids = linkedMapOf<String, String>()
-        val simpleValues = linkedMapOf<String, MutableSet<String>>()
         for ((_, source) in javaSources) {
             val packageName = legacyJavaPackageName(source)
             Regex("""\bstatic\s+(?:final\s+)?String\s+([A-Za-z_$][\w$]*)\s*=\s*"([^"]+)"""")
@@ -2108,7 +2107,6 @@ ${codecFields.joinToString(",\n")}
                 .forEach { match ->
                     val ownerClass = javaTypeNameContainingOffset(source, match.range.first)
                         ?: return@forEach
-                    simpleValues.getOrPut(match.groupValues[1]) { linkedSetOf() } += match.groupValues[2]
                     ids["$ownerClass.${match.groupValues[1]}"] = match.groupValues[2]
                     if (packageName.isNotBlank()) {
                         ids["$packageName.$ownerClass.${match.groupValues[1]}"] = match.groupValues[2]
@@ -2122,11 +2120,6 @@ ${codecFields.joinToString(",\n")}
                         ids["$packageName.${match.groupValues[2]}"] = match.groupValues[1]
                     }
                 }
-        }
-        simpleValues.forEach { (name, values) ->
-            if (values.size == 1) {
-                ids[name] = values.single()
-            }
         }
         return ids
     }
@@ -2211,7 +2204,7 @@ ${codecFields.joinToString(",\n")}
             for (registerMatch in registerPattern.findAll(source)) {
                 val registerField = registerMatch.groupValues[1]
                 val modIdExpression = registerMatch.groupValues[2].trim()
-                val modId = resolveLegacyModIdExpression(modIdExpression, modIds)
+                val modId = resolveLegacyModIdExpression(modIdExpression, modIds, source, registerMatch.range.first)
                 if (modId == null) {
                     errors.add("Cannot derive custom enchantment data in ${file.fileName}: unresolved mod id expression '$modIdExpression'")
                     continue
@@ -2252,10 +2245,32 @@ ${codecFields.joinToString(",\n")}
         return results
     }
 
-    private fun resolveLegacyModIdExpression(expression: String, modIds: Map<String, String>): String? {
+    private fun resolveLegacyModIdExpression(
+        expression: String,
+        modIds: Map<String, String>,
+        source: String,
+        offset: Int
+    ): String? {
         val trimmed = expression.trim()
         if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) return trimmed.trim('"')
-        return modIds[trimmed]
+        modIds[trimmed]?.let { return it }
+
+        if (!Regex("""^[A-Za-z_$][\w$]*$""").matches(trimmed)) return null
+        val context = legacyJavaContext(source)
+        context.staticFieldImports[trimmed]?.let { imported ->
+            modIds[imported]?.let { return it }
+        }
+        context.staticWildcardImports
+            .mapNotNull { importedOwner -> modIds["$importedOwner.$trimmed"] }
+            .distinct()
+            .singleOrNull()
+            ?.let { return it }
+        val ownerClass = javaTypeNameContainingOffset(source, offset) ?: return null
+        modIds["$ownerClass.$trimmed"]?.let { return it }
+        if (context.packageName.isNotBlank()) {
+            modIds["${context.packageName}.$ownerClass.$trimmed"]?.let { return it }
+        }
+        return null
     }
 
     private fun collectLegacyEnchantmentCategories(
@@ -2301,7 +2316,12 @@ ${codecFields.joinToString(",\n")}
             val ownerPackage = legacyJavaPackageName(source)
             for (registerMatch in registerPattern.findAll(source)) {
                 val registerField = registerMatch.groupValues[1]
-                val modId = resolveLegacyModIdExpression(registerMatch.groupValues[2], modIds) ?: continue
+                val modId = resolveLegacyModIdExpression(
+                    expression = registerMatch.groupValues[2],
+                    modIds = modIds,
+                    source = source,
+                    offset = registerMatch.range.first
+                ) ?: continue
                 val entryPattern = Regex(
                     """(?s)(?:public\s+)?static\s+final\s+(?:RegistryObject|DeferredHolder|DeferredItem)\s*<[^;=]+>\s+($id)\s*=\s*${Regex.escape(registerField)}\.register\(\s*"([^"]+)""""
                 )
@@ -2339,7 +2359,12 @@ ${codecFields.joinToString(",\n")}
         for ((_, source) in javaSources) {
             for (registerMatch in registerPattern.findAll(source)) {
                 val registerField = registerMatch.groupValues[1]
-                val modId = resolveLegacyModIdExpression(registerMatch.groupValues[2], modIds) ?: continue
+                val modId = resolveLegacyModIdExpression(
+                    expression = registerMatch.groupValues[2],
+                    modIds = modIds,
+                    source = source,
+                    offset = registerMatch.range.first
+                ) ?: continue
                 val entryPattern = Regex(
                     """(?s)${Regex.escape(registerField)}\.register\(\s*"([^"]+)"\s*,\s*(?:\(\)\s*->\s*)?new\s+($id)\s*\("""
                 )

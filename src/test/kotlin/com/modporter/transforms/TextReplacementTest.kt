@@ -1498,6 +1498,77 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `custom enchantment data resolves unqualified mod id from declaring java type`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModEnchantments {
+                public static final String MODID = "example";
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(
+                        BuiltInRegistries.ENCHANTMENT,
+                        MODID
+                );
+                public static final DeferredHolder<Enchantment, Enchantment> FLAME = ENCHANTMENTS.register("flame", FlameEnchantment::new);
+
+                private static class FlameEnchantment extends Enchantment {
+                    private FlameEnchantment() {
+                        super(Rarity.COMMON, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.CHEST});
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "text-custom-enchantment-data" })
+        assertTrue(tempDir.resolve("src/generated/resources/data/example/enchantment/flame.json").exists())
+    }
+
+    @Test
+    fun `custom enchantment data does not resolve bare mod id by global uniqueness`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public static final String MODID = "example";
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(
+                        BuiltInRegistries.ENCHANTMENT,
+                        MODID
+                );
+                public static final DeferredHolder<Enchantment, Enchantment> FLAME = ENCHANTMENTS.register("flame", FlameEnchantment::new);
+
+                private static class FlameEnchantment extends Enchantment {
+                    private FlameEnchantment() {
+                        super(Rarity.COMMON, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.CHEST});
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any { it.contains("unresolved mod id expression 'MODID'") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/flame.json").exists())
+    }
+
+    @Test
     fun `custom enchantment data rejects registry reference tail fallback`() {
         val projectDir = createTestFile("""
             package com.example;
