@@ -429,6 +429,44 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `deferred holder presence checks use declared owners and executable code`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RegistryDeclarations.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            class ActualRegistry {
+                public static final DeferredHolder<Item, Item> GEM = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("Usage.java").writeText("""
+            package com.example;
+
+            public class Usage {
+                public void verify() {
+                    String text = "ActualRegistry.GEM.isPresent()";
+                    // ActualRegistry.GEM.isPresent();
+                    boolean bound = ActualRegistry.GEM.isPresent();
+                    boolean filenameGuess = RegistryDeclarations.GEM.isPresent();
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(tempDir)
+        val transformed = srcDir.resolve("Usage.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredholder-isbound" })
+        assertTrue(transformed.contains("""String text = "ActualRegistry.GEM.isPresent()";"""), transformed)
+        assertTrue(transformed.contains("// ActualRegistry.GEM.isPresent();"), transformed)
+        assertTrue(transformed.contains("boolean bound = ActualRegistry.GEM.isBound();"), transformed)
+        assertTrue(transformed.contains("boolean filenameGuess = RegistryDeclarations.GEM.isPresent();"), transformed)
+        assertFalse(transformed.contains("RegistryDeclarations.GEM.isBound()"), transformed)
+    }
+
+    @Test
     fun `moves mod bus event listener registration off common NeoForge bus`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

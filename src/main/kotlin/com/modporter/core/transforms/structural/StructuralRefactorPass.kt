@@ -41316,15 +41316,14 @@ public class ${builder.className} implements RecipeBuilder {
             }}
             .toList()
         val declarationPattern = Regex("""DeferredHolder\s*<[^;\r\n]+>\s+([A-Za-z_$][\w$]*)""")
-        val classPattern = Regex("""\b(?:public\s+)?(?:final\s+)?class\s+([A-Za-z_$][\w$]*)\b""")
         val staticHolderRefs = javaFiles.flatMap { file ->
             val content = file.readText()
             if (!content.contains("DeferredHolder")) {
                 emptyList()
             } else {
-                val owner = classPattern.find(content)?.groupValues?.get(1)
-                    ?: file.fileName.toString().removeSuffix(".java")
-                declarationPattern.findAll(content)
+                val owner = classNameOfJavaSource(content) ?: return@flatMap emptyList()
+                val executableCode = maskJavaCommentsAndLiterals(content)
+                declarationPattern.findAll(executableCode)
                     .map { owner to it.groupValues[1] }
                     .toList()
             }
@@ -41332,22 +41331,33 @@ public class ${builder.className} implements RecipeBuilder {
 
         for (file in javaFiles) {
             var content = file.readText()
-            if (!content.contains(".isPresent()")) continue
-            val holderNames = declarationPattern.findAll(content)
+            if (!content.contains("isPresent")) continue
+            val executableCode = maskJavaCommentsAndLiterals(content)
+            val holderNames = declarationPattern.findAll(executableCode)
                 .map { it.groupValues[1] }
                 .toSet()
 
             val original = content
             for (name in holderNames) {
-                content = content.replace("${name}.isPresent()", "${name}.isBound()")
+                content = replaceExecutableRegex(
+                    content,
+                    Regex("""(?<![A-Za-z_$0-9.])${Regex.escape(name)}\s*\.\s*isPresent\s*\(\s*\)""")
+                ) { "${name}.isBound()" }
             }
             for ((owner, name) in staticHolderRefs) {
-                content = content.replace("$owner.$name.isPresent()", "$owner.$name.isBound()")
+                content = replaceExecutableRegex(
+                    content,
+                    Regex("""(?<![A-Za-z_$0-9.])${Regex.escape(owner)}\s*\.\s*${Regex.escape(name)}\s*\.\s*isPresent\s*\(\s*\)""")
+                ) { "$owner.$name.isBound()" }
             }
-            content = Regex("""\bNeoForgeMod\.([A-Z][A-Z0-9_]*)\.isPresent\(\)""")
-                .replace(content, "NeoForgeMod.$1.isBound()")
-            content = Regex("""\bnet\.neoforged\.neoforge\.common\.NeoForgeMod\.([A-Z][A-Z0-9_]*)\.isPresent\(\)""")
-                .replace(content, "net.neoforged.neoforge.common.NeoForgeMod.$1.isBound()")
+            content = replaceExecutableRegex(
+                content,
+                Regex("""\bNeoForgeMod\.([A-Z][A-Z0-9_]*)\.isPresent\(\)""")
+            ) { match -> "NeoForgeMod.${match.groupValues[1]}.isBound()" }
+            content = replaceExecutableRegex(
+                content,
+                Regex("""\bnet\.neoforged\.neoforge\.common\.NeoForgeMod\.([A-Z][A-Z0-9_]*)\.isPresent\(\)""")
+            ) { match -> "net.neoforged.neoforge.common.NeoForgeMod.${match.groupValues[1]}.isBound()" }
 
             if (content != original) {
                 changes.add(Change(
@@ -41366,6 +41376,20 @@ public class ${builder.className} implements RecipeBuilder {
         }
 
         return changes
+    }
+
+    private fun replaceExecutableRegex(source: String, pattern: Regex, replacement: (MatchResult) -> String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val matches = pattern.findAll(executableCode).toList()
+        if (matches.isEmpty()) return source
+
+        var result = source
+        for (match in matches.asReversed()) {
+            result = result.substring(0, match.range.first) +
+                replacement(match) +
+                result.substring(match.range.last + 1)
+        }
+        return result
     }
 
     private fun migrateMenuScreensRegistration(projectDir: Path, dryRun: Boolean): List<Change> {

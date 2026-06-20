@@ -2549,6 +2549,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `deferred holder presence migration uses declared owners and executable code`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateDeferredHolderPresenceChecks")
+        assertTrue(start >= 0, "migrateDeferredHolderPresenceChecks is missing")
+        val end = source.indexOf("private fun migrateMenuScreensRegistration", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "java file-name owner fallback" to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "ad hoc class regex owner" to Regex("""classPattern\.find\(content\)"""),
+            "raw content replace" to Regex("""content\.replace\("""),
+            "raw declaration scan" to Regex("""declarationPattern\.findAll\(content\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "DeferredHolder presence migration contains $label" }
+
+        assertTrue(
+            body.contains("classNameOfJavaSource(content) ?: return@flatMap emptyList()") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(content)") &&
+                body.contains("declarationPattern.findAll(executableCode)") &&
+                body.contains("replaceExecutableRegex("),
+            "DeferredHolder presence migration must bind static holders to declared Java owners and rewrite only executable code"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "DeferredHolder presence migration must not infer owners from file names or rewrite comments/strings: $offenders"
+        )
+    }
+
+    @Test
     fun `source backed payload migration does not depend on generated network class names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
