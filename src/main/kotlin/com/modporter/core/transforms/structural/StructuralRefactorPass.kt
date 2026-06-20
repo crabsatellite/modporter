@@ -8828,6 +8828,7 @@ $fields
         val gameEventDeferredHolderFields = collectDeferredHolderFieldsOf(srcDir, "GameEvent")
         val soundEventSupplierConstructors = collectSoundEventSupplierConstructors(javaFiles)
         val placementModifierTypeHolderFields = collectPlacementModifierTypeRegistryFields(javaFiles)
+        val legacyLootTableResourceLocationReferences = collectLegacyLootTableResourceLocationReferences(javaFiles)
 
         javaFiles.forEach { javaFile ->
                 val original = javaFile.readText()
@@ -9298,6 +9299,7 @@ $fields
                     modId.orEmpty(),
                     generatedCompatPackage,
                     savedDataClassNames,
+                    legacyLootTableResourceLocationReferences,
                     attributeModifierNamespaceExpression = explicitModIdReferenceForGeneratedClass(
                         mainClass,
                         mainText,
@@ -14374,6 +14376,7 @@ ${indent}}
         modId: String = "",
         generatedCompatPackage: String = "",
         savedDataClassNames: Set<String> = emptySet(),
+        legacyLootTableResourceLocationReferences: Set<String> = emptySet(),
         attributeModifierNamespaceExpression: String? = null
     ): String {
         var result = source
@@ -14574,7 +14577,7 @@ ${indent}}
         result = migrateMapCodecRegistryFactorySignatures(result)
         result = migrateBuiltInPlacementModifierTypeRegistrations(result, modId)
         result = migrateLegacyEventHooks121(result)
-        result = migrateLegacyLootAndRegistryAccess(result)
+        result = migrateLegacyLootAndRegistryAccess(result, legacyLootTableResourceLocationReferences)
         result = migrateRegistrySetBuilderBuildPatchSource(result)
         result = migrateLegacyLootTableKeyFields(result)
         result = migrateLegacyDataAndComponentAccess(result)
@@ -25649,7 +25652,10 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         return cleanupRedundantBlankLines(result)
     }
 
-    private fun migrateLegacyLootAndRegistryAccess(source: String): String {
+    private fun migrateLegacyLootAndRegistryAccess(
+        source: String,
+        legacyLootTableResourceLocationReferences: Set<String>
+    ): String {
         var result = source
         var needsBlocks = false
         var needsResourceKey = false
@@ -25666,14 +25672,14 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
                 val lootTable = args[0].trim()
                 val nestedLootTableKey = unwrapLootTableResourceKeyCreate(lootTable)
                 if (nestedLootTableKey != null &&
-                    (isLootTableResourceKeyExpression(nestedLootTableKey) ||
+                    (isLootTableResourceKeyExpression(nestedLootTableKey, legacyLootTableResourceLocationReferences) ||
                         isLocalLootTableResourceKeyExpression(result, nestedLootTableKey))) {
                     return@rewriteJavaCall "$receiver.getLootTable($nestedLootTableKey)"
                 }
                 if (isLocalLootTableResourceKeyExpression(result, lootTable)) {
                     return@rewriteJavaCall null
                 }
-                if (isLootTableResourceKeyExpression(lootTable)) {
+                if (isLootTableResourceKeyExpression(lootTable, legacyLootTableResourceLocationReferences)) {
                     null
                 } else {
                     needsResourceKey = true
@@ -25687,7 +25693,7 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
             result = rewriteJavaNew(result, "AdvancementRewards") { args ->
                 if (args.size != 4) return@rewriteJavaNew null
                 val lootList = legacyResourceLocationArrayToList(args[1]) { entry ->
-                    if (isLootTableResourceKeyExpression(entry)) {
+                    if (isLootTableResourceKeyExpression(entry, legacyLootTableResourceLocationReferences)) {
                         entry
                     } else {
                         needsResourceKey = true
@@ -25704,7 +25710,7 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
             result = rewriteJavaCall(result, "builder") { receiver, args ->
                 if (receiver != "LootTableIdCondition" || args.size != 1) return@rewriteJavaCall null
                 val lootTable = args[0].trim()
-                if (!isLootTableResourceKeyExpression(lootTable) || lootTable.endsWith(".location()")) {
+                if (!isLootTableResourceKeyExpression(lootTable, legacyLootTableResourceLocationReferences) || lootTable.endsWith(".location()")) {
                     null
                 } else {
                     "$receiver.builder($lootTable.location())"
@@ -25723,7 +25729,9 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
             result = Regex("""(\b\w+\.accept\(\s*)([^,\r\n]+)(\s*,)""")
                 .replace(result) { match ->
                     val key = match.groupValues[2].trim()
-                    if (key.startsWith("ResourceKey.") || key.contains("ResourceKey.create(") || isLootTableResourceKeyExpression(key)) {
+                    if (key.startsWith("ResourceKey.") ||
+                        key.contains("ResourceKey.create(") ||
+                        isLootTableResourceKeyExpression(key, legacyLootTableResourceLocationReferences)) {
                         match.value
                     } else {
                         needsResourceKey = true
@@ -25751,7 +25759,7 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
 
         if (result.contains("ResourceLocation") && result.contains("register(")) {
             val beforeLootKeys = result
-            result = migrateLegacyLootTableResourceLocationRegistry(result)
+            result = migrateLegacyLootTableResourceLocationRegistry(result, legacyLootTableResourceLocationReferences)
             if (result != beforeLootKeys) {
                 needsResourceKey = true
                 needsRegistries = true
@@ -25819,25 +25827,97 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         return result
     }
 
-    private fun migrateLegacyLootTableResourceLocationRegistry(source: String): String {
+    private fun collectLegacyLootTableResourceLocationReferences(javaFiles: List<Path>): Set<String> {
+        val references = linkedSetOf<String>()
+        fun addReference(expression: String) {
+            val normalized = expression
+                .trim()
+                .removeSuffix(".location()")
+                .removeSurrounding("(", ")")
+                .trim()
+            if (Regex("""(?:[A-Za-z_$][\w$]*\.)?[A-Z][A-Z0-9_]*""").matches(normalized)) {
+                references += normalized
+            }
+        }
+
+        javaFiles.forEach { javaFile ->
+            val source = javaFile.readText()
+            if (!source.contains("LootTable")) return@forEach
+            var cursor = 0
+            while (true) {
+                val match = Regex("""new\s+LootTableProvider\s*\(""").find(source, cursor) ?: break
+                val openParen = source.indexOf('(', match.range.last)
+                val closeParen = findMatchingParen(source, openParen)
+                if (closeParen < 0) {
+                    cursor = match.range.last + 1
+                    continue
+                }
+                val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+                if (args.size >= 2) addReference(args[1])
+                cursor = closeParen + 1
+            }
+            Regex("""register\.accept\s*\(\s*([^,]+?)\s*,\s*LootTable\.lootTable\s*\(""")
+                .findAll(source)
+                .forEach { addReference(it.groupValues[1]) }
+            Regex("""NestedLootTable\.lootTableReference\s*\(\s*([^)]+?)\s*\)""")
+                .findAll(source)
+                .forEach { addReference(it.groupValues[1]) }
+            Regex("""LootTableIdCondition\.builder\s*\(\s*([^)]+?)\s*\)""")
+                .findAll(source)
+                .forEach { addReference(it.groupValues[1]) }
+            Regex("""new\s+ResourceLocation\s*\[\s*]\s*\{([^}]*)}""")
+                .findAll(source)
+                .forEach { match ->
+                    splitTopLevelJavaArgs(match.groupValues[1]).forEach(::addReference)
+                }
+        }
+        return references
+    }
+
+    private fun migrateLegacyLootTableResourceLocationRegistry(
+        source: String,
+        legacyLootTableResourceLocationReferences: Set<String>
+    ): String {
         if (!Regex("""(?m)^\s*private\s+static\s+ResourceLocation\s+register\s*\(""").containsMatchIn(source) &&
             !Regex("""(?m)^\s*(?:public|protected|private)?\s*static\s+final\s+Set\s*<\s*ResourceLocation\s*>""").containsMatchIn(source)) {
             return source
         }
 
         var result = source
-        val className = classNameOfJavaSource(source) ?: ""
+        val ownerClass = classNameOfJavaSource(source) ?: ""
+        val ownerPackage = packageNameOf(source)
+        fun isProvenLootReference(fieldName: String): Boolean {
+            if (fieldName in legacyLootTableResourceLocationReferences) return true
+            if (ownerClass.isNotBlank() && "$ownerClass.$fieldName" in legacyLootTableResourceLocationReferences) return true
+            if (ownerClass.isNotBlank() && ownerPackage.isNotBlank() &&
+                "$ownerPackage.$ownerClass.$fieldName" in legacyLootTableResourceLocationReferences) {
+                return true
+            }
+            return false
+        }
         val staticResourceLocationSetPattern = Regex(
             """(?m)^([ \t]*(?:public|protected|private)?\s*static\s+final\s+)Set\s*<\s*ResourceLocation\s*>(\s+([A-Za-z_$][\w$]*)\s*=)"""
         )
-        val lootSetNames = staticResourceLocationSetPattern.findAll(result)
+        val resourceLocationSetNames = staticResourceLocationSetPattern.findAll(result)
             .map { it.groupValues[3] }
-            .filter { it.contains("loot", ignoreCase = true) }
             .toSet()
-        val classLooksLikeLootRegistry = Regex(""".*(?:Loot|LootTables|LootIds)$""").matches(className) || lootSetNames.isNotEmpty()
-        if (!classLooksLikeLootRegistry) return source
-        if (lootSetNames.isEmpty() &&
-            !Regex("""(?m)^\s*public\s+static\s+final\s+ResourceLocation\s+[A-Z0-9_]+\s*=\s*register\(""").containsMatchIn(result)) {
+        val registerSetNames = legacyResourceLocationRegisterSets(result, resourceLocationSetNames)
+        val provenSetNames = registerSetNames.filterTo(linkedSetOf(), ::isProvenLootReference)
+        val provenRegisteredFieldNames = Regex(
+            """(?m)^\s*public\s+static\s+final\s+ResourceLocation\s+([A-Z0-9_]+)\s*=\s*register\("""
+        ).findAll(result)
+            .map { it.groupValues[1] }
+            .filterTo(linkedSetOf(), ::isProvenLootReference)
+        val inSourceLootTableApiMarker = Regex("""\bLootTable(?:Provider|SubProvider)?\b""").containsMatchIn(source)
+        val lootSetNames = when {
+            provenSetNames.isNotEmpty() -> provenSetNames
+            provenRegisteredFieldNames.isNotEmpty() -> registerSetNames
+            inSourceLootTableApiMarker -> registerSetNames
+            else -> emptySet()
+        }
+        if (lootSetNames.isEmpty()) return source
+        if (!Regex("""(?m)^\s*public\s+static\s+final\s+ResourceLocation\s+[A-Z0-9_]+\s*=\s*register\(""").containsMatchIn(result) &&
+            staticResourceLocationSetPattern.findAll(result).none { it.groupValues[3] in lootSetNames }) {
             return source
         }
 
@@ -25890,6 +25970,27 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         return result
     }
 
+    private fun legacyResourceLocationRegisterSets(source: String, setNames: Set<String>): Set<String> {
+        val result = linkedSetOf<String>()
+        val registerPattern = Regex(
+            """private\s+static\s+ResourceLocation\s+register\s*\(\s*ResourceLocation\s+([A-Za-z_$][\w$]*)\s*\)\s*\{""",
+            RegexOption.DOT_MATCHES_ALL
+        )
+        registerPattern.findAll(source).forEach { match ->
+            val parameter = match.groupValues[1]
+            val openBrace = source.indexOf('{', match.range.last)
+            if (openBrace < 0) return@forEach
+            val closeBrace = findMatchingBrace(source, openBrace)
+            if (closeBrace < 0) return@forEach
+            val body = source.substring(openBrace + 1, closeBrace)
+            Regex("""\b([A-Za-z_$][\w$]*)\.add\s*\(\s*${Regex.escape(parameter)}\s*\)""")
+                .findAll(body)
+                .map { it.groupValues[1] }
+                .filterTo(result) { it in setNames }
+        }
+        return result
+    }
+
     private fun legacyResourceLocationArrayToList(
         expression: String,
         migrateEntry: (String) -> String
@@ -25908,14 +26009,17 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         return entries.joinToString(prefix = "java.util.List.of(", postfix = ")") { migrateEntry(it) }
     }
 
-    private fun isLootTableResourceKeyExpression(expression: String): Boolean {
+    private fun isLootTableResourceKeyExpression(
+        expression: String,
+        legacyLootTableResourceLocationReferences: Set<String> = emptySet()
+    ): Boolean {
         val trimmed = expression.trim()
         return trimmed.contains("ResourceKey.create(") ||
             trimmed.startsWith("BuiltInLootTables.") ||
             trimmed.endsWith(".getDefaultLootTable()") ||
             trimmed.endsWith(".getLootTable()") ||
             trimmed.endsWith(".getLootLocation()") ||
-            Regex("""(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*(?:Loot|LootTables)\.[A-Z0-9_]+""").matches(trimmed)
+            trimmed.removeSuffix(".location()") in legacyLootTableResourceLocationReferences
     }
 
     private fun unwrapLootTableResourceKeyCreate(expression: String): String? {

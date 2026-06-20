@@ -750,6 +750,53 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `loot table registry migrations do not use class name suffix inference`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyLootTableResourceLocationRegistry")
+        assertTrue(start >= 0, "migrateLegacyLootTableResourceLocationRegistry is missing")
+        val end = source.indexOf("\n    private fun ", start + 1).let { if (it < 0) source.length else it }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "class name loot suffix variable" to "classLooksLikeLootRegistry",
+            "LootTables class suffix regex" to Regex("""LootTables\|LootIds|Loot\|LootTables""")
+        )
+        val offenders = forbidden
+            .filter { (_, marker) ->
+                when (marker) {
+                    is String -> body.contains(marker)
+                    is Regex -> marker.containsMatchIn(body)
+                    else -> false
+                }
+            }
+            .map { (label, _) -> "migrateLegacyLootTableResourceLocationRegistry contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Loot table registry migrations must use API/register-set structure, not class-name suffix inference: $offenders"
+        )
+
+        val keyExpressionStart = source.indexOf("private fun isLootTableResourceKeyExpression")
+        assertTrue(keyExpressionStart >= 0, "isLootTableResourceKeyExpression is missing")
+        val keyExpressionEnd = source.indexOf("\n    private fun ", keyExpressionStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val keyExpressionBody = source.substring(keyExpressionStart, keyExpressionEnd)
+        val keyExpressionOffenders = listOf(
+            "owner name Loot suffix regex" to Regex("""\(\?:Loot\|LootTables\)|LootTables\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(keyExpressionBody) }
+            .map { (label, _) -> "isLootTableResourceKeyExpression contains $label" }
+
+        assertTrue(
+            keyExpressionOffenders.isEmpty(),
+            "Loot table key-expression detection must use API/evidence structure, not owner-name suffix inference: $keyExpressionOffenders"
+        )
+    }
+
+    @Test
     fun `build mod id helpers do not scan arbitrary constant references`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

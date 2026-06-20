@@ -6497,6 +6497,40 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `loot table registry migration does not trust class name suffix`() {
+        val projectDir = createFile("LootTables.java", """
+            package com.example;
+
+            import java.util.HashSet;
+            import java.util.Set;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class LootTables {
+                private static final Set<ResourceLocation> IDS = new HashSet<>();
+                public static final ResourceLocation NOT_A_LOOT_TABLE = register("ids/demo");
+
+                private static ResourceLocation register(String id) {
+                    return register(ExampleMod.prefix(id));
+                }
+
+                private static ResourceLocation register(ResourceLocation id) {
+                    if (IDS.add(id)) {
+                        return id;
+                    }
+                    throw new IllegalArgumentException(id + " duplicate");
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = tempDir.resolve("src/main/java/com/example/LootTables.java").readText()
+        assertTrue(migrated.contains("Set<ResourceLocation> IDS"), migrated)
+        assertTrue(migrated.contains("public static final ResourceLocation NOT_A_LOOT_TABLE = register(\"ids/demo\")"), migrated)
+        assertFalse(migrated.contains("ResourceKey<LootTable>"), migrated)
+    }
+
+    @Test
     fun `migrates indirect recipe provider constructors to holder lookup registries`() {
         val projectDir = createFile("LibraryRecipeProvider.java", """
             package com.example;
