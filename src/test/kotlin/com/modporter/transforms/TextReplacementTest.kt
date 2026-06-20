@@ -1461,6 +1461,43 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `custom enchantment data does not infer mod id owner from java file names`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public static final String MODID = "example";
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(
+                        BuiltInRegistries.ENCHANTMENT,
+                        TestMod.MODID
+                );
+                public static final DeferredHolder<Enchantment, Enchantment> FLAME = ENCHANTMENTS.register("flame", FlameEnchantment::new);
+            }
+
+            class FlameEnchantment extends Enchantment {
+                public FlameEnchantment() {
+                    super(Rarity.COMMON, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.CHEST});
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any { it.contains("unresolved mod id expression 'TestMod.MODID'") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/flame.json").exists())
+    }
+
+    @Test
     fun `custom enchantment data rejects registry reference tail fallback`() {
         val projectDir = createTestFile("""
             package com.example;

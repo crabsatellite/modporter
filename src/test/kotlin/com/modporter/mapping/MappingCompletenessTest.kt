@@ -803,6 +803,33 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `custom enchantment data migrations do not infer declaration owners from java file names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun detectLegacyJavaModIds")
+        assertTrue(start >= 0, "detectLegacyJavaModIds is missing")
+        val end = source.indexOf("private fun collectLegacyItemRegistryEntries", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "java file-name owner" to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "type-name elvis file fallback" to Regex("""javaTypeNameContainingOffset\([^)]*\)\s*\?:\s*file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "bare @Mod file owner fallback" to Regex("""ids\.putIfAbsent\([^,\r\n]*className""")
+        )
+        val offenders = forbidden
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "TextReplacementPass custom enchantment data contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Custom enchantment data migrations must use source-declared Java owners, not Java file-name fallback inference: $offenders"
+        )
+    }
+
+    @Test
     fun `loot table registry migrations do not use class name suffix inference`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

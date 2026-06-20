@@ -2101,13 +2101,13 @@ ${codecFields.joinToString(",\n")}
     private fun detectLegacyJavaModIds(javaSources: List<Pair<Path, String>>): Map<String, String> {
         val ids = linkedMapOf<String, String>()
         val simpleValues = linkedMapOf<String, MutableSet<String>>()
-        for ((file, source) in javaSources) {
-            val className = file.fileName.toString().removeSuffix(".java")
+        for ((_, source) in javaSources) {
             val packageName = legacyJavaPackageName(source)
             Regex("""\bstatic\s+(?:final\s+)?String\s+([A-Za-z_$][\w$]*)\s*=\s*"([^"]+)"""")
                 .findAll(source)
                 .forEach { match ->
-                    val ownerClass = javaTypeNameContainingOffset(source, match.range.first) ?: className
+                    val ownerClass = javaTypeNameContainingOffset(source, match.range.first)
+                        ?: return@forEach
                     simpleValues.getOrPut(match.groupValues[1]) { linkedSetOf() } += match.groupValues[2]
                     ids["$ownerClass.${match.groupValues[1]}"] = match.groupValues[2]
                     if (packageName.isNotBlank()) {
@@ -2122,9 +2122,6 @@ ${codecFields.joinToString(",\n")}
                         ids["$packageName.${match.groupValues[2]}"] = match.groupValues[1]
                     }
                 }
-            Regex("""@Mod\s*\(\s*"([^"]+)"""").find(source)?.let { match ->
-                ids.putIfAbsent(className, match.groupValues[1])
-            }
         }
         simpleValues.forEach { (name, values) ->
             if (values.size == 1) {
@@ -2225,7 +2222,10 @@ ${codecFields.joinToString(",\n")}
                 )
                 for (entryMatch in entryPattern.findAll(source)) {
                     val ownerClass = javaTypeNameContainingOffset(source, entryMatch.range.first)
-                        ?: file.fileName.toString().removeSuffix(".java")
+                    if (ownerClass == null) {
+                        errors.add("Cannot derive custom enchantment data for ${entryMatch.groupValues[1]}: declaring Java type is unresolved")
+                        continue
+                    }
                     val supplier = entryMatch.groupValues[3].trim()
                     val newMatch = Regex("""(?s)(?:\(\)\s*->\s*)?new\s+($qualifiedId)\s*\((.*)\)\s*$""").find(supplier)
                     val methodRefMatch = Regex("""^\s*($qualifiedId)::new\s*$""").find(supplier)
@@ -2266,11 +2266,11 @@ ${codecFields.joinToString(",\n")}
             """(?s)(?:public|private|protected)?\s*static\s+final\s+EnchantmentCategory\s+($id)\s*=\s*EnchantmentCategory\.create\(\s*[^,]+,\s*$id\s*->\s*[^;]*?\binstanceof\s+($id)\b[^;]*?\)\s*;"""
         )
         val categories = mutableListOf<LegacyEnchantmentCategorySpec>()
-        for ((file, source) in javaSources) {
+        for ((_, source) in javaSources) {
             val ownerPackage = legacyJavaPackageName(source)
             for (match in categoryPattern.findAll(source)) {
                 val ownerClass = javaTypeNameContainingOffset(source, match.range.first)
-                    ?: file.fileName.toString().removeSuffix(".java")
+                    ?: continue
                 val spec = LegacyEnchantmentCategorySpec(
                     ownerPackage = ownerPackage,
                     ownerClass = ownerClass,
@@ -2297,7 +2297,7 @@ ${codecFields.joinToString(",\n")}
             """(?s)(?:public\s+)?static\s+final\s+DeferredRegister\s*<[^>]+>\s+($id)\s*=\s*DeferredRegister\.create\(\s*[^,]+,\s*([^)]+?)\s*\)\s*;"""
         )
         val entries = mutableListOf<RegistryEntryRef>()
-        for ((file, source) in javaSources) {
+        for ((_, source) in javaSources) {
             val ownerPackage = legacyJavaPackageName(source)
             for (registerMatch in registerPattern.findAll(source)) {
                 val registerField = registerMatch.groupValues[1]
@@ -2307,7 +2307,7 @@ ${codecFields.joinToString(",\n")}
                 )
                 for (entryMatch in entryPattern.findAll(source)) {
                     val ownerClass = javaTypeNameContainingOffset(source, entryMatch.range.first)
-                        ?: file.fileName.toString().removeSuffix(".java")
+                        ?: continue
                     val ref = RegistryEntryRef(
                         ownerPackage = ownerPackage,
                         ownerClass = ownerClass,
