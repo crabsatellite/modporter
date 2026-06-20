@@ -2751,6 +2751,65 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `legacy armor material migration rejects package derived mod ids`() {
+        val projectDir = tempDir.resolve("p15-armor-no-modid")
+        val itemDir = projectDir.resolve("src/main/java/com/example/item")
+        itemDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        val materialFile = itemDir.resolve("ExampleArmorMaterials.java")
+        materialFile.writeText("""
+            package com.example.item;
+
+            import net.minecraft.sounds.SoundEvent;
+            import net.minecraft.sounds.SoundEvents;
+            import net.minecraft.world.item.ArmorMaterial;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import java.util.function.Supplier;
+
+            public enum ExampleArmorMaterials implements ArmorMaterial {
+                STRAW("straw", "strawhat", 6, new int[]{0, 0, 0, 1}, 30,
+                        SoundEvents.ARMOR_EQUIP_LEATHER, 0.0F, 0.0F, () -> Ingredient.of(Items.WHEAT));
+
+                private final String name;
+                private final String textureName;
+                private final SoundEvent sound;
+                private final Supplier<Ingredient> repairIngredient;
+
+                ExampleArmorMaterials(String name, String textureName, int durabilityMult, int[] protections, int enchant,
+                                       SoundEvent sound, float tough, float kb, Supplier<Ingredient> repair) {
+                    this.name = name;
+                    this.textureName = textureName;
+                    this.sound = sound;
+                    this.repairIngredient = repair;
+                }
+
+                @Override
+                public String getName() {
+                    return this.name;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val material = materialFile.readText()
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Cannot derive mod id expression for legacy ArmorMaterial enum ExampleArmorMaterials")
+            },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(result.changes.any { it.ruleId == "build-legacy-armor-material-registry" })
+        assertTrue(material.contains("enum ExampleArmorMaterials implements ArmorMaterial"))
+        assertFalse(material.contains("DeferredRegister.create(Registries.ARMOR_MATERIAL, \"item\")"))
+    }
+
+    @Test
     fun `relocates removed mmlib recipe helpers into project local base package`() {
         val projectDir = tempDir.resolve("p15-mmlib")
         val recipeDir = projectDir.resolve("src/main/java/com/example/recipes")

@@ -128,7 +128,7 @@ class BuildSystemPass(
         }
 
         try {
-            changes.addAll(rewriteLegacyArmorMaterials(projectDir, dryRun))
+            changes.addAll(rewriteLegacyArmorMaterials(projectDir, dryRun, errors))
         } catch (e: Exception) {
             errors.add("Failed to rewrite legacy armor materials: ${e.message}")
         }
@@ -4521,7 +4521,11 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         val pathName: String
     )
 
-    private fun rewriteLegacyArmorMaterials(projectDir: Path, dryRun: Boolean): List<Change> {
+    private fun rewriteLegacyArmorMaterials(
+        projectDir: Path,
+        dryRun: Boolean,
+        errors: MutableList<String>
+    ): List<Change> {
         val changes = mutableListOf<Change>()
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return changes
@@ -4531,7 +4535,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val original = javaFile.readText()
-                val material = parseLegacyArmorMaterial(javaFile, original) ?: return@forEach
+                val material = parseLegacyArmorMaterial(javaFile, original, projectDir, errors) ?: return@forEach
                 val replacement = renderArmorMaterialRegistry(material)
                 if (replacement != original) {
                     changes.add(Change(
@@ -5294,7 +5298,12 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         return changes
     }
 
-    private fun parseLegacyArmorMaterial(path: Path, content: String): LegacyArmorMaterial? {
+    private fun parseLegacyArmorMaterial(
+        path: Path,
+        content: String,
+        projectDir: Path,
+        errors: MutableList<String>
+    ): LegacyArmorMaterial? {
         val enumMatch = Regex("""public\s+enum\s+([A-Za-z_$][\w$]*)\s+implements\s+ArmorMaterial\b""")
             .find(content) ?: return null
         val enumName = enumMatch.groupValues[1]
@@ -5313,7 +5322,14 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
             .find(content)?.groupValues?.get(1)
             ?: Regex("""\b([A-Za-z_$][\w$]*\.MODID)\b""").find(content)?.groupValues?.get(1)
             ?: Regex("""\b([A-Za-z_$][\w$]*\.ID)\b""").find(content)?.groupValues?.get(1)
-            ?: "\"${packageName.substringAfterLast('.')}\""
+        if (modIdExpr == null) {
+            val relative = projectDir.relativize(path).toString().replace('\\', '/')
+            errors.add(
+                "Cannot derive mod id expression for legacy ArmorMaterial enum $enumName in $relative: " +
+                    "expected a source MODID/ID reference in the enum"
+            )
+            return null
+        }
         val modClass = when {
             modIdExpr.endsWith(".MODID") -> modIdExpr.substringBefore(".MODID")
             modIdExpr.endsWith(".ID") -> modIdExpr.substringBefore(".ID")

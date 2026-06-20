@@ -649,6 +649,33 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `production migrations do not derive mod identity from package names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val forbidden = listOf(
+            "package tail mod id fallback" to Regex("""packageName\.substringAfterLast\('\.'\)""")
+        )
+
+        val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) && it.extension == "kt" }
+                .flatMap { file ->
+                    val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                    val text = file.readText()
+                    forbidden
+                        .filter { (_, pattern) -> pattern.containsMatchIn(text) }
+                        .map { (label, _) -> "$relative contains $label" }
+                        .stream()
+                }
+                .toList()
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Migration rules must derive mod identity from declared source or metadata, not Java package names: $offenders"
+        )
+    }
+
+    @Test
     fun `resource string constant resolution does not use qualified tail fallback`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot
