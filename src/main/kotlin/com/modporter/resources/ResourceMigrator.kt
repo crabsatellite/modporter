@@ -3414,40 +3414,56 @@ class ResourceMigrationPass(
                 .filter { Files.isRegularFile(it) && (it.toString().endsWith(".java") || it.toString().endsWith(".kt")) }
                 .forEach { file ->
                     val content = file.readText()
+                    val code = maskJavaComments(content)
+                    val executableCode = maskJavaCommentsAndLiterals(content)
                     val packageName = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""")
-                        .find(content)
+                        .find(code)
                         ?.groupValues
                         ?.get(1)
                         .orEmpty()
                     val constants = linkedMapOf<String, String>()
                     val simpleValues = linkedMapOf<String, MutableSet<String>>()
-                    constantPattern.findAll(content).forEach { match ->
-                        val name = match.groupValues[1]
-                        val value = match.groupValues[2]
-                        val className = javaTypeNameContainingOffset(content, match.range.first)
-                        simpleValues.getOrPut(name) { linkedSetOf() } += value
-                        if (className != null) {
-                            constants["$className.$name"] = value
-                            if (packageName.isNotBlank()) {
-                                constants["$packageName.$className.$name"] = value
+                    constantPattern.findAll(code)
+                        .filter { match ->
+                            val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                            executableSegment.contains("static") &&
+                                executableSegment.contains("final") &&
+                                executableSegment.contains("String") &&
+                                executableSegment.contains("=")
+                        }
+                        .forEach { match ->
+                            val name = match.groupValues[1]
+                            val value = match.groupValues[2]
+                            val className = javaTypeNameContainingOffset(code, match.range.first)
+                            simpleValues.getOrPut(name) { linkedSetOf() } += value
+                            if (className != null) {
+                                constants["$className.$name"] = value
+                                if (packageName.isNotBlank()) {
+                                    constants["$packageName.$className.$name"] = value
+                                }
                             }
                         }
-                    }
                     simpleValues.forEach { (name, values) ->
                         if (values.size == 1) {
                             constants[name] = values.single()
                         }
                     }
 
-                    callPattern.findAll(content).forEach { match ->
-                        val rawId = match.groupValues[1].trim()
-                        val advancementId = when {
-                            rawId.startsWith("\"") && rawId.endsWith("\"") -> rawId.trim('"')
-                            else -> constants[rawId]
-                        } ?: return@forEach
-                        val criterion = match.groupValues[2]
-                        result.getOrPut(advancementId) { linkedSetOf() }.add(criterion)
-                    }
+                    callPattern.findAll(code)
+                        .filter { match ->
+                            executableCode
+                                .substring(match.range.first, match.range.last + 1)
+                                .contains("tryAwardAdvancement")
+                        }
+                        .forEach { match ->
+                            val rawId = match.groupValues[1].trim()
+                            val advancementId = when {
+                                rawId.startsWith("\"") && rawId.endsWith("\"") -> rawId.trim('"')
+                                else -> constants[rawId]
+                            } ?: return@forEach
+                            val criterion = match.groupValues[2]
+                            result.getOrPut(advancementId) { linkedSetOf() }.add(criterion)
+                        }
                 }
         }
 

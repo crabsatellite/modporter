@@ -1239,6 +1239,42 @@ class ResourceMigrationTest {
     }
 
     @Test
+    fun `code awarded advancement ignores text block call examples`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/com/example")
+        javaDir.createDirectories()
+        javaDir.resolve("Awarder.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "class Awarder {",
+            "    private static final String ADVANCEMENT_ID = \"resmod:manual\";",
+            "",
+            "    String docs() {",
+            "        return \"\"\"",
+            "            AdvancementHelper.tryAwardAdvancement(player, ADVANCEMENT_ID, \"code_triggered\");",
+            "            \"\"\";",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+
+        val advancementDir = projectDir.resolve("src/main/resources/data/resmod/advancements")
+        advancementDir.resolve("manual.json").writeText("""
+            {"display":{"icon":{"item":"resmod:item"}},"criteria":{"code_triggered":{"trigger":"resmod:manual"}}}
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val advancement = projectDir.resolve("src/main/resources/data/resmod/advancement/manual.json").readText()
+        assertFalse(
+            result.changes.any { it.ruleId == "res-advancement-code-awarded-trigger" },
+            "Documentation examples must not be converted into code-awarded advancement evidence"
+        )
+        assertTrue(advancement.contains(""""trigger":"resmod:manual""""), advancement)
+        assertFalse(advancement.contains("minecraft:impossible"), advancement)
+    }
+
+    @Test
     fun `forge item layers model loader is migrated without changing model structure`() {
         val projectDir = setupResourceProject()
         val modelDir = projectDir.resolve("src/main/resources/assets/resmod/models/item")

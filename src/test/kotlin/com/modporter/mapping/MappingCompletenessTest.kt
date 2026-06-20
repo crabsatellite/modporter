@@ -1815,6 +1815,43 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `code awarded advancement detection uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val resourceMigrator = projectRoot
+            .resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt")
+            .readText()
+        val start = resourceMigrator.indexOf("private fun detectCodeAwardedAdvancements")
+        assertTrue(start >= 0, "detectCodeAwardedAdvancements is missing")
+        val end = resourceMigrator.indexOf("\n    private fun ", start + 1).let {
+            if (it < 0) resourceMigrator.length else it
+        }
+        val body = resourceMigrator.substring(start, end)
+        val forbidden = listOf(
+            "raw source package scan" to ".find(content)",
+            "raw source constant scan" to "constantPattern.findAll(content)",
+            "raw source call scan" to "callPattern.findAll(content)"
+        )
+        val offenders = forbidden
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "detectCodeAwardedAdvancements contains $label" }
+
+        assertTrue(
+            body.contains("val code = maskJavaComments(content)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(content)") &&
+                body.contains("constantPattern.findAll(code)") &&
+                body.contains("javaTypeNameContainingOffset(code, match.range.first)") &&
+                body.contains("callPattern.findAll(code)") &&
+                body.contains("executableCode") &&
+                body.contains("contains(\"tryAwardAdvancement\")"),
+            "Code-awarded advancement detection must derive values from comment-masked code and prove declarations/calls from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Code-awarded advancement detection must not treat comments or text blocks as award evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `production migrations do not resolve source constants by qualified tail fallback`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(
