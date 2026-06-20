@@ -12852,6 +12852,50 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `attribute modifier namespace binds mod id constant to annotated owner`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("Bootstrap.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            class BootstrapHelper {
+                public static final String MOD_ID = "wrong";
+            }
+
+            @Mod(ExampleMod.MOD_ID)
+            class ExampleMod {
+                public static final String MOD_ID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("AttributeShapes.java").writeText("""
+            package com.example;
+
+            import java.util.UUID;
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class AttributeShapes {
+                static final UUID REACH_MODIFIER = UUID.fromString("00000000-0000-0000-0000-000000000001");
+
+                void update(AttributeInstance instance) {
+                    UUID oldId = REACH_MODIFIER;
+                    instance.removeModifier(oldId);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("AttributeShapes.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, \"reach_modifier\")"), transformed)
+        assertFalse(transformed.contains("BootstrapHelper.MOD_ID"), transformed)
+        assertFalse(transformed.contains("\"wrong\""), transformed)
+    }
+
+    @Test
     fun `attribute modifier namespace does not choose first mod class when multiple mods exist`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

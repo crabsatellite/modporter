@@ -2496,6 +2496,7 @@ class MappingCompletenessTest {
         val detectModMainClass = functionBody("detectModMainClass")
         val modAnnotationArgument = functionBody("modAnnotationArgumentExpression")
         val explicitModIdReference = functionBody("explicitModIdReferenceForGeneratedClass")
+        val javaModIdReferenceExpression = functionBody("javaModIdReferenceExpression")
         val detectModIdsFromText = functionBody("detectModIdsFromText")
         val javaTypeBlocks = functionBody("javaTypeBlocks")
         val javaStaticFinalStringConstant = functionBody("javaStaticFinalStringConstant")
@@ -2506,6 +2507,9 @@ class MappingCompletenessTest {
             "annotation argument raw scan" to (modAnnotationArgument to Regex("""@Mod[\s\S]{0,120}\.find\(source\)""")),
             "explicit mod id raw main scan" to (explicitModIdReference to Regex("""@Mod[\s\S]{0,160}\.find\(mainText\)""")),
             "explicit mod id file-name owner" to (explicitModIdReference to Regex("""mainClass\.fileName""")),
+            "explicit mod id first type owner" to (explicitModIdReference to Regex("""classNameOfJavaSource\(mainText\)""")),
+            "explicit mod id global constant fallback" to (explicitModIdReference to Regex("""hasStaticFinalStringConstant\(mainText""")),
+            "explicit mod id first annotation match" to (explicitModIdReference to Regex("""@Mod[\s\S]{0,160}\.find\(code\)""")),
             "detect text raw direct scan" to (detectModIdsFromText to Regex("""@Mod[\s\S]{0,160}\.find\(text\)""")),
             "detect text raw constant scan" to (detectModIdsFromText to Regex("""\.find\(text\)""")),
             "detect text first candidate return" to (detectModIdsFromText to Regex("""return\s+it\.groupValues\[1]""")),
@@ -2527,8 +2531,14 @@ class MappingCompletenessTest {
                 modAnnotationArgument.contains(".find(code)") &&
                 explicitModIdReference.contains("val code = maskJavaComments(mainText)") &&
                 explicitModIdReference.contains("val executableCode = maskJavaCommentsAndLiterals(mainText)") &&
-                explicitModIdReference.contains("val className = classNameOfJavaSource(mainText) ?: return null") &&
-                explicitModIdReference.contains(".find(code)") &&
+                explicitModIdReference.contains("val typeBlocks = javaTypeBlocks(mainText, executableCode)") &&
+                explicitModIdReference.contains("val references = linkedSetOf<String>()") &&
+                explicitModIdReference.contains(".findAll(code)") &&
+                explicitModIdReference.contains("javaTypeBlockForModAnnotation(match.range.last, typeBlocks)") &&
+                explicitModIdReference.contains("javaStaticFinalStringConstant(code, executableCode, owner, constName, typeBlocks)") &&
+                explicitModIdReference.contains("javaModIdReferenceExpression(mainPackage, generatedPackage, owner, constName)") &&
+                explicitModIdReference.contains("references.singleOrNull()?.let { return it }") &&
+                javaModIdReferenceExpression.contains("owner.isPublic") &&
                 detectModIdsFromText.contains("val candidates = linkedSetOf<String>()") &&
                 detectModIdsFromText.contains("val code = maskJavaComments(text)") &&
                 detectModIdsFromText.contains("val executableCode = maskJavaCommentsAndLiterals(text)") &&
@@ -2537,6 +2547,7 @@ class MappingCompletenessTest {
                 detectModIdsFromText.contains("javaTypeBlockForModAnnotation(match.range.last, typeBlocks)") &&
                 detectModIdsFromText.contains("javaStaticFinalStringConstant(code, executableCode, owner, constName, typeBlocks)") &&
                 detectModIdsFromText.contains("return candidates") &&
+                javaTypeBlocks.contains("isPublic = Regex") &&
                 javaTypeBlocks.contains("findMatchingBrace(executableCode, openBrace)") &&
                 javaStaticFinalStringConstant.contains("declaringType == owner") &&
                 staticStringConstant.contains("val code = maskJavaComments(source)") &&

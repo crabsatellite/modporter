@@ -7957,59 +7957,67 @@ public final class ${spec.attachmentClassName} {
     ): String? {
         if (mainClass != null && mainText.isNotBlank()) {
             val mainPackage = packageNameOf(mainText)
-            val className = classNameOfJavaSource(mainText) ?: return null
-            val classRef = if (mainPackage.isBlank() || mainPackage == generatedPackage) {
-                className
-            } else {
-                "$mainPackage.$className"
-            }
             val code = maskJavaComments(mainText)
             val executableCode = maskJavaCommentsAndLiterals(mainText)
-            Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)""")
-                .find(code)
-                ?.takeIf { match ->
+            val typeBlocks = javaTypeBlocks(mainText, executableCode)
+            val references = linkedSetOf<String>()
+            Regex("""@Mod\s*\(\s*(?:value\s*=\s*)?"([^"]+)"\s*\)""")
+                .findAll(code)
+                .filter { match ->
                     executableCode
                         .substring(match.range.first, match.range.last + 1)
                         .contains("@Mod")
                 }
-                ?.let { return "\"${it.groupValues[1]}\"" }
+                .forEach { references += "\"${it.groupValues[1]}\"" }
 
-            val modArgument = Regex("""@Mod\s*\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\)""")
-                .find(code)
-                ?.takeIf { match ->
+            Regex("""@Mod\s*\(\s*(?:value\s*=\s*)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\)""")
+                .findAll(code)
+                .filter { match ->
                     executableCode
                         .substring(match.range.first, match.range.last + 1)
                         .contains("@Mod")
                 }
-                ?.groupValues
-                ?.get(1)
-            val constName = when {
-                modArgument == null -> null
-                !modArgument.contains('.') -> modArgument
-                modArgument.substringBeforeLast('.') == className -> modArgument.substringAfterLast('.')
-                modArgument.substringBeforeLast('.') == "$mainPackage.$className" -> modArgument.substringAfterLast('.')
-                else -> null
-            }
-            if (constName != null && hasStaticFinalStringConstant(mainText, constName)) {
-                return "$classRef.$constName"
-            }
-
-            Regex("""(?m)\b(?:public|private|protected)?\s*static\s+final\s+String\s+(MOD_ID|MODID)\s*=\s*"[^"]+"""")
-                .find(code)
-                ?.takeIf { match ->
-                    val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
-                    executableSegment.contains("String") &&
-                        executableSegment.contains("=")
+                .forEach { match ->
+                    val modArgument = match.groupValues[1]
+                    val constName = modArgument.substringAfterLast('.')
+                    val owner = if (modArgument.contains('.')) {
+                        val ownerName = modArgument.substringBeforeLast('.').substringAfterLast('.')
+                        typeBlocks.singleOrNull { it.name == ownerName }
+                    } else {
+                        javaTypeBlockForModAnnotation(match.range.last, typeBlocks)
+                    }
+                    if (owner != null) {
+                        val constValue = javaStaticFinalStringConstant(code, executableCode, owner, constName, typeBlocks)
+                        if (constValue != null) {
+                            references += javaModIdReferenceExpression(mainPackage, generatedPackage, owner, constName)
+                                ?: "\"$constValue\""
+                        }
+                    }
                 }
-                ?.let { return "$classRef.${it.groupValues[1]}" }
+            references.singleOrNull()?.let { return it }
         }
         return metadataModId
             ?.takeIf { it.isNotBlank() }
             ?.let { "\"$it\"" }
     }
 
+    private fun javaModIdReferenceExpression(
+        mainPackage: String,
+        generatedPackage: String,
+        owner: JavaTypeBlock,
+        constName: String
+    ): String? {
+        val classRef = when {
+            mainPackage.isBlank() || mainPackage == generatedPackage -> owner.name
+            owner.isPublic -> "$mainPackage.${owner.name}"
+            else -> return null
+        }
+        return "$classRef.$constName"
+    }
+
     private data class JavaTypeBlock(
         val name: String,
+        val isPublic: Boolean,
         val start: Int,
         val declarationStart: Int,
         val bodyStart: Int,
@@ -8067,6 +8075,7 @@ public final class ${spec.attachmentClassName} {
             if (closeBrace < 0 || closeBrace >= text.length) return@mapNotNull null
             JavaTypeBlock(
                 name = name,
+                isPublic = Regex("""\bpublic\b""").containsMatchIn(match.value),
                 start = match.range.first,
                 declarationStart = declarationStart,
                 bodyStart = openBrace,
