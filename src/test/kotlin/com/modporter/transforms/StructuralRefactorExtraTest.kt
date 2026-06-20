@@ -22904,6 +22904,40 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy damage bonus migration requires server guard before call`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CombatSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.level.Level;
+
+            public class CombatSurface {
+                public void releaseUsing(ItemStack stack, Level level, LivingEntity entityLiving, Player player) {
+                    float baseDamage = (float) player.getAttributeValue(Attributes.ATTACK_DAMAGE);
+                    float enchantBonus = EnchantmentHelper.getDamageBonus(stack, entityLiving.getMobType());
+                    if (level.isClientSide()) return;
+                    entityLiving.hurt(player.damageSources().playerAttack(player), baseDamage + enchantBonus);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val combat = srcDir.resolve("CombatSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(combat.contains("EnchantmentHelper.getDamageBonus(stack, entityLiving.getMobType())"), combat)
+        assertTrue(combat.contains("if (level.isClientSide()) return;"), combat)
+        assertFalse(combat.contains("EnchantmentHelper.modifyDamage"), combat)
+        assertFalse(combat.contains("import net.minecraft.server.level.ServerLevel;"), combat)
+    }
+
+    @Test
     fun `migrates source shaped compile debt without comment or fallback inference`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

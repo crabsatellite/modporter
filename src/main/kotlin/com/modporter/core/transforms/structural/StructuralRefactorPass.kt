@@ -21870,7 +21870,7 @@ ${indent}}"""
             if (!methodText.contains("EnchantmentHelper.getDamageBonus(") || !methodText.contains(".getMobType()")) continue
 
             val damageSourceExpr = firstHurtDamageSourceArgument(methodText) ?: continue
-            val serverLevelExpr = inferServerLevelExpressionForMethod(methodText) ?: continue
+            val serverLevelExpr = sourceProvenServerLevelExpressionForDamageBonus(methodText) ?: continue
             var replacement = methodText
             val baseDamageVariable = Regex("""\b(?:float|double)\s+([A-Za-z_$][\w$]*)\s*=\s*[^;\r\n]*Attributes\.ATTACK_DAMAGE[^;\r\n]*;""")
                 .find(methodText)
@@ -22017,34 +22017,41 @@ ${indent}}"""
         return sources.singleOrNull()
     }
 
-    private fun inferServerLevelExpressionForMethod(methodText: String): String? {
+    private fun sourceProvenServerLevelExpressionForDamageBonus(methodText: String): String? {
+        val damageBonusOffset = methodText.indexOf("EnchantmentHelper.getDamageBonus(")
+        if (damageBonusOffset < 0) return null
+        val prefix = methodText.substring(0, damageBonusOffset)
         Regex("""this\.level\(\)\s+instanceof\s+ServerLevel\s+([A-Za-z_$][\w$]*)""")
-            .find(methodText)
+            .find(prefix)
             ?.groupValues
             ?.get(1)
             ?.let { return it }
-        Regex("""\bServerLevel\s+([A-Za-z_$][\w$]*)\b""")
-            .find(methodText)
+        Regex("""\b(?:net\.minecraft\.server\.level\.)?ServerLevel\s+([A-Za-z_$][\w$]*)\b""")
+            .find(prefix)
             ?.groupValues
             ?.get(1)
             ?.let { return it }
-        val serverCheckedLevels = Regex("""\bLevel\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(methodText)
+        val serverCheckedLevels = Regex("""\b(?:net\.minecraft\.world\.level\.)?Level\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(prefix)
             .map { it.groupValues[1] }
             .filter { levelName ->
-                methodText.contains("if ($levelName.isClientSide()) return;") ||
-                    methodText.contains("if (${levelName}.isClientSide) return;") ||
-                    methodText.contains("if (!$levelName.isClientSide())")
+                hasClientSideEarlyReturn(prefix, levelName)
             }
             .distinct()
             .toList()
         if (serverCheckedLevels.size == 1) {
             return "(ServerLevel) ${serverCheckedLevels.single()}"
         }
-        if (methodText.contains("!this.level().isClientSide()") || methodText.contains("this.level().isClientSide()")) {
+        if (hasClientSideEarlyReturn(prefix, "this.level()")) {
             return "(ServerLevel) this.level()"
         }
         return null
+    }
+
+    private fun hasClientSideEarlyReturn(sourcePrefix: String, levelExpression: String): Boolean {
+        val escaped = Regex.escape(levelExpression)
+        return Regex("""if\s*\(\s*$escaped\.isClientSide(?:\(\))?\s*\)\s*(?:\{\s*)?return\s*;(?:\s*})?""")
+            .containsMatchIn(sourcePrefix)
     }
 
     private fun migrateLegacyMobCustomDamageSourceAttacks(source: String): String {

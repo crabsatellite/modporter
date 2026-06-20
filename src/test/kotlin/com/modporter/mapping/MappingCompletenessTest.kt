@@ -567,6 +567,38 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy damage bonus migration does not use method wide client side fallback`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        assertTrue(
+            !source.contains("inferServerLevelExpressionForMethod"),
+            "Legacy getDamageBonus migration must not infer ServerLevel from whole-method client-side scans"
+        )
+
+        val start = source.indexOf("private fun sourceProvenServerLevelExpressionForDamageBonus")
+        assertTrue(start >= 0, "sourceProvenServerLevelExpressionForDamageBonus is missing")
+        val end = source.indexOf("private fun migrateLivingDamageEventBoundarySource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "whole-method this.level client-side scan" to "methodText.contains(\"this.level().isClientSide()\")",
+            "whole-method negated this.level client-side scan" to "methodText.contains(\"!this.level().isClientSide()\")",
+            "whole-method Level early-return scan" to "methodText.contains(\"if (${'$'}levelName.isClientSide()) return;\")",
+            "negated Level client-side block fallback" to "if (!${'$'}levelName.isClientSide())"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "legacy getDamageBonus migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy getDamageBonus migration must use source-proven ServerLevel evidence before the call site, not whole-method client-side fallbacks: $offenders"
+        )
+    }
+
+    @Test
     fun `production mod event bus migrations do not synthesize variable names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(
