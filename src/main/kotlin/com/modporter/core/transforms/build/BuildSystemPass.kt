@@ -1651,18 +1651,14 @@ private static boolean hasNativePlayerVisibilityHook(Entity $entityParam) {
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val original = javaFile.readText()
-                if (!original.contains("CreativeModeInventoryScreen.class.getDeclaredField(\"selectedTab\")") ||
-                    !original.contains("setAccessible(true)") ||
-                    !original.contains("field.get(null)")) {
-                    return@forEach
-                }
-
                 val methodMatch = Regex(
                     """private\s+static\s+CreativeModeTab\s+getSelectedTab\s*\(\s*\)\s*\{"""
                 ).find(original) ?: return@forEach
                 val openBrace = original.indexOf('{', methodMatch.range.first)
                 val closeBrace = if (openBrace >= 0) findMatchingBrace(original, openBrace) else -1
                 if (closeBrace <= openBrace) return@forEach
+                val methodSource = original.substring(methodMatch.range.first, closeBrace + 1)
+                if (!containsCreativeSelectedTabReflection(methodSource)) return@forEach
 
                 val replacement = """
 private static CreativeModeTab getSelectedTab() {
@@ -1698,6 +1694,16 @@ private static CreativeModeTab getSelectedTab() {
                 }
             }
         return changes
+    }
+
+    private fun containsCreativeSelectedTabReflection(methodSource: String): Boolean {
+        val code = maskJavaComments(methodSource)
+        val fieldMatch = Regex(
+            """\b(?:java\.lang\.reflect\.)?Field\s+([A-Za-z_$][\w$]*)\s*=\s*(?:net\.minecraft\.client\.gui\.screens\.inventory\.)?CreativeModeInventoryScreen\.class\.getDeclaredField\s*\(\s*"selectedTab"\s*\)"""
+        ).find(code) ?: return false
+        val fieldName = fieldMatch.groupValues[1]
+        return Regex("""\b${Regex.escape(fieldName)}\s*\.\s*setAccessible\s*\(\s*true\s*\)""").containsMatchIn(code) &&
+            Regex("""\b${Regex.escape(fieldName)}\s*\.\s*get\s*\(\s*null\s*\)""").containsMatchIn(code)
     }
 
     private fun migrateEntityRenderersAddLayersReflection(projectDir: Path, dryRun: Boolean): List<Change> {
@@ -3268,6 +3274,39 @@ config="$configName"
             .findAll(code)
             .map { it.groupValues[1] }
             .toSet()
+    }
+
+    private fun maskJavaComments(source: String): String {
+        val chars = source.toCharArray()
+        var index = 0
+        while (index < chars.size) {
+            when {
+                index + 1 < chars.size && chars[index] == '/' && chars[index + 1] == '/' -> {
+                    chars[index] = ' '
+                    chars[index + 1] = ' '
+                    index += 2
+                    while (index < chars.size && chars[index] != '\n' && chars[index] != '\r') {
+                        chars[index++] = ' '
+                    }
+                }
+                index + 1 < chars.size && chars[index] == '/' && chars[index + 1] == '*' -> {
+                    chars[index] = ' '
+                    chars[index + 1] = ' '
+                    index += 2
+                    while (index + 1 < chars.size && !(chars[index] == '*' && chars[index + 1] == '/')) {
+                        if (chars[index] != '\n' && chars[index] != '\r') chars[index] = ' '
+                        index++
+                    }
+                    if (index + 1 < chars.size) {
+                        chars[index] = ' '
+                        chars[index + 1] = ' '
+                        index += 2
+                    }
+                }
+                else -> index++
+            }
+        }
+        return String(chars)
     }
 
     private fun maskJavaCommentsAndLiterals(source: String): String {

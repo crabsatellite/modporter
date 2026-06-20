@@ -628,6 +628,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `creative selected tab reflection migration uses method local evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateCreativeModeInventorySelectedTabReflection")
+        assertTrue(start >= 0, "migrateCreativeModeInventorySelectedTabReflection is missing")
+        val end = source.indexOf("private fun migrateEntityRenderersAddLayersReflection", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "whole-file selectedTab reflection scan" to """original.contains("CreativeModeInventoryScreen.class.getDeclaredField(\"selectedTab\")")""",
+            "whole-file setAccessible scan" to """original.contains("setAccessible(true)")""",
+            "whole-file field get scan" to """original.contains("field.get(null)")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "creative selectedTab migration contains $label" }
+
+        assertTrue(
+            body.contains("val methodSource = original.substring(methodMatch.range.first, closeBrace + 1)") &&
+                body.contains("containsCreativeSelectedTabReflection(methodSource)") &&
+                body.contains("Field\\s+([A-Za-z_$][\\w$]*)") &&
+                body.contains("Regex.escape(fieldName)") &&
+                source.contains("private fun maskJavaComments(source: String)"),
+            "Creative selectedTab reflection migration must prove reflection inside getSelectedTab(), not from whole-file markers"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Creative selectedTab reflection migration must not use whole-file reflection markers: $offenders"
+        )
+    }
+
+    @Test
     fun `required access transformer collection uses typed source evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

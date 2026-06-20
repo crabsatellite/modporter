@@ -1464,6 +1464,45 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `creative selected tab reflection migration ignores comments outside method evidence`() {
+        val projectDir = tempDir.resolve("creative-selectedtab-comment-no-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("CreativeFilters.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
+            import net.minecraft.world.item.CreativeModeTab;
+            import net.minecraft.world.item.CreativeModeTabs;
+
+            public class CreativeFilters {
+              // CreativeModeInventoryScreen.class.getDeclaredField("selectedTab");
+              // field.setAccessible(true);
+              // field.get(null);
+
+              private static CreativeModeTab getSelectedTab() {
+                return CreativeModeTabs.getDefaultTab();
+              }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("CreativeFilters.java").readText()
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-creative-selectedtab-at" })
+        assertTrue(content.contains("return CreativeModeTabs.getDefaultTab();"), content)
+        assertFalse(content.contains("CreativeModeInventoryScreen.selectedTab"), content)
+        assertFalse(atFile.exists())
+    }
+
+    @Test
     fun `rewrites class-for-name presence checks to class resource probes`() {
         val projectDir = tempDir.resolve("class-for-name-presence")
         val srcDir = projectDir.resolve("src/main/java/com/example")
