@@ -575,6 +575,59 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `client only build detection ignores comments and strings`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+
+        fun functionBody(startMarker: String, endMarker: String): String {
+            val start = source.indexOf(startMarker)
+            assertTrue(start >= 0, "$startMarker is missing")
+            val end = source.indexOf(endMarker, start + 1).let { if (it < 0) source.length else it }
+            return source.substring(start, end)
+        }
+
+        val sourceClassifier = functionBody(
+            "private fun isClientOnlyJavaSource",
+            "private fun guardClientOnlyListenerReferences"
+        )
+        val methodClassifier = functionBody(
+            "private fun javaMethodContainsClientOnlyApis",
+            "private fun isWithinDistClientGuard"
+        )
+        val subscriberClassifier = functionBody(
+            "private fun classBodyContainsClientOnlyApis",
+            "private fun addDistClientValueToEventBusSubscriberAnnotation"
+        )
+        val offenders = listOf(
+            "source classifier raw client package scan" to (sourceClassifier to """source.contains("net.minecraft.client.")"""),
+            "source classifier raw NeoForge client event scan" to (sourceClassifier to """source.contains("net.neoforged.neoforge.client.event.")"""),
+            "method classifier raw client package scan" to (methodClassifier to """methodSource.contains("net.minecraft.client.")"""),
+            "method classifier raw NeoForge client event scan" to (methodClassifier to """methodSource.contains("net.neoforged.neoforge.client.event.")"""),
+            "method classifier raw import scan" to (methodClassifier to """).findAll(classSource)"""),
+            "method classifier raw event name scan" to (methodClassifier to """).containsMatchIn(methodSource)"""),
+            "subscriber classifier raw client package scan" to (subscriberClassifier to """body.contains("net.minecraft.client.")"""),
+            "subscriber classifier raw NeoForge client event scan" to (subscriberClassifier to """body.contains("net.neoforged.neoforge.client.event.")"""),
+            "subscriber classifier raw event name scan" to (subscriberClassifier to """).containsMatchIn(body)""")
+        )
+            .filter { (_, pair) -> pair.first.contains(pair.second) }
+            .map { (label, _) -> "client-only detection contains $label" }
+
+        assertTrue(
+            sourceClassifier.contains("val code = maskJavaCommentsAndLiterals(source)") &&
+                methodClassifier.contains("val methodCode = maskJavaCommentsAndLiterals(methodSource)") &&
+                methodClassifier.contains("val classCode = maskJavaCommentsAndLiterals(classSource)") &&
+                subscriberClassifier.contains("val code = maskJavaCommentsAndLiterals(body)"),
+            "Client-only build detection must classify executable Java code, not comments or string literals"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Client-only build detection must not use raw source/body/method strings as evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `required access transformer collection uses typed source evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

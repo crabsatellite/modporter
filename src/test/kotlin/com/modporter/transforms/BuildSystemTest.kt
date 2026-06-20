@@ -1924,6 +1924,54 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `client only listener guard ignores comments and strings`() {
+        val projectDir = tempDir.resolve("client-listener-comment-no-guard")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    modEventBus.addListener(ClientEvent::commonSetup);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ClientEvent.java").writeText("""
+            package com.example;
+
+            public class ClientEvent {
+                String note = "net.minecraft.client.gui.screens.Screen RegisterParticleProvidersEvent";
+
+                public static void commonSetup(Object event) {
+                    // net.neoforged.neoforge.client.event.RegisterParticleProvidersEvent
+                    // net.minecraft.client.gui.screens.Screen
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ExampleMod.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "build-client-only-listener-dist-guard" })
+        assertTrue(content.contains("modEventBus.addListener(ClientEvent::commonSetup);"), content)
+        assertFalse(content.contains("FMLLoader.getDist()"), content)
+    }
+
+    @Test
     fun `marks client lifecycle event bus subscribers as client dist`() {
         val projectDir = tempDir.resolve("client-subscriber-dist")
         val srcDir = projectDir.resolve("src/main/java/com/example")
@@ -1970,6 +2018,49 @@ class BuildSystemTest {
 
         assertTrue(result.changes.any { it.ruleId == "build-client-eventbus-subscriber-dist" })
         assertTrue(content.contains("@EventBusSubscriber(modid = MODID, bus = EventBusSubscriber.Bus.MOD, value = net.neoforged.api.distmarker.Dist.CLIENT)"), content)
+    }
+
+    @Test
+    fun `client event bus subscriber dist marking ignores comments and strings`() {
+        val projectDir = tempDir.resolve("client-subscriber-comment-no-dist")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                @EventBusSubscriber(modid = MODID, bus = EventBusSubscriber.Bus.MOD)
+                public static class ModEvents {
+                    String note = "FMLClientSetupEvent RegisterShadersEvent net.minecraft.client.gui.screens.Screen";
+
+                    @SubscribeEvent
+                    public static void commonSetup(FMLCommonSetupEvent event) {
+                        // FMLClientSetupEvent RegisterParticleProvidersEvent
+                        // net.neoforged.neoforge.client.event.ModelEvent
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ExampleMod.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "build-client-eventbus-subscriber-dist" })
+        assertTrue(content.contains("@EventBusSubscriber(modid = MODID, bus = EventBusSubscriber.Bus.MOD)"), content)
+        assertFalse(content.contains("value = net.neoforged.api.distmarker.Dist.CLIENT"), content)
     }
 
     @Test

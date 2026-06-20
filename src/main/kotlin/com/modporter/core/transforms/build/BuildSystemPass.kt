@@ -1394,13 +1394,15 @@ private static boolean hasNativePlayerVisibilityHook(Entity $entityParam) {
         return changes
     }
 
-    private fun isClientOnlyJavaSource(source: String): Boolean =
-        source.contains("net.minecraft.client.") ||
-            source.contains("net.neoforged.neoforge.client.event.") ||
-            Regex("""(?m)^\s*package\s+.*\.client(?:\.|;)""").containsMatchIn(source) ||
-            Regex("""@OnlyIn\s*\(\s*(?:Dist\.)?CLIENT\s*\)""").containsMatchIn(source) ||
+    private fun isClientOnlyJavaSource(source: String): Boolean {
+        val code = maskJavaCommentsAndLiterals(source)
+        return code.contains("net.minecraft.client.") ||
+            code.contains("net.neoforged.neoforge.client.event.") ||
+            Regex("""(?m)^\s*package\s+.*\.client(?:\.|;)""").containsMatchIn(code) ||
+            Regex("""@OnlyIn\s*\(\s*(?:Dist\.)?CLIENT\s*\)""").containsMatchIn(code) ||
             Regex("""@(?:Mod\.)?EventBusSubscriber\s*\([\s\S]*?\bvalue\s*=\s*(?:net\.neoforged\.api\.distmarker\.)?Dist\.CLIENT""")
-                .containsMatchIn(source)
+                .containsMatchIn(code)
+    }
 
     private fun guardClientOnlyListenerReferences(
         source: String,
@@ -1524,16 +1526,18 @@ private static boolean hasNativePlayerVisibilityHook(Entity $entityParam) {
     }
 
     private fun javaMethodContainsClientOnlyApis(methodSource: String, classSource: String): Boolean {
+        val methodCode = maskJavaCommentsAndLiterals(methodSource)
+        val classCode = maskJavaCommentsAndLiterals(classSource)
         if (
-            methodSource.contains("net.minecraft.client.") ||
-            methodSource.contains("net.neoforged.neoforge.client.event.")
+            methodCode.contains("net.minecraft.client.") ||
+            methodCode.contains("net.neoforged.neoforge.client.event.")
         ) {
             return true
         }
 
         val clientImportedNames = Regex(
             """(?m)^\s*import\s+(net\.minecraft\.client\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*|net\.neoforged\.neoforge\.client\.event\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;"""
-        ).findAll(classSource).map { it.groupValues[1].substringAfterLast('.') }.toSet()
+        ).findAll(classCode).map { it.groupValues[1].substringAfterLast('.') }.toSet()
         val knownClientEventNames = setOf(
             "FMLClientSetupEvent",
             "ClientTickEvent",
@@ -1565,7 +1569,7 @@ private static boolean hasNativePlayerVisibilityHook(Entity $entityParam) {
             "ViewportEvent"
         )
         return (clientImportedNames + knownClientEventNames)
-            .any { name -> Regex("""\b${Regex.escape(name)}\b""").containsMatchIn(methodSource) }
+            .any { name -> Regex("""\b${Regex.escape(name)}\b""").containsMatchIn(methodCode) }
     }
 
     private fun isWithinDistClientGuard(source: String, offset: Int): Boolean {
@@ -1609,12 +1613,14 @@ private static boolean hasNativePlayerVisibilityHook(Entity $entityParam) {
         return result
     }
 
-    private fun classBodyContainsClientOnlyApis(body: String): Boolean =
-        body.contains("net.minecraft.client.") ||
-            body.contains("net.neoforged.neoforge.client.event.") ||
-            Regex("""\bFMLClientSetupEvent\b""").containsMatchIn(body) ||
+    private fun classBodyContainsClientOnlyApis(body: String): Boolean {
+        val code = maskJavaCommentsAndLiterals(body)
+        return code.contains("net.minecraft.client.") ||
+            code.contains("net.neoforged.neoforge.client.event.") ||
+            Regex("""\bFMLClientSetupEvent\b""").containsMatchIn(code) ||
             Regex("""\b(?:EntityRenderersEvent|ModelEvent|RegisterColorHandlersEvent|RegisterParticleProvidersEvent|RegisterKeyMappingsEvent|RegisterShadersEvent)\b""")
-                .containsMatchIn(body)
+                .containsMatchIn(code)
+    }
 
     private fun addDistClientValueToEventBusSubscriberAnnotation(annotation: String): String {
         val closeParen = annotation.lastIndexOf(')')
