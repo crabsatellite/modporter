@@ -32671,7 +32671,7 @@ $indent}"""
             }
 
             val target = args[1].trim()
-            val damageSourceExpr = inferDamageSourceForDoEnchantDamageEffects(source, statementStart, target)
+            val damageSourceExpr = damageSourceFromPrecedingTargetHurt(source, statementStart, target)
             if (damageSourceExpr == null) {
                 migrated.append(source, cursor, closeParen + 1)
                 cursor = closeParen + 1
@@ -32717,13 +32717,13 @@ $indent}"""
         return result
     }
 
-    private fun inferDamageSourceForDoEnchantDamageEffects(source: String, callStatementStart: Int, targetExpression: String): String? {
+    private fun damageSourceFromPrecedingTargetHurt(source: String, callStatementStart: Int, targetExpression: String): String? {
         val methodStart = enclosingMethodRange(source, callStatementStart)?.first
             ?: source.lastIndexOf('{', callStatementStart).let { if (it < 0) 0 else it + 1 }
         val prefix = source.substring(methodStart, callStatementStart)
         val token = "$targetExpression.hurt("
         var cursor = 0
-        var inferred: String? = null
+        var damageSource: String? = null
         while (cursor < prefix.length) {
             val index = prefix.indexOf(token, cursor)
             if (index < 0) break
@@ -32732,18 +32732,11 @@ $indent}"""
             if (closeParen < 0) break
             val args = splitTopLevelJavaArgs(prefix.substring(openParen + 1, closeParen))
             if (args.size >= 2) {
-                inferred = args[0].trim()
+                damageSource = args[0].trim()
             }
             cursor = closeParen + 1
         }
-        if (inferred != null) {
-            return inferred
-        }
-        return Regex("""\bDamageSource\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(prefix)
-            .lastOrNull()
-            ?.groupValues
-            ?.get(1)
+        return damageSource
     }
 
     private fun migrateMethodCalls(

@@ -537,6 +537,36 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy doEnchant damage effect migration does not use nearby damage source fallback`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        assertTrue(
+            !source.contains("inferDamageSourceForDoEnchantDamageEffects"),
+            "Legacy doEnchantDamageEffects migration must not infer damage sources from nearby declarations"
+        )
+
+        val start = source.indexOf("private fun damageSourceFromPrecedingTargetHurt")
+        assertTrue(start >= 0, "damageSourceFromPrecedingTargetHurt is missing")
+        val end = source.indexOf("private fun migrateMethodCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "method-scope DamageSource declaration scan" to "DamageSource",
+            "last declaration fallback" to "lastOrNull()"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "legacy doEnchantDamageEffects migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy doEnchantDamageEffects migration must use the same target's preceding hurt call, not nearby DamageSource declarations: $offenders"
+        )
+    }
+
+    @Test
     fun `production mod event bus migrations do not synthesize variable names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(

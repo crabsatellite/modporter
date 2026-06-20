@@ -19141,7 +19141,7 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
-    fun `migrates legacy doEnchant damage effects from method scoped damage source`() {
+    fun `migrates legacy doEnchant damage effects from preceding target hurt source`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
         srcDir.resolve("ExploderSurface.java").writeText("""
@@ -19179,6 +19179,46 @@ class StructuralRefactorExtraTest {
         assertTrue(exploder.contains("EnchantmentHelper.doPostAttackEffects(serverLevel, entity, damageSource);"), exploder)
         assertTrue(exploder.contains("import net.minecraft.world.item.enchantment.EnchantmentHelper;"), exploder)
         assertFalse(exploder.contains("doEnchantDamageEffects"), exploder)
+    }
+
+    @Test
+    fun `legacy doEnchant damage effects does not use unrelated method damage source`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExploderSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.damagesource.DamageSource;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.level.Level;
+
+            public class ExploderSurface extends Mob {
+                protected ExploderSurface(EntityType<? extends Mob> type, Level level) {
+                    super(type, level);
+                }
+
+                public void explodeAt(LivingEntity firstTarget, LivingEntity entity) {
+                    DamageSource damageSource = this.damageSources().mobAttack(this);
+                    firstTarget.hurt(damageSource, 1.0F);
+                    if (this.level() instanceof ServerLevel level) {
+                        level.broadcastEntityEvent(this, (byte) 4);
+                    }
+
+                    this.doEnchantDamageEffects(this, entity);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val exploder = srcDir.resolve("ExploderSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(exploder.contains("this.doEnchantDamageEffects(this, entity);"), exploder)
+        assertFalse(exploder.contains("EnchantmentHelper.doPostAttackEffects"), exploder)
+        assertFalse(exploder.contains("import net.minecraft.world.item.enchantment.EnchantmentHelper;"), exploder)
     }
 
     @Test
