@@ -1650,7 +1650,7 @@ class ResourceMigrationTest {
     }
 
     @Test
-    fun `hotbath descriptive item model uses bath herb texture when no direct texture exists`() {
+    fun `registered item without matching texture does not guess model texture from class names`() {
         val projectDir = setupResourceProject()
         val javaDir = projectDir.resolve("src/main/java/com/example")
         javaDir.createDirectories()
@@ -1670,10 +1670,11 @@ class ResourceMigrationTest {
         textureDir.resolve("bath_herb.png").writeText("png")
 
         val db = MappingDatabase.loadDefault()
-        ResourceMigrationPass(db).apply(projectDir)
+        val result = ResourceMigrationPass(db).apply(projectDir)
 
-        val model = projectDir.resolve("src/main/resources/assets/resmod/models/item/descriptive_item.json").readText()
-        assertTrue(model.contains(""""layer0": "resmod:item/bath_herb""""))
+        val model = projectDir.resolve("src/main/resources/assets/resmod/models/item/descriptive_item.json")
+        assertFalse(result.changes.any { it.ruleId == "res-create-missing-item-model" })
+        assertFalse(model.exists(), "Item model generation must not map arbitrary nonmatching textures by item or class names")
     }
 
     @Test

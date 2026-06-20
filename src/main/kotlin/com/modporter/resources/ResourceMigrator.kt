@@ -3085,9 +3085,6 @@ class ResourceMigrationPass(
 
                             val texture = when {
                                 textureDir.resolve("${item.id}.png").exists() -> item.id
-                                item.id == "descriptive_item" &&
-                                    item.className.endsWith("DescriptiveItem") &&
-                                    textureDir.resolve("bath_herb.png").exists() -> "bath_herb"
                                 else -> null
                             } ?: continue
 
@@ -3131,7 +3128,7 @@ class ResourceMigrationPass(
                         }
                         .forEach { match ->
                             val id = match.groupValues[1]
-                            items.putIfAbsent(id, RegisteredItem(id, match.groupValues[2]))
+                            items.putIfAbsent(id, RegisteredItem(id))
                         }
                 }
         }
@@ -3147,7 +3144,7 @@ class ResourceMigrationPass(
 }
 """.trimIndent() + "\n"
 
-    private data class RegisteredItem(val id: String, val className: String)
+    private data class RegisteredItem(val id: String)
 
     private data class NitrogenFuelSpriteSpec(
         val namespace: String,

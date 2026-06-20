@@ -259,6 +259,9 @@ class MappingCompletenessTest {
             "sakura",
             "HotBath",
             "hotbath",
+            "descriptive_item",
+            "DescriptiveItem",
+            "bath_herb",
             "ConstructionWand",
             "constructionwand",
             "glass_sword",
@@ -1039,7 +1042,10 @@ class MappingCompletenessTest {
         }
         val body = source.substring(start, end)
         val offenders = listOf(
-            "raw file text registration scan" to "registerPattern.findAll(file.readText())"
+            "raw file text registration scan" to "registerPattern.findAll(file.readText())",
+            "registered item class-name texture inference" to "item.className",
+            "hardcoded descriptive item id" to "descriptive_item",
+            "hardcoded alternate item texture" to "bath_herb"
         )
             .filter { (_, marker) -> body.contains(marker) }
             .map { (label, _) -> "missing item model registration detection contains $label" }
@@ -1055,7 +1061,7 @@ class MappingCompletenessTest {
         )
         assertTrue(
             offenders.isEmpty(),
-            "Missing item model generation must not use raw Java text as registration evidence: $offenders"
+            "Missing item model generation must use direct registered item and texture evidence, not raw Java text or class-name texture guesses: $offenders"
         )
     }
 
