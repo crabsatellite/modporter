@@ -1815,14 +1815,6 @@
       "isRegex": true
     },
     {
-      "id": "simple-criterion-trigger-simpleinstance",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: SimpleCriterionTrigger.SimpleInstance is handled by structural criterion-trigger migration",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "blockstate-get-to-getValue",
       "pattern": "state\\.get\\(",
       "replacement": "state.getValue(",
@@ -1931,22 +1923,6 @@
       "pattern": "new SimpleTier\\(\\s*\\d+\\s*,\\s*(\\d+)\\s*,\\s*([0-9.]+F?)\\s*,\\s*([0-9.]+F?)\\s*,\\s*(\\d+)\\s*,\\s*([^,]+),\\s*\\(\\)\\s*->\\s*Ingredient\\.EMPTY\\s*\\)",
       "replacement": "new SimpleTier($5, $1, $2, $3, $4, () -> Ingredient.EMPTY)",
       "description": "NeoForge SimpleTier constructor starts with incorrect-block tag and no mining-level parameter",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "enchantmenthelper-sweeping-ratio-blocked",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: getSweepingDamageRatio(...) must migrate through the 1.21 enchantment damage pipeline, not a fixed value",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "enchantmenthelper-damagebonus-mobtype-blocked",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: getDamageBonus(... getMobType()) must migrate to EnchantmentHelper.modifyDamage with a real DamageSource",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -2260,22 +2236,6 @@
       "isRegex": true
     },
     {
-      "id": "network-import-simplechannel",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: SimpleChannel import is handled by structural payload migration",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "network-import-networkregistry",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: NetworkRegistry import is handled by structural payload migration",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "network-import-networkevent",
       "pattern": "import net.minecraftforge.network.NetworkEvent;",
       "replacement": "import net.neoforged.neoforge.network.handling.IPayloadContext;",
@@ -2325,30 +2285,6 @@
       "pattern": "(?m)^\\s*\\w+\\.get\\(\\)\\.setPacketHandled\\(true\\);\\s*\\r?\\n?",
       "replacement": "",
       "description": "setPacketHandled(true) removed - NeoForge handles this automatically",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "network-simplechannel-field",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: SimpleChannel fields are handled by structural payload migration",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "network-newSimpleChannel-assign",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: NetworkRegistry.newSimpleChannel() is handled by structural payload migration",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "network-registerMessage",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: SimpleChannel.registerMessage calls must be migrated to PayloadRegistrar with real packet registration",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -2494,41 +2430,10 @@
       "isRegex": true
     },
     {
-      "id": "gui-overlay-event-import-fix",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: RenderGuiOverlayEvent import is rewritten directly",
-      "fileGlob": "*.java"
-    },
-    {
       "id": "editbox-super-tick-remove",
       "pattern": "(?s)(extends\\s+EditBox\\b.*?)\\s+super\\.tick\\(\\);",
       "replacement": "$1",
       "description": "Remove super.tick() call in EditBox subclass (tick() removed in 1.21)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "recipe-craftingcontainer-import-inventory",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: CraftingContainer is still the mutable inventory container in 1.21; structural recipe migration adds CraftingInput only at recipe API boundaries",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "recipe-craftingcontainer-import",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: CraftingContainer import migration is context-sensitive and handled structurally",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "recipe-craftingcontainer-to-craftinginput",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: CraftingContainer -> CraftingInput must not apply to GUI containers or slots; structural recipe migration handles recipe API signatures",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -2592,14 +2497,6 @@
       "pattern": "(?m)^([ \\t]*)@Override\\s*\\r?\\n[ \\t]*public\\s+int\\s+(getWidth|getHeight)\\s*\\(",
       "replacement": "$1public int $2(",
       "description": "Remove stale @Override after IShapedRecipe width/height accessors become local helpers",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "recipe-getContainerSize-to-size",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: getContainerSize() still exists on Container; structural recipe migration rewrites only CraftingInput receivers",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -2936,34 +2833,10 @@
       "isRegex": true
     },
     {
-      "id": "entity-getMyRidingOffset-removed",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: Entity.getMyRidingOffset() must be migrated structurally, not replaced with a numeric constant",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "nbt-getOrCreateTagElement-to-component",
       "pattern": "\\.getOrCreateTagElement\\(",
       "replacement": ".getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag().getCompound(",
       "description": "ItemStack.getOrCreateTagElement() -> DataComponents sub-compound access in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "net-ctx-get-direction-server",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: NetworkEvent.Context direction checks must be migrated by payload registration, not replaced with constants",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "net-ctx-get-direction-client",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: NetworkEvent.Context direction checks must be migrated by payload registration, not replaced with constants",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -3057,7 +2930,7 @@
       "id": "recipe-registerevent-register-string",
       "pattern": "registry\\.register\\(\"(\\w+)\",",
       "replacement": "registry.register(ResourceLocation.parse(\"$1\"),",
-      "description": "RegisterEvent registry.register(String, obj) -> registry.register(ResourceLocation, obj) in 1.21 (may need modid prefix)",
+      "description": "RegisterEvent registry.register(String, obj) -> registry.register(ResourceLocation.parse(String), obj); unqualified ids remain visible to compile/runtime gates",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -3130,14 +3003,6 @@
       "pattern": "TickEvent.PlayerTickEvent",
       "replacement": "PlayerTickEvent.Post",
       "description": "TickEvent.PlayerTickEvent -> PlayerTickEvent.Post (1.21)",
-      "fileGlob": "*.java"
-    },
-    {
-      "id": "tick-event-phase-check-remove",
-      "pattern": "(?!)",
-      "replacement": "",
-      "isRegex": true,
-      "description": "Disabled: event side/phase checks must be removed by structural tick-event migration",
       "fileGlob": "*.java"
     },
     {
@@ -3901,58 +3766,10 @@
       "isRegex": true
     },
     {
-      "id": "custom-enchantment-deferred-register-to-holder-helper",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: custom enchantment ResourceKey migration must resolve the mod id from structured source data",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "custom-enchantment-remove-category-fields",
       "pattern": "\\n\\s*(?:public|protected|private)?\\s*static\\s+final\\s+EnchantmentCategory\\s+\\w+\\s*=\\s*EnchantmentCategory\\.create\\([\\s\\S]*?\\);",
       "replacement": "",
       "description": "EnchantmentCategory removed in 1.21 data-driven enchantments",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "custom-enchantment-holder-to-resourcekey",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: custom enchantment ResourceKey migration must resolve the mod id from structured source data",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "custom-enchantment-internal-getlevel-holder",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: context-aware custom enchantment migration rewrites discovered keys",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "custom-enchantment-internal-enchant-holder",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: context-aware custom enchantment migration rewrites discovered keys",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "custom-enchantment-ispermanence-holder",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: context-aware custom enchantment migration rewrites discovered keys",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "custom-enchantment-isrenewal-holder",
-      "pattern": "(?!)",
-      "replacement": "",
-      "description": "Disabled: context-aware custom enchantment migration rewrites discovered keys",
       "fileGlob": "*.java",
       "isRegex": true
     },

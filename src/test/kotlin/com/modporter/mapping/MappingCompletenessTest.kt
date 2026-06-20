@@ -53,6 +53,30 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `text replacements do not carry disabled noop or uncertainty rules`() {
+        val db = MappingDatabase.loadDefault()
+        val forbiddenDescriptions = listOf(
+            "disabled rule" to Regex("""^\s*Disabled:""", RegexOption.IGNORE_CASE),
+            "uncertain rule" to Regex("""\bmay\s+need\b""", RegexOption.IGNORE_CASE)
+        )
+        val offenders = db.getTextReplacements().flatMap { rule ->
+            buildList {
+                if (rule.pattern == "(?!)") {
+                    add("${rule.id} has inert no-op pattern")
+                }
+                forbiddenDescriptions
+                    .filter { (_, pattern) -> pattern.containsMatchIn(rule.description) }
+                    .forEach { (label, _) -> add("${rule.id} has $label description") }
+            }
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Text replacements must be executable migrations/removals, not disabled placeholders or uncertainty notes: $offenders"
+        )
+    }
+
+    @Test
     fun `text replacements do not rewrite untyped getTag calls`() {
         val db = MappingDatabase.loadDefault()
         val offenders = db.getTextReplacements()
