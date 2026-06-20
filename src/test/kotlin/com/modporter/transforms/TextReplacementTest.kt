@@ -1425,6 +1425,42 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `custom enchantment data rejects unresolved qualified mod id expression`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            final class ExampleMod {
+                static final String MODID = "example";
+            }
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(
+                        BuiltInRegistries.ENCHANTMENT,
+                        MissingMod.MODID
+                );
+                public static final DeferredHolder<Enchantment, Enchantment> FLAME = ENCHANTMENTS.register("flame", FlameEnchantment::new);
+
+                private static class FlameEnchantment extends Enchantment {
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any {
+                it.contains("unresolved mod id expression 'MissingMod.MODID'")
+            },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/flame.json").exists())
+    }
+
+    @Test
     fun `legacy enchantment category runtime checks migrate to holder item support`() {
         val projectDir = createTestFile("""
             package com.example;

@@ -1949,19 +1949,60 @@ ${codecFields.joinToString(",\n")}
 
     private fun detectLegacyJavaModIds(javaSources: List<Pair<Path, String>>): Map<String, String> {
         val ids = linkedMapOf<String, String>()
+        val simpleValues = linkedMapOf<String, MutableSet<String>>()
         for ((file, source) in javaSources) {
             val className = file.fileName.toString().removeSuffix(".java")
+            val packageName = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""")
+                .find(source)
+                ?.groupValues
+                ?.get(1)
+                .orEmpty()
             Regex("""\bstatic\s+(?:final\s+)?String\s+([A-Za-z_$][\w$]*)\s*=\s*"([^"]+)"""")
                 .findAll(source)
                 .forEach { match ->
-                    ids[match.groupValues[1]] = match.groupValues[2]
-                    ids["$className.${match.groupValues[1]}"] = match.groupValues[2]
+                    val ownerClass = javaTypeNameContainingOffset(source, match.range.first) ?: className
+                    simpleValues.getOrPut(match.groupValues[1]) { linkedSetOf() } += match.groupValues[2]
+                    ids["$ownerClass.${match.groupValues[1]}"] = match.groupValues[2]
+                    if (packageName.isNotBlank()) {
+                        ids["$packageName.$ownerClass.${match.groupValues[1]}"] = match.groupValues[2]
+                    }
+                }
+            Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)\s*(?:public|protected|private|abstract|final|\s)*class\s+([A-Za-z_$][\w$]*)""")
+                .find(source)
+                ?.let { match ->
+                    ids[match.groupValues[2]] = match.groupValues[1]
+                    if (packageName.isNotBlank()) {
+                        ids["$packageName.${match.groupValues[2]}"] = match.groupValues[1]
+                    }
                 }
             Regex("""@Mod\s*\(\s*"([^"]+)"""").find(source)?.let { match ->
-                ids[className] = match.groupValues[1]
+                ids.putIfAbsent(className, match.groupValues[1])
+            }
+        }
+        simpleValues.forEach { (name, values) ->
+            if (values.size == 1) {
+                ids[name] = values.single()
             }
         }
         return ids
+    }
+
+    private fun javaTypeNameContainingOffset(source: String, offset: Int): String? {
+        val typePattern = Regex(
+            """\b(?:public|protected|private|abstract|final|static|\s)*(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b"""
+        )
+        for (match in typePattern.findAll(source)) {
+            val openBrace = source.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (openBrace >= 0 && closeBrace > openBrace && offset in openBrace..closeBrace) {
+                return match.groupValues[1]
+            }
+        }
+        return typePattern.findAll(source)
+            .takeWhile { it.range.first <= offset }
+            .lastOrNull()
+            ?.groupValues
+            ?.get(1)
     }
 
     private fun indexJavaClassSources(javaSources: List<Pair<Path, String>>): Map<String, List<Pair<Path, String>>> {
@@ -2054,7 +2095,7 @@ ${codecFields.joinToString(",\n")}
     private fun resolveLegacyModIdExpression(expression: String, modIds: Map<String, String>): String? {
         val trimmed = expression.trim()
         if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) return trimmed.trim('"')
-        return modIds[trimmed] ?: modIds[trimmed.substringAfterLast('.')]
+        return modIds[trimmed]
     }
 
     private fun collectLegacyEnchantmentCategories(

@@ -649,6 +649,58 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `resource string constant resolution does not use qualified tail fallback`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val resourceMigrator = projectRoot
+            .resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt")
+            .readText()
+        val start = resourceMigrator.indexOf("private fun resolveJavaStringExpression")
+        assertTrue(start >= 0, "resolveJavaStringExpression is missing")
+        val end = resourceMigrator.indexOf("\n    private fun ", start + 1).let { if (it < 0) resourceMigrator.length else it }
+        val body = resourceMigrator.substring(start, end)
+
+        val forbidden = listOf(
+            "qualified tail fallback" to "substringAfterLast('.')"
+        )
+        val offenders = forbidden
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "resolveJavaStringExpression contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Resource string migrations must resolve exact source constants, not guess by the last qualified segment: $offenders"
+        )
+    }
+
+    @Test
+    fun `production migrations do not resolve source constants by qualified tail fallback`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val forbidden = listOf(
+            "mod id qualified tail fallback" to Regex("""modIds\[[^\]\r\n]*substringAfterLast\('\.'\)[^\]\r\n]*]"""),
+            "constant qualified tail fallback" to Regex("""constants\[[^\]\r\n]*substringAfterLast\('\.'\)[^\]\r\n]*]""")
+        )
+
+        val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) && it.extension == "kt" }
+                .flatMap { file ->
+                    val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                    val text = file.readText()
+                    forbidden
+                        .filter { (_, pattern) -> pattern.containsMatchIn(text) }
+                        .map { (label, _) -> "$relative contains $label" }
+                        .stream()
+                }
+                .toList()
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Source constant migrations must resolve exact or unique constants, not degrade qualified references to their last segment: $offenders"
+        )
+    }
+
+    @Test
     fun `build mod id helpers do not scan arbitrary constant references`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

@@ -900,19 +900,60 @@ public class $className extends CustomRecipe {
 
     private fun detectJavaModIds(javaSources: List<Pair<Path, String>>): Map<String, String> {
         val ids = mutableMapOf<String, String>()
+        val simpleValues = linkedMapOf<String, MutableSet<String>>()
         for ((file, content) in javaSources) {
             val className = file.fileName.toString().removeSuffix(".java")
+            val packageName = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""")
+                .find(content)
+                ?.groupValues
+                ?.get(1)
+                .orEmpty()
             Regex("static\\s+final\\s+String\\s+(MODID|MOD_ID)\\s*=\\s*\"([^\"]+)\"")
                 .findAll(content)
                 .forEach { match ->
-                    ids[match.groupValues[1]] = match.groupValues[2]
-                    ids["$className.${match.groupValues[1]}"] = match.groupValues[2]
+                    val ownerClass = javaTypeNameContainingOffset(content, match.range.first) ?: className
+                    simpleValues.getOrPut(match.groupValues[1]) { linkedSetOf() } += match.groupValues[2]
+                    ids["$ownerClass.${match.groupValues[1]}"] = match.groupValues[2]
+                    if (packageName.isNotBlank()) {
+                        ids["$packageName.$ownerClass.${match.groupValues[1]}"] = match.groupValues[2]
+                    }
+                }
+            Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)\s*(?:public|protected|private|abstract|final|\s)*class\s+([A-Za-z_$][\w$]*)""")
+                .find(content)
+                ?.let { match ->
+                    ids[match.groupValues[2]] = match.groupValues[1]
+                    if (packageName.isNotBlank()) {
+                        ids["$packageName.${match.groupValues[2]}"] = match.groupValues[1]
+                    }
                 }
             Regex("@Mod\\s*\\(\\s*\"([^\"]+)\"").find(content)?.let { match ->
-                ids[className] = match.groupValues[1]
+                ids.putIfAbsent(className, match.groupValues[1])
+            }
+        }
+        simpleValues.forEach { (name, values) ->
+            if (values.size == 1) {
+                ids[name] = values.single()
             }
         }
         return ids
+    }
+
+    private fun javaTypeNameContainingOffset(source: String, offset: Int): String? {
+        val typePattern = Regex(
+            """\b(?:public|protected|private|abstract|final|static|\s)*(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b"""
+        )
+        for (match in typePattern.findAll(source)) {
+            val openBrace = source.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingJavaBrace(source, openBrace) else -1
+            if (openBrace >= 0 && closeBrace > openBrace && offset in openBrace..closeBrace) {
+                return match.groupValues[1]
+            }
+        }
+        return typePattern.findAll(source)
+            .takeWhile { it.range.first <= offset }
+            .lastOrNull()
+            ?.groupValues
+            ?.get(1)
     }
 
     private fun resolveModIdExpression(expression: String, modIds: Map<String, String>): String? {
@@ -921,7 +962,6 @@ public class $className extends CustomRecipe {
             return trimmed.trim('"')
         }
         return modIds[trimmed]
-            ?: modIds[trimmed.substringAfterLast('.')]
     }
 
     private data class CustomEnchantmentKey(val modId: String, val name: String)
@@ -3420,12 +3460,18 @@ public class $className extends CustomRecipe {
         errors: MutableList<String>
     ) {
         try {
-            val specs = collectNitrogenFuelSpriteSpecs(projectDir)
+            val specs = collectNitrogenFuelSpriteSpecs(projectDir, errors)
             if (specs.isEmpty()) return
 
             specs.forEach { spec ->
                 val sourceTexture = assetsDir.resolve(spec.namespace).resolve(spec.menuTexturePath)
-                if (!sourceTexture.exists()) return@forEach
+                if (!sourceTexture.exists()) {
+                    errors.add(
+                        "Cannot generate Nitrogen fuel sprites for namespace '${spec.namespace}': " +
+                            "legacy texture is missing at ${spec.menuTexturePath}"
+                    )
+                    return@forEach
+                }
 
                 val iconTarget = assetsDir
                     .resolve(spec.namespace)
@@ -3462,7 +3508,10 @@ public class $className extends CustomRecipe {
         }
     }
 
-    private fun collectNitrogenFuelSpriteSpecs(projectDir: Path): Set<NitrogenFuelSpriteSpec> {
+    private fun collectNitrogenFuelSpriteSpecs(
+        projectDir: Path,
+        errors: MutableList<String>
+    ): Set<NitrogenFuelSpriteSpec> {
         val sourceRoots = listOf(
             projectDir.resolve("src/main/java"),
             projectDir.resolve("src/generated/java")
@@ -3493,8 +3542,15 @@ public class $className extends CustomRecipe {
                 return@forEach
             }
             texturePattern.findAll(source).forEach { match ->
-                val namespace = resolveJavaStringExpression(match.groupValues[1].trim(), stringConstants)
-                    ?: return@forEach
+                val namespaceExpression = match.groupValues[1].trim()
+                val namespace = resolveJavaStringExpression(namespaceExpression, stringConstants)
+                if (namespace == null) {
+                    errors.add(
+                        "Cannot resolve Nitrogen fuel texture namespace expression '$namespaceExpression' " +
+                            "for textures/gui/menu/${match.groupValues[2]}.png"
+                    )
+                    return@forEach
+                }
                 val textureTail = match.groupValues[2]
                 val spriteStem = textureTail
                     .substringAfterLast('/')
@@ -3513,24 +3569,29 @@ public class $className extends CustomRecipe {
 
     private fun collectJavaStringConstants(sources: Iterable<String>): Map<String, String> {
         val constants = linkedMapOf<String, String>()
-        val classPattern = Regex("""\b(?:class|interface|enum)\s+([A-Za-z_$][\w$]*)\b""")
+        val simpleValues = linkedMapOf<String, MutableSet<String>>()
         val packagePattern = Regex("""(?m)^package\s+([\w.]+)\s*;""")
         val constantPattern = Regex(
             """\b(?:public|protected|private)?\s*static\s+final\s+String\s+([A-Za-z_$][\w$]*)\s*=\s*"([^"]+)""""
         )
         sources.forEach { source ->
-            val className = classPattern.find(source)?.groupValues?.get(1)
             val packageName = packagePattern.find(source)?.groupValues?.get(1).orEmpty()
             constantPattern.findAll(source).forEach { match ->
                 val name = match.groupValues[1]
                 val value = match.groupValues[2]
-                constants.putIfAbsent(name, value)
+                val className = javaTypeNameContainingOffset(source, match.range.first)
+                simpleValues.getOrPut(name) { linkedSetOf() } += value
                 if (className != null) {
                     constants["$className.$name"] = value
                     if (packageName.isNotBlank()) {
                         constants["$packageName.$className.$name"] = value
                     }
                 }
+            }
+        }
+        simpleValues.forEach { (name, values) ->
+            if (values.size == 1) {
+                constants[name] = values.single()
             }
         }
         return constants
@@ -3541,7 +3602,7 @@ public class $className extends CustomRecipe {
         if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
             return trimmed.trim('"')
         }
-        return constants[trimmed] ?: constants[trimmed.substringAfterLast('.')]
+        return constants[trimmed]
     }
 
     private fun cropNitrogenFuelSprite(
@@ -3647,14 +3708,35 @@ public class $className extends CustomRecipe {
                 .filter { Files.isRegularFile(it) && (it.toString().endsWith(".java") || it.toString().endsWith(".kt")) }
                 .forEach { file ->
                     val content = file.readText()
-                    val constants = constantPattern.findAll(content)
-                        .associate { it.groupValues[1] to it.groupValues[2] }
+                    val fallbackClassName = file.fileName.toString().substringBeforeLast('.')
+                    val packageName = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""")
+                        .find(content)
+                        ?.groupValues
+                        ?.get(1)
+                        .orEmpty()
+                    val constants = linkedMapOf<String, String>()
+                    val simpleValues = linkedMapOf<String, MutableSet<String>>()
+                    constantPattern.findAll(content).forEach { match ->
+                        val name = match.groupValues[1]
+                        val value = match.groupValues[2]
+                        val className = javaTypeNameContainingOffset(content, match.range.first) ?: fallbackClassName
+                        simpleValues.getOrPut(name) { linkedSetOf() } += value
+                        constants["$className.$name"] = value
+                        if (packageName.isNotBlank()) {
+                            constants["$packageName.$className.$name"] = value
+                        }
+                    }
+                    simpleValues.forEach { (name, values) ->
+                        if (values.size == 1) {
+                            constants[name] = values.single()
+                        }
+                    }
 
                     callPattern.findAll(content).forEach { match ->
                         val rawId = match.groupValues[1].trim()
                         val advancementId = when {
                             rawId.startsWith("\"") && rawId.endsWith("\"") -> rawId.trim('"')
-                            else -> constants[rawId] ?: constants[rawId.substringAfterLast('.')]
+                            else -> constants[rawId]
                         } ?: return@forEach
                         val criterion = match.groupValues[2]
                         result.getOrPut(advancementId) { linkedSetOf() }.add(criterion)
