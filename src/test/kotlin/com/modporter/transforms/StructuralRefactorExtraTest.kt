@@ -709,6 +709,94 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `static mod bus subscribers use declared type names instead of java file names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ModData.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+            class ActualData {
+                @SubscribeEvent
+                public static void gatherData(GatherDataEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+        val data = srcDir.resolve("ModData.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-static-modbus-subscriber-registration" })
+        assertTrue(main.contains("modEventBus.addListener(ActualData::gatherData);"), main)
+        assertFalse(main.contains("ModData::gatherData"), main)
+        assertFalse(data.contains("@EventBusSubscriber"), data)
+        assertFalse(data.contains("@SubscribeEvent"), data)
+    }
+
+    @Test
+    fun `common bus mod event listener migration matches declared handler type names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.common.NeoForge;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    NeoForge.EVENT_BUS.addListener(ActualData::gatherData);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ModData.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            class ActualData {
+                public static void gatherData(GatherDataEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-modbus-listener-registration" })
+        assertTrue(main.contains("modEventBus.addListener(ActualData::gatherData);"), main)
+        assertFalse(main.contains("NeoForge.EVENT_BUS.addListener(ActualData::gatherData);"), main)
+        assertFalse(main.contains("ModData::gatherData"), main)
+    }
+
+    @Test
     fun `inserts common static mod bus subscribers outside client dist guard`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val entityDir = srcDir.resolve("entity")

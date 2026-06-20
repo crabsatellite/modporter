@@ -8007,12 +8007,29 @@ public final class ${spec.attachmentClassName} {
         owner: JavaTypeBlock,
         constName: String
     ): String? {
-        val classRef = when {
-            mainPackage.isBlank() || mainPackage == generatedPackage -> owner.name
-            owner.isPublic -> "$mainPackage.${owner.name}"
-            else -> return null
-        }
+        val classRef = javaTypeReferenceExpression(mainPackage, generatedPackage, owner) ?: return null
         return "$classRef.$constName"
+    }
+
+    private fun javaTypeReferenceExpression(
+        sourcePackage: String,
+        targetPackage: String,
+        owner: JavaTypeBlock
+    ): String? = when {
+        sourcePackage.isBlank() || sourcePackage == targetPackage -> owner.name
+        owner.isPublic -> "$sourcePackage.${owner.name}"
+        else -> null
+    }
+
+    private fun javaListenerTypeReferenceExpression(
+        sourcePackage: String,
+        targetPackage: String,
+        owner: JavaTypeBlock
+    ): String? = when {
+        sourcePackage.isBlank() -> owner.name
+        owner.isPublic -> "$sourcePackage.${owner.name}"
+        sourcePackage == targetPackage -> owner.name
+        else -> null
     }
 
     private data class JavaTypeBlock(
@@ -8088,6 +8105,11 @@ public final class ${spec.attachmentClassName} {
         typeBlocks
             .filter { it.declarationStart > annotationEnd }
             .minByOrNull { it.declarationStart }
+
+    private fun javaTypeBlockContainingOffset(offset: Int, typeBlocks: List<JavaTypeBlock>): JavaTypeBlock? =
+        typeBlocks
+            .filter { offset > it.bodyStart && offset < it.end }
+            .minByOrNull { it.end - it.bodyStart }
 
     private fun javaStaticFinalStringConstant(
         code: String,
@@ -41832,11 +41854,13 @@ public class ${builder.className} implements RecipeBuilder {
             .toList()
             .forEach { file ->
                 val text = file.readText()
-                val className = file.fileName.toString().removeSuffix(".java")
+                val packageName = packageNameOf(text)
+                val executableCode = maskJavaCommentsAndLiterals(text)
+                val typeBlocks = javaTypeBlocks(text, executableCode)
                 val methodPattern = Regex(
                     """(?m)\b(?:public|protected|private)?\s*(?:static\s+)?void\s+(\w+)\s*\(\s*(?:final\s+)?([\w.]+)(?:<[^>]+>)?\s+\w+"""
                 )
-                methodPattern.findAll(text).forEach { match ->
+                methodPattern.findAll(executableCode).forEach { match ->
                     val methodName = match.groupValues[1]
                     val parameterType = match.groupValues[2]
                     val isModBusEvent = modBusEventTypes.any { eventName ->
@@ -41845,7 +41869,13 @@ public class ${builder.className} implements RecipeBuilder {
                             parameterType.contains("$eventName.")
                     }
                     if (isModBusEvent) {
-                        refs.add("$className::$methodName")
+                        val owner = javaTypeBlockContainingOffset(match.range.first, typeBlocks)
+                        if (owner != null) {
+                            refs.add("${owner.name}::$methodName")
+                            if (packageName.isNotBlank() && owner.isPublic) {
+                                refs.add("$packageName.${owner.name}::$methodName")
+                            }
+                        }
                     }
                 }
             }
@@ -41884,7 +41914,7 @@ public class ${builder.className} implements RecipeBuilder {
                 val annotation = annotationPattern.find(text) ?: return@forEach
                 val handlers = Regex(
                     """(?m)^[ \t]*@SubscribeEvent\s*\r?\n[ \t]*(?:public\s+)?static\s+void\s+(\w+)\s*\(\s*(?:final\s+)?([\w.]+)\s+\w+\s*\)"""
-                ).findAll(text)
+                ).findAll(maskJavaCommentsAndLiterals(text))
                     .map { match ->
                         val methodPrefix = text.substring(
                             (match.range.first - 160).coerceAtLeast(0),
@@ -41908,16 +41938,16 @@ public class ${builder.className} implements RecipeBuilder {
                     .toList()
                 if (handlers.isEmpty()) return@forEach
 
-                val packageName = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""")
-                    .find(text)
-                    ?.groupValues
-                    ?.get(1)
-                val className = file.fileName.toString().removeSuffix(".java")
-                val qualifiedClassName = if (packageName.isNullOrBlank()) className else "$packageName.$className"
+                val packageName = packageNameOf(text)
+                val mainPackage = packageNameOf(mainText)
+                val executableCode = maskJavaCommentsAndLiterals(text)
+                val typeBlocks = javaTypeBlocks(text, executableCode)
+                val owner = javaTypeBlockForModAnnotation(annotation.range.last, typeBlocks) ?: return@forEach
+                val listenerClassName = javaListenerTypeReferenceExpression(packageName, mainPackage, owner) ?: return@forEach
                 var mainChanged = false
                 val indent = mainConstructorIndent(mainText, modBusVar)
                 for (handler in handlers) {
-                    val listener = "$modBusVar.addListener($qualifiedClassName::${handler.methodName});"
+                    val listener = "$modBusVar.addListener($listenerClassName::${handler.methodName});"
                     val registration = if (handler.isClientOnly) {
                         "${indent}if (net.neoforged.fml.loading.FMLLoader.getDist() == net.neoforged.api.distmarker.Dist.CLIENT) {\n" +
                             "$indent    $listener\n" +
@@ -41930,7 +41960,7 @@ public class ${builder.className} implements RecipeBuilder {
                             mainText,
                             modBusVar,
                             registration,
-                            className
+                            owner.name
                         )
                         mainChanged = true
                     }
@@ -41957,7 +41987,7 @@ public class ${builder.className} implements RecipeBuilder {
                         line = 1,
                         description = "Register static mod-bus subscriber handlers on mod event bus",
                         before = annotation.value.trim(),
-                        after = handlers.joinToString(" ") { "$modBusVar.addListener($qualifiedClassName::${it.methodName});" },
+                        after = handlers.joinToString(" ") { "$modBusVar.addListener($listenerClassName::${it.methodName});" },
                         confidence = Confidence.HIGH,
                         ruleId = "struct-static-modbus-subscriber-registration"
                     ))

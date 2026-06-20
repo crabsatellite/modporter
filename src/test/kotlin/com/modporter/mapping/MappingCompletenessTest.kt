@@ -1452,6 +1452,45 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `production mod event bus listener migrations do not infer owners from java file names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        fun functionBody(name: String): String {
+            val start = source.indexOf("private fun $name")
+            assertTrue(start >= 0, "$name is missing")
+            val end = source.indexOf("\n    private fun ", start + 1).let {
+                if (it < 0) source.length else it
+            }
+            return source.substring(start, end)
+        }
+
+        val collectRefs = functionBody("collectModBusListenerRefs")
+        val staticSubscribers = functionBody("migrateStaticModBusSubscribers")
+        val forbidden = listOf(
+            "collect listener file-name owner" to (collectRefs to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)""")),
+            "static subscriber file-name owner" to (staticSubscribers to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""))
+        )
+        val offenders = forbidden
+            .filter { (_, scoped) -> scoped.second.containsMatchIn(scoped.first) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            collectRefs.contains("val typeBlocks = javaTypeBlocks(text, executableCode)") &&
+                collectRefs.contains("javaTypeBlockContainingOffset(match.range.first, typeBlocks)") &&
+                staticSubscribers.contains("val typeBlocks = javaTypeBlocks(text, executableCode)") &&
+                staticSubscribers.contains("javaTypeBlockForModAnnotation(annotation.range.last, typeBlocks)") &&
+                staticSubscribers.contains("javaListenerTypeReferenceExpression(packageName, mainPackage, owner)"),
+            "Mod event bus listener migrations must bind method references to source-declared Java type blocks"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Mod event bus listener migrations must use declared Java types, not Java file-name owner guesses: $offenders"
+        )
+    }
+
+    @Test
     fun `production migrations do not synthesize minecraft namespace when mod id is missing`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val quotedMinecraftStringLiteral = "\"\\\"minecraft\\\"\""
@@ -2497,6 +2536,7 @@ class MappingCompletenessTest {
         val modAnnotationArgument = functionBody("modAnnotationArgumentExpression")
         val explicitModIdReference = functionBody("explicitModIdReferenceForGeneratedClass")
         val javaModIdReferenceExpression = functionBody("javaModIdReferenceExpression")
+        val javaTypeReferenceExpression = functionBody("javaTypeReferenceExpression")
         val detectModIdsFromText = functionBody("detectModIdsFromText")
         val javaTypeBlocks = functionBody("javaTypeBlocks")
         val javaStaticFinalStringConstant = functionBody("javaStaticFinalStringConstant")
@@ -2538,7 +2578,8 @@ class MappingCompletenessTest {
                 explicitModIdReference.contains("javaStaticFinalStringConstant(code, executableCode, owner, constName, typeBlocks)") &&
                 explicitModIdReference.contains("javaModIdReferenceExpression(mainPackage, generatedPackage, owner, constName)") &&
                 explicitModIdReference.contains("references.singleOrNull()?.let { return it }") &&
-                javaModIdReferenceExpression.contains("owner.isPublic") &&
+                javaModIdReferenceExpression.contains("javaTypeReferenceExpression(mainPackage, generatedPackage, owner)") &&
+                javaTypeReferenceExpression.contains("owner.isPublic") &&
                 detectModIdsFromText.contains("val candidates = linkedSetOf<String>()") &&
                 detectModIdsFromText.contains("val code = maskJavaComments(text)") &&
                 detectModIdsFromText.contains("val executableCode = maskJavaCommentsAndLiterals(text)") &&
