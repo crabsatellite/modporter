@@ -260,6 +260,40 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy pack resource compat generation hard gates missing source mod id`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PackSetup.java").writeText("""
+            package com.example;
+
+            import java.nio.file.Path;
+            import net.neoforged.neoforge.resource.PathPackResources;
+
+            public class PackSetup {
+                public PathPackResources open(Path sourcePath) {
+                    return new PathPackResources("example:" + sourcePath, true, sourcePath);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val setup = srcDir.resolve("PackSetup.java").readText()
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Legacy pack resource API migration error") &&
+                    it.contains("Cannot derive generated compat package")
+            },
+            "Expected missing mod id hard gate, got: ${result.errors}"
+        )
+        assertFalse(setup.contains("com.modporter.generated.shared"))
+        assertFalse(setup.contains("com.modporter.generated.mod"))
+        assertFalse(tempDir.resolve("src/main/java/com/modporter/generated/shared/compat/PathPackResources.java").exists())
+        assertFalse(tempDir.resolve("src/main/java/com/modporter/generated/mod/compat/PathPackResources.java").exists())
+        assertFalse(result.changes.any { it.ruleId == "struct-generate-path-pack-resources" })
+    }
+
+    @Test
     fun `migrates cross class DeferredHolder presence checks without touching optionals`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

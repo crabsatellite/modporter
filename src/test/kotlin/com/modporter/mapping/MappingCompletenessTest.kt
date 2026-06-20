@@ -620,6 +620,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy pack resource compat package detection does not synthesize placeholder package segments`() {
+        val structuralPass = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = structuralPass.indexOf("private fun detectRequiredGeneratedCompatPackage")
+        assertTrue(start >= 0, "detectRequiredGeneratedCompatPackage is missing")
+        val end = structuralPass.indexOf("\n    private fun migrateLegacyPackResourceApis", start)
+        assertTrue(end > start, "detectRequiredGeneratedCompatPackage boundary is missing")
+        val body = structuralPass.substring(start, end)
+        val forbidden = listOf(
+            "shared package fallback" to "?: \"shared\"",
+            "literal shared package segment" to "\"shared\"",
+            "literal mod package fallback" to "?: \"mod\"",
+            "blank mod id fallback" to "ifBlank { \"mod\" }"
+        )
+        val offenders = forbidden
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Generated compat package names must come from source-declared mod ids, not placeholders: $offenders"
+        )
+        assertTrue(
+            body.contains("missing @Mod annotation and mod metadata mod id"),
+            "Generated compat package detection must hard-gate missing source mod ids"
+        )
+        assertTrue(
+            structuralPass.contains("""detectRequiredGeneratedCompatPackage(projectDir, "legacy pack resource adapters")"""),
+            "Legacy pack resource adapter generation must use required source-derived mod ids"
+        )
+    }
+
+    @Test
     fun `resource mod id detection does not infer constant owners from file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot

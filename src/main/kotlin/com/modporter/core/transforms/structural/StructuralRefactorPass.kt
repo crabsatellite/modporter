@@ -5970,21 +5970,48 @@ $helpers
         return "com.modporter.generated.$sanitized.compat"
     }
 
+    private fun detectRequiredGeneratedCompatPackage(projectDir: Path, reason: String): String {
+        val modId = detectModId(projectDir)
+            ?: projectMetadataModId(projectDir)
+            ?: error("Cannot derive generated compat package for $reason: missing @Mod annotation and mod metadata mod id")
+        val sanitized = modId
+            .lowercase()
+            .replace(Regex("""[^a-z0-9_]"""), "_")
+            .trim('_')
+        require(sanitized.isNotBlank()) {
+            "Cannot derive generated compat package for $reason: mod id '$modId' has no valid Java package segment"
+        }
+        val packageSegment = if (sanitized.first().isDigit()) "m$sanitized" else sanitized
+        return "com.modporter.generated.$packageSegment.compat"
+    }
+
     private fun migrateLegacyPackResourceApis(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return emptyList()
 
-        val compatPackage = detectGeneratedCompatPackage(projectDir)
         val javaFiles = Files.walk(srcDir)
             .filter { it.extension == "java" }
-            .filter { !it.toString().replace('\\', '/').contains("/src/main/java/${compatPackage.replace('.', '/')}/") }
             .toList()
+        var detectedCompatPackage: String? = null
+        fun compatPackage(): String {
+            val existing = detectedCompatPackage
+            if (existing != null) return existing
+            val detected = detectRequiredGeneratedCompatPackage(projectDir, "legacy pack resource adapters")
+            detectedCompatPackage = detected
+            return detected
+        }
         val changes = mutableListOf<Change>()
         var needsPathPackResources = false
         var needsDelegatingPackResources = false
         var needsLegacyResourcesSupplier = false
 
         for (javaFile in javaFiles) {
+            val generatedPackagePath = detectedCompatPackage?.replace('.', '/')
+            if (generatedPackagePath != null &&
+                javaFile.toString().replace('\\', '/').contains("/src/main/java/$generatedPackagePath/")
+            ) {
+                continue
+            }
             val original = javaFile.readText()
             var modified = original
             val hadPathPackResources =
@@ -5995,30 +6022,32 @@ $helpers
                     modified.contains("net.minecraftforge.resource.DelegatingPackResources")
 
             if (hadPathPackResources) {
+                val generatedCompatPackage = compatPackage()
                 modified = modified
-                    .replace("import net.neoforged.neoforge.resource.PathPackResources;", "import $compatPackage.PathPackResources;")
-                    .replace("import net.minecraftforge.resource.PathPackResources;", "import $compatPackage.PathPackResources;")
-                    .replace("net.neoforged.neoforge.resource.PathPackResources", "$compatPackage.PathPackResources")
-                    .replace("net.minecraftforge.resource.PathPackResources", "$compatPackage.PathPackResources")
+                    .replace("import net.neoforged.neoforge.resource.PathPackResources;", "import $generatedCompatPackage.PathPackResources;")
+                    .replace("import net.minecraftforge.resource.PathPackResources;", "import $generatedCompatPackage.PathPackResources;")
+                    .replace("net.neoforged.neoforge.resource.PathPackResources", "$generatedCompatPackage.PathPackResources")
+                    .replace("net.minecraftforge.resource.PathPackResources", "$generatedCompatPackage.PathPackResources")
                 needsPathPackResources = true
             }
             if (hadDelegatingPackResources) {
+                val generatedCompatPackage = compatPackage()
                 modified = modified
-                    .replace("import net.neoforged.neoforge.resource.DelegatingPackResources;", "import $compatPackage.DelegatingPackResources;")
-                    .replace("import net.minecraftforge.resource.DelegatingPackResources;", "import $compatPackage.DelegatingPackResources;")
-                    .replace("net.neoforged.neoforge.resource.DelegatingPackResources", "$compatPackage.DelegatingPackResources")
-                    .replace("net.minecraftforge.resource.DelegatingPackResources", "$compatPackage.DelegatingPackResources")
+                    .replace("import net.neoforged.neoforge.resource.DelegatingPackResources;", "import $generatedCompatPackage.DelegatingPackResources;")
+                    .replace("import net.minecraftforge.resource.DelegatingPackResources;", "import $generatedCompatPackage.DelegatingPackResources;")
+                    .replace("net.neoforged.neoforge.resource.DelegatingPackResources", "$generatedCompatPackage.DelegatingPackResources")
+                    .replace("net.minecraftforge.resource.DelegatingPackResources", "$generatedCompatPackage.DelegatingPackResources")
                 needsDelegatingPackResources = true
             }
 
             val accessorMigrated = migratePackMetadataSectionAccessors(modified)
             modified = accessorMigrated
 
-            val createRewrite = rewriteLegacyPackCreateCalls(modified, compatPackage)
+            val createRewrite = rewriteLegacyPackCreateCalls(modified) { compatPackage() }
             modified = createRewrite.first
             needsLegacyResourcesSupplier = needsLegacyResourcesSupplier || createRewrite.second
 
-            val supplierRewrite = rewriteLegacyPackResourcesSupplierAssignments(modified, compatPackage)
+            val supplierRewrite = rewriteLegacyPackResourcesSupplierAssignments(modified) { compatPackage() }
             modified = supplierRewrite.first
             needsLegacyResourcesSupplier = needsLegacyResourcesSupplier || supplierRewrite.second
 
@@ -6046,33 +6075,36 @@ $helpers
         }
 
         if (needsPathPackResources) {
+            val generatedCompatPackage = compatPackage()
             changes.addAll(ensureGeneratedPackResourceCompat(
                 srcDir,
-                compatPackage,
+                generatedCompatPackage,
                 "PathPackResources.java",
-                generatedPathPackResourcesSource(compatPackage),
+                generatedPathPackResourcesSource(generatedCompatPackage),
                 "Generate source-compatible PathPackResources adapter",
                 "struct-generate-path-pack-resources",
                 dryRun
             ))
         }
         if (needsDelegatingPackResources) {
+            val generatedCompatPackage = compatPackage()
             changes.addAll(ensureGeneratedPackResourceCompat(
                 srcDir,
-                compatPackage,
+                generatedCompatPackage,
                 "DelegatingPackResources.java",
-                generatedDelegatingPackResourcesSource(compatPackage),
+                generatedDelegatingPackResourcesSource(generatedCompatPackage),
                 "Generate source-compatible DelegatingPackResources adapter",
                 "struct-generate-delegating-pack-resources",
                 dryRun
             ))
         }
         if (needsLegacyResourcesSupplier) {
+            val generatedCompatPackage = compatPackage()
             changes.addAll(ensureGeneratedPackResourceCompat(
                 srcDir,
-                compatPackage,
+                generatedCompatPackage,
                 "LegacyPackResourcesSupplier.java",
-                generatedLegacyPackResourcesSupplierSource(compatPackage),
+                generatedLegacyPackResourcesSupplierSource(generatedCompatPackage),
                 "Generate adapter for legacy single-method Pack.ResourcesSupplier lambdas",
                 "struct-generate-legacy-pack-resources-supplier",
                 dryRun
@@ -6120,7 +6152,10 @@ $helpers
         return result
     }
 
-    private fun rewriteLegacyPackResourcesSupplierAssignments(source: String, compatPackage: String): Pair<String, Boolean> {
+    private fun rewriteLegacyPackResourcesSupplierAssignments(
+        source: String,
+        compatPackage: () -> String
+    ): Pair<String, Boolean> {
         var usedAdapter = false
         val pattern = Regex(
             """(Pack\.ResourcesSupplier\s+[A-Za-z_$][\w$]*\s*=\s*)((?:\([^;\n{}]*\)|[A-Za-z_$][\w$]*)\s*->\s*[^;]+);"""
@@ -6129,7 +6164,7 @@ $helpers
             val rhs = match.groupValues[2].trim()
             if (rhs.contains("LegacyPackResourcesSupplier")) return@replace match.value
             usedAdapter = true
-            "${match.groupValues[1]}new $compatPackage.LegacyPackResourcesSupplier($rhs);"
+            "${match.groupValues[1]}new ${compatPackage()}.LegacyPackResourcesSupplier($rhs);"
         }
         return rewritten to usedAdapter
     }
@@ -6162,7 +6197,10 @@ $helpers
         return result
     }
 
-    private fun rewriteLegacyPackCreateCalls(source: String, compatPackage: String): Pair<String, Boolean> {
+    private fun rewriteLegacyPackCreateCalls(
+        source: String,
+        compatPackage: () -> String
+    ): Pair<String, Boolean> {
         var result = source
         var usedSupplierAdapter = false
         var cursor = 0
@@ -6193,10 +6231,10 @@ $helpers
         return result to usedSupplierAdapter
     }
 
-    private fun wrapLegacyPackResourcesSupplier(expression: String, compatPackage: String): String {
+    private fun wrapLegacyPackResourcesSupplier(expression: String, compatPackage: () -> String): String {
         val trimmed = expression.trim()
         if (!trimmed.contains("->") || trimmed.contains("LegacyPackResourcesSupplier")) return trimmed
-        return "new $compatPackage.LegacyPackResourcesSupplier($trimmed)"
+        return "new ${compatPackage()}.LegacyPackResourcesSupplier($trimmed)"
     }
 
     private fun rewriteLegacyPackInfoExpression(expression: String, packTypeExpression: String): String {
