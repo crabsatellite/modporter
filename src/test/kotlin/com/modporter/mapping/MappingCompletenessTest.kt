@@ -1149,6 +1149,36 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `nested simplechannel migration does not depend on fixed networking class names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateKnownNestedSimpleChannelNetworking")
+        assertTrue(start >= 0, "migrateKnownNestedSimpleChannelNetworking is missing")
+        val end = source.indexOf("private data class ModAccess", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "fixed CustomFluidNetworking name" to "CustomFluidNetworking",
+            "fixed custom fluid packet name" to "SyncCustomFluids",
+            "fixed DirtinessNetworking name" to "DirtinessNetworking",
+            "fixed dirtiness packet name" to "SyncDirtiness",
+            "fixed dirtiness capability call" to "DirtinessCapability",
+            "fixed networking file-name branch" to "fileName ==",
+            "fixed whole-file networking template" to "PayloadSource(packageName"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "nested SimpleChannel migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Nested SimpleChannel migrations must use source-declared packet/register/send structure, not fixed networking class templates: $offenders"
+        )
+    }
+
+    @Test
     fun `build mod id helpers do not scan arbitrary constant references`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

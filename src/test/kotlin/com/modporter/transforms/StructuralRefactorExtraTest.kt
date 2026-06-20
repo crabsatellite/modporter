@@ -1127,6 +1127,104 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `nested SimpleChannel packets migrate without file specific networking templates`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+            }
+        """.trimIndent())
+
+        networkDir.resolve("StatusNetworking.java").writeText("""
+            package com.example.network;
+
+            import com.example.ExampleMod;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraftforge.network.NetworkEvent;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.PacketDistributor;
+            import net.minecraftforge.network.simple.SimpleChannel;
+            import java.util.function.Supplier;
+
+            public class StatusNetworking {
+                private static final String PROTOCOL_VERSION = "1";
+                public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
+                        new ResourceLocation(ExampleMod.ID, "status"),
+                        () -> PROTOCOL_VERSION,
+                        PROTOCOL_VERSION::equals,
+                        PROTOCOL_VERSION::equals
+                );
+                private static int messageId = 0;
+
+                public static void register() {
+                    CHANNEL.registerMessage(messageId++, SyncStatusPacket.class,
+                            SyncStatusPacket::encode,
+                            SyncStatusPacket::decode,
+                            SyncStatusPacket::handle);
+                }
+
+                public static class SyncStatusPacket {
+                    private final int value;
+
+                    public SyncStatusPacket(int value) {
+                        this.value = value;
+                    }
+
+                    public static void encode(SyncStatusPacket packet, FriendlyByteBuf buf) {
+                        buf.writeInt(packet.value);
+                    }
+
+                    public static SyncStatusPacket decode(FriendlyByteBuf buf) {
+                        return new SyncStatusPacket(buf.readInt());
+                    }
+
+                    public static void handle(SyncStatusPacket packet, Supplier<NetworkEvent.Context> ctx) {
+                        ctx.get().enqueueWork(() -> ClientStatusCache.set(packet.value));
+                        ctx.get().setPacketHandled(true);
+                    }
+                }
+
+                public static void syncToClient(ServerPlayer player) {
+                    SyncStatusPacket packet = new SyncStatusPacket(7);
+                    CHANNEL.send(PacketDistributor.PLAYER.with(() -> player), packet);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val networking = networkDir.resolve("StatusNetworking.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-nested-simplechannel-payloads" }, "changes=${result.changes}")
+        assertTrue(networking.contains("@EventBusSubscriber(modid = ExampleMod.ID)"), networking)
+        assertTrue(networking.contains("public static class SyncStatusPacket implements CustomPacketPayload"), networking)
+        assertTrue(networking.contains("CustomPacketPayload.Type<SyncStatusPacket> TYPE"), networking)
+        assertTrue(networking.contains("""ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, "sync_status")"""), networking)
+        assertTrue(networking.contains("StreamCodec.of(SyncStatusPacket::encode, SyncStatusPacket::decode)"), networking)
+        assertTrue(networking.contains("public static void encode(FriendlyByteBuf buf, SyncStatusPacket packet)"), networking)
+        assertTrue(networking.contains("public static void handle(SyncStatusPacket packet, IPayloadContext ctx)"), networking)
+        assertTrue(networking.contains("ctx.enqueueWork(() -> ClientStatusCache.set(packet.value));"), networking)
+        assertTrue(networking.contains("registrar.playToClient("), networking)
+        assertTrue(networking.contains("SyncStatusPacket.TYPE"), networking)
+        assertTrue(networking.contains("PacketDistributor.sendToPlayer(player, packet);"), networking)
+        assertFalse(networking.contains("SimpleChannel"), networking)
+        assertFalse(networking.contains("NetworkRegistry"), networking)
+        assertFalse(networking.contains("registerMessage"), networking)
+        assertFalse(networking.contains("messageId"), networking)
+        assertFalse(networking.contains("ctx.get()"), networking)
+    }
+
+    @Test
     fun `base packet records handlers and relay calls migrate to payload registrar`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val networkDir = srcDir.resolve("network")

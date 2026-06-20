@@ -119,8 +119,9 @@ class StructuralRefactorPass : Pass {
             errors.add("WorldGenRegion structure manager accessor migration error: ${e.message}")
         }
 
-        // Preserve networking helper classes that contain nested Forge SimpleChannel
-        // packet definitions before the generic packet pass can replace them.
+        // Migrate networking helper classes that declare nested Forge
+        // SimpleChannel packet definitions before the generic packet pass
+        // treats the helper as a removable registration wrapper.
         try {
             val nestedNetworkChanges = migrateKnownNestedSimpleChannelNetworking(projectDir, dryRun)
             changes.addAll(nestedNetworkChanges)
@@ -1454,42 +1455,429 @@ ${indent}}
         Files.walk(srcDir)
             .filter { it.extension == "java" }
             .forEach { file ->
-                val text = file.readText()
-                val packageName = packageNameOf(text)
-                val fileName = file.fileName.toString()
-                val modAccess = inferModAccess(text) ?: return@forEach
-                val migrated = when {
-                    fileName == "CustomFluidNetworking.java" &&
-                        text.contains("SimpleChannel") &&
-                        text.contains("SyncCustomFluidsPacket") &&
-                        text.contains("serializeAllFluids") &&
-                        modAccess.loggerExpression != null ->
-                        customFluidNetworkingPayloadSource(packageName, modAccess)
+                val original = file.readText()
+                if (!original.contains("SimpleChannel") ||
+                    !original.contains("NetworkRegistry.newSimpleChannel") ||
+                    !original.contains(".registerMessage(")) {
+                    return@forEach
+                }
+                val packageName = packageNameOf(original)
+                val ownerClassName = classNameOfJavaSource(original) ?: return@forEach
+                val channelNames = nestedSimpleChannelNames(original)
+                if (channelNames.isEmpty()) return@forEach
+                val modIdExpression = nestedSimpleChannelModIdExpression(original) ?: return@forEach
+                val protocolExpression = nestedSimpleChannelProtocolExpression(original) ?: return@forEach
+                val packets = nestedSimpleChannelPackets(file, original, packageName, ownerClassName, channelNames)
+                if (packets.isEmpty() || packets.any { it.direction == null }) return@forEach
 
-                    fileName == "DirtinessNetworking.java" &&
-                        text.contains("SimpleChannel") &&
-                        text.contains("SyncDirtinessPacket") &&
-                        text.contains("SyncOtherPlayerDirtinessPacket") ->
-                        dirtinessNetworkingPayloadSource(packageName, modAccess)
-
-                    else -> null
-                } ?: return@forEach
-
+                var migrated = original
+                packets.forEach { packet ->
+                    migrated = migrateNestedSimpleChannelPacketSource(migrated, packet, modIdExpression)
+                    migrated = migrateLegacyPayloadHandlerContext(migrated, packet.toPacketClassInfo(), changes)
+                    migrated = cleanupLegacyPayloadContextReferences(migrated, packet.toPacketClassInfo(), changes)
+                }
+                migrated = insertNestedSimpleChannelPayloadRegistration(
+                    migrated,
+                    ownerClassName,
+                    modIdExpression,
+                    protocolExpression,
+                    packets
+                )
+                migrated = rewriteNestedSimpleChannelSendCalls(migrated, channelNames)
+                migrated = removeNestedSimpleChannelLegacySetup(migrated, channelNames, packets)
+                if (migrated == original) return@forEach
                 if (!dryRun) {
                     file.writeText(migrated)
                 }
                 changes.add(Change(
                     file = file,
                     line = 1,
-                    description = "Migrate nested SimpleChannel packets in $fileName to inline CustomPacketPayload records",
+                    description = "Migrate nested SimpleChannel packet classes to CustomPacketPayload registrations",
                     before = "SimpleChannel + static inner packet classes",
-                    after = "RegisterPayloadHandlersEvent + payload records + PacketDistributor helpers",
+                    after = "RegisterPayloadHandlersEvent + nested CustomPacketPayload classes + PacketDistributor sends",
                     confidence = Confidence.HIGH,
                     ruleId = "struct-nested-simplechannel-payloads"
                 ))
             }
 
         return changes
+    }
+
+    private data class NestedSimpleChannelPacketInfo(
+        val file: Path,
+        val packageName: String,
+        val ownerClassName: String,
+        val packetClassName: String,
+        val bufferType: String,
+        val handlerExpression: String,
+        val direction: String?,
+        val registrationText: String,
+        val idVariable: String?
+    ) {
+        fun toPacketClassInfo(): PacketClassInfo =
+            PacketClassInfo(
+                file = file,
+                className = packetClassName,
+                packageName = packageName,
+                encodeParamName = packetClassName.replaceFirstChar { it.lowercase() },
+                encodeBufferName = "buf",
+                handlerRef = handlerExpression,
+                isPlayToClient = direction == "playToClient",
+                bufferType = bufferType,
+                streamCodecExpression = "StreamCodec.of($packetClassName::encode, $packetClassName::decode)"
+            )
+    }
+
+    private fun nestedSimpleChannelNames(source: String): Set<String> =
+        buildSet {
+            Regex("""\bSimpleChannel\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(source)
+                .forEach { add(it.groupValues[1]) }
+            Regex("""\b([A-Za-z_$][\w$]*)\s*=\s*NetworkRegistry\.newSimpleChannel\s*\(""")
+                .findAll(source)
+                .forEach { add(it.groupValues[1]) }
+        }
+
+    private fun nestedSimpleChannelPackets(
+        file: Path,
+        source: String,
+        packageName: String,
+        ownerClassName: String,
+        channelNames: Set<String>
+    ): List<NestedSimpleChannelPacketInfo> {
+        val packets = mutableListOf<NestedSimpleChannelPacketInfo>()
+        for (channelName in channelNames) {
+            val callName = "$channelName.registerMessage"
+            var cursor = 0
+            while (true) {
+                val callIndex = source.indexOf(callName, cursor)
+                if (callIndex < 0) break
+                val openParen = source.indexOf('(', callIndex + callName.length)
+                val closeParen = if (openParen >= 0) findMatchingParen(source, openParen) else -1
+                if (openParen < 0 || closeParen < 0) {
+                    cursor = callIndex + callName.length
+                    continue
+                }
+                val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen)).map { it.trim() }
+                if (args.size < 5) {
+                    cursor = closeParen + 1
+                    continue
+                }
+                val packetClassName = args[1].removeSuffix(".class").substringAfterLast('.').trim()
+                if (packetClassName.isBlank() || findTypeDeclarationStart(source, packetClassName) == null) {
+                    cursor = closeParen + 1
+                    continue
+                }
+                val bufferType = nestedPacketBufferType(source, packetClassName)
+                if (bufferType == null) {
+                    cursor = closeParen + 1
+                    continue
+                }
+                val direction = nestedPacketDirection(source, packetClassName, args.getOrNull(5))
+                packets.add(
+                    NestedSimpleChannelPacketInfo(
+                        file = file,
+                        packageName = packageName,
+                        ownerClassName = ownerClassName,
+                        packetClassName = packetClassName,
+                        bufferType = bufferType,
+                        handlerExpression = args[4],
+                        direction = direction,
+                        registrationText = source.substring(callIndex, closeParen + 1),
+                        idVariable = Regex("""^([A-Za-z_$][\w$]*)\s*\+\+$""")
+                            .matchEntire(args[0])
+                            ?.groupValues
+                            ?.get(1)
+                    )
+                )
+                cursor = closeParen + 1
+            }
+        }
+        return packets.distinctBy { it.packetClassName }
+    }
+
+    private fun nestedPacketBufferType(source: String, packetClassName: String): String? {
+        Regex(
+            """static\s+void\s+encode\s*\(\s*${Regex.escape(packetClassName)}\s+[A-Za-z_$][\w$]*\s*,\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+[A-Za-z_$][\w$]*\s*\)"""
+        ).find(source)?.let { return it.groupValues[1] }
+        Regex(
+            """\bvoid\s+encode\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+[A-Za-z_$][\w$]*\s*\)"""
+        ).find(source)?.let { return it.groupValues[1] }
+        return null
+    }
+
+    private fun javaTypeBody(source: String, typeName: String): String? {
+        val typeStart = findTypeDeclarationStart(source, typeName) ?: return null
+        val openBrace = source.indexOf('{', typeStart)
+        if (openBrace < 0) return null
+        val closeBrace = findMatchingBrace(source, openBrace)
+        if (closeBrace <= openBrace) return null
+        return source.substring(openBrace + 1, closeBrace)
+    }
+
+    private fun nestedPacketDirection(source: String, packetClassName: String, directionArg: String?): String? {
+        directionArg?.let { explicit ->
+            return when {
+                explicit.contains("PLAY_TO_CLIENT") -> "playToClient"
+                explicit.contains("PLAY_TO_SERVER") -> "playToServer"
+                else -> null
+            }
+        }
+        val payloadVariables = Regex("""\b${Regex.escape(packetClassName)}\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+${Regex.escape(packetClassName)}\s*\(""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        val payloadPattern = """(?:new\s+${Regex.escape(packetClassName)}\s*\(|${payloadVariables.joinToString("|") { Regex.escape(it) }.ifBlank { "(?!)" }})"""
+        val sendStatements = Regex("""(?s)\b[A-Za-z_$][\w$]*\.send(?:To)?\s*\((.*?)\)\s*;""")
+            .findAll(source)
+            .map { it.value }
+            .filter { Regex(payloadPattern).containsMatchIn(it) }
+            .toList()
+        val directions = sendStatements.mapNotNull { statement ->
+            when {
+                statement.contains("NetworkDirection.PLAY_TO_CLIENT") -> "playToClient"
+                statement.contains("NetworkDirection.PLAY_TO_SERVER") -> "playToServer"
+                statement.contains("PacketDistributor.SERVER") -> "playToServer"
+                statement.contains("PacketDistributor.PLAYER") ||
+                    statement.contains("PacketDistributor.TRACKING_ENTITY") ||
+                    statement.contains("PacketDistributor.TRACKING_CHUNK") ||
+                    statement.contains("PacketDistributor.ALL") -> "playToClient"
+                else -> null
+            }
+        }.toSet()
+        if (directions.size == 1) return directions.single()
+
+        val body = javaTypeBody(source, packetClassName)
+        if (body != null &&
+            (body.contains("net.minecraft.client.") ||
+                body.contains("Minecraft.getInstance()") ||
+                Regex("""\b[A-Za-z_$][\w$]*Client[A-Za-z_$][\w$]*\b""").containsMatchIn(body))) {
+            return "playToClient"
+        }
+        return null
+    }
+
+    private fun nestedSimpleChannelModIdExpression(source: String): String? {
+        val args = nestedSimpleChannelArgs(source) ?: return inferModAccess(source)?.modIdExpression
+        val idExpression = args.firstOrNull()?.trim().orEmpty()
+        Regex("""new\s+ResourceLocation\s*\(\s*([^,]+)\s*,""")
+            .find(idExpression)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
+            ?.let { return it }
+        Regex("""ResourceLocation\.fromNamespaceAndPath\s*\(\s*([^,]+)\s*,""")
+            .find(idExpression)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
+            ?.let { return it }
+        if (Regex(""""[^"]+"""").matches(idExpression)) return idExpression
+        if (Regex("""[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.(?:MOD_ID|MODID|ID)""").matches(idExpression)) {
+            return idExpression
+        }
+        return inferModAccess(source)?.modIdExpression
+    }
+
+    private fun nestedSimpleChannelProtocolExpression(source: String): String? {
+        val args = nestedSimpleChannelArgs(source) ?: return null
+        val supplier = args.getOrNull(1)?.trim().orEmpty()
+        return Regex("""^\(\s*\)\s*->\s*(.+)$""")
+            .find(supplier)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() && !it.contains('\n') && !it.contains('\r') }
+    }
+
+    private fun nestedSimpleChannelArgs(source: String): List<String>? {
+        val token = "NetworkRegistry.newSimpleChannel"
+        val index = source.indexOf(token)
+        if (index < 0) return null
+        val openParen = source.indexOf('(', index + token.length)
+        val closeParen = if (openParen >= 0) findMatchingParen(source, openParen) else -1
+        if (openParen < 0 || closeParen < 0) return null
+        return splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+    }
+
+    private fun migrateNestedSimpleChannelPacketSource(
+        source: String,
+        packet: NestedSimpleChannelPacketInfo,
+        modIdExpression: String
+    ): String {
+        var result = source
+        result = addImportIfMissing(result, "net.minecraft.network.codec.StreamCodec")
+        result = addImportIfMissing(result, "net.minecraft.network.protocol.common.custom.CustomPacketPayload")
+        result = addImportIfMissing(result, "net.minecraft.resources.ResourceLocation")
+        result = addImportIfMissing(result, "net.neoforged.neoforge.network.handling.IPayloadContext")
+        result = addNestedCustomPacketPayloadInterface(result, packet.packetClassName)
+        result = insertNestedPacketPayloadMembers(result, packet, modIdExpression)
+        result = Regex(
+            """encode\s*\(\s*${Regex.escape(packet.packetClassName)}\s+([A-Za-z_$][\w$]*)\s*,\s*${Regex.escape(packet.bufferType)}\s+([A-Za-z_$][\w$]*)\s*\)"""
+        ).replace(result, "encode(${packet.bufferType} $2, ${packet.packetClassName} $1)")
+        result = Regex("""Supplier\s*<\s*NetworkEvent\.Context\s*>\s+([A-Za-z_$][\w$]*)""")
+            .replace(result, "IPayloadContext $1")
+        result = Regex("""\b([A-Za-z_$][\w$]*)\.get\(\)\.enqueueWork\s*\(""")
+            .replace(result, "$1.enqueueWork(")
+        return result
+    }
+
+    private fun addNestedCustomPacketPayloadInterface(source: String, packetClassName: String): String {
+        val typeStart = findTypeDeclarationStart(source, packetClassName) ?: return source
+        val openBrace = source.indexOf('{', typeStart)
+        if (openBrace < 0) return source
+        val header = source.substring(typeStart, openBrace)
+        if (header.contains("implements CustomPacketPayload")) return source
+        val insertion = if (Regex("""\bimplements\b""").containsMatchIn(header)) {
+            ", CustomPacketPayload"
+        } else {
+            " implements CustomPacketPayload"
+        }
+        return source.substring(0, openBrace).trimEnd() + insertion + " " + source.substring(openBrace)
+    }
+
+    private fun insertNestedPacketPayloadMembers(
+        source: String,
+        packet: NestedSimpleChannelPacketInfo,
+        modIdExpression: String
+    ): String {
+        val typeStart = findTypeDeclarationStart(source, packet.packetClassName) ?: return source
+        val openBrace = source.indexOf('{', typeStart)
+        if (openBrace < 0) return source
+        val closeBrace = findMatchingBrace(source, openBrace)
+        if (closeBrace <= openBrace) return source
+        val body = source.substring(openBrace + 1, closeBrace)
+        if (body.contains("CustomPacketPayload.Type<${packet.packetClassName}> TYPE") ||
+            body.contains("Type<${packet.packetClassName}> TYPE")) {
+            return source
+        }
+        val payloadName = payloadPathName(packet.packetClassName)
+        val insert = """
+
+        public static final CustomPacketPayload.Type<${packet.packetClassName}> TYPE =
+                new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath($modIdExpression, "$payloadName"));
+
+        public static final StreamCodec<${packet.bufferType}, ${packet.packetClassName}> STREAM_CODEC =
+                StreamCodec.of(${packet.packetClassName}::encode, ${packet.packetClassName}::decode);
+
+        @Override
+        public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
+            return TYPE;
+        }
+"""
+        return source.substring(0, openBrace + 1) + insert + source.substring(openBrace + 1)
+    }
+
+    private fun insertNestedSimpleChannelPayloadRegistration(
+        source: String,
+        ownerClassName: String,
+        modIdExpression: String,
+        protocolExpression: String,
+        packets: List<NestedSimpleChannelPacketInfo>
+    ): String {
+        if (source.contains("registerPayloads(RegisterPayloadHandlersEvent")) return source
+        var result = source
+        result = addImportIfMissing(result, "net.neoforged.bus.api.SubscribeEvent")
+        result = addImportIfMissing(result, "net.neoforged.fml.common.EventBusSubscriber")
+        result = addImportIfMissing(result, "net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent")
+        result = addImportIfMissing(result, "net.neoforged.neoforge.network.registration.PayloadRegistrar")
+        result = addEventBusSubscriberAnnotation(result, ownerClassName, modIdExpression)
+        val registrations = packets.joinToString("\n") { packet ->
+            """        registrar.${packet.direction}(
+                ${packet.packetClassName}.TYPE,
+                ${packet.packetClassName}.STREAM_CODEC,
+                ${packet.handlerExpression}
+        );"""
+        }
+        val method = """
+
+    @SubscribeEvent
+    public static void registerPayloads(RegisterPayloadHandlersEvent event) {
+        PayloadRegistrar registrar = event.registrar($modIdExpression).versioned($protocolExpression);
+$registrations
+    }
+"""
+        return insertBeforeLastClassBrace(result, method)
+    }
+
+    private fun addEventBusSubscriberAnnotation(source: String, className: String, modIdExpression: String): String {
+        if (source.contains("@EventBusSubscriber")) return source
+        val typeStart = findTypeDeclarationStart(source, className) ?: return source
+        val annotation = "@EventBusSubscriber(modid = $modIdExpression, bus = EventBusSubscriber.Bus.MOD)\n"
+        return source.substring(0, typeStart) + annotation + source.substring(typeStart)
+    }
+
+    private fun rewriteNestedSimpleChannelSendCalls(source: String, channelNames: Set<String>): String {
+        var result = source
+        for (channelName in channelNames) {
+            result = rewriteJavaInvocation(result, "$channelName.sendTo") { args ->
+                if (args.size < 3) return@rewriteJavaInvocation null
+                val payload = args[0].trim()
+                val connection = args[1].trim()
+                val direction = args[2].trim()
+                val player = connection.removeSuffix(".connection.connection").takeIf { it != connection }
+                    ?: return@rewriteJavaInvocation null
+                when (direction) {
+                    "NetworkDirection.PLAY_TO_CLIENT" -> "PacketDistributor.sendToPlayer($player, $payload)"
+                    "NetworkDirection.PLAY_TO_SERVER" -> "PacketDistributor.sendToServer($payload)"
+                    else -> null
+                }
+            }
+            result = rewriteJavaInvocation(result, "$channelName.send") { args ->
+                if (args.size < 2) return@rewriteJavaInvocation null
+                val target = args[0].trim()
+                val payload = args[1].trim()
+                val supplierTarget = Regex("""PacketDistributor\.([A-Z_]+)\.with\s*\(\s*\(\)\s*->\s*(.+)\s*\)""")
+                    .matchEntire(target)
+                when {
+                    supplierTarget != null -> {
+                        val distributor = supplierTarget.groupValues[1]
+                        val receiver = supplierTarget.groupValues[2].trim()
+                        when (distributor) {
+                            "PLAYER" -> "PacketDistributor.sendToPlayer($receiver, $payload)"
+                            "TRACKING_ENTITY" -> "PacketDistributor.sendToPlayersTrackingEntity($receiver, $payload)"
+                            "TRACKING_CHUNK" -> "PacketDistributor.sendToPlayersTrackingChunk($receiver, $payload)"
+                            else -> null
+                        }
+                    }
+                    target == "PacketDistributor.ALL.noArg()" -> "PacketDistributor.sendToAllPlayers($payload)"
+                    target == "PacketDistributor.SERVER.noArg()" -> "PacketDistributor.sendToServer($payload)"
+                    else -> null
+                }
+            }
+        }
+        if (result != source) {
+            result = addImportIfMissing(result, "net.neoforged.neoforge.network.PacketDistributor")
+        }
+        return result
+    }
+
+    private fun removeNestedSimpleChannelLegacySetup(
+        source: String,
+        channelNames: Set<String>,
+        packets: List<NestedSimpleChannelPacketInfo>
+    ): String {
+        var result = source
+        result = removeJavaStatementsMatching(result) { statement ->
+            statement.contains("NetworkRegistry.newSimpleChannel") ||
+                channelNames.any { statement.contains("$it.registerMessage(") }
+        }
+        packets.mapNotNull { it.idVariable }.toSet().forEach { idVariable ->
+            result = Regex("""(?m)^[ \t]*(?:private\s+)?static\s+int\s+${Regex.escape(idVariable)}\s*=\s*0\s*;\s*\r?\n?""")
+                .replace(result, "")
+            result = Regex("""(?m)^[ \t]*int\s+${Regex.escape(idVariable)}\s*=\s*0\s*;\s*\r?\n?""")
+                .replace(result, "")
+        }
+        listOf(
+            "net.minecraftforge.network.NetworkDirection",
+            "net.minecraftforge.network.NetworkEvent",
+            "net.minecraftforge.network.NetworkRegistry",
+            "net.minecraftforge.network.PacketDistributor",
+            "net.minecraftforge.network.simple.SimpleChannel",
+            "java.util.function.Supplier"
+        ).forEach { result = removeImportIfPresent(result, it) }
+        result = Regex("""(?m)^[ \t]*\r?\n(?=[ \t]*\r?\n)""").replace(result, "")
+        return result
     }
 
     private data class ModAccess(
@@ -1529,275 +1917,6 @@ ${indent}}
             ?.value
         return ModAccess(modIdExpression, modImport, loggerExpression)
     }
-
-    private fun customFluidNetworkingPayloadSource(packageName: String, modAccess: ModAccess): String = """package $packageName;
-
-${modAccess.importLine()}import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import com.google.gson.JsonObject;
-import com.mojang.serialization.JsonOps;
-import net.minecraft.network.FriendlyByteBuf;
-import net.minecraft.network.codec.ByteBufCodecs;
-import net.minecraft.network.codec.StreamCodec;
-import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
-import net.minecraft.resources.ResourceLocation;
-import net.minecraft.server.level.ServerPlayer;
-import net.neoforged.bus.api.SubscribeEvent;
-import net.neoforged.fml.common.EventBusSubscriber;
-import net.neoforged.neoforge.network.PacketDistributor;
-import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
-import net.neoforged.neoforge.network.handling.IPayloadContext;
-import net.neoforged.neoforge.network.registration.PayloadRegistrar;
-
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-
-@EventBusSubscriber(modid = ${modAccess.modIdExpression}, bus = EventBusSubscriber.Bus.MOD)
-public class CustomFluidNetworking {
-    private static final Gson GSON = new GsonBuilder().create();
-
-    public static final ResourceLocation SYNC_CUSTOM_FLUIDS_ID =
-            ResourceLocation.fromNamespaceAndPath(${modAccess.modIdExpression}, "sync_custom_fluids");
-
-    public record SyncCustomFluidsPayload(List<String> fluidJsons) implements CustomPacketPayload {
-        public static final Type<SyncCustomFluidsPayload> TYPE =
-                new Type<>(SYNC_CUSTOM_FLUIDS_ID);
-
-        public static final StreamCodec<FriendlyByteBuf, SyncCustomFluidsPayload> STREAM_CODEC =
-                StreamCodec.composite(
-                        ByteBufCodecs.STRING_UTF8.apply(ByteBufCodecs.list()),
-                        SyncCustomFluidsPayload::fluidJsons,
-                        SyncCustomFluidsPayload::new
-                );
-
-        @Override
-        public Type<? extends CustomPacketPayload> type() {
-            return TYPE;
-        }
-    }
-
-    @SubscribeEvent
-    public static void registerPayloads(RegisterPayloadHandlersEvent event) {
-        PayloadRegistrar registrar = event.registrar(${modAccess.modIdExpression});
-        registrar.playToClient(
-                SyncCustomFluidsPayload.TYPE,
-                SyncCustomFluidsPayload.STREAM_CODEC,
-                CustomFluidNetworking::handleSyncOnClient
-        );
-    }
-
-    private static void handleSyncOnClient(SyncCustomFluidsPayload payload, IPayloadContext context) {
-        context.enqueueWork(() -> {
-            ${modAccess.loggerExpression}.info("Received {} custom fluid definitions from server", payload.fluidJsons().size());
-
-            CustomFluidRegistry.clearClientSide();
-
-            int successCount = 0;
-            for (String json : payload.fluidJsons()) {
-                try {
-                    JsonObject jsonObject = GSON.fromJson(json, JsonObject.class);
-                    CustomFluidDefinition definition = CustomFluidDefinition.CODEC
-                            .parse(JsonOps.INSTANCE, jsonObject)
-                            .resultOrPartial(error -> ${modAccess.loggerExpression}.warn("Failed to parse synced fluid: {}", error))
-                            .orElse(null);
-
-                    if (definition != null) {
-                        CustomFluidRegistry.registerClientSide(definition);
-                        definition.registerTranslations();
-                        successCount++;
-                    }
-                } catch (Exception e) {
-                    ${modAccess.loggerExpression}.error("Error deserializing custom fluid from server: {}", e.getMessage());
-                }
-            }
-
-            ${modAccess.loggerExpression}.info("Client registered {} custom fluids from server", successCount);
-            CustomFluidClientEvents.updateAllCustomFluidLights();
-        });
-    }
-
-    public static void register() {
-    }
-
-    public static void syncToClient(ServerPlayer player) {
-        List<String> fluidJsons = serializeAllFluids();
-
-        if (fluidJsons.isEmpty()) {
-            ${modAccess.loggerExpression}.debug("No custom fluids to sync to player {}", player.getName().getString());
-            return;
-        }
-
-        SyncCustomFluidsPayload payload = new SyncCustomFluidsPayload(fluidJsons);
-        PacketDistributor.sendToPlayer(player, payload);
-        ${modAccess.loggerExpression}.info("Synced {} custom fluids to player {}",
-                fluidJsons.size(), player.getName().getString());
-    }
-
-    public static void syncToAllClients(Iterable<ServerPlayer> players) {
-        List<String> fluidJsons = serializeAllFluids();
-
-        if (fluidJsons.isEmpty()) {
-            return;
-        }
-
-        SyncCustomFluidsPayload payload = new SyncCustomFluidsPayload(fluidJsons);
-        for (ServerPlayer player : players) {
-            PacketDistributor.sendToPlayer(player, payload);
-        }
-        ${modAccess.loggerExpression}.info("Synced {} custom fluids to all connected players", fluidJsons.size());
-    }
-
-    private static List<String> serializeAllFluids() {
-        Collection<CustomFluidDefinition> allFluids = CustomFluidAPI.getAllFluids();
-
-        if (allFluids.isEmpty()) {
-            return List.of();
-        }
-
-        List<String> fluidJsons = new ArrayList<>(allFluids.size());
-
-        for (CustomFluidDefinition definition : allFluids) {
-            try {
-                JsonObject json = (JsonObject) CustomFluidDefinition.CODEC
-                        .encodeStart(JsonOps.INSTANCE, definition)
-                        .resultOrPartial(error -> ${modAccess.loggerExpression}.warn("Failed to encode fluid: {}", error))
-                        .orElse(null);
-
-                if (json != null) {
-                    fluidJsons.add(GSON.toJson(json));
-                }
-            } catch (Exception e) {
-                ${modAccess.loggerExpression}.error("Error serializing custom fluid {}: {}",
-                        definition.id(), e.getMessage());
-            }
-        }
-
-        return fluidJsons;
-    }
-}
-"""
-
-    private fun dirtinessNetworkingPayloadSource(packageName: String, modAccess: ModAccess): String = """package $packageName;
-
-${modAccess.importLine()}import net.minecraft.network.FriendlyByteBuf;
-import net.minecraft.network.codec.ByteBufCodecs;
-import net.minecraft.network.codec.StreamCodec;
-import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
-import net.minecraft.resources.ResourceLocation;
-import net.minecraft.server.level.ServerPlayer;
-import net.neoforged.bus.api.SubscribeEvent;
-import net.neoforged.fml.common.EventBusSubscriber;
-import net.neoforged.neoforge.network.PacketDistributor;
-import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
-import net.neoforged.neoforge.network.handling.IPayloadContext;
-import net.neoforged.neoforge.network.registration.PayloadRegistrar;
-
-import java.util.UUID;
-
-@EventBusSubscriber(modid = ${modAccess.modIdExpression}, bus = EventBusSubscriber.Bus.MOD)
-public class DirtinessNetworking {
-    public static final ResourceLocation SYNC_DIRTINESS_ID =
-            ResourceLocation.fromNamespaceAndPath(${modAccess.modIdExpression}, "sync_dirtiness");
-    public static final ResourceLocation SYNC_OTHER_PLAYER_ID =
-            ResourceLocation.fromNamespaceAndPath(${modAccess.modIdExpression}, "sync_other_dirtiness");
-
-    public record SyncDirtinessPayload(float dirtiness, long dirtSeed, boolean hasFlies) implements CustomPacketPayload {
-        public static final Type<SyncDirtinessPayload> TYPE =
-                new Type<>(SYNC_DIRTINESS_ID);
-
-        public static final StreamCodec<FriendlyByteBuf, SyncDirtinessPayload> STREAM_CODEC =
-                StreamCodec.composite(
-                        ByteBufCodecs.FLOAT, SyncDirtinessPayload::dirtiness,
-                        ByteBufCodecs.VAR_LONG, SyncDirtinessPayload::dirtSeed,
-                        ByteBufCodecs.BOOL, SyncDirtinessPayload::hasFlies,
-                        SyncDirtinessPayload::new
-                );
-
-        @Override
-        public Type<? extends CustomPacketPayload> type() {
-            return TYPE;
-        }
-    }
-
-    public record SyncOtherPlayerDirtinessPayload(UUID playerId, float dirtiness, long dirtSeed, boolean hasFlies) implements CustomPacketPayload {
-        public static final Type<SyncOtherPlayerDirtinessPayload> TYPE =
-                new Type<>(SYNC_OTHER_PLAYER_ID);
-
-        public static final StreamCodec<FriendlyByteBuf, SyncOtherPlayerDirtinessPayload> STREAM_CODEC =
-                StreamCodec.composite(
-                        net.minecraft.core.UUIDUtil.STREAM_CODEC, SyncOtherPlayerDirtinessPayload::playerId,
-                        ByteBufCodecs.FLOAT, SyncOtherPlayerDirtinessPayload::dirtiness,
-                        ByteBufCodecs.VAR_LONG, SyncOtherPlayerDirtinessPayload::dirtSeed,
-                        ByteBufCodecs.BOOL, SyncOtherPlayerDirtinessPayload::hasFlies,
-                        SyncOtherPlayerDirtinessPayload::new
-                );
-
-        @Override
-        public Type<? extends CustomPacketPayload> type() {
-            return TYPE;
-        }
-    }
-
-    @SubscribeEvent
-    public static void registerPayloads(RegisterPayloadHandlersEvent event) {
-        PayloadRegistrar registrar = event.registrar(${modAccess.modIdExpression});
-        registrar.playToClient(
-                SyncDirtinessPayload.TYPE,
-                SyncDirtinessPayload.STREAM_CODEC,
-                DirtinessNetworking::handleSyncOnClient
-        );
-        registrar.playToClient(
-                SyncOtherPlayerDirtinessPayload.TYPE,
-                SyncOtherPlayerDirtinessPayload.STREAM_CODEC,
-                DirtinessNetworking::handleSyncOtherPlayerOnClient
-        );
-    }
-
-    private static void handleSyncOnClient(SyncDirtinessPayload payload, IPayloadContext context) {
-        context.enqueueWork(() -> {
-            if (context.player() != null) {
-                DirtinessClientData.setDirtiness(
-                        context.player().getUUID(),
-                        payload.dirtiness(),
-                        payload.dirtSeed(),
-                        payload.hasFlies()
-                );
-            }
-        });
-    }
-
-    private static void handleSyncOtherPlayerOnClient(SyncOtherPlayerDirtinessPayload payload, IPayloadContext context) {
-        context.enqueueWork(() -> DirtinessClientData.setDirtiness(
-                payload.playerId(),
-                payload.dirtiness(),
-                payload.dirtSeed(),
-                payload.hasFlies()
-        ));
-    }
-
-    public static void register() {
-    }
-
-    public static void syncToClient(ServerPlayer player) {
-        DirtinessCapability.get(player).ifPresent(data -> {
-            long gameTime = player.level().getGameTime();
-            float dirtiness = data.getDirtiness(gameTime);
-            boolean hasFlies = data.shouldSpawnFlies(gameTime);
-
-            PacketDistributor.sendToPlayer(
-                    player,
-                    new SyncDirtinessPayload(dirtiness, data.getDirtSeed(), hasFlies)
-            );
-
-            PacketDistributor.sendToPlayersTrackingEntity(
-                    player,
-                    new SyncOtherPlayerDirtinessPayload(player.getUUID(), dirtiness, data.getDirtSeed(), hasFlies)
-            );
-        });
-    }
-}
-"""
 
     /**
      * Transform packet classes to implement CustomPacketPayload and generate ModNetwork.java.
