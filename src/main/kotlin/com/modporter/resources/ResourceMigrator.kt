@@ -3118,6 +3118,7 @@ class ResourceMigrationPass(
 
         val sourceTexts = javaSources.associateWith { it.readText() }
         val commentMaskedSources = sourceTexts.mapValues { (_, source) -> maskJavaComments(source) }
+        val executableMaskedSources = sourceTexts.mapValues { (_, source) -> maskJavaCommentsAndLiterals(source) }
         val stringConstants = collectJavaStringConstants(commentMaskedSources.values)
         val specs = linkedSetOf<NitrogenFuelSpriteSpec>()
         val resourceLocationExpression =
@@ -3126,38 +3127,46 @@ class ResourceMigrationPass(
             """\bResourceLocation\s+[A-Za-z_$][\w$]*\s*=\s*$resourceLocationExpression\s*\(\s*([^,\r\n]+?)\s*,\s*"textures/gui/menu/([^"]+?)\.png"\s*\)\s*;"""
         )
 
-        commentMaskedSources.values.forEach { source ->
+        commentMaskedSources.forEach { (javaFile, source) ->
             if (!containsNitrogenFuelCategoryApiUse(source)) {
                 return@forEach
             }
-            texturePattern.findAll(source).forEach { match ->
-                val namespaceExpression = match.groupValues[1].trim()
-                val namespace = resolveJavaStringExpression(namespaceExpression, stringConstants)
-                if (namespace == null) {
-                    errors.add(
-                        "Cannot resolve Nitrogen fuel texture namespace expression '$namespaceExpression' " +
-                            "for textures/gui/menu/${match.groupValues[2]}.png"
-                    )
-                    return@forEach
+            val executableSource = executableMaskedSources.getValue(javaFile)
+            texturePattern.findAll(source)
+                .filter { match ->
+                    val executableSegment = executableSource.substring(match.range.first, match.range.last + 1)
+                    executableSegment.contains("ResourceLocation") &&
+                        (executableSegment.contains("fromNamespaceAndPath") ||
+                            executableSegment.contains("new ResourceLocation"))
                 }
-                val textureTail = match.groupValues[2]
-                val spriteStem = textureTail
-                    .substringAfterLast('/')
-                    .replace(Regex("""[^A-Za-z0-9_]+"""), "_")
-                    .trim('_')
-                if (spriteStem.isBlank()) {
-                    errors.add(
-                        "Cannot derive Nitrogen fuel sprite name from legacy texture path " +
-                            "textures/gui/menu/$textureTail.png"
+                .forEach { match ->
+                    val namespaceExpression = match.groupValues[1].trim()
+                    val namespace = resolveJavaStringExpression(namespaceExpression, stringConstants)
+                    if (namespace == null) {
+                        errors.add(
+                            "Cannot resolve Nitrogen fuel texture namespace expression '$namespaceExpression' " +
+                                "for textures/gui/menu/${match.groupValues[2]}.png"
+                        )
+                        return@forEach
+                    }
+                    val textureTail = match.groupValues[2]
+                    val spriteStem = textureTail
+                        .substringAfterLast('/')
+                        .replace(Regex("""[^A-Za-z0-9_]+"""), "_")
+                        .trim('_')
+                    if (spriteStem.isBlank()) {
+                        errors.add(
+                            "Cannot derive Nitrogen fuel sprite name from legacy texture path " +
+                                "textures/gui/menu/$textureTail.png"
+                        )
+                        return@forEach
+                    }
+                    specs += NitrogenFuelSpriteSpec(
+                        namespace = namespace,
+                        menuTexturePath = "textures/gui/menu/$textureTail.png",
+                        spriteStem = spriteStem
                     )
-                    return@forEach
                 }
-                specs += NitrogenFuelSpriteSpec(
-                    namespace = namespace,
-                    menuTexturePath = "textures/gui/menu/$textureTail.png",
-                    spriteStem = spriteStem
-                )
-            }
         }
         return specs
     }

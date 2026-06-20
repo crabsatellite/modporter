@@ -494,10 +494,16 @@ class MappingCompletenessTest {
         )
         assertTrue(
             resourceBody.contains("commentMaskedSources") &&
+                resourceBody.contains("val executableMaskedSources = sourceTexts.mapValues") &&
                 resourceBody.contains("containsNitrogenFuelCategoryApiUse(source)") &&
+                resourceBody.contains("val executableSource = executableMaskedSources.getValue(javaFile)") &&
+                resourceBody.contains("val executableSegment = executableSource.substring(match.range.first, match.range.last + 1)") &&
+                resourceBody.contains("executableSegment.contains(\"ResourceLocation\")") &&
+                resourceBody.contains("executableSegment.contains(\"fromNamespaceAndPath\")") &&
+                resourceBody.contains("executableSegment.contains(\"new ResourceLocation\")") &&
                 resourceSource.contains("maskJavaComments(source)") &&
                 resourceSource.contains("maskJavaCommentsAndLiterals(source)"),
-            "Resource Nitrogen fuel sprite migration must use typed API-shape evidence and comment masking"
+            "Resource Nitrogen fuel sprite migration must use typed API-shape evidence and executable texture declarations"
         )
         assertTrue(
             offenders.isEmpty(),

@@ -1758,6 +1758,39 @@ class ResourceMigrationTest {
     }
 
     @Test
+    fun `legacy Nitrogen fuel sprite generation ignores text block texture fields in real API classes`() {
+        val projectDir = tempDir.resolve("nitrogenfuel-text-block-texture")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val textureDir = projectDir.resolve("src/main/resources/assets/example/textures/gui/menu")
+        srcDir.createDirectories()
+        textureDir.createDirectories()
+        srcDir.resolve("ExampleFuelCategory.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory;",
+            "import net.minecraft.resources.ResourceLocation;",
+            "",
+            "public class ExampleFuelCategory extends AbstractFuelCategory {",
+            "    public String docs() {",
+            "        return \"\"\"",
+            "            public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath(\"example\", \"textures/gui/menu/altar.png\");",
+            "            \"\"\";",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+
+        val source = BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB)
+        ImageIO.write(source, "png", textureDir.resolve("altar.png").toFile())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId.startsWith("res-nitrogen-fuel-") })
+        assertFalse(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_icon.png").exists())
+    }
+
+    @Test
     fun `dry run does not rename folders`() {
         val projectDir = setupResourceProject()
         val db = MappingDatabase.loadDefault()
