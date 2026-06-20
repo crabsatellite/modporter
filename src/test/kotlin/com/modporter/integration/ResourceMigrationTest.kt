@@ -148,6 +148,88 @@ class ResourceMigrationTest {
     }
 
     @Test
+    fun `custom enchantment resource keys ignore text block mod id constants`() {
+        val projectDir = tempDir.resolve("text-block-enchantment-modid")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "public final class ExampleMod {",
+            "    String docs() {",
+            "        return \"\"\"",
+            "            public static final String MODID = \"example\";",
+            "            \"\"\";",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+
+            public final class ModEnchantments {
+                public static final net.minecraft.resources.ResourceKey<Enchantment> FIRE_REACT =
+                        net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,
+                                net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "fire_react"));
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertFalse(
+            result.changes.any { it.ruleId == "res-custom-enchantment-data" },
+            "Text block MODID examples must not resolve custom enchantment resource namespaces"
+        )
+        assertFalse(
+            result.errors.any { it.contains("Missing source-derived data-driven custom enchantment JSON") },
+            result.errors.joinToString("\n")
+        )
+    }
+
+    @Test
+    fun `custom enchantment resource keys ignore text block key examples`() {
+        val projectDir = tempDir.resolve("text-block-enchantment-key")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModEnchantments.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "import net.minecraft.world.item.enchantment.Enchantment;",
+            "",
+            "public final class ModEnchantments {",
+            "    String docs() {",
+            "        return \"\"\"",
+            "            public static final net.minecraft.resources.ResourceKey<Enchantment> FIRE_REACT =",
+            "                    net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,",
+            "                            net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, \"fire_react\"));",
+            "            \"\"\";",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertFalse(
+            result.changes.any { it.ruleId == "res-custom-enchantment-data" },
+            "Text block ResourceKey examples must not produce custom enchantment data requirements"
+        )
+        assertFalse(
+            result.errors.any { it.contains("Missing source-derived data-driven custom enchantment JSON") },
+            result.errors.joinToString("\n")
+        )
+    }
+
+    @Test
     fun `renames data folders`() {
         val projectDir = setupResourceProject()
         val db = MappingDatabase.loadDefault()

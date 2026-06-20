@@ -486,10 +486,20 @@ class ResourceMigrationPass(
         )
 
         for ((_, content) in javaSources) {
-            keyPattern.findAll(content).forEach { match ->
-                val modId = resolveModIdExpression(match.groupValues[2], modIds) ?: return@forEach
-                enchantmentKeys.add(CustomEnchantmentKey(modId, match.groupValues[3]))
-            }
+            val code = maskJavaComments(content)
+            val executableCode = maskJavaCommentsAndLiterals(content)
+            keyPattern.findAll(code)
+                .filter { match ->
+                    val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                    executableSegment.contains("ResourceKey") &&
+                        executableSegment.contains("Enchantment") &&
+                        executableSegment.contains("ResourceLocation") &&
+                        executableSegment.contains("fromNamespaceAndPath")
+                }
+                .forEach { match ->
+                    val modId = resolveModIdExpression(match.groupValues[2], modIds) ?: return@forEach
+                    enchantmentKeys.add(CustomEnchantmentKey(modId, match.groupValues[3]))
+                }
         }
 
         if (enchantmentKeys.isEmpty()) return
@@ -574,15 +584,24 @@ class ResourceMigrationPass(
         val ids = mutableMapOf<String, String>()
         val simpleValues = linkedMapOf<String, MutableSet<String>>()
         for ((_, content) in javaSources) {
+            val code = maskJavaComments(content)
+            val executableCode = maskJavaCommentsAndLiterals(content)
             val packageName = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""")
-                .find(content)
+                .find(code)
                 ?.groupValues
                 ?.get(1)
                 .orEmpty()
             Regex("static\\s+final\\s+String\\s+(MODID|MOD_ID)\\s*=\\s*\"([^\"]+)\"")
-                .findAll(content)
+                .findAll(code)
+                .filter { match ->
+                    val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                    executableSegment.contains("static") &&
+                        executableSegment.contains("final") &&
+                        executableSegment.contains("String") &&
+                        executableSegment.contains("=")
+                }
                 .forEach { match ->
-                    val ownerClass = javaTypeNameContainingOffset(content, match.range.first)
+                    val ownerClass = javaTypeNameContainingOffset(code, match.range.first)
                         ?: return@forEach
                     simpleValues.getOrPut(match.groupValues[1]) { linkedSetOf() } += match.groupValues[2]
                     ids["$ownerClass.${match.groupValues[1]}"] = match.groupValues[2]
@@ -591,7 +610,12 @@ class ResourceMigrationPass(
                     }
                 }
             Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)\s*(?:public|protected|private|abstract|final|\s)*class\s+([A-Za-z_$][\w$]*)""")
-                .find(content)
+                .find(code)
+                ?.takeIf { match ->
+                    val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                    executableSegment.contains("@Mod") &&
+                        executableSegment.contains("class")
+                }
                 ?.let { match ->
                     ids[match.groupValues[2]] = match.groupValues[1]
                     if (packageName.isNotBlank()) {

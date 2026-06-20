@@ -1660,15 +1660,66 @@ class MappingCompletenessTest {
         val forbidden = listOf(
             "java file-name owner" to Regex("""fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
             "type-name elvis file fallback" to Regex("""javaTypeNameContainingOffset\([^)]*\)\s*\?:\s*[^;\r\n]*file"""),
-            "bare @Mod file owner fallback" to Regex("""ids\.putIfAbsent\([^,\r\n]*className""")
+            "bare @Mod file owner fallback" to Regex("""ids\.putIfAbsent\([^,\r\n]*className"""),
+            "raw source package scan" to Regex("""\.find\(content\)"""),
+            "raw source constant scan" to Regex("""\.findAll\(content\)""")
         )
         val offenders = forbidden
             .filter { (_, pattern) -> pattern.containsMatchIn(body) }
             .map { (label, _) -> "detectJavaModIds contains $label" }
 
         assertTrue(
+            body.contains("val code = maskJavaComments(content)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(content)") &&
+                body.contains(".find(code)") &&
+                body.contains(".findAll(code)") &&
+                body.contains("javaTypeNameContainingOffset(code, match.range.first)") &&
+                body.contains("executableSegment.contains(\"static\")") &&
+                body.contains("executableSegment.contains(\"final\")") &&
+                body.contains("executableSegment.contains(\"String\")") &&
+                body.contains("executableSegment.contains(\"@Mod\")") &&
+                body.contains("executableSegment.contains(\"class\")"),
+            "Resource mod id detection must collect ids from comment-masked source and prove declarations from executable Java"
+        )
+        assertTrue(
             offenders.isEmpty(),
             "Resource mod id detection must use source-declared owners, not Java file-name fallback inference: $offenders"
+        )
+    }
+
+    @Test
+    fun `custom enchantment key detection uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val resourceMigrator = projectRoot
+            .resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt")
+            .readText()
+        val start = resourceMigrator.indexOf("private fun migrateCustomEnchantmentData")
+        assertTrue(start >= 0, "migrateCustomEnchantmentData is missing")
+        val end = resourceMigrator.indexOf("\n    private fun customEnchantmentDataExists", start + 1).let {
+            if (it < 0) resourceMigrator.length else it
+        }
+        val body = resourceMigrator.substring(start, end)
+        val forbidden = listOf(
+            "raw source custom enchantment key scan" to "keyPattern.findAll(content)"
+        )
+        val offenders = forbidden
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "migrateCustomEnchantmentData contains $label" }
+
+        assertTrue(
+            body.contains("val code = maskJavaComments(content)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(content)") &&
+                body.contains("keyPattern.findAll(code)") &&
+                body.contains("val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)") &&
+                body.contains("executableSegment.contains(\"ResourceKey\")") &&
+                body.contains("executableSegment.contains(\"Enchantment\")") &&
+                body.contains("executableSegment.contains(\"ResourceLocation\")") &&
+                body.contains("executableSegment.contains(\"fromNamespaceAndPath\")"),
+            "Custom enchantment key detection must derive string values from comment-masked source and prove key declarations from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Custom enchantment key detection must not treat comments or text blocks as resource-key evidence: $offenders"
         )
     }
 
