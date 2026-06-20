@@ -3412,6 +3412,79 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `loot condition codec migration rejects json key member fallbacks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AmbiguousKeyCondition.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.Serializer;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+
+            public class AmbiguousKeyCondition implements LootItemCondition {
+                private final String actualValue;
+
+                public AmbiguousKeyCondition(String actualValue) {
+                    this.actualValue = actualValue;
+                }
+
+                public LootItemConditionType getType() {
+                    return TestLoot.AMBIGUOUS.get();
+                }
+
+                public boolean test(LootContext context) {
+                    return true;
+                }
+
+                public static class ConditionSerializer implements Serializer<AmbiguousKeyCondition> {
+                    public void serialize(JsonObject json, AmbiguousKeyCondition value, JsonSerializationContext context) {
+                        json.addProperty("marker", value.actualValue);
+                    }
+
+                    public AmbiguousKeyCondition deserialize(JsonObject json, JsonDeserializationContext context) {
+                        return new AmbiguousKeyCondition(GsonHelper.getAsString(json, "display_name"));
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TestLoot.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class TestLoot {
+                public static final DeferredRegister<LootItemConditionType> CONDITIONS = DeferredRegister.create(Registries.LOOT_CONDITION_TYPE, "example");
+
+                public static final DeferredHolder<LootItemConditionType, LootItemConditionType> AMBIGUOUS =
+                        CONDITIONS.register("ambiguous", () -> new LootItemConditionType(new AmbiguousKeyCondition.ConditionSerializer()));
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(tempDir)
+
+        val ambiguous = srcDir.resolve("AmbiguousKeyCondition.java").readText()
+        val registry = srcDir.resolve("TestLoot.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(ambiguous.contains("MapCodec<AmbiguousKeyCondition>"), ambiguous)
+        assertTrue(ambiguous.contains("Serializer<AmbiguousKeyCondition>"), ambiguous)
+        assertTrue(ambiguous.contains("GsonHelper.getAsString(json, \"display_name\")"), ambiguous)
+        assertTrue(registry.contains("new LootItemConditionType(new AmbiguousKeyCondition.ConditionSerializer())"), registry)
+        assertFalse(registry.contains("AmbiguousKeyCondition.CODEC"), registry)
+    }
+
+    @Test
     fun `loot function entity and int codec migration rejects local variable member fallbacks`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

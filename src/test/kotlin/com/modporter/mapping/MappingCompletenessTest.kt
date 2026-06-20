@@ -659,6 +659,62 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `loot condition codec migrations do not synthesize member names from json keys`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun inferLootConditionCodecField")
+        assertTrue(start >= 0, "inferLootConditionCodecField is missing")
+        val end = source.indexOf("private fun migrateLootConditionalFunctionSerializerCodec", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "json key member synthesis helper" to "jsonKeyToJavaMember",
+            "string key member fallback" to "serializedMembers[key] ?: jsonKey",
+            "boolean key member fallback" to "serializedMembers[key] ?: jsonKey",
+            "entity target key member fallback" to "serializedMembers[key] ?: jsonKey"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "loot condition codec migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Loot condition codec migrations must derive getters from serializer writes, not synthesize members from JSON keys: $offenders"
+        )
+    }
+
+    @Test
+    fun `loot type registry codec migrations require proven codec owners`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLootTypeRegistryCodecConstructors")
+        assertTrue(start >= 0, "migrateLootTypeRegistryCodecConstructors is missing")
+        val end = source.indexOf("private fun lootCodecOwnerIsAvailable", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "unconditional condition codec replacement" to """.replace(result, "new LootItemConditionType($1.CODEC)")""",
+            "unconditional function codec replacement" to """.replace(result, "new LootItemFunctionType<>($1.CODEC)")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "loot type registry codec migration contains $label" }
+
+        assertTrue(
+            body.contains("lootCodecOwnerIsAvailable"),
+            "Loot type registry codec migrations must check project-proven CODEC owners before replacing serializer constructors"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Loot type registry codec migrations must not reference CODEC fields unless the owner migration was proven: $offenders"
+        )
+    }
+
+    @Test
     fun `loot conditional function codec migrations do not synthesize member names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

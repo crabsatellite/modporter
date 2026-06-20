@@ -38,6 +38,7 @@ class TextReplacementPass(
         val javaFiles = findJavaFiles(projectDir)
         logger.info { "Found ${javaFiles.size} Java files to process" }
         val legacyDyeableLeatherItemClasses = collectLegacyDyeableLeatherItemClasses(javaFiles)
+        val legacyLootCodecOwners = collectLegacyLootCodecOwners(javaFiles)
 
         try {
             migrateLegacyCustomEnchantmentData(projectDir, javaFiles, changes, errors, dryRun)
@@ -48,7 +49,15 @@ class TextReplacementPass(
 
         for (file in javaFiles) {
             try {
-                val result = processFile(projectDir, file, rules, dryRun, errors, legacyDyeableLeatherItemClasses)
+                val result = processFile(
+                    projectDir,
+                    file,
+                    rules,
+                    dryRun,
+                    errors,
+                    legacyDyeableLeatherItemClasses,
+                    legacyLootCodecOwners
+                )
                 changes.addAll(result)
             } catch (e: Exception) {
                 errors.add("Error processing ${file}: ${e.message}")
@@ -65,7 +74,8 @@ class TextReplacementPass(
         rules: List<TextReplacement>,
         dryRun: Boolean,
         errors: MutableList<String>,
-        legacyDyeableLeatherItemClasses: Set<String>
+        legacyDyeableLeatherItemClasses: Set<String>,
+        legacyLootCodecOwners: Set<String>
     ): List<Change> {
         val originalContent = file.readText()
         var content = originalContent
@@ -329,7 +339,7 @@ class TextReplacementPass(
         ensureTierIncorrectTagResources(projectDir, file, tierIncorrectTagResources, changes, dryRun)
 
         val beforeLootCodecs = content
-        content = migrateLootSerializerCodecs(content)
+        content = migrateLootSerializerCodecs(content, legacyLootCodecOwners)
         if (content != beforeLootCodecs) {
             changes.add(
                 Change(
@@ -1420,7 +1430,22 @@ private boolean $methodName(Iterable<net.minecraft.core.Holder<Enchantment>> enc
 
     private data class LootCodecField(val key: String, val getter: String, val codecExpression: String)
 
-    private fun migrateLootSerializerCodecs(source: String): String {
+    private fun collectLegacyLootCodecOwners(javaFiles: List<Path>): Set<String> {
+        return javaFiles.mapNotNull { file ->
+            val source = runCatching { file.readText() }.getOrNull() ?: return@mapNotNull null
+            legacyLootCodecOwner(source)
+        }.toSet()
+    }
+
+    private fun legacyLootCodecOwner(source: String): String? {
+        val className = javaTopLevelTypeName(source) ?: return null
+        return className.takeIf {
+            lootConditionCodecFieldSource(source, className) != null ||
+                lootConditionalFunctionCodecFieldSource(source, className) != null
+        }
+    }
+
+    private fun migrateLootSerializerCodecs(source: String, codecOwners: Set<String> = emptySet()): String {
         if (!source.contains("LootItemConditionType") &&
             !source.contains("LootItemFunctionType") &&
             !source.contains("Serializer<")) {
@@ -1430,7 +1455,7 @@ private boolean $methodName(Iterable<net.minecraft.core.Holder<Enchantment>> enc
         var result = source
         result = migrateLootConditionSerializerCodec(result)
         result = migrateLootConditionalFunctionSerializerCodec(result)
-        result = migrateLootTypeRegistryCodecConstructors(result)
+        result = migrateLootTypeRegistryCodecConstructors(result, codecOwners)
         result = removeLegacyLootSerializerImports(result)
         return result
     }
@@ -1449,12 +1474,23 @@ private boolean $methodName(Iterable<net.minecraft.core.Holder<Enchantment>> enc
                 .containsMatchIn(source) -> "Serializer"
             else -> return source
         }
-        val serializer = innerClassText(source, serializerName) ?: return source
-        val codecField = inferLootConditionCodecField(source, serializer, className) ?: return source
+        val codecField = lootConditionCodecFieldSource(source, className) ?: return source
 
         var result = insertStaticFieldAfterTypeOpen(source, className, codecField)
         result = removeInnerClassByName(result, serializerName)
         return result
+    }
+
+    private fun lootConditionCodecFieldSource(source: String, className: String): String? {
+        val serializerName = when {
+            Regex("""class\s+ConditionSerializer\s+implements\s+(?:net\.minecraft\.world\.level\.storage\.loot\.)?Serializer<\s*${Regex.escape(className)}\s*>""")
+                .containsMatchIn(source) -> "ConditionSerializer"
+            Regex("""class\s+Serializer\s+implements\s+(?:net\.minecraft\.world\.level\.storage\.loot\.)?Serializer<\s*${Regex.escape(className)}\s*>""")
+                .containsMatchIn(source) -> "Serializer"
+            else -> return null
+        }
+        val serializer = innerClassText(source, serializerName) ?: return null
+        return inferLootConditionCodecField(source, serializer, className)
     }
 
     private fun inferLootConditionCodecField(source: String, serializer: String, className: String): String? {
@@ -1520,7 +1556,7 @@ $fieldLines
         val key = deserialize.groupValues[2]
         val member = Regex(
             """\b(?:json|object)\.addProperty\s*\(\s*"${Regex.escape(key)}"\s*,\s*${Regex.escape(converter)}\.serialize\s*\(\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\s*\)\s*\)"""
-        ).find(serializer)?.groupValues?.get(1) ?: jsonKeyToJavaMember(key)
+        ).find(serializer)?.groupValues?.get(1) ?: return null
         return """
 	public static final MapCodec<$className> CODEC = com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec(instance -> instance.group(
 		com.mojang.serialization.Codec.STRING.fieldOf("$key").forGetter(o -> $converter.serialize(o.$member))
@@ -1531,27 +1567,30 @@ $fieldLines
     private fun lootConditionCodecField(argument: String, serializedMembers: Map<String, String>): LootCodecField? {
         Regex("""GsonHelper\.getAsString\s*\(\s*[^,]+,\s*"([^"]+)"""").find(argument)?.let { match ->
             val key = match.groupValues[1]
+            val member = serializedMembers[key] ?: return null
             return LootCodecField(
                 key = key,
-                getter = serializedMembers[key] ?: jsonKeyToJavaMember(key),
+                getter = member,
                 codecExpression = """com.mojang.serialization.Codec.STRING.fieldOf("$key")"""
             )
         }
         Regex("""GsonHelper\.getAsBoolean\s*\(\s*[^,]+,\s*"([^"]+)"\s*,\s*([^)]+)\)""").find(argument)?.let { match ->
             val key = match.groupValues[1]
             val defaultValue = match.groupValues[2].trim()
+            val member = serializedMembers[key] ?: return null
             return LootCodecField(
                 key = key,
-                getter = serializedMembers[key] ?: jsonKeyToJavaMember(key),
+                getter = member,
                 codecExpression = """com.mojang.serialization.Codec.BOOL.optionalFieldOf("$key", $defaultValue)"""
             )
         }
         Regex("""GsonHelper\.getAsObject\s*\(\s*[^,]+,\s*"([^"]+)"\s*,\s*[^,]+,\s*LootContext\.EntityTarget\.class\s*\)""")
             .find(argument)?.let { match ->
                 val key = match.groupValues[1]
+                val member = serializedMembers[key] ?: return null
                 return LootCodecField(
                     key = key,
-                    getter = serializedMembers[key] ?: jsonKeyToJavaMember(key),
+                    getter = member,
                     codecExpression = """LootContext.EntityTarget.CODEC.fieldOf("$key")"""
                 )
             }
@@ -1565,9 +1604,7 @@ $fieldLines
         }
 
         val className = javaTopLevelTypeName(source) ?: return source
-        val serializer = innerClassText(source, "Serializer") ?: return source
-        if (!serializer.contains("extends LootItemConditionalFunction.Serializer<$className>")) return source
-        val codecField = inferLootConditionalFunctionCodecField(serializer, className) ?: return source
+        val codecField = lootConditionalFunctionCodecFieldSource(source, className) ?: return source
 
         var result = insertStaticFieldAfterTypeOpen(source, className, codecField)
         result = Regex("""(protected|public|private)\s+${Regex.escape(className)}\s*\(\s*LootItemCondition\[\]\s+([A-Za-z_$][\w$]*)""")
@@ -1576,6 +1613,12 @@ $fieldLines
             .replace(result, "public LootItemFunctionType<$className> getType()")
         result = removeInnerClassByName(result, "Serializer")
         return result
+    }
+
+    private fun lootConditionalFunctionCodecFieldSource(source: String, className: String): String? {
+        val serializer = innerClassText(source, "Serializer") ?: return null
+        if (!serializer.contains("extends LootItemConditionalFunction.Serializer<$className>")) return null
+        return inferLootConditionalFunctionCodecField(serializer, className)
     }
 
     private fun inferLootConditionalFunctionCodecField(serializer: String, className: String): String? {
@@ -1652,23 +1695,44 @@ ${codecFields.joinToString(",\n")}
         """.trimIndent()
     }
 
-    private fun migrateLootTypeRegistryCodecConstructors(source: String): String {
+    private fun migrateLootTypeRegistryCodecConstructors(source: String, codecOwners: Set<String>): String {
         if (!source.contains("LootItemConditionType") && !source.contains("LootItemFunctionType")) return source
         var result = source
         result = Regex("""new\s+LootItemConditionType\s*\(\s*new\s+([A-Za-z_$][\w$]*)\.(?:ConditionSerializer|Serializer)\s*\(\s*\)\s*\)""")
-            .replace(result, "new LootItemConditionType($1.CODEC)")
+            .replace(result) { match ->
+                val owner = match.groupValues[1]
+                if (lootCodecOwnerIsAvailable(result, owner, codecOwners)) {
+                    "new LootItemConditionType($owner.CODEC)"
+                } else {
+                    match.value
+                }
+            }
         result = Regex("""new\s+LootItemFunctionType\s*\(\s*new\s+([A-Za-z_$][\w$]*)\.Serializer\s*\(\s*\)\s*\)""")
-            .replace(result, "new LootItemFunctionType<>($1.CODEC)")
-        result = result.replace(
-            "DeferredRegister<LootItemFunctionType> FUNCTIONS",
-            "DeferredRegister<LootItemFunctionType<?>> FUNCTIONS"
-        )
+            .replace(result) { match ->
+                val owner = match.groupValues[1]
+                if (lootCodecOwnerIsAvailable(result, owner, codecOwners)) {
+                    "new LootItemFunctionType<>($owner.CODEC)"
+                } else {
+                    match.value
+                }
+            }
+        if (result.contains("new LootItemFunctionType<>(")) {
+            result = result.replace(
+                "DeferredRegister<LootItemFunctionType> FUNCTIONS",
+                "DeferredRegister<LootItemFunctionType<?>> FUNCTIONS"
+            )
+        }
         result = Regex(
             """DeferredHolder<LootItemFunctionType,\s*LootItemFunctionType>\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\.register\s*\(\s*"([^"]+)"\s*,\s*\(\)\s*->\s*new\s+LootItemFunctionType<>\s*\(\s*([A-Za-z_$][\w$]*)\.CODEC\s*\)\s*\)"""
         ).replace(result) { match ->
             "DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<${match.groupValues[4]}>> ${match.groupValues[1]} = ${match.groupValues[2]}.register(\"${match.groupValues[3]}\", () -> new LootItemFunctionType<>(${match.groupValues[4]}.CODEC))"
         }
         return result
+    }
+
+    private fun lootCodecOwnerIsAvailable(source: String, owner: String, codecOwners: Set<String>): Boolean {
+        return owner in codecOwners ||
+            Regex("""MapCodec\s*<\s*${Regex.escape(owner)}\s*>\s+CODEC\b""").containsMatchIn(source)
     }
 
     private fun removeLegacyLootSerializerImports(source: String): String {
@@ -1687,14 +1751,6 @@ ${codecFields.joinToString(",\n")}
             }
         }
         return result
-    }
-
-    private fun jsonKeyToJavaMember(key: String): String {
-        val parts = key.split('_', '-').filter { it.isNotBlank() }
-        if (parts.isEmpty()) return key
-        return parts.first() + parts.drop(1).joinToString("") { part ->
-            part.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
-        }
     }
 
     private fun javaTopLevelTypeName(source: String): String? =
