@@ -18728,6 +18728,47 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy banner item factories do not infer owners from java file names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleItems.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+
+            public static ItemStack createExampleBannerItemStack() {
+                ItemStack bannerStack = new ItemStack(Items.WHITE_BANNER);
+                CompoundTag tag = new CompoundTag();
+                tag.put("Patterns", new BannerPattern.Builder().toListTag());
+                BlockItem.setBlockEntityData(bannerStack, BlockEntityType.BANNER, tag);
+                return bannerStack;
+            }
+        """.trimIndent())
+        srcDir.resolve("Usage.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.item.ItemStack;
+
+            public class Usage {
+                public ItemStack make(HolderLookup.Provider registries) {
+                    return ExampleItems.createExampleBannerItemStack();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val usage = srcDir.resolve("Usage.java").readText()
+
+        assertTrue(usage.contains("return ExampleItems.createExampleBannerItemStack();"), usage)
+        assertFalse(usage.contains("lookupOrThrow(Registries.BANNER_PATTERN)"), usage)
+    }
+
+    @Test
     fun `item stack predicate override methods do not infer owners from java file names`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

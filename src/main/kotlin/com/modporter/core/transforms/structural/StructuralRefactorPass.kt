@@ -9805,7 +9805,7 @@ $fields
             if (!source.contains("BannerPattern.Builder") || !source.contains("new BannerPattern.Builder()")) {
                 return@mapNotNull null
             }
-            val ownerClass = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+            val ownerClass = classNameOfJavaSource(source) ?: return@mapNotNull null
             val packageName = packageNameOf(source)
             Regex("""(?m)\bstatic\s+final\s+BannerPattern\.Builder\s+([A-Za-z_$][\w$]*)\s*=""")
                 .findAll(source)
@@ -9821,7 +9821,7 @@ $fields
                 !source.contains("BlockEntityType.BANNER")) {
                 return@mapNotNull null
             }
-            val ownerClass = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+            val ownerClass = classNameOfJavaSource(source) ?: return@mapNotNull null
             val packageName = packageNameOf(source)
             javaMethodRanges(source)
                 .mapNotNull { method ->
