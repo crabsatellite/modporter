@@ -9691,9 +9691,9 @@ $fields
                     changes.add(Change(
                         file = javaFile,
                         line = 0,
-                        description = "Wrap external MobEffect variables with registry holders for Holder<MobEffect> APIs",
-                        before = "MobEffect variable passed to 1.21 Holder APIs",
-                        after = "BuiltInRegistries.MOB_EFFECT.wrapAsHolder(mobEffect)",
+                        description = "Migrate MobEffect arguments to Holder<MobEffect> API shapes",
+                        before = "MobEffect or DeferredHolder#get() passed to 1.21 Holder APIs",
+                        after = "Holder<MobEffect> or source-proven registry holder argument",
                         confidence = Confidence.HIGH,
                         ruleId = "struct-mobeffect-holder-direct"
                     ))
@@ -14491,16 +14491,33 @@ ${entries.joinToString(",\n")}
             !source.contains("addEffect(")
         ) return source
 
+        val holderConstant = """(?:[A-Za-z_$][\w$]*\.)+[A-Z0-9_$]+"""
+        var result = source
+
+        result = Regex("""\bMobEffect\s+(\w+)\s*=\s*($holderConstant)\.get\(\)\s*;""")
+            .replace(result) { match ->
+                "Holder<MobEffect> ${match.groupValues[1]} = ${match.groupValues[2]};"
+            }
+
+        val holderVariables = Regex("""\bHolder\s*<\s*MobEffect\s*>\s+(\w+)\s*=""")
+            .findAll(result)
+            .map { it.groupValues[1] }
+            .toSet()
         val mobEffectVariables = Regex("""\bMobEffect\s+(\w+)\s*=""")
-            .findAll(source)
+            .findAll(result)
             .map { it.groupValues[1] }
             .toSet()
 
-        var result = source
         result = Regex("""(new\s+MobEffectInstance\s*\(\s*)((?:[A-Za-z_$][\w$]*\.)+[A-Z0-9_$]+)\.get\(\)""")
             .replace(result, "$1$2")
         result = Regex("""(\.\s*(?:hasEffect|getEffect|removeEffect)\s*\(\s*)((?:[A-Za-z_$][\w$]*\.)+[A-Z0-9_$]+)\.get\(\)(\s*\))""")
             .replace(result, "$1$2$3")
+        result = Regex("""(new\s+ClientboundRemoveMobEffectPacket\s*\(\s*(?:[^()]|\([^()]*\))*?,\s*)($holderConstant)\.get\(\)(\s*\))""")
+            .replace(result, "$1$2$3")
+
+        holderVariables.forEach { variable ->
+            result = result.replace("BuiltInRegistries.MOB_EFFECT.wrapAsHolder($variable)", variable)
+        }
         for (variable in mobEffectVariables) {
             val varPattern = Regex.escape(variable)
             result = Regex("""(new\s+MobEffectInstance\s*\(\s*)$varPattern\b""")
@@ -14544,11 +14561,17 @@ ${entries.joinToString(",\n")}
         }
 
         if (result != source) {
+            if (holderVariables.isNotEmpty() || result.contains("Holder<MobEffect>")) {
+                result = addImportIfMissing(result, "net.minecraft.core.Holder")
+            }
             if (mobEffectVariables.isNotEmpty()) {
                 result = addImportIfMissing(result, "net.minecraft.core.registries.BuiltInRegistries")
             }
             if (holderParamNames.isNotEmpty()) {
                 result = addImportIfMissing(result, "net.minecraft.core.Holder")
+            }
+            if (!result.contains("BuiltInRegistries.MOB_EFFECT")) {
+                result = removeImport(result, "net.minecraft.core.registries.BuiltInRegistries")
             }
         }
         return result
@@ -37761,33 +37784,7 @@ $encodeLines
 
     private fun migrateVerifiedCompat121ApiSource(source: String): String {
         var result = source
-        var needsHolder = false
         var needsEpicFightEvent = false
-
-        if (result.contains("ACEffectRegistry.")) {
-            result = Regex(
-                """(ACEffectRegistry\.(?:MAGNETIZING|STUNNED|RAGE|IRRADIATED|BUBBLED|DEEPSIGHT|DARKNESS_INCARNATE|SUGAR_RUSH))\.get\(\)"""
-            ).replace(result, "$1")
-        }
-
-        if (result.contains("ModEffects.")) {
-            result = Regex("""MobEffect\s+(\w+)\s*=\s*ModEffects\.(NOURISHMENT|COMFORT)\.get\(\);""")
-                .replace(result) { match ->
-                    needsHolder = true
-                    "Holder<MobEffect> ${match.groupValues[1]} = ModEffects.${match.groupValues[2]};"
-                }
-
-            val holderVars = Regex("""Holder<MobEffect>\s+(\w+)\s*=\s*ModEffects\.(?:NOURISHMENT|COMFORT)\s*;""")
-                .findAll(result)
-                .map { it.groupValues[1] }
-                .toSet()
-            holderVars.forEach { variable ->
-                result = result.replace("BuiltInRegistries.MOB_EFFECT.wrapAsHolder($variable)", variable)
-            }
-            if (!result.contains("BuiltInRegistries.MOB_EFFECT")) {
-                result = removeImport(result, "net.minecraft.core.registries.BuiltInRegistries")
-            }
-        }
 
         result = result
             .replace(
@@ -37826,9 +37823,6 @@ $encodeLines
 
         result = migrateNitrogenTooltipPredicateLambdas(result)
 
-        if (needsHolder || result.contains("Holder<MobEffect>")) {
-            result = addImportIfMissing(result, "net.minecraft.core.Holder")
-        }
         if (!needsEpicFightEvent && !result.contains("RegisterPatchedRenderersEvent")) {
             result = removeImport(result, "yesman.epicfight.api.client.event.types.registry.RegisterPatchedRenderersEvent")
         }

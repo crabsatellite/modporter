@@ -7497,7 +7497,7 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
-    fun `adds Item import for TooltipContext and wraps external MobEffect variables`() {
+    fun `adds Item import for TooltipContext and migrates registry backed MobEffect variables`() {
         val projectDir = createFile("EffectItem.java", """
             package com.example;
 
@@ -7531,11 +7531,13 @@ class StructuralRefactorExtraTest {
         assertTrue(result.changes.any { it.ruleId == "struct-tooltip-context-import" })
         assertTrue(result.changes.any { it.ruleId == "struct-mobeffect-holder-direct" })
         assertTrue(migrated.contains("import net.minecraft.world.item.Item;"))
-        assertTrue(migrated.contains("import net.minecraft.core.registries.BuiltInRegistries;"))
-        assertTrue(migrated.contains("player.hasEffect(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(coldResistance))"))
-        assertTrue(migrated.contains("player.getEffect(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(coldResistance))"))
-        assertTrue(migrated.contains("new MobEffectInstance(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(coldResistance), 100)"))
-        assertTrue(migrated.contains("player.removeEffect(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(coldResistance))"))
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"))
+        assertFalse(migrated.contains("import net.minecraft.core.registries.BuiltInRegistries;"))
+        assertTrue(migrated.contains("Holder<MobEffect> coldResistance = ExternalEffects.COLD_RESISTANCE;"))
+        assertTrue(migrated.contains("player.hasEffect(coldResistance)"))
+        assertTrue(migrated.contains("player.getEffect(coldResistance)"))
+        assertTrue(migrated.contains("new MobEffectInstance(coldResistance, 100)"))
+        assertTrue(migrated.contains("player.removeEffect(coldResistance)"))
     }
 
     @Test
@@ -7564,6 +7566,45 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("return player.hasEffect(ModEffects.REMEDY);"))
         assertTrue(migrated.contains("return instance.getEffect().value() == ModEffects.REMEDY.get();"))
         assertFalse(migrated.contains("hasEffect(ModEffects.REMEDY.get())"))
+    }
+
+    @Test
+    fun `migrates generic deferred effect holders in holder api arguments`() {
+        val projectDir = createFile("GenericEffectUse.java", """
+            package com.example;
+
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.network.protocol.game.ClientboundRemoveMobEffectPacket;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public class GenericEffectUse {
+                void cure(LivingEntity living, ServerLevel serverLevel) {
+                    MobEffect frozen = ExampleEffects.FROZEN.get();
+                    MobEffectInstance current = living.getEffect(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(frozen));
+                    living.removeEffect(ExampleEffects.FROZEN.get());
+                    serverLevel.getChunkSource().broadcastAndSend(living,
+                            new ClientboundRemoveMobEffectPacket(living.getId(), ExampleEffects.FROZEN.get()));
+                    living.addEffect(new MobEffectInstance(frozen, 100, 0));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/GenericEffectUse.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-mobeffect-holder-direct" })
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"))
+        assertFalse(migrated.contains("import net.minecraft.core.registries.BuiltInRegistries;"))
+        assertTrue(migrated.contains("Holder<MobEffect> frozen = ExampleEffects.FROZEN;"), migrated)
+        assertTrue(migrated.contains("MobEffectInstance current = living.getEffect(frozen);"), migrated)
+        assertTrue(migrated.contains("living.removeEffect(ExampleEffects.FROZEN);"), migrated)
+        assertTrue(migrated.contains("new ClientboundRemoveMobEffectPacket(living.getId(), ExampleEffects.FROZEN)"), migrated)
+        assertTrue(migrated.contains("living.addEffect(new MobEffectInstance(frozen, 100, 0));"), migrated)
+        assertFalse(migrated.contains("ExampleEffects.FROZEN.get()"), migrated)
+        assertFalse(migrated.contains("BuiltInRegistries.MOB_EFFECT.wrapAsHolder(frozen)"), migrated)
     }
 
     @Test
