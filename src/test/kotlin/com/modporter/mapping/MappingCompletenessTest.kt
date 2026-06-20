@@ -804,6 +804,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `class for name presence migration uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun rewriteClassForNamePresenceChecksWithoutReflection")
+        assertTrue(start >= 0, "rewriteClassForNamePresenceChecksWithoutReflection is missing")
+        val end = source.indexOf("private fun ensureClassResourcePresenceHelper", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw source replacement" to "pattern.replace(source)",
+            "raw source match scan" to "pattern.findAll(source)",
+            "raw source no-op comparison" to "rewritten == source"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "Class.forName presence migration contains $label" }
+
+        assertTrue(
+            body.contains("val code = maskJavaComments(source)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("pattern.findAll(code)") &&
+                body.contains("executablePattern.matchEntire") &&
+                body.contains("executableCode.substring(match.range.first, match.range.last + 1)") &&
+                body.contains("matches.asReversed()"),
+            "Class.forName presence migration must prove the try/catch probe from executable Java code before rewriting"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Class.forName presence migration must not use raw whole-file source as migration evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `reflected optional dependency scan ignores comments`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

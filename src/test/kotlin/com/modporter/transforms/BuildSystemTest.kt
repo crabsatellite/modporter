@@ -1659,6 +1659,42 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `does not rewrite commented class-for-name presence checks`() {
+        val projectDir = tempDir.resolve("commented-class-for-name-presence")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("ClientSetup.java").writeText("""
+            package com.example;
+
+            public class ClientSetup {
+                public static boolean optionalPresent = false;
+
+                public static void setup() {
+                    // try {
+                    //     Class.forName("net.optional.ExampleConfig");
+                    //     optionalPresent = true;
+                    // } catch (ClassNotFoundException e) {
+                    //     optionalPresent = false;
+                    // }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ClientSetup.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertTrue(content.contains("""//     Class.forName("net.optional.ExampleConfig");"""), content)
+        assertFalse(content.contains("modporterClassResourcePresent"), content)
+    }
+
+    @Test
     fun `rewrites class-for-name loader presence probes to class resource probes`() {
         val projectDir = tempDir.resolve("class-for-name-loader-presence")
         val srcDir = projectDir.resolve("src/main/java/com/example")

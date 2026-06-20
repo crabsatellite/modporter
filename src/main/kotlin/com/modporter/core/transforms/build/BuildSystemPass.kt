@@ -2343,14 +2343,34 @@ $header
             .replace(source, "")
 
     private fun rewriteClassForNamePresenceChecksWithoutReflection(source: String): String {
+        val code = maskJavaComments(source)
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val pattern = Regex(
             """try\s*\{\s*Class\.forName\(\s*"([^"]+)"(?:\s*,\s*false\s*,\s*.*?)?\s*\)\s*;\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*=\s*true\s*;\s*\}\s*catch\s*\(\s*ClassNotFoundException\s+[A-Za-z_$][\w$]*\s*\)\s*\{\s*(?:\2\s*=\s*false\s*;)?\s*\}""",
             RegexOption.DOT_MATCHES_ALL
         )
-        val rewritten = pattern.replace(source) { match ->
-            """${match.groupValues[2]} = modporterClassResourcePresent("${match.groupValues[1]}");"""
+        val executablePattern = Regex(
+            """try\s*\{\s*Class\.forName\(\s*(?:,\s*false\s*,\s*.*?)?\)\s*;\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*=\s*true\s*;\s*\}\s*catch\s*\(\s*ClassNotFoundException\s+[A-Za-z_$][\w$]*\s*\)\s*\{\s*(?:\1\s*=\s*false\s*;)?\s*\}""",
+            RegexOption.DOT_MATCHES_ALL
+        )
+        val matches = pattern.findAll(code)
+            .filter { match ->
+                val executableMatch = executablePattern.matchEntire(
+                    executableCode.substring(match.range.first, match.range.last + 1)
+                )
+                executableMatch?.groupValues?.get(1) == match.groupValues[2]
+            }
+            .toList()
+        if (matches.isEmpty()) return source
+
+        var rewritten = source
+        for (match in matches.asReversed()) {
+            val replacement = """${match.groupValues[2]} = modporterClassResourcePresent("${match.groupValues[1]}");"""
+            rewritten = rewritten.substring(0, match.range.first) +
+                replacement +
+                rewritten.substring(match.range.last + 1)
         }
-        return if (rewritten == source) source else ensureClassResourcePresenceHelper(rewritten)
+        return ensureClassResourcePresenceHelper(rewritten)
     }
 
     private fun ensureClassResourcePresenceHelper(source: String): String {
