@@ -1795,6 +1795,57 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `add-layers renderer reflection migration ignores comments outside method evidence`() {
+        val projectDir = tempDir.resolve("addlayers-renderers-comment-markers")
+        val srcDir = projectDir.resolve("src/main/java/com/example/client")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("ClientSetup.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.client.model.EntityModel;
+            import net.minecraft.client.renderer.entity.EntityRenderer;
+            import net.minecraft.client.renderer.entity.LivingEntityRenderer;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.player.Player;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.client.event.EntityRenderersEvent;
+            import java.util.Map;
+
+            public class ClientSetup {
+                // EntityRenderersEvent.AddLayers.class.getDeclaredField("renderers");
+                // field_EntityRenderersEvent${'$'}AddLayers_renderers.setAccessible(true);
+
+                @SubscribeEvent
+                @SuppressWarnings("unchecked")
+                public static void attachRenderLayers(EntityRenderersEvent.AddLayers event) {
+                    event.getSkins().forEach(renderer -> {
+                        LivingEntityRenderer<Player, EntityModel<Player>> skin = event.getSkin(renderer);
+                        attachRenderLayers(skin);
+                    });
+                    ((Map<EntityType<?>, EntityRenderer<?>>) renderers.get(event)).values().stream().
+                            filter(LivingEntityRenderer.class::isInstance).map(LivingEntityRenderer.class::cast).forEach(ClientSetup::attachRenderLayers);
+                }
+
+                private static void attachRenderLayers(LivingEntityRenderer<?, ?> renderer) {
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ClientSetup.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-entityrenderers-addlayers-api" })
+        assertTrue(content.contains("renderers.get(event)"), content)
+        assertTrue(content.contains("getDeclaredField(\"renderers\")"), content)
+    }
+
+    @Test
     fun `rewrites obfuscation method handles to mixin invoker calls`() {
         val projectDir = tempDir.resolve("methodhandle-mixin")
         val srcDir = projectDir.resolve("src/main/java/com/example")

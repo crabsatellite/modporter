@@ -662,6 +662,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `add layers renderer reflection migration uses method local evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateEntityRenderersAddLayersReflection")
+        assertTrue(start >= 0, "migrateEntityRenderersAddLayersReflection is missing")
+        val end = source.indexOf("private fun migrateObfuscationReflectionMethodHandles", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "whole-file AddLayers renderers reflection scan" to """original.contains("EntityRenderersEvent.AddLayers.class.getDeclaredField(\"renderers\")")""",
+            "whole-file setAccessible scan" to """original.contains(".setAccessible(true)")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "add-layers renderer migration contains $label" }
+
+        assertTrue(
+            body.contains("val methodSource = original.substring(methodMatch.range.first, closeBrace + 1)") &&
+                body.contains("containsEntityRenderersAddLayersReflection(methodSource, eventParam)") &&
+                body.contains("private fun containsEntityRenderersAddLayersReflection(methodSource: String, eventParam: String)") &&
+                body.contains("val code = maskJavaComments(methodSource)") &&
+                body.contains("Regex.escape(fieldName)") &&
+                body.contains("Regex.escape(eventParam)"),
+            "AddLayers renderer reflection migration must prove declared-field, setAccessible, and get(event) inside the AddLayers handler"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "AddLayers renderer reflection migration must not use whole-file reflection markers: $offenders"
+        )
+    }
+
+    @Test
     fun `required access transformer collection uses typed source evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

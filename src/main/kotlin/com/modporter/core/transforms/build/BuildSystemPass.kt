@@ -1715,11 +1715,6 @@ private static CreativeModeTab getSelectedTab() {
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val original = javaFile.readText()
-                if (!original.contains("EntityRenderersEvent.AddLayers.class.getDeclaredField(\"renderers\")") ||
-                    !original.contains(".setAccessible(true)")) {
-                    return@forEach
-                }
-
                 val methodMatch = Regex(
                     """public\s+static\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*EntityRenderersEvent\.AddLayers\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
                 ).find(original) ?: return@forEach
@@ -1728,6 +1723,9 @@ private static CreativeModeTab getSelectedTab() {
                 val openBrace = original.indexOf('{', methodMatch.range.first)
                 val closeBrace = if (openBrace >= 0) findMatchingBrace(original, openBrace) else -1
                 if (closeBrace <= openBrace) return@forEach
+
+                val methodSource = original.substring(methodMatch.range.first, closeBrace + 1)
+                if (!containsEntityRenderersAddLayersReflection(methodSource, eventParam)) return@forEach
 
                 val body = original.substring(openBrace + 1, closeBrace)
                 val skinBlockStart = body.indexOf("$eventParam.getSkins().forEach")
@@ -1770,6 +1768,18 @@ public static void $methodName(EntityRenderersEvent.AddLayers $eventParam) {
                 }
             }
         return changes
+    }
+
+    private fun containsEntityRenderersAddLayersReflection(methodSource: String, eventParam: String): Boolean {
+        val code = maskJavaComments(methodSource)
+        val fieldAssignments = Regex(
+            """\b([A-Za-z_$][\w$]*)\s*=\s*(?:net\.neoforged\.neoforge\.client\.event\.)?EntityRenderersEvent\.AddLayers\.class\.getDeclaredField\s*\(\s*"renderers"\s*\)"""
+        ).findAll(code)
+        return fieldAssignments.any { match ->
+            val fieldName = match.groupValues[1]
+            Regex("""\b${Regex.escape(fieldName)}\s*\.\s*setAccessible\s*\(\s*true\s*\)""").containsMatchIn(code) &&
+                Regex("""\b${Regex.escape(fieldName)}\s*\.\s*get\s*\(\s*${Regex.escape(eventParam)}\s*\)""").containsMatchIn(code)
+        }
     }
 
     private fun migrateObfuscationReflectionMethodHandles(projectDir: Path, dryRun: Boolean): List<Change> {
