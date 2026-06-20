@@ -380,9 +380,10 @@ class ResourceMigrationTest {
         val result = ResourceMigrationPass(db).apply(projectDir)
 
         val recipe = projectDir.resolve("src/main/resources/data/resmod/recipe/cutting_result_array.json").readText()
-        assertTrue(
-            result.changes.any { it.ruleId == "res-recipe-farmersdelight-cutting-result-stack" },
-            "Farmers Delight cutting result stack migration rule should be recorded"
+        assertEquals(
+            1,
+            result.changes.count { it.ruleId == "res-recipe-farmersdelight-cutting-result-stack" },
+            "Farmers Delight cutting result stack migration rule should be recorded exactly once"
         )
         assertTrue(recipe.contains(""""item": "resmod:cabbage""""))
         assertTrue(recipe.contains(""""item": {"""))
@@ -431,9 +432,14 @@ class ResourceMigrationTest {
         """.trimIndent())
 
         val db = MappingDatabase.loadDefault()
-        ResourceMigrationPass(db).apply(projectDir)
+        val result = ResourceMigrationPass(db).apply(projectDir)
 
         val recipe = projectDir.resolve("src/main/resources/data/resmod/recipe/conditional_cutting.json").readText()
+        assertEquals(
+            1,
+            result.changes.count { it.ruleId == "res-recipe-farmersdelight-cutting-result-stack" },
+            "Conditional Farmers Delight cutting migration should be recorded exactly once"
+        )
         assertTrue(recipe.contains(""""neoforge:conditions":"""))
         assertTrue(recipe.contains(""""type": "farmersdelight:cutting""""))
         assertTrue(recipe.contains(""""item": {"""))

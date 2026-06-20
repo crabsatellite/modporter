@@ -853,22 +853,6 @@ class ResourceMigrationPass(
                         }
                     }
 
-                    if (isRecipeFile && content.contains("\"farmersdelight:cutting\"")) {
-                        val newContent = migrateFarmersDelightCuttingRecipe(content)
-                        if (newContent != content) {
-                            content = newContent
-                            modified = true
-                            changes.add(Change(
-                                file = file, line = 0,
-                                description = "Farmers Delight cutting result: item id/count -> item stack object",
-                                before = "\"item\": \"mod:item\", \"count\": 2",
-                                after = "\"item\": {\"id\": \"mod:item\", \"count\": 2}",
-                                confidence = Confidence.HIGH,
-                                ruleId = "res-recipe-farmersdelight-cutting-result-stack"
-                            ))
-                        }
-                    }
-
                     if (isLootTableFile && content.contains("\"neoforge:conditions\"")) {
                         val newContent = content.replace("\"neoforge:conditions\"", "\"conditions\"")
                         if (newContent != content) {

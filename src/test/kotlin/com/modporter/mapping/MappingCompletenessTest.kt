@@ -308,7 +308,7 @@ class MappingCompletenessTest {
         val surfaces = Json.parseToJsonElement(apiSurfaceFile.readText()).jsonArray.map { element ->
             val json = element.jsonObject
             val id = json.getValue("id").jsonPrimitive.content
-            val markers = listOf("packagePrefixes", "coordinatePrefixes", "ruleIdPrefixes")
+            val markers = listOf("packagePrefixes", "coordinatePrefixes", "resourceTypeIds", "ruleIdPrefixes")
                 .flatMap { key ->
                     json[key]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
                 }
@@ -339,6 +339,7 @@ class MappingCompletenessTest {
             "com.simibubi.create",
             "curse.maven:",
             "dev.engine-room.flywheel",
+            "farmersdelight:",
             "maven.modrinth:",
             "mezz.jei.",
             "mezz.jei:",
@@ -414,7 +415,7 @@ class MappingCompletenessTest {
                     .findAll(file.readText())
                     .map { it.groupValues[1] }
                     .filter { ruleId ->
-                        listOf("nitrogen", "cumulus", "curios", "quark").any { ruleId.contains("-$it-") }
+                        listOf("nitrogen", "cumulus", "curios", "farmersdelight", "quark").any { ruleId.contains("-$it-") }
                     }
                     .flatMap { ruleId ->
                         val declaringSurfaces = ruleIdPrefixes

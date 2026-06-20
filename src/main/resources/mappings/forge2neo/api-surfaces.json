@@ -95,6 +95,20 @@
     "rationale": "Quark is a public dependency API; any migration must be tied to the API package, not to a benchmark target."
   },
   {
+    "id": "farmers-delight",
+    "type": "data-recipe-api",
+    "resourceTypeIds": [
+      "farmersdelight:cutting"
+    ],
+    "ruleIdPrefixes": [
+      "res-recipe-farmersdelight-"
+    ],
+    "allowedFiles": [
+      "src/main/kotlin/com/modporter/resources/ResourceMigrator.kt"
+    ],
+    "rationale": "Farmer's Delight cutting recipes are a public data recipe API; migrations must target that declared recipe type, not a benchmark mod."
+  },
+  {
     "id": "dependency-coordinate-normalization",
     "type": "dependency-coordinate-api",
     "packagePrefixes": [
