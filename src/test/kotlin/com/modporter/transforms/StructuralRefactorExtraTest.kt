@@ -2945,7 +2945,7 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
-    fun `migrates dirtiness player capability to NeoForge attachment bridge`() {
+    fun `migrates legacy player capability facade to NeoForge attachment bridge`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val dirtinessDir = srcDir.resolve("dirtiness")
         val registersDir = srcDir.resolve("registers")
@@ -3034,10 +3034,10 @@ class StructuralRefactorExtraTest {
         val data = dirtinessDir.resolve("DirtinessData.java").readText()
         val mod = srcDir.resolve("ExampleMod.java").readText()
 
-        assertTrue(result.changes.any { it.ruleId == "struct-dirtiness-attachment-bridge" })
-        assertTrue(result.changes.any { it.ruleId == "struct-dirtiness-attachment-register" })
-        assertTrue(result.changes.any { it.ruleId == "struct-dirtiness-data-attachment-serializable" })
-        assertTrue(result.changes.any { it.ruleId == "struct-dirtiness-attachment-main-register" })
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-bridge" })
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-register" })
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-data-attachment-serializable" })
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-main-register" })
         assertTrue(bridge.contains("player.getData(DirtinessAttachment.DIRTINESS)"))
         assertTrue(!bridge.contains("ICapabilityProvider"))
         assertTrue(!bridge.contains("AttachCapabilitiesEvent"))
@@ -3049,6 +3049,101 @@ class StructuralRefactorExtraTest {
         assertTrue(data.contains("public void deserializeNBT(HolderLookup.Provider provider, CompoundTag tag)"))
         assertTrue(mod.contains("import com.example.dirtiness.DirtinessAttachment;"))
         assertTrue(mod.contains("DirtinessAttachment.register(modEventBus);"))
+    }
+
+    @Test
+    fun `legacy capability facade migration uses declared types instead of dirtiness names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val cleanDir = srcDir.resolve("clean")
+        cleanDir.createDirectories()
+
+        cleanDir.resolve("ExampleMod.java").writeText("""
+            package com.example.clean;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+
+                public ExampleMod(IEventBus modEventBus) {
+                }
+            }
+        """.trimIndent())
+
+        cleanDir.resolve("WrongDataFile.java").writeText("""
+            package com.example.clean;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            class CleanlinessState {
+                public CompoundTag serializeNBT() {
+                    return new CompoundTag();
+                }
+
+                public void deserializeNBT(CompoundTag tag) {
+                }
+            }
+        """.trimIndent())
+
+        cleanDir.resolve("WrongFacadeFile.java").writeText("""
+            package com.example.clean;
+
+            import com.modporter.compat.CapabilityManager;
+            import com.modporter.compat.CapabilityToken;
+            import com.modporter.compat.LazyOptional;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.player.Player;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
+
+            class CleanlinessBridge {
+                public static final Object CLEAN_STATE = CapabilityManager.get(new CapabilityToken<CleanlinessState>() {});
+
+                public static LazyOptional<CleanlinessState> get(Player player) {
+                    return player.getCapability(CLEAN_STATE);
+                }
+
+                public static void attach(AttachCapabilitiesEvent<Entity> event) {
+                    event.addCapability(null, new Provider());
+                }
+
+                static class Provider implements ICapabilityProvider {
+                    private final CleanlinessState state = new CleanlinessState();
+                    public CompoundTag serializeNBT() {
+                        return state.serializeNBT();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val facade = cleanDir.resolve("WrongFacadeFile.java").readText()
+        val attachment = cleanDir.resolve("CleanlinessBridgeAttachment.java").readText()
+        val data = cleanDir.resolve("WrongDataFile.java").readText()
+        val mod = cleanDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-bridge" })
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-register" })
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-data-attachment-serializable" })
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-main-register" })
+        assertTrue(facade.contains("final class CleanlinessBridge"), facade)
+        assertFalse(facade.contains("public final class CleanlinessBridge"), facade)
+        assertTrue(facade.contains("LazyOptional<CleanlinessState> get(Player player)"), facade)
+        assertTrue(facade.contains("player.getData(CleanlinessBridgeAttachment.CLEAN_STATE)"), facade)
+        assertFalse(facade.contains("Dirtiness"), facade)
+        assertFalse(facade.contains("WrongFacadeFile"), facade)
+        assertTrue(attachment.contains("public final class CleanlinessBridgeAttachment"), attachment)
+        assertTrue(attachment.contains("Supplier<AttachmentType<CleanlinessState>> CLEAN_STATE"), attachment)
+        assertTrue(attachment.contains("ATTACHMENT_TYPES.register(\"clean_state\", () -> AttachmentType.serializable(CleanlinessState::new).copyOnDeath().build())"), attachment)
+        assertFalse(attachment.contains("Dirtiness"), attachment)
+        assertTrue(data.contains("class CleanlinessState implements INBTSerializable<CompoundTag>"), data)
+        assertTrue(data.contains("serializeNBT(HolderLookup.Provider provider)"), data)
+        assertTrue(data.contains("deserializeNBT(HolderLookup.Provider provider, CompoundTag tag)"), data)
+        assertTrue(mod.contains("CleanlinessBridgeAttachment.register(modEventBus);"), mod)
+        assertFalse(mod.contains("DirtinessAttachment"), mod)
     }
 
     @Test

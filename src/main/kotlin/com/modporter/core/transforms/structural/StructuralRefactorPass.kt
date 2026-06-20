@@ -236,12 +236,12 @@ class StructuralRefactorPass : Pass {
             errors.add("Block entity capability migration error: ${e.message}")
         }
 
-        // Migrate legacy player dirtiness capabilities to NeoForge attachments.
+        // Migrate legacy player capability facades to NeoForge attachments.
         try {
-            val dirtinessCapabilityChanges = migrateDirtinessCapabilityToAttachment(projectDir, dryRun)
-            changes.addAll(dirtinessCapabilityChanges)
+            val capabilityFacadeChanges = migrateLegacyCapabilityFacadeToAttachment(projectDir, dryRun)
+            changes.addAll(capabilityFacadeChanges)
         } catch (e: Exception) {
-            errors.add("Dirtiness capability attachment migration error: ${e.message}")
+            errors.add("Legacy capability facade attachment migration error: ${e.message}")
         }
 
         // Migrate legacy advancement criterion triggers to the 1.21 codec
@@ -7265,7 +7265,18 @@ $registrations
         return lines.joinToString("\n")
     }
 
-    private fun migrateDirtinessCapabilityToAttachment(projectDir: Path, dryRun: Boolean): List<Change> {
+    private data class LegacyCapabilityFacadeSpec(
+        val file: Path,
+        val packageName: String,
+        val className: String,
+        val classIsPublic: Boolean,
+        val dataType: String,
+        val fieldName: String,
+        val attachmentClassName: String,
+        val attachmentPath: String
+    )
+
+    private fun migrateLegacyCapabilityFacadeToAttachment(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return changes
@@ -7274,123 +7285,179 @@ $registrations
             .filter { it.extension == "java" }
             .toList()
 
-        val capabilityFile = javaFiles.firstOrNull { file ->
-            val text = file.readText()
-            file.fileName.toString() == "DirtinessCapability.java" &&
-                text.contains("class DirtinessCapability") &&
-                text.contains("DirtinessData") &&
-                (text.contains("ICapabilityProvider") || text.contains("AttachCapabilitiesEvent"))
-        } ?: return changes
-
-        val capabilityText = capabilityFile.readText()
-        val packageName = packageNameOf(capabilityText)
-        val dataFile = capabilityFile.parent.resolve("DirtinessData.java")
-        val attachmentFile = capabilityFile.parent.resolve("DirtinessAttachment.java")
         val mainClass = detectModMainClass(projectDir)
-        val mainText = mainClass?.readText().orEmpty()
-        val modRef = modIdReferenceForGeneratedClass(mainClass, mainText, packageName)
+        val originalMainText = mainClass?.readText().orEmpty()
+        var migratedMainText = originalMainText
 
-        val bridgeSource = dirtinessCapabilityBridgeSource(packageName)
-        if (capabilityText != bridgeSource) {
-            if (!dryRun) {
-                capabilityFile.writeText(bridgeSource)
+        val facadeSpecs = javaFiles.mapNotNull { legacyCapabilityFacadeSpec(it) }
+        if (facadeSpecs.isEmpty()) return changes
+        val dataFilesByType = javaFiles
+            .mapNotNull { file ->
+                val source = file.readText()
+                classNameOfJavaSource(source)?.let { it to file }
             }
-            changes.add(Change(
-                file = capabilityFile,
-                line = 1,
-                description = "Migrate DirtinessCapability provider to a NeoForge attachment bridge",
-                before = "CapabilityManager + AttachCapabilitiesEvent + ICapabilityProvider",
-                after = "player.getData(DirtinessAttachment.DIRTINESS) bridge",
-                confidence = Confidence.HIGH,
-                ruleId = "struct-dirtiness-attachment-bridge"
-            ))
-        }
+            .toMap()
 
-        if (dataFile.exists()) {
-            val originalData = dataFile.readText()
-            val migratedData = migrateDirtinessDataNbtSerializable(originalData)
-            if (migratedData != originalData) {
+        for (spec in facadeSpecs) {
+            val capabilityText = spec.file.readText()
+            val attachmentFile = spec.file.parent.resolve("${spec.attachmentClassName}.java")
+            val modRef = modIdReferenceForGeneratedClass(mainClass, migratedMainText, spec.packageName)
+
+            val bridgeSource = legacyCapabilityFacadeBridgeSource(spec)
+            if (capabilityText != bridgeSource) {
                 if (!dryRun) {
-                    dataFile.writeText(migratedData)
+                    spec.file.writeText(bridgeSource)
                 }
                 changes.add(Change(
-                    file = dataFile,
+                    file = spec.file,
                     line = 1,
-                    description = "Make DirtinessData compatible with AttachmentType.serializable",
-                    before = "serializeNBT()/deserializeNBT(CompoundTag)",
-                    after = "INBTSerializable<CompoundTag> with HolderLookup.Provider",
+                    description = "Migrate legacy player capability facade to a NeoForge attachment bridge",
+                    before = "CapabilityManager + AttachCapabilitiesEvent + ICapabilityProvider",
+                    after = "player.getData(${spec.attachmentClassName}.${spec.fieldName}) bridge",
                     confidence = Confidence.HIGH,
-                    ruleId = "struct-dirtiness-data-attachment-serializable"
+                    ruleId = "struct-legacy-capability-attachment-bridge"
                 ))
             }
-        }
 
-        if (!attachmentFile.exists()) {
-            if (!dryRun) {
-                attachmentFile.writeText(dirtinessAttachmentSource(packageName, modRef))
+            val dataFile = dataFilesByType[spec.dataType]
+            if (dataFile != null) {
+                val originalData = dataFile.readText()
+                val migratedData = migrateAttachmentDataNbtSerializable(originalData, spec.dataType)
+                if (migratedData != originalData) {
+                    if (!dryRun) {
+                        dataFile.writeText(migratedData)
+                    }
+                    changes.add(Change(
+                        file = dataFile,
+                        line = 1,
+                        description = "Make legacy capability data compatible with AttachmentType.serializable",
+                        before = "serializeNBT()/deserializeNBT(CompoundTag)",
+                        after = "INBTSerializable<CompoundTag> with HolderLookup.Provider",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-legacy-capability-data-attachment-serializable"
+                    ))
+                }
             }
-            changes.add(Change(
-                file = attachmentFile,
-                line = 1,
-                description = "Generate NeoForge attachment registration for DirtinessData",
-                before = "(missing)",
-                after = "DirtinessAttachment.register(IEventBus)",
-                confidence = Confidence.HIGH,
-                ruleId = "struct-dirtiness-attachment-register"
-            ))
-        }
 
-        if (mainClass != null && mainText.isNotBlank() && !mainText.contains("DirtinessAttachment.register(")) {
-            var migratedMain = mainText
-            val mainPackage = packageNameOf(migratedMain)
-            val constructorBusName = requireModEventBusName(migratedMain, "Dirtiness attachment registration")
-
-            if (packageName != mainPackage) {
-                migratedMain = addImportIfMissing(migratedMain, "$packageName.DirtinessAttachment")
-            }
-            val registration = "        DirtinessAttachment.register($constructorBusName);"
-            migratedMain = insertModBusListener(migratedMain, constructorBusName, registration, "EntityRegister")
-            if (migratedMain != mainText) {
+            if (!attachmentFile.exists()) {
                 if (!dryRun) {
-                    mainClass.writeText(migratedMain)
+                    attachmentFile.writeText(legacyCapabilityAttachmentSource(spec, modRef))
                 }
                 changes.add(Change(
-                    file = mainClass,
+                    file = attachmentFile,
                     line = 1,
-                    description = "Register DirtinessAttachment on the mod event bus",
-                    before = "(no DirtinessAttachment.register call)",
-                    after = "DirtinessAttachment.register($constructorBusName)",
+                    description = "Generate NeoForge attachment registration for legacy capability data",
+                    before = "(missing)",
+                    after = "${spec.attachmentClassName}.register(IEventBus)",
                     confidence = Confidence.HIGH,
-                    ruleId = "struct-dirtiness-attachment-main-register"
+                    ruleId = "struct-legacy-capability-attachment-register"
                 ))
             }
+
+            if (mainClass != null && migratedMainText.isNotBlank() && !migratedMainText.contains("${spec.attachmentClassName}.register(")) {
+                val mainPackage = packageNameOf(migratedMainText)
+                val constructorBusName = requireModEventBusName(migratedMainText, "legacy capability attachment registration")
+
+                if (spec.packageName != mainPackage) {
+                    migratedMainText = addImportIfMissing(migratedMainText, "${spec.packageName}.${spec.attachmentClassName}")
+                }
+                val registration = "        ${spec.attachmentClassName}.register($constructorBusName);"
+                val updatedMain = insertModBusListener(migratedMainText, constructorBusName, registration, "EntityRegister")
+                if (updatedMain != migratedMainText) {
+                    migratedMainText = updatedMain
+                    changes.add(Change(
+                        file = mainClass,
+                        line = 1,
+                        description = "Register legacy capability attachment on the mod event bus",
+                        before = "(no ${spec.attachmentClassName}.register call)",
+                        after = "${spec.attachmentClassName}.register($constructorBusName)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-legacy-capability-attachment-main-register"
+                    ))
+                }
+            }
+        }
+
+        if (mainClass != null && migratedMainText != originalMainText && !dryRun) {
+            mainClass.writeText(migratedMainText)
         }
 
         return changes
     }
 
-    private fun dirtinessCapabilityBridgeSource(packageName: String): String = """package $packageName;
+    private fun legacyCapabilityFacadeSpec(file: Path): LegacyCapabilityFacadeSpec? {
+        val source = file.readText()
+        if (!source.contains("CapabilityManager.get") ||
+            !source.contains("CapabilityToken") ||
+            !(source.contains("ICapabilityProvider") || source.contains("AttachCapabilitiesEvent"))) {
+            return null
+        }
+        val className = classNameOfJavaSource(source) ?: return null
+        val classIsPublic = javaTopLevelTypeIsPublic(source, className)
+        val getterDataType = Regex(
+            """(?:public\s+)?static\s+(?:[A-Za-z_$][\w$]*\.)?LazyOptional\s*<\s*([A-Za-z_$][\w$]*)\s*>\s+get\s*\(\s*(?:[A-Za-z_$][\w$]*\.)*Player\s+[A-Za-z_$][\w$]*\s*\)"""
+        ).find(source)?.groupValues?.get(1)
+        val declaration = Regex(
+            """(?:public|protected|private)?\s*static\s+final\s+(?:Object|(?:[A-Za-z_$][\w$]*\.)?Capability\s*<\s*([A-Za-z_$][\w$]*)\s*>)\s+([A-Z_$][A-Z0-9_$]*)\s*=\s*CapabilityManager\.get\s*\(\s*new\s+CapabilityToken\s*<\s*([A-Za-z_$][\w$]*)?\s*>\s*\(\s*\)\s*\{\s*}\s*\)"""
+        ).find(source) ?: return null
+        val dataType = declaration.groupValues[3]
+            .ifBlank { declaration.groupValues[1] }
+            .ifBlank { getterDataType.orEmpty() }
+            .ifBlank { return null }
+        if (getterDataType != null && getterDataType != dataType) return null
+        val fieldName = declaration.groupValues[2]
+        val attachmentClassName = if (className.endsWith("Capability")) {
+            className.removeSuffix("Capability") + "Attachment"
+        } else {
+            className + "Attachment"
+        }
+        return LegacyCapabilityFacadeSpec(
+            file = file,
+            packageName = packageNameOf(source),
+            className = className,
+            classIsPublic = classIsPublic,
+            dataType = dataType,
+            fieldName = fieldName,
+            attachmentClassName = attachmentClassName,
+            attachmentPath = legacyCapabilityAttachmentPath(fieldName, dataType)
+        )
+    }
+
+    private fun legacyCapabilityAttachmentPath(fieldName: String, dataType: String): String {
+        val normalized = fieldName
+            .lowercase()
+            .replace(Regex("""[^a-z0-9]+"""), "_")
+            .trim('_')
+            .removeSuffix("_capability")
+            .ifBlank { classNameToPath(dataType) }
+        return normalized.ifBlank { "data" }
+    }
+
+    private fun legacyCapabilityFacadeBridgeSource(spec: LegacyCapabilityFacadeSpec): String {
+        val visibility = if (spec.classIsPublic) "public " else ""
+        return """package ${spec.packageName};
 
 import com.modporter.compat.LazyOptional;
 import net.minecraft.world.entity.player.Player;
 import org.jetbrains.annotations.Nullable;
 
-public final class DirtinessCapability {
-    private DirtinessCapability() {
+${visibility}final class ${spec.className} {
+    private ${spec.className}() {
     }
 
-    public static LazyOptional<DirtinessData> get(Player player) {
-        return LazyOptional.of(() -> player.getData(DirtinessAttachment.DIRTINESS));
+    public static LazyOptional<${spec.dataType}> get(Player player) {
+        return LazyOptional.of(() -> player.getData(${spec.attachmentClassName}.${spec.fieldName}));
     }
 
     @Nullable
-    public static DirtinessData getOrNull(Player player) {
-        return player.getData(DirtinessAttachment.DIRTINESS);
+    public static ${spec.dataType} getOrNull(Player player) {
+        return player.getData(${spec.attachmentClassName}.${spec.fieldName});
     }
 }
 """
+    }
 
-    private fun dirtinessAttachmentSource(packageName: String, modRef: String): String = """package $packageName;
+    private fun legacyCapabilityAttachmentSource(spec: LegacyCapabilityFacadeSpec, modRef: String): String = """package ${spec.packageName};
 
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.neoforge.attachment.AttachmentType;
@@ -7399,14 +7466,14 @@ import net.neoforged.neoforge.registries.NeoForgeRegistries;
 
 import java.util.function.Supplier;
 
-public final class DirtinessAttachment {
+public final class ${spec.attachmentClassName} {
     public static final DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES =
             DeferredRegister.create(NeoForgeRegistries.ATTACHMENT_TYPES, $modRef);
 
-    public static final Supplier<AttachmentType<DirtinessData>> DIRTINESS =
-            ATTACHMENT_TYPES.register("dirtiness", () -> AttachmentType.serializable(DirtinessData::new).copyOnDeath().build());
+    public static final Supplier<AttachmentType<${spec.dataType}>> ${spec.fieldName} =
+            ATTACHMENT_TYPES.register("${spec.attachmentPath}", () -> AttachmentType.serializable(${spec.dataType}::new).copyOnDeath().build());
 
-    private DirtinessAttachment() {
+    private ${spec.attachmentClassName}() {
     }
 
     public static void register(IEventBus modEventBus) {
@@ -7415,11 +7482,10 @@ public final class DirtinessAttachment {
 }
 """
 
-    private fun migrateDirtinessDataNbtSerializable(source: String): String {
+    private fun migrateAttachmentDataNbtSerializable(source: String, dataType: String): String {
         var result = source
         if (!result.contains("implements INBTSerializable<CompoundTag>")) {
-            result = Regex("""public\s+class\s+DirtinessData\b""")
-                .replace(result, "public class DirtinessData implements INBTSerializable<CompoundTag>")
+            result = ensureJavaTypeImplements(result, dataType, "INBTSerializable<CompoundTag>")
             result = addImportIfMissing(result, "net.neoforged.neoforge.common.util.INBTSerializable")
         }
         result = addImportIfMissing(result, "net.minecraft.core.HolderLookup")
@@ -7449,6 +7515,22 @@ public final class DirtinessAttachment {
             )
         }
         return result
+    }
+
+    private fun ensureJavaTypeImplements(source: String, typeName: String, interfaceType: String): String {
+        val typeStart = findTypeDeclarationStart(source, typeName) ?: return source
+        val openBrace = source.indexOf('{', typeStart)
+        if (openBrace < 0) return source
+        val header = source.substring(typeStart, openBrace)
+        if (Regex("""\b${Regex.escape(interfaceType.substringBefore('<'))}\b""").containsMatchIn(header)) {
+            return source
+        }
+        val insertion = if (Regex("""\bimplements\b""").containsMatchIn(header)) {
+            ", $interfaceType"
+        } else {
+            " implements $interfaceType"
+        }
+        return source.substring(0, openBrace).trimEnd() + insertion + " " + source.substring(openBrace)
     }
 
     private fun modIdReferenceForGeneratedClass(mainClass: Path?, mainText: String, generatedPackage: String): String =
