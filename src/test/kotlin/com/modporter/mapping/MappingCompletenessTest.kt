@@ -1199,6 +1199,31 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `mmlib recipe base relocation does not infer target package from package suffixes`() {
+        val source = Path.of("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .toAbsolutePath()
+            .readText()
+        val start = source.indexOf("private fun detectLocalRecipeBasePackage")
+        val end = source.indexOf("private fun addLocalMmlibRecipeBase", start)
+        assertTrue(start >= 0 && end > start, "Could not locate detectLocalRecipeBasePackage body")
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "package suffix check" to Regex("""packageName\.endsWith\("""),
+            "candidate package voting" to Regex("""groupingBy\s*\{[\s\S]{0,120}maxByOrNull""")
+        )
+        val offenders = forbidden
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "MMLib recipe base relocation must use executable removed-type owner evidence, not package suffix guesses: $offenders"
+        )
+        assertTrue(body.contains("usesRemovedMmlibRecipeBaseType(source)"))
+        assertTrue(body.contains("commonJavaPackagePrefix(ownerPackages)"))
+    }
+
+    @Test
     fun `legacy doEnchant damage effect migration does not use nearby damage source fallback`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

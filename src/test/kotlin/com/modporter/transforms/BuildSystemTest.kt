@@ -3746,7 +3746,7 @@ class BuildSystemTest {
     @Test
     fun `relocates removed mmlib recipe helpers into project local base package`() {
         val projectDir = tempDir.resolve("p15-mmlib")
-        val recipeDir = projectDir.resolve("src/main/java/com/example/recipes")
+        val recipeDir = projectDir.resolve("src/main/java/com/example/content/cooking")
         recipeDir.createDirectories()
         projectDir.resolve("build.gradle").writeText("""
             plugins {
@@ -3754,7 +3754,7 @@ class BuildSystemTest {
             }
         """.trimIndent())
         recipeDir.resolve("ExampleRecipe.java").writeText("""
-            package com.example.recipes;
+            package com.example.content.cooking;
 
             import cn.mcmod_mmf.mmlib.fluid.FluidIngredient;
             import cn.mcmod_mmf.mmlib.recipe.AbstractRecipe;
@@ -3773,19 +3773,19 @@ class BuildSystemTest {
 
         assertTrue(result.changes.any { it.ruleId == "build-relocate-mmlib-recipe-base" })
         assertTrue(result.changes.any { it.ruleId == "build-add-local-mmlib-recipe-base" })
-        assertTrue(recipe.contains("import com.example.recipes.base.FluidIngredient;"))
-        assertTrue(recipe.contains("import com.example.recipes.base.AbstractRecipe;"))
-        assertTrue(recipe.contains("import com.example.recipes.base.AbstractRecipeSerializer;"))
-        assertTrue(recipe.contains("import com.example.recipes.base.ChanceResult;"))
-        assertTrue(projectDir.resolve("src/main/java/com/example/recipes/base/FluidIngredient.java").exists())
-        val abstractRecipe = projectDir.resolve("src/main/java/com/example/recipes/base/AbstractRecipe.java")
+        assertTrue(recipe.contains("import com.example.content.cooking.base.FluidIngredient;"))
+        assertTrue(recipe.contains("import com.example.content.cooking.base.AbstractRecipe;"))
+        assertTrue(recipe.contains("import com.example.content.cooking.base.AbstractRecipeSerializer;"))
+        assertTrue(recipe.contains("import com.example.content.cooking.base.ChanceResult;"))
+        assertTrue(projectDir.resolve("src/main/java/com/example/content/cooking/base/FluidIngredient.java").exists())
+        val abstractRecipe = projectDir.resolve("src/main/java/com/example/content/cooking/base/AbstractRecipe.java")
         assertTrue(abstractRecipe.exists())
         val abstractRecipeSource = abstractRecipe.readText()
         assertTrue(abstractRecipeSource.contains("public abstract ItemStack getResultItem(HolderLookup.Provider registries);"))
         assertFalse(abstractRecipeSource.contains("return ItemStack.EMPTY;"))
         assertFalse(abstractRecipeSource.contains("Temporary source-compatibility shim"))
-        assertTrue(projectDir.resolve("src/main/java/com/example/recipes/base/ChanceResult.java").exists())
-        val serializerSource = projectDir.resolve("src/main/java/com/example/recipes/base/AbstractRecipeSerializer.java").readText()
+        assertTrue(projectDir.resolve("src/main/java/com/example/content/cooking/base/ChanceResult.java").exists())
+        val serializerSource = projectDir.resolve("src/main/java/com/example/content/cooking/base/AbstractRecipeSerializer.java").readText()
         assertTrue(serializerSource.contains("private static JsonElement normalizeLegacyItemStackJson(JsonElement json)"))
         assertTrue(serializerSource.contains("normalized.add(\"id\", obj.get(\"item\"));"))
         assertTrue(serializerSource.contains("components.add(\"minecraft:custom_data\", obj.get(\"nbt\"));"))
@@ -3796,6 +3796,34 @@ class BuildSystemTest {
         assertFalse(projectDir.resolve("src/main/java/cn/mcmod_mmf/mmlib/recipe/AbstractRecipe.java").exists())
         assertFalse(projectDir.resolve("src/main/java/cn/mcmod_mmf/mmlib/recipe/ChanceResult.java").exists())
         assertFalse(projectDir.resolve("src/main/java/cn/mcmod_mmf/mmlib/recipe/AbstractRecipeSerializer.java").exists())
+    }
+
+    @Test
+    fun `mmlib recipe base relocation requires executable removed type evidence`() {
+        val projectDir = tempDir.resolve("p15-mmlib-no-package-guess")
+        val recipeDir = projectDir.resolve("src/main/java/com/example/recipes")
+        recipeDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        recipeDir.resolve("Notes.java").writeText("""
+            package com.example.recipes;
+
+            public class Notes {
+                // import cn.mcmod_mmf.mmlib.recipe.AbstractRecipe;
+                private static final String DOC = "cn.mcmod_mmf.mmlib.recipe.AbstractRecipe";
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val source = recipeDir.resolve("Notes.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "build-relocate-mmlib-recipe-base" })
+        assertFalse(result.changes.any { it.ruleId == "build-add-local-mmlib-recipe-base" })
+        assertFalse(projectDir.resolve("src/main/java/com/example/recipes/base/AbstractRecipe.java").exists())
+        assertTrue(source.contains("cn.mcmod_mmf.mmlib.recipe.AbstractRecipe"))
     }
 
     @Test

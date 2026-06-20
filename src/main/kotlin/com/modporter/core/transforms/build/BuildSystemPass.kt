@@ -6591,7 +6591,7 @@ public abstract class ModPorterAbstractTreeGrower extends TreeGrower {
     }
 
     private fun detectLocalRecipeBasePackage(srcDir: Path): String? {
-        val candidates = mutableListOf<String>()
+        val ownerPackages = linkedSetOf<String>()
         java.nio.file.Files.walk(srcDir)
             .filter { it.extension == "java" }
             .forEach { javaFile ->
@@ -6601,14 +6601,38 @@ public abstract class ModPorterAbstractTreeGrower extends TreeGrower {
                     ?.groupValues
                     ?.get(1)
                     ?: return@forEach
-                val usesRemovedMmlibRecipeBase =
-                    source.contains("cn.mcmod_mmf.mmlib.recipe.") ||
-                        source.contains("cn.mcmod_mmf.mmlib.fluid.FluidIngredient")
-                if (usesRemovedMmlibRecipeBase && packageName.endsWith(".recipes")) {
-                    candidates.add("${packageName}.base")
+                if (usesRemovedMmlibRecipeBaseType(source)) {
+                    ownerPackages.add(packageName)
                 }
             }
-        return candidates.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
+        val baseOwnerPackage = commonJavaPackagePrefix(ownerPackages) ?: return null
+        return "$baseOwnerPackage.base"
+    }
+
+    private fun usesRemovedMmlibRecipeBaseType(source: String): Boolean {
+        val code = maskJavaCommentsAndLiterals(source)
+        val removedType = """(?:cn\.mcmod_mmf\.mmlib\.(?:recipe|fluid)\.)?(?:AbstractRecipe|AbstractRecipeSerializer|FluidIngredient|ChanceResult)"""
+        val importsRemovedType = Regex("""(?m)^\s*import\s+cn\.mcmod_mmf\.mmlib\.(?:recipe|fluid)\.(?:AbstractRecipe|AbstractRecipeSerializer|FluidIngredient|ChanceResult)\s*;""")
+            .containsMatchIn(code)
+        return Regex("""\b(?:extends|implements)\s+$removedType\b""").containsMatchIn(code) ||
+            Regex("""\b$removedType\s*<""").containsMatchIn(code) ||
+            Regex("""\b$removedType\s+[A-Za-z_$][\w$]*\b""").containsMatchIn(code) ||
+            (importsRemovedType && Regex("""\b(?:AbstractRecipe|AbstractRecipeSerializer|FluidIngredient|ChanceResult)\b""").containsMatchIn(code))
+    }
+
+    private fun commonJavaPackagePrefix(packages: Collection<String>): String? {
+        if (packages.isEmpty()) return null
+        val splitPackages = packages.map { it.split('.') }
+        val first = splitPackages.first()
+        val common = mutableListOf<String>()
+        for ((index, segment) in first.withIndex()) {
+            if (splitPackages.all { index < it.size && it[index] == segment }) {
+                common.add(segment)
+            } else {
+                break
+            }
+        }
+        return common.takeIf { it.size >= 2 }?.joinToString(".")
     }
 
     private fun addLocalMmlibRecipeBase(srcDir: Path, basePackage: String, dryRun: Boolean): List<Change> {
