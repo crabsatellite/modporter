@@ -6917,8 +6917,9 @@ public class AbstractRecipeSerializer<T extends AbstractRecipe> implements Recip
             .takeIf { it.exists() }
             ?.readText()
             ?.let { Regex("""(?m)^mod_?id\s*=\s*([A-Za-z0-9_.-]+)\s*$""").find(it)?.groupValues?.get(1) }
-        val modId = modIdFromProperties ?: detectModId(projectDir) ?: projectDir.fileName.toString()
-        return "com.modporter.generated.${sanitizePackageSegment(modId)}.compat"
+        val modId = modIdFromProperties ?: detectModId(projectDir)
+        val packageSegment = modId?.let(::sanitizePackageSegment) ?: "shared"
+        return "com.modporter.generated.$packageSegment.compat"
     }
 
     private fun sanitizePackageSegment(value: String): String {

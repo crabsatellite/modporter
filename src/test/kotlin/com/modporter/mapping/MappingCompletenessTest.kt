@@ -522,6 +522,35 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `production migrations do not derive mod identity from project directory names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val forbidden = listOf(
+            "mod id project directory fallback" to Regex("""(?i)mod_?id[\s\S]{0,180}projectDir\.fileName\.toString\(\)"""),
+            "detectModId project directory fallback" to Regex("""detectModId\(projectDir\)[\s\S]{0,180}projectDir\.fileName\.toString\(\)"""),
+            "metadata mod id project directory fallback" to Regex("""projectMetadataModId\(projectDir\)[\s\S]{0,180}projectDir\.fileName\.toString\(\)""")
+        )
+
+        val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) && it.extension == "kt" }
+                .flatMap { file ->
+                    val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                    val text = file.readText()
+                    forbidden
+                        .filter { (_, pattern) -> pattern.containsMatchIn(text) }
+                        .map { (label, _) -> "$relative contains $label" }
+                        .stream()
+                }
+                .toList()
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Migration rules must derive mod identity from source metadata, not checkout or benchmark directory names: $offenders"
+        )
+    }
+
+    @Test
     fun `default migration surfaces do not retreat to manual handling`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val scannedRoots = listOf(

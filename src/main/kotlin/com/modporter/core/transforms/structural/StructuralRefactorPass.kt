@@ -5804,14 +5804,14 @@ $helpers
         expression.trim().removeSuffix(".dimension()")
 
     private fun detectGeneratedCompatPackage(projectDir: Path): String {
-        val modId = detectModId(projectDir)
-            ?: projectMetadataModId(projectDir)
-            ?: projectDir.fileName.toString()
-        val sanitized = modId.lowercase()
-            .replace(Regex("""[^a-z0-9_]"""), "_")
-            .trim('_')
-            .ifBlank { "mod" }
-            .let { if (it.first().isDigit()) "m$it" else it }
+        val modId = detectModId(projectDir) ?: projectMetadataModId(projectDir)
+        val sanitized = modId
+            ?.lowercase()
+            ?.replace(Regex("""[^a-z0-9_]"""), "_")
+            ?.trim('_')
+            ?.ifBlank { "mod" }
+            ?.let { if (it.first().isDigit()) "m$it" else it }
+            ?: "shared"
         return "com.modporter.generated.$sanitized.compat"
     }
 
