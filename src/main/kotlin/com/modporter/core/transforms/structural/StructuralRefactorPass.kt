@@ -39931,14 +39931,12 @@ $writeLines
 
         for (file in javaFiles) {
             val source = file.readText()
-            val match = registrationPattern.find(source) ?: continue
+            val executableCode = maskJavaCommentsAndLiterals(source)
+            val match = registrationPattern.find(executableCode) ?: continue
             val holderName = match.groupValues[1]
             val packageName = packageNameOf(source)
-            val registryClassName = Regex("""\bpublic\s+(?:final\s+)?class\s+([A-Za-z_$][\w$]*)\b""")
-                .find(source)
-                ?.groupValues
-                ?.get(1)
-                ?: file.fileName.toString().removeSuffix(".java")
+            val typeBlocks = javaTypeBlocks(source, executableCode)
+            val registryClassName = javaTypeBlockContainingOffset(match.range.first, typeBlocks)?.name ?: continue
             return listOf(packageName, registryClassName, holderName)
                 .filter { it.isNotBlank() }
                 .joinToString(".") + ".get()"

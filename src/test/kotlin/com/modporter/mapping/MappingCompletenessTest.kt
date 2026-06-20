@@ -1491,6 +1491,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `block codec registry holder migration binds holder owners to declared type blocks`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun findBlockRegistryHolderExpression")
+        assertTrue(start >= 0, "findBlockRegistryHolderExpression is missing")
+        val end = source.indexOf("\n    private fun ", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "java file-name owner" to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "raw source registration scan" to Regex("""registrationPattern\.find\(source\)""")
+        )
+        val offenders = forbidden
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("registrationPattern.find(executableCode)") &&
+                body.contains("val typeBlocks = javaTypeBlocks(source, executableCode)") &&
+                body.contains("javaTypeBlockContainingOffset(match.range.first, typeBlocks)?.name ?: continue"),
+            "Block codec registry holder migration must bind holder owners to executable Java type blocks"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Block codec registry holder migration must not infer owners from Java file names or raw source scans: $offenders"
+        )
+    }
+
+    @Test
     fun `production migrations do not synthesize minecraft namespace when mod id is missing`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val quotedMinecraftStringLiteral = "\"\\\"minecraft\\\"\""

@@ -5634,6 +5634,47 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `block codec registry holder owner comes from declaring type not java file name`() {
+        val projectDir = createFile("LinkedLogBlock.java", """
+            package com.example;
+
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class LinkedLogBlock extends Block {
+                private final DeferredHolder<Block, Block> linked;
+
+                public LinkedLogBlock(BlockBehaviour.Properties properties, DeferredHolder<Block, Block> linked) {
+                    super(properties);
+                    this.linked = linked;
+                }
+            }
+        """.trimIndent())
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.resolve("Registrations.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            final class ActualBlocks {
+                public static final BlockBehaviour.Properties LOCAL_PROPS = BlockBehaviour.Properties.of();
+                public static final DeferredHolder<Block, Block> OTHER = null;
+                public static final DeferredHolder<Block, LinkedLogBlock> LINKED_LOG =
+                        register("linked_log", () -> new LinkedLogBlock(LOCAL_PROPS, OTHER));
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = srcDir.resolve("LinkedLogBlock.java").readText()
+
+        assertTrue(migrated.contains("MapCodec<LinkedLogBlock> CODEC = com.mojang.serialization.MapCodec.unit(() -> com.example.ActualBlocks.LINKED_LOG.get());"), migrated)
+        assertFalse(migrated.contains("com.example.Registrations.LINKED_LOG.get()"), migrated)
+    }
+
+    @Test
     fun `custom horizon block codec keeps horizontal directional return bound`() {
         val projectDir = createFile("TatamiBlock.java", """
             package com.example;
