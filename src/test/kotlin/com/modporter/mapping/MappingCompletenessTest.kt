@@ -259,6 +259,8 @@ class MappingCompletenessTest {
             "sakura",
             "HotBath",
             "hotbath",
+            "Farmers Delight",
+            "farmersdelight",
             "descriptive_item",
             "DescriptiveItem",
             "bath_herb",
@@ -2018,6 +2020,7 @@ class MappingCompletenessTest {
         val collectNamespaces = functionBody("collectRecipeSerializerRegistryNamespaces")
         val fieldsForType = functionBody("recipeCodecFieldsForType")
         val fieldsInBlock = functionBody("recipeCodecFieldsInBlock")
+        val listFieldsInBlock = functionBody("recipeListEntryCodecFieldsInBlock")
         val forbidden = listOf(
             "javaSourceInfo raw package/import scan" to (javaSourceInfo to Regex("""\.(find|findAll)\(content\)""")),
             "javaSourceInfo file-name type owner" to (javaSourceInfo to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)""")),
@@ -2026,7 +2029,8 @@ class MappingCompletenessTest {
             "recipe namespace raw precheck" to (collectNamespaces to Regex("""source\.content\.contains\("DeferredRegister"\)""")),
             "recipe namespace raw scan" to (collectNamespaces to Regex("""createPattern\.findAll\(source\.content\)""")),
             "recipe class raw block range" to (fieldsForType to Regex("""javaClassBlockRange\(source\.code""")),
-            "recipe codec field raw scan" to (fieldsInBlock to Regex("""\.(findAll)\(block\)\s*\.map"""))
+            "recipe codec field raw scan" to (fieldsInBlock to Regex("""\.(findAll)\(block\)\s*\.map""")),
+            "recipe list entry raw codec acceptance" to (listFieldsInBlock to Regex("""codecListPattern\.findAll\(block\)[\s\S]{0,240}recipeCodecFieldsForType"""))
         )
         val offenders = forbidden
             .filter { (_, scoped) -> scoped.second.containsMatchIn(scoped.first) }
@@ -2045,10 +2049,16 @@ class MappingCompletenessTest {
                 collectNamespaces.contains("createPattern.findAll(source.code)") &&
                 fieldsForType.contains("javaClassBlockRange(source.executableCode, className)") &&
                 fieldsForType.contains("recipeCodecFieldsInBlock(classBlock, executableClassBlock)") &&
+                fieldsForType.contains("recipeListEntryCodecFieldsInBlock(classBlock, executableClassBlock, source, index, visited)") &&
                 fieldsForType.contains("directSuperclassReference(executableClassBlock, className)") &&
                 fieldsInBlock.contains("val executableSegment = executableBlock.substring(match.range.first, match.range.last + 1)") &&
                 fieldsInBlock.contains("executableSegment.contains(\"ItemStack\")") &&
-                fieldsInBlock.contains("executableSegment.contains(\"CompoundTag\")"),
+                fieldsInBlock.contains("executableSegment.contains(\"CompoundTag\")") &&
+                listFieldsInBlock.contains("val executableSegment = executableBlock.substring(match.range.first, match.range.last + 1)") &&
+                listFieldsInBlock.contains("executableSegment.contains(\"CODEC\")") &&
+                listFieldsInBlock.contains("executableSegment.contains(\"listOf\")") &&
+                listFieldsInBlock.contains("resolveRecipeCodecOwner") &&
+                listFieldsInBlock.contains("itemStackFieldsByListField"),
             "Custom recipe codec hint collection must read string values from comment-masked code and prove registrations/codecs from executable Java"
         )
         assertTrue(

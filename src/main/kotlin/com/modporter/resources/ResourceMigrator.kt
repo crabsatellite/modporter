@@ -1187,22 +1187,6 @@ class ResourceMigrationPass(
                         }
                     }
 
-                    if (isRecipeFile && content.contains("\"farmersdelight:cutting\"")) {
-                        val newContent = migrateFarmersDelightCuttingRecipe(content)
-                        if (newContent != content) {
-                            content = newContent
-                            modified = true
-                            changes.add(Change(
-                                file = file, line = 0,
-                                description = "Farmers Delight cutting result: item id/count -> item stack object",
-                                before = "\"item\": \"mod:item\", \"count\": 2",
-                                after = "\"item\": {\"id\": \"mod:item\", \"count\": 2}",
-                                confidence = Confidence.HIGH,
-                                ruleId = "res-recipe-farmersdelight-cutting-result-stack"
-                            ))
-                        }
-                    }
-
                     // Loot function renames: set_nbt -> set_custom_data, copy_nbt -> copy_custom_data
                     if (content.contains("set_nbt") || content.contains("copy_nbt")) {
                         val newContent = content
@@ -1464,6 +1448,7 @@ class ResourceMigrationPass(
         if (registryNamespaces.isEmpty()) return RecipeDataCodecHints.EMPTY
 
         val itemStackFields = linkedMapOf<String, MutableSet<String>>()
+        val itemStackListEntryFields = linkedMapOf<String, MutableMap<String, MutableSet<String>>>()
         val compoundTagFields = linkedMapOf<String, MutableSet<String>>()
         val registerPattern = Regex(
             """\b([A-Za-z_$][\w$]*)\.register\(\s*"([^"]+)"\s*,\s*(?:(?:\(\)\s*->\s*new\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?))|([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)::new)"""
@@ -1488,6 +1473,12 @@ class ResourceMigrationPass(
                     if (fields.itemStackFields.isNotEmpty()) {
                         itemStackFields.getOrPut(typeId) { linkedSetOf() }.addAll(fields.itemStackFields)
                     }
+                    fields.itemStackFieldsByListField.forEach { (listField, entryFields) ->
+                        itemStackListEntryFields
+                            .getOrPut(typeId) { linkedMapOf() }
+                            .getOrPut(listField) { linkedSetOf() }
+                            .addAll(entryFields)
+                    }
                     if (fields.compoundTagFields.isNotEmpty()) {
                         compoundTagFields.getOrPut(typeId) { linkedSetOf() }.addAll(fields.compoundTagFields)
                     }
@@ -1496,6 +1487,9 @@ class ResourceMigrationPass(
 
         return RecipeDataCodecHints(
             itemStackFieldsByType = itemStackFields.mapValues { it.value.toSet() },
+            itemStackListEntryFieldsByType = itemStackListEntryFields.mapValues { (_, fieldsByList) ->
+                fieldsByList.mapValues { it.value.toSet() }
+            },
             compoundTagFieldsByType = compoundTagFields.mapValues { it.value.toSet() }
         )
     }
@@ -1549,6 +1543,7 @@ class ResourceMigrationPass(
         val classBlock = classRange?.let { source.code.substring(it) } ?: source.code
         val executableClassBlock = classRange?.let { source.executableCode.substring(it) } ?: source.executableCode
         var fields = recipeCodecFieldsInBlock(classBlock, executableClassBlock)
+        fields += recipeListEntryCodecFieldsInBlock(classBlock, executableClassBlock, source, index, visited)
 
         val superclass = directSuperclassReference(executableClassBlock, className)
         if (superclass != null) {
@@ -1585,7 +1580,36 @@ class ResourceMigrationPass(
             }
             .map { it.groupValues[1] }
             .toSet()
-        return RecipeCodecFieldSet(itemStackFields, compoundTagFields)
+        return RecipeCodecFieldSet(itemStackFields = itemStackFields, compoundTagFields = compoundTagFields)
+    }
+
+    private fun recipeListEntryCodecFieldsInBlock(
+        block: String,
+        executableBlock: String,
+        context: JavaSourceInfo,
+        index: JavaSourceIndex,
+        visited: MutableSet<String>
+    ): RecipeCodecFieldSet {
+        val listEntryFields = linkedMapOf<String, MutableSet<String>>()
+        val codecListPattern = Regex(
+            """\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\.\s*CODEC\s*\.\s*listOf\s*\(\s*\)\s*\.\s*(?:optionalFieldOf|fieldOf)\s*\(\s*"([^"]+)""""
+        )
+        codecListPattern.findAll(block)
+            .filter { match ->
+                val executableSegment = executableBlock.substring(match.range.first, match.range.last + 1)
+                executableSegment.contains("CODEC") &&
+                    executableSegment.contains("listOf") &&
+                    (executableSegment.contains("fieldOf") || executableSegment.contains("optionalFieldOf"))
+            }
+            .forEach { match ->
+                val entryType = resolveRecipeCodecOwner(match.groupValues[1], context, index) ?: return@forEach
+                val entryFields = recipeCodecFieldsForType(entryType.first, entryType.second, index, visited)
+                if (entryFields.itemStackFields.isEmpty()) return@forEach
+                listEntryFields
+                    .getOrPut(match.groupValues[2]) { linkedSetOf() }
+                    .addAll(entryFields.itemStackFields)
+            }
+        return RecipeCodecFieldSet(itemStackFieldsByListField = listEntryFields.mapValues { it.value.toSet() })
     }
 
     private fun directSuperclassReference(classBlock: String, className: String): String? =
@@ -1699,6 +1723,23 @@ class ResourceMigrationPass(
         }
 
         return resolveSimpleJavaType(segments.first(), context, index)
+    }
+
+    private fun resolveRecipeCodecOwner(
+        reference: String,
+        context: JavaSourceInfo,
+        index: JavaSourceIndex
+    ): Pair<JavaSourceInfo, String?>? {
+        val clean = sanitizeJavaTypeReference(reference)
+        if (clean.isBlank()) return null
+        resolveJavaTypeReference(clean, context, index)?.let { source ->
+            return source to nestedClassName(clean, source)
+        }
+        val simpleName = clean.substringAfterLast('.')
+        if (javaClassBlockRange(context.executableCode, simpleName) != null) {
+            return context to simpleName
+        }
+        return null
     }
 
     private fun resolveSimpleJavaType(
@@ -1845,8 +1886,11 @@ class ResourceMigrationPass(
                 val recipeType = objectType ?: currentRecipeType
                 val entries = linkedMapOf<String, JsonElement>()
                 for ((key, value) in element) {
-                    val result = if (shouldMigrateRecipeItemStackField(recipeType, key, recipeCodecHints)) {
-                            migrateRecipeResultValue(value)
+                    val listEntryFields = recipeCodecHints.itemStackListEntryFields(recipeType, key)
+                    val result = if (listEntryFields.isNotEmpty() && value is JsonArray) {
+                        migrateRecipeListEntryItemStackFields(value, listEntryFields)
+                    } else if (shouldMigrateRecipeItemStackField(recipeType, key, recipeCodecHints)) {
+                        migrateRecipeResultValue(value)
                     } else {
                         migrateRecipeResultEntries(value, recipeType, recipeCodecHints)
                     }
@@ -1857,6 +1901,64 @@ class ResourceMigrationPass(
             }
             else -> JsonElementMigration(element, changed = false)
         }
+    }
+
+    private fun migrateRecipeListEntryItemStackFields(
+        element: JsonArray,
+        stackFields: Set<String>
+    ): JsonElementMigration {
+        var changed = false
+        val values = element.map { entry ->
+            val entryObject = entry as? JsonObject ?: return@map entry
+            val presentStackFields = stackFields.filter { it in entryObject }
+            if (presentStackFields.isEmpty()) return@map entry
+
+            val count = entryObject["count"]
+            val fieldsFoldingCount = presentStackFields
+                .filter { field -> count != null && canFoldLegacyItemStackCount(entryObject.getValue(field)) }
+                .toSet()
+            var entryChanged = false
+            val entries = linkedMapOf<String, JsonElement>()
+            for ((key, value) in entryObject) {
+                when {
+                    key in presentStackFields -> {
+                        val migrated = migrateRecipeItemStackFieldValue(
+                            value,
+                            count.takeIf { key in fieldsFoldingCount }
+                        )
+                        entryChanged = entryChanged || migrated.changed
+                        entries[key] = migrated.element
+                    }
+                    key == "count" && fieldsFoldingCount.isNotEmpty() -> {
+                        entryChanged = true
+                    }
+                    else -> entries[key] = value
+                }
+            }
+            changed = changed || entryChanged
+            if (entryChanged) JsonObject(entries) else entry
+        }
+        return JsonElementMigration(JsonArray(values), changed)
+    }
+
+    private fun canFoldLegacyItemStackCount(element: JsonElement): Boolean =
+        when (element) {
+            is JsonPrimitive -> element.isString
+            is JsonObject -> "count" !in element && ("item" in element || "id" in element)
+            else -> false
+        }
+
+    private fun migrateRecipeItemStackFieldValue(element: JsonElement, count: JsonElement?): JsonElementMigration {
+        val migrated = migrateRecipeResultValue(element)
+        if (count == null || migrated.element !is JsonObject || "count" in migrated.element) {
+            return migrated
+        }
+        val entries = linkedMapOf<String, JsonElement>()
+        for ((key, value) in migrated.element) {
+            entries[key] = value
+        }
+        entries["count"] = count
+        return JsonElementMigration(JsonObject(entries), changed = true)
     }
 
     private fun shouldMigrateRecipeItemStackField(
@@ -1956,51 +2058,6 @@ class ResourceMigrationPass(
         if (!primitive.isString) return JsonElementMigration(element, changed = false)
         val compound = parseSnbtCompoundJson(primitive.content) ?: return JsonElementMigration(element, changed = false)
         return JsonElementMigration(compound, changed = true)
-    }
-
-    private fun migrateFarmersDelightCuttingRecipe(content: String): String {
-        val root = parseResourceJson(content) as? JsonObject ?: return content
-        val type = (root["type"] as? JsonPrimitive)
-            ?.takeIf { it.isString }
-            ?.content
-        if (type != "farmersdelight:cutting") return content
-
-        val result = root["result"] as? JsonArray ?: return content
-        var changed = false
-        val migratedResult = result.map { entry ->
-            val entryObject = entry as? JsonObject ?: return@map entry
-            val item = (entryObject["item"] as? JsonPrimitive)
-                ?.takeIf { it.isString }
-                ?: return@map entry
-            val stack = linkedMapOf<String, JsonElement>()
-            stack["id"] = item
-            val count = entryObject["count"]
-            if (count != null) {
-                stack["count"] = count
-            }
-
-            val migratedEntry = linkedMapOf<String, JsonElement>()
-            for ((key, value) in entryObject) {
-                when (key) {
-                    "item" -> migratedEntry["item"] = JsonObject(stack)
-                    "count" -> Unit
-                    else -> migratedEntry[key] = value
-                }
-            }
-            changed = true
-            JsonObject(migratedEntry)
-        }
-        if (!changed) return content
-
-        val entries = linkedMapOf<String, JsonElement>()
-        for ((key, value) in root) {
-            if (key == "result") {
-                entries[key] = JsonArray(migratedResult)
-            } else {
-                entries[key] = value
-            }
-        }
-        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), JsonObject(entries)) + "\n"
     }
 
     private fun migratePartialNbtIngredients(content: String): String {
@@ -2885,6 +2942,7 @@ class ResourceMigrationPass(
 
     private data class RecipeDataCodecHints(
         val itemStackFieldsByType: Map<String, Set<String>> = emptyMap(),
+        val itemStackListEntryFieldsByType: Map<String, Map<String, Set<String>>> = emptyMap(),
         val compoundTagFieldsByType: Map<String, Set<String>> = emptyMap()
     ) {
         val hasCompoundTagFields: Boolean
@@ -2892,6 +2950,9 @@ class ResourceMigrationPass(
 
         fun itemStackFields(type: String?): Set<String> =
             if (type == null) emptySet() else itemStackFieldsByType[type].orEmpty()
+
+        fun itemStackListEntryFields(type: String?, listFieldName: String): Set<String> =
+            if (type == null) emptySet() else itemStackListEntryFieldsByType[type]?.get(listFieldName).orEmpty()
 
         fun compoundTagFields(type: String?): Set<String> =
             if (type == null) emptySet() else compoundTagFieldsByType[type].orEmpty()
@@ -2903,14 +2964,19 @@ class ResourceMigrationPass(
 
     private data class RecipeCodecFieldSet(
         val itemStackFields: Set<String> = emptySet(),
+        val itemStackFieldsByListField: Map<String, Set<String>> = emptyMap(),
         val compoundTagFields: Set<String> = emptySet()
     ) {
         val isEmpty: Boolean
-            get() = itemStackFields.isEmpty() && compoundTagFields.isEmpty()
+            get() = itemStackFields.isEmpty() && itemStackFieldsByListField.isEmpty() && compoundTagFields.isEmpty()
 
         operator fun plus(other: RecipeCodecFieldSet): RecipeCodecFieldSet =
             RecipeCodecFieldSet(
                 itemStackFields = itemStackFields + other.itemStackFields,
+                itemStackFieldsByListField =
+                    (itemStackFieldsByListField.keys + other.itemStackFieldsByListField.keys).associateWith { key ->
+                        itemStackFieldsByListField[key].orEmpty() + other.itemStackFieldsByListField[key].orEmpty()
+                    },
                 compoundTagFields = compoundTagFields + other.compoundTagFields
             )
 

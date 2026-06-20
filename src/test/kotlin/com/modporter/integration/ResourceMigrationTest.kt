@@ -55,6 +55,47 @@ class ResourceMigrationTest {
         return projectDir
     }
 
+    private fun writeResultEntryCodecRecipeSources(projectDir: Path) {
+        val javaDir = projectDir.resolve("src/main/java/resmod")
+        javaDir.createDirectories()
+        javaDir.resolve("ModRecipeSerializers.java").writeText("""
+            package resmod;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModRecipeSerializers {
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS = DeferredRegister.create(Registries.RECIPE_SERIALIZER, "resmod");
+                public static final DeferredHolder<RecipeSerializer<?>, CuttingRecipe.Serializer> CUTTING = RECIPE_SERIALIZERS.register("cutting", CuttingRecipe.Serializer::new);
+            }
+        """.trimIndent())
+        javaDir.resolve("CuttingRecipe.java").writeText("""
+            package resmod;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public final class CuttingRecipe {
+                public static final class ResultEntry {
+                    public static final Codec<ResultEntry> CODEC = RecordCodecBuilder.create(instance -> instance.group(
+                        ItemStack.CODEC.fieldOf("item").forGetter(entry -> null)
+                    ).apply(instance, item -> null));
+                }
+
+                public static final class Serializer implements RecipeSerializer<CuttingRecipe> {
+                    private static final MapCodec<CuttingRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                        ResultEntry.CODEC.listOf().fieldOf("result").forGetter(recipe -> null)
+                    ).apply(instance, result -> null));
+                }
+            }
+        """.trimIndent())
+    }
+
     @Test
     fun `renames mods toml to neoforge mods toml`() {
         val projectDir = setupResourceProject()
@@ -554,12 +595,13 @@ class ResourceMigrationTest {
     }
 
     @Test
-    fun `farmers delight cutting result array entries migrate to item stack object`() {
+    fun `codec declared result list item stack fields migrate without mod specific recipe ids`() {
         val projectDir = setupResourceProject()
+        writeResultEntryCodecRecipeSources(projectDir)
         val recipeDir = projectDir.resolve("src/main/resources/data/resmod/recipes")
         recipeDir.resolve("cutting_result_array.json").writeText("""
             {
-              "type": "farmersdelight:cutting",
+              "type": "resmod:cutting",
               "ingredients": [
                 {
                   "item": "resmod:cabbage"
@@ -583,8 +625,8 @@ class ResourceMigrationTest {
         val recipe = projectDir.resolve("src/main/resources/data/resmod/recipe/cutting_result_array.json").readText()
         assertEquals(
             1,
-            result.changes.count { it.ruleId == "res-recipe-farmersdelight-cutting-result-stack" },
-            "Farmers Delight cutting result stack migration rule should be recorded exactly once"
+            result.changes.count { it.ruleId == "res-recipe-result-entry-id" },
+            "Codec-declared result entry stack migration rule should be recorded exactly once"
         )
         assertTrue(recipe.contains(""""item": "resmod:cabbage""""))
         assertTrue(recipe.contains(""""item": {"""))
@@ -596,8 +638,42 @@ class ResourceMigrationTest {
     }
 
     @Test
-    fun `conditional farmers delight cutting recipe is unwrapped and result stack migrated`() {
+    fun `result list item stack fields require serializer codec evidence`() {
         val projectDir = setupResourceProject()
+        val recipeDir = projectDir.resolve("src/main/resources/data/resmod/recipes")
+        recipeDir.resolve("unproven_result_array.json").writeText("""
+            {
+              "type": "resmod:cutting",
+              "ingredients": [
+                {
+                  "item": "resmod:cabbage"
+                }
+              ],
+              "result": [
+                {
+                  "item": "resmod:sliced_cabbage",
+                  "count": 2
+                }
+              ]
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/main/resources/data/resmod/recipe/unproven_result_array.json").readText()
+        assertFalse(
+            result.changes.any { it.ruleId == "res-recipe-result-entry-id" },
+            "Result entry stack migration must require source-declared serializer codec evidence"
+        )
+        assertTrue(recipe.contains(""""item": "resmod:sliced_cabbage""""))
+        assertTrue(recipe.contains(""""count": 2"""))
+        assertFalse(recipe.contains(""""item": {"""))
+    }
+
+    @Test
+    fun `conditional codec declared result list item stack fields are unwrapped and migrated`() {
+        val projectDir = setupResourceProject()
+        writeResultEntryCodecRecipeSources(projectDir)
         val recipeDir = projectDir.resolve("src/main/resources/data/resmod/recipes")
         recipeDir.resolve("conditional_cutting.json").writeText("""
             {
@@ -607,11 +683,11 @@ class ResourceMigrationTest {
                   "neoforge:conditions": [
                     {
                       "type": "neoforge:mod_loaded",
-                      "modid": "farmersdelight"
+                      "modid": "resmod"
                     }
                   ],
                   "recipe": {
-                    "type": "farmersdelight:cutting",
+                    "type": "resmod:cutting",
                     "ingredients": [
                       {
                         "item": "resmod:cabbage"
@@ -638,11 +714,11 @@ class ResourceMigrationTest {
         val recipe = projectDir.resolve("src/main/resources/data/resmod/recipe/conditional_cutting.json").readText()
         assertEquals(
             1,
-            result.changes.count { it.ruleId == "res-recipe-farmersdelight-cutting-result-stack" },
-            "Conditional Farmers Delight cutting migration should be recorded exactly once"
+            result.changes.count { it.ruleId == "res-recipe-result-entry-id" },
+            "Conditional codec-declared result entry stack migration should be recorded exactly once"
         )
         assertTrue(recipe.contains(""""neoforge:conditions":"""))
-        assertTrue(recipe.contains(""""type": "farmersdelight:cutting""""))
+        assertTrue(recipe.contains(""""type": "resmod:cutting""""))
         assertTrue(recipe.contains(""""item": {"""))
         assertTrue(recipe.contains(""""id": "resmod:sliced_cabbage""""))
         assertTrue(recipe.contains(""""count": 2"""))
