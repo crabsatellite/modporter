@@ -5199,9 +5199,10 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         val expressions = javaFiles
             .mapNotNull { file ->
                 val source = file.readText()
+                val executableSource = maskJavaCommentsAndLiterals(source)
                 val className = file.fileName.toString().removeSuffix(".java")
                 val packageName = Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
-                    .find(source)
+                    .find(executableSource)
                     ?.groupValues
                     ?.get(1)
                 modIdExpressionFromModClass(source, className, packageName)
@@ -5212,8 +5213,15 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
     }
 
     private fun modIdExpressionFromModClass(source: String, className: String?, packageName: String?): String? {
+        val code = maskJavaComments(source)
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val rawArgument = Regex("""@Mod\s*\(\s*([^)]+?)\s*\)""")
-            .find(source)
+            .find(code)
+            ?.takeIf { match ->
+                executableCode
+                    .substring(match.range.first, match.range.last + 1)
+                    .contains("@Mod")
+            }
             ?.groupValues
             ?.get(1)
             ?.trim()
@@ -5232,7 +5240,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         }
 
         val localClassName = className ?: Regex("""(?m)\bclass\s+([A-Za-z_$][\w$]*)\b""")
-            .find(source)
+            .find(executableCode)
             ?.groupValues
             ?.get(1)
         val constantName = when {
@@ -5293,12 +5301,24 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                 .filter { it.toString().endsWith(".java") }
                 .forEach { file ->
                     val text = file.readText()
+                    val code = maskJavaComments(text)
+                    val executableCode = maskJavaCommentsAndLiterals(text)
                     Regex("""@Mod\s*\(\s*"([a-z0-9_.-]+)"\s*\)""", RegexOption.IGNORE_CASE)
-                        .findAll(text)
+                        .findAll(code)
+                        .filter { match ->
+                            executableCode
+                                .substring(match.range.first, match.range.last + 1)
+                                .contains("@Mod")
+                        }
                         .forEach { addCandidate(it.groupValues[1]) }
 
                     Regex("""@Mod\s*\(\s*(?:[A-Za-z_$][\w$]*\.)?([A-Za-z_$][\w$]*)\s*\)""")
-                        .findAll(text)
+                        .findAll(code)
+                        .filter { match ->
+                            executableCode
+                                .substring(match.range.first, match.range.last + 1)
+                                .contains("@Mod")
+                        }
                         .forEach { match ->
                             findJavaStringConstant(text, match.groupValues[1])?.let(::addCandidate)
                         }
@@ -5308,11 +5328,19 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         return candidates.singleOrNull()
     }
 
-    private fun findJavaStringConstant(source: String, constantName: String): String? =
-        Regex("(?m)\\b(?:public\\s+|protected\\s+|private\\s+)?(?:static\\s+)?(?:final\\s+)?String\\s+${Regex.escape(constantName)}\\s*=\\s*\"([^\"]+)\"")
-            .find(source)
+    private fun findJavaStringConstant(source: String, constantName: String): String? {
+        val code = maskJavaComments(source)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        return Regex("(?m)\\b(?:public\\s+|protected\\s+|private\\s+)?(?:static\\s+)?(?:final\\s+)?String\\s+${Regex.escape(constantName)}\\s*=\\s*\"([^\"]+)\"")
+            .find(code)
+            ?.takeIf { match ->
+                val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                executableSegment.contains("String") &&
+                    executableSegment.contains("=")
+            }
             ?.groupValues
             ?.get(1)
+    }
 
     private fun javaStringLiteral(value: String): String =
         "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""

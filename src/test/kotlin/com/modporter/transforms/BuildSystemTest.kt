@@ -4593,6 +4593,74 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `mmlib recipe provider ignores text block mod id documentation`() {
+        val projectDir = tempDir.resolve("p19-mmlib-datagen-text-block-modid")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val dataDir = srcDir.resolve("data")
+        dataDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "public final class ExampleMod {",
+            "    String docs() {",
+            "        return \"\"\"",
+            "            @Mod(\"examplemod\")",
+            "            public static final String MODID = \"examplemod\";",
+            "            \"\"\";",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+        dataDir.resolve("ExampleRecipeProvider.java").writeText("""
+            package com.example.data;
+
+            import cn.mcmod_mmf.mmlib.data.AbstractRecipeProvider;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.recipes.RecipeOutput;
+
+            public class ExampleRecipeProvider extends AbstractRecipeProvider {
+                public ExampleRecipeProvider(PackOutput packOutput) {
+                    super(packOutput);
+                }
+
+                protected void buildRecipes(RecipeOutput output) {
+                    save(output, "example_recipe");
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("ModData.java").writeText("""
+            package com.example.data;
+
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class ModData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput packOutput = generator.getPackOutput();
+                    generator.addProvider(true, new ExampleRecipeProvider(packOutput));
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val recipe = dataDir.resolve("ExampleRecipeProvider.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive mod id for AbstractRecipeProvider ExampleRecipeProvider") },
+            "Expected text block mod id documentation to be ignored; got errors: ${result.errors}"
+        )
+        assertFalse(recipe.contains("\"examplemod\", lookupProvider"), recipe)
+        assertTrue(recipe.contains("super(packOutput);"), recipe)
+    }
+
+    @Test
     fun `mmlib recipe provider without any mod id source reports hard migration error`() {
         val projectDir = tempDir.resolve("p19-mmlib-datagen-missing-modid")
         val dataDir = projectDir.resolve("src/main/java/com/example/data")

@@ -2420,6 +2420,57 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `build mod id helpers use executable Java evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+
+        fun functionBody(name: String): String {
+            val start = source.indexOf("private fun $name")
+            assertTrue(start >= 0, "$name is missing")
+            val end = source.indexOf("\n    private fun ", start + 1).let { if (it < 0) source.length else it }
+            return source.substring(start, end)
+        }
+
+        val projectModAnnotation = functionBody("projectModAnnotationExpression")
+        val modIdFromModClass = functionBody("modIdExpressionFromModClass")
+        val uniqueModId = functionBody("detectUniqueProjectModId")
+        val stringConstant = functionBody("findJavaStringConstant")
+        val forbidden = listOf(
+            "project @Mod raw package scan" to (projectModAnnotation to Regex("""\.find\(source\)""")),
+            "mod class raw annotation scan" to (modIdFromModClass to Regex("""@Mod[\s\S]{0,120}\.find\(source\)""")),
+            "mod class raw class scan" to (modIdFromModClass to Regex("""\bclass[\s\S]{0,120}\.find\(source\)""")),
+            "unique mod id raw annotation scan" to (uniqueModId to Regex("""@Mod[\s\S]{0,160}\.findAll\(text\)""")),
+            "string constant raw scan" to (stringConstant to Regex("""\.find\(source\)"""))
+        )
+        val offenders = forbidden
+            .filter { (_, scoped) -> scoped.second.containsMatchIn(scoped.first) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            projectModAnnotation.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                projectModAnnotation.contains(".find(executableSource)") &&
+                modIdFromModClass.contains("val code = maskJavaComments(source)") &&
+                modIdFromModClass.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                modIdFromModClass.contains(".find(code)") &&
+                modIdFromModClass.contains(".find(executableCode)") &&
+                uniqueModId.contains("val code = maskJavaComments(text)") &&
+                uniqueModId.contains("val executableCode = maskJavaCommentsAndLiterals(text)") &&
+                uniqueModId.contains(".findAll(code)") &&
+                stringConstant.contains("val code = maskJavaComments(source)") &&
+                stringConstant.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                stringConstant.contains(".find(code)") &&
+                stringConstant.contains("executableSegment.contains(\"String\")"),
+            "Build-system mod id helpers must read values from comment-masked Java and prove @Mod/constants from executable source"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Build-system mod id helpers must not treat comments or text blocks as mod id evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `text resource namespace helpers do not infer mod id from data directories`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
