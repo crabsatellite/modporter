@@ -2750,8 +2750,9 @@ ${registrations.distinct().joinToString("\n")}
             if (entries.isEmpty()) continue
 
             val packageName = packageNameOf(original)
-            val className = file.fileName.toString().removeSuffix(".java")
-            var migrated = missingMappingAliasClassSource(packageName, className, modAccess, registryFields, entries)
+            val className = classNameOfJavaSource(original) ?: continue
+            val classIsPublic = javaTopLevelTypeIsPublic(original, className)
+            var migrated = missingMappingAliasClassSource(packageName, className, classIsPublic, modAccess, registryFields, entries)
             if (migrated != original) {
                 changes.add(Change(
                     file = file,
@@ -2794,7 +2795,7 @@ ${registrations.distinct().joinToString("\n")}
             val source = file.readText()
             if (!source.contains("DeferredRegister<")) continue
             val packageName = packageNameOf(source)
-            val className = file.fileName.toString().removeSuffix(".java")
+            val className = classNameOfJavaSource(source) ?: continue
             val qualifiedClassName = if (packageName.isBlank()) className else "$packageName.$className"
             val fieldMatches = fieldPattern.findAll(source).toList()
             val helperRegisteredNames = if (fieldMatches.size == 1) {
@@ -2872,6 +2873,7 @@ ${registrations.distinct().joinToString("\n")}
     private fun missingMappingAliasClassSource(
         packageName: String,
         className: String,
+        classIsPublic: Boolean,
         modAccess: ModAccess,
         registryFields: Map<String, RegistryFieldInfo>,
         entries: List<RegistryAliasEntry>
@@ -2904,7 +2906,7 @@ ${registrations.distinct().joinToString("\n")}
             append(packageLine)
             imports.sorted().forEach { append("import $it;\n") }
             append("\n")
-            append("public class $className {\n\n")
+            append("${if (classIsPublic) "public " else ""}class $className {\n\n")
             append("\tpublic static void addRegistryAliases() {\n")
             lines.forEach { append(it).append("\n") }
             append("\t}\n\n")
@@ -4282,6 +4284,15 @@ $itemArguments
             .find(source)
             ?.groupValues
             ?.get(1)
+
+    private fun javaTopLevelTypeIsPublic(source: String, typeName: String): Boolean {
+        val modifiers = Regex("""(?m)^[ \t]*((?:(?:@[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\s*\([^;\r\n]*\))?|public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*)(?:class|interface|enum|record)\s+${Regex.escape(typeName)}\b""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?: return false
+        return Regex("""\bpublic\b""").containsMatchIn(modifiers)
+    }
 
     private fun removeMethodByNameContaining(source: String, methodName: String, requiredNeedles: List<String>): String {
         var result = source

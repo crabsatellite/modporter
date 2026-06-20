@@ -13568,6 +13568,78 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `missing mapping aliases use declared Java owners instead of file names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public ExampleMod(IEventBus bus) {
+                    ActualBlocks.BLOCKS.register(bus);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("WrongBlockRegistryFile.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            class ActualBlocks {
+                static final DeferredRegister<Block> BLOCKS = DeferredRegister.create(Registries.BLOCK, ExampleMod.ID);
+                static final Object NEW_GRANITE = BLOCKS.register("new_granite", () -> null);
+            }
+        """.trimIndent())
+        srcDir.resolve("WrongRemapperFile.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.event.MissingMappingsEvent;
+
+            class ActualRemapper {
+                @SubscribeEvent
+                public static void remap(MissingMappingsEvent event) {
+                    for (MissingMappingsEvent.Mapping<Block> mapping : event.getAllMappings(Registries.BLOCK)) {
+                        remapBlock(mapping, "old_granite", "new_granite");
+                    }
+                }
+
+                static void remapBlock(MissingMappingsEvent.Mapping<Block> mapping, String oldId, String newId) {
+                    if (mapping.getKey().getPath().contains(oldId)) {
+                        ResourceLocation replacement = ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, newId);
+                        mapping.remap(null);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val remapper = srcDir.resolve("WrongRemapperFile.java").readText()
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-missing-mappings-add-alias" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-missing-mappings-alias-call" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(remapper.contains("class ActualRemapper"), remapper)
+        assertFalse(remapper.contains("public class ActualRemapper"), remapper)
+        assertTrue(remapper.contains("remapEntry(ActualBlocks.BLOCKS, \"old_granite\", \"new_granite\");"), remapper)
+        assertFalse(remapper.contains("WrongBlockRegistryFile"), remapper)
+        assertFalse(remapper.contains("WrongRemapperFile"), remapper)
+        assertTrue(main.contains("ActualRemapper.addRegistryAliases();"), main)
+        assertFalse(main.contains("WrongRemapperFile.addRegistryAliases();"), main)
+    }
+
+    @Test
     fun `migrates inventory screen entity preview signatures without losing angle semantics`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

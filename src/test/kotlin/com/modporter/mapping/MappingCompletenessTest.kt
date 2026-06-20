@@ -1016,6 +1016,30 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `missing mapping alias migrations do not infer owners from java file names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateMissingMappingsAliases")
+        assertTrue(start >= 0, "migrateMissingMappingsAliases is missing")
+        val end = source.indexOf("private fun extractMissingMappingAliasRules", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "java file-name owner" to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "missing mapping alias migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "MissingMapping alias migrations must use source-declared Java owners, not Java file-name fallback inference: $offenders"
+        )
+    }
+
+    @Test
     fun `build mod id helpers do not scan arbitrary constant references`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
