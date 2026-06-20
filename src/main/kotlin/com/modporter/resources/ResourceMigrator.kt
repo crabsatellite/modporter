@@ -1593,13 +1593,13 @@ class ResourceMigrationPass(
             Files.walk(root).use { files ->
                 files
                     .filter { Files.isRegularFile(it) && it.toString().endsWith(".java") }
-                    .map { javaSourceInfo(it) }
                     .toList()
+                    .mapNotNull { javaSourceInfo(it) }
             }
         }
     }
 
-    private fun javaSourceInfo(file: Path): JavaSourceInfo {
+    private fun javaSourceInfo(file: Path): JavaSourceInfo? {
         val content = file.readText()
         val code = maskJavaComments(content)
         val executableCode = maskJavaCommentsAndLiterals(content)
@@ -1608,7 +1608,7 @@ class ResourceMigrationPass(
             ?.groupValues
             ?.get(1)
             .orEmpty()
-        val simpleName = file.fileName.toString().removeSuffix(".java")
+        val simpleName = sourceDeclaredJavaTypeName(executableCode) ?: return null
         val imports = linkedMapOf<String, String>()
         val wildcardImports = linkedSetOf<String>()
         Regex("""(?m)^\s*import\s+(?!static)([\w.]+(?:\.\*)?)\s*;""")
@@ -1623,6 +1623,49 @@ class ResourceMigrationPass(
             }
         val fqName = if (packageName.isBlank()) simpleName else "$packageName.$simpleName"
         return JavaSourceInfo(file, content, code, executableCode, packageName, simpleName, fqName, imports, wildcardImports)
+    }
+
+    private fun sourceDeclaredJavaTypeName(executableCode: String): String? {
+        val declarations = topLevelJavaTypeDeclarations(executableCode)
+        if (declarations.isEmpty()) return null
+        val publicDeclarations = declarations.filter { it.isPublic }
+        return when {
+            publicDeclarations.size == 1 -> publicDeclarations.single().name
+            publicDeclarations.size > 1 -> null
+            declarations.size == 1 -> declarations.single().name
+            else -> null
+        }
+    }
+
+    private fun topLevelJavaTypeDeclarations(executableCode: String): List<JavaDeclaredType> {
+        val identifier = """[A-Za-z_$][\w$]*"""
+        val declaration = Regex(
+            """(?m)^[ \t]*(?:(?:@(?:$identifier\.)*$identifier(?:\s*\([^;\r\n]*\))?|public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*(class|interface|enum|record)\s+($identifier)\b"""
+        )
+        return declaration.findAll(executableCode).mapNotNull { match ->
+            if (javaBraceDepthBefore(executableCode, match.range.first) != 0) return@mapNotNull null
+            val openBrace = executableCode.indexOf('{', match.range.last + 1)
+            if (openBrace < 0) return@mapNotNull null
+            val closeBrace = findMatchingJavaBrace(executableCode, openBrace)
+            if (closeBrace < 0) return@mapNotNull null
+            JavaDeclaredType(
+                name = match.groupValues[2],
+                isPublic = Regex("""\bpublic\b""").containsMatchIn(match.value)
+            )
+        }.toList()
+    }
+
+    private fun javaBraceDepthBefore(source: String, offset: Int): Int {
+        var depth = 0
+        var index = 0
+        while (index < offset && index < source.length) {
+            when (source[index]) {
+                '{' -> depth++
+                '}' -> if (depth > 0) depth--
+            }
+            index++
+        }
+        return depth
     }
 
     private fun resolveJavaTypeReference(
@@ -2869,6 +2912,11 @@ class ResourceMigrationPass(
         val fqName: String,
         val imports: Map<String, String>,
         val wildcardImports: Set<String>
+    )
+
+    private data class JavaDeclaredType(
+        val name: String,
+        val isPublic: Boolean
     )
 
     private data class JavaSourceIndex(

@@ -1818,6 +1818,7 @@ class MappingCompletenessTest {
         val fieldsInBlock = functionBody("recipeCodecFieldsInBlock")
         val forbidden = listOf(
             "javaSourceInfo raw package/import scan" to (javaSourceInfo to Regex("""\.(find|findAll)\(content\)""")),
+            "javaSourceInfo file-name type owner" to (javaSourceInfo to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)""")),
             "recipe register raw precheck" to (collectHints to Regex("""source\.content\.contains\("\.register\("\)""")),
             "recipe register raw scan" to (collectHints to Regex("""registerPattern\.findAll\(source\.content\)""")),
             "recipe namespace raw precheck" to (collectNamespaces to Regex("""source\.content\.contains\("DeferredRegister"\)""")),
@@ -1834,6 +1835,7 @@ class MappingCompletenessTest {
                 javaSourceInfo.contains("val executableCode = maskJavaCommentsAndLiterals(content)") &&
                 javaSourceInfo.contains(".find(executableCode)") &&
                 javaSourceInfo.contains(".findAll(executableCode)") &&
+                javaSourceInfo.contains("val simpleName = sourceDeclaredJavaTypeName(executableCode) ?: return null") &&
                 collectHints.contains("source.executableCode.contains(\".register(\")") &&
                 collectHints.contains("registerPattern.findAll(source.code)") &&
                 collectHints.contains("val executableSegment = source.executableCode.substring(match.range.first, match.range.last + 1)") &&

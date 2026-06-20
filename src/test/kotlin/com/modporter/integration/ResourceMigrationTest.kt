@@ -435,6 +435,59 @@ class ResourceMigrationTest {
     }
 
     @Test
+    fun `custom recipe codec source index uses declared type names not java file names`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/resmod")
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        javaDir.createDirectories()
+        recipeDir.createDirectories()
+
+        javaDir.resolve("RegistrySurface.java").writeText("""
+            package resmod;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            final class RecipeRegistries {
+                static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS = DeferredRegister.create(Registries.RECIPE_SERIALIZER, "resmod");
+                static final DeferredHolder<RecipeSerializer<?>, RenamedRecipe.Serializer> RENAMED = RECIPE_SERIALIZERS.register("renamed", RenamedRecipe.Serializer::new);
+            }
+        """.trimIndent())
+        javaDir.resolve("RecipeSource.java").writeText("""
+            package resmod;
+
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            final class RenamedRecipe {
+                static class Serializer implements RecipeSerializer<RenamedRecipe> {
+                    private static final MapCodec<RenamedRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                        CompoundTag.CODEC.optionalFieldOf("tag").forGetter(recipe -> null)
+                    ).apply(instance, value -> null));
+                }
+            }
+        """.trimIndent())
+        recipeDir.resolve("renamed.json").writeText("""
+            {
+              "type": "resmod:renamed",
+              "tag": "{Value:1b}"
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val renamed = projectDir.resolve("src/generated/resources/data/resmod/recipe/renamed.json").readText()
+        assertTrue(result.changes.any { it.ruleId == "res-recipe-snbt-compound-tag" })
+        assertTrue(renamed.contains(""""tag": {"""), renamed)
+        assertTrue(renamed.contains(""""Value": 1"""), renamed)
+        assertFalse(renamed.contains(""""tag": "{Value:1b}""""), renamed)
+    }
+
+    @Test
     fun `custom recipe data fields ignore text block serializer codecs`() {
         val projectDir = setupResourceProject()
         val javaDir = projectDir.resolve("src/main/java/resmod")
