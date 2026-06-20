@@ -9626,7 +9626,7 @@ $fields
                 !source.contains(".putIfAbsent(")) {
                 return@mapNotNull null
             }
-            val ownerClass = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+            val ownerClass = classNameOfJavaSource(source) ?: return@mapNotNull null
             val packageName = packageNameOf(source)
             val methodPattern = Regex(
                 """(?m)\bstatic\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*Predicate\s*<\s*ItemStack\s*>\s+[A-Za-z_$][\w$]*\s*,"""

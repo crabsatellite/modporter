@@ -18728,6 +18728,44 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `item stack predicate override methods do not infer owners from java file names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LoreBookMenu.java").writeText("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.Map;
+            import java.util.function.Predicate;
+            import net.minecraft.world.item.ItemStack;
+
+            private static final Map<Predicate<ItemStack>, String> LORE_ENTRY_OVERRIDES = new HashMap<>();
+
+            public static void addLoreEntryOverride(Predicate<ItemStack> predicate, String entry) {
+                LORE_ENTRY_OVERRIDES.putIfAbsent(predicate, entry);
+            }
+        """.trimIndent())
+        srcDir.resolve("LoreClient.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+
+            public class LoreClient {
+                public static void registerLoreOverrides() {
+                    LoreBookMenu.addLoreEntryOverride(stack -> stack.isEmpty(), "lore.example");
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val loreClient = srcDir.resolve("LoreClient.java").readText()
+
+        assertTrue(loreClient.contains("LoreBookMenu.addLoreEntryOverride(stack -> stack.isEmpty(), \"lore.example\")"), loreClient)
+        assertFalse(loreClient.contains("registryAccess ->"), loreClient)
+        assertTrue(result.changes.none { it.ruleId == "struct-registry-backed-itemstack-predicate" }, result.changes.joinToString("\n"))
+    }
+
+    @Test
     fun `migrates creative tab entries hover names and uuid map writers`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
