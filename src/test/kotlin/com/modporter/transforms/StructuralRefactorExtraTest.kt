@@ -22304,6 +22304,34 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `backpack InventoryIIH wrapper migration requires same variable passed to slot`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BackpackInventorySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import org.violetmoon.quark.addons.oddities.inventory.slot.BackpackSlot;
+            import org.violetmoon.quark.base.util.InventoryIIH;
+
+            public class BackpackInventorySurface {
+                public Object create(ItemStack backpack, Object container) {
+                    InventoryIIH utility = new InventoryIIH(backpack);
+                    return new BackpackSlot(container, 0, 8, 18);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("BackpackInventorySurface.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-quark-backpack-container-121" })
+        assertTrue(source.contains("import org.violetmoon.quark.base.util.InventoryIIH;"), source)
+        assertTrue(source.contains("InventoryIIH utility = new InventoryIIH(backpack);"), source)
+        assertFalse(source.contains("BackpackContainer utility"), source)
+    }
+
+    @Test
     fun `migrates screen background rendered event overrides to new renderBackground signature`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

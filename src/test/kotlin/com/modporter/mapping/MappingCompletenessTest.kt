@@ -440,6 +440,37 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `backpack container API migration binds inventory wrapper to slot constructor`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateQuarkBackpackInventoryWrappers")
+        assertTrue(start >= 0, "migrateQuarkBackpackInventoryWrappers is missing")
+        val end = source.indexOf("private fun hasNitrogenAttachmentSyncPacketMethod", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "file-level BackpackSlot guard" to """original.contains("new BackpackSlot(")""",
+            "file-level BackpackSlot negated guard" to """!original.contains("new BackpackSlot(")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "backpack container migration contains $label" }
+
+        assertTrue(
+            body.contains("Regex.escape(wrapperName)") &&
+                body.contains("BackpackSlot") &&
+                body.contains("backpackSlotConsumesWrapper"),
+            "Backpack container migration must prove the declared wrapper variable is passed to BackpackSlot"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Backpack container migration must use variable-level constructor evidence, not whole-file BackpackSlot presence: $offenders"
+        )
+    }
+
+    @Test
     fun `production kotlin sources do not contain TODO placeholder or reflection fallback debt`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val allowedReflectionMigrator = "src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt"

@@ -5554,21 +5554,29 @@ $helpers
             .filter { it.extension == "java" }
             .toList()
         val changes = mutableListOf<Change>()
-        val wrapperDeclaration = Regex(
-            """\b((?:final\s+)?)InventoryIIH\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+InventoryIIH\s*\("""
-        )
+        val wrapperDeclaration = Regex("""\b((?:final\s+)?)InventoryIIH\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+InventoryIIH\s*\(""")
 
         for (javaFile in javaFiles) {
             val original = javaFile.readText()
             if (!original.contains("org.violetmoon.quark.base.util.InventoryIIH") ||
-                !original.contains("new BackpackSlot(") ||
                 !wrapperDeclaration.containsMatchIn(original)) {
                 continue
             }
 
+            var changed = false
             var modified = wrapperDeclaration.replace(original) { match ->
-                "${match.groupValues[1]}BackpackContainer ${match.groupValues[2]} = new BackpackContainer("
+                val wrapperName = match.groupValues[2]
+                val backpackSlotConsumesWrapper = Regex(
+                    """\bnew\s+(?:org\.violetmoon\.quark\.addons\.oddities\.inventory\.slot\.)?BackpackSlot\s*\(\s*${Regex.escape(wrapperName)}\b"""
+                ).containsMatchIn(original)
+                if (!backpackSlotConsumesWrapper) {
+                    match.value
+                } else {
+                    changed = true
+                    "${match.groupValues[1]}BackpackContainer $wrapperName = new BackpackContainer("
+                }
             }
+            if (!changed) continue
             modified = removeImport(modified, "org.violetmoon.quark.base.util.InventoryIIH")
             modified = addImportIfMissing(modified, "org.violetmoon.quark.addons.oddities.inventory.BackpackContainer")
             modified = cleanupRedundantBlankLines(modified)
