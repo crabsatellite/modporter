@@ -1879,30 +1879,30 @@ class BuildSystemTest {
 
             public class EntityUtil {
                 private static final MethodHandles.Lookup LOOKUP = MethodHandles.lookup();
-                private static final Method LivingEntity_getDeathSound = ObfuscationReflectionHelper.findMethod(LivingEntity.class, "m_5592_");
-                private static final MethodHandle handle_LivingEntity_getDeathSound;
-                private static final Method HangingEntity_setDirection = ObfuscationReflectionHelper.findMethod(HangingEntity.class, "m_6022_", Direction.class);
-                private static final MethodHandle handle_HangingEntity_setDirection;
+                private static final Method reflectedDeathSound = ObfuscationReflectionHelper.findMethod(LivingEntity.class, "m_5592_");
+                private static final MethodHandle boundDeathSound;
+                private static final Method reflectedDirectionSetter = ObfuscationReflectionHelper.findMethod(HangingEntity.class, "m_6022_", Direction.class);
+                private static final MethodHandle boundDirectionSetter;
 
                 static {
-                    MethodHandle tmp_handle_LivingEntity_getDeathSound = null;
-                    MethodHandle tmp_handle_HangingEntity_setDirection = null;
+                    MethodHandle temporaryDeathSound = null;
+                    MethodHandle temporaryDirectionSetter = null;
                     try {
-                        tmp_handle_LivingEntity_getDeathSound = LOOKUP.unreflect(LivingEntity_getDeathSound);
-                        tmp_handle_HangingEntity_setDirection = LOOKUP.unreflect(HangingEntity_setDirection);
+                        temporaryDeathSound = LOOKUP.unreflect(reflectedDeathSound);
+                        temporaryDirectionSetter = LOOKUP.unreflect(reflectedDirectionSetter);
                     } catch (IllegalAccessException e) {
                         e.printStackTrace();
                     }
-                    handle_LivingEntity_getDeathSound = tmp_handle_LivingEntity_getDeathSound;
-                    handle_HangingEntity_setDirection = tmp_handle_HangingEntity_setDirection;
+                    boundDeathSound = temporaryDeathSound;
+                    boundDirectionSetter = temporaryDirectionSetter;
                 }
 
                 @Nullable
                 public static SoundEvent getDeathSound(LivingEntity living) {
                     SoundEvent sound = null;
-                    if (handle_LivingEntity_getDeathSound != null) {
+                    if (boundDeathSound != null) {
                         try {
-                            sound = (SoundEvent) handle_LivingEntity_getDeathSound.invokeExact(living);
+                            sound = (SoundEvent) boundDeathSound.invokeExact(living);
                         } catch (Throwable e) {
                         }
                     }
@@ -1911,7 +1911,7 @@ class BuildSystemTest {
 
                 public static void setPaintingDirection(HangingEntity painting, Direction direction) {
                     try {
-                        handle_HangingEntity_setDirection.invoke(painting, direction);
+                        boundDirectionSetter.invoke(painting, direction);
                     } catch (Throwable throwable) {
                         throwable.printStackTrace();
                     }
@@ -1951,6 +1951,44 @@ class BuildSystemTest {
         val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
         assertTrue(!atFile.exists() || !atFile.readText().contains("getDeathSound()"))
         assertTrue(!atFile.exists() || !atFile.readText().contains("setDirection("))
+    }
+
+    @Test
+    fun `obfuscation method handle migration ignores commented binding evidence`() {
+        val projectDir = tempDir.resolve("methodhandle-comment-markers")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("EntityUtil.java").writeText("""
+            package com.example;
+
+            import net.minecraft.sounds.SoundEvent;
+            import net.minecraft.world.entity.LivingEntity;
+            import org.jetbrains.annotations.Nullable;
+
+            public class EntityUtil {
+                // private static final Method reflectedDeathSound = ObfuscationReflectionHelper.findMethod(LivingEntity.class, "m_5592_");
+                // private static final MethodHandle boundDeathSound;
+                // boundDeathSound = LOOKUP.unreflect(reflectedDeathSound);
+
+                @Nullable
+                public static SoundEvent getDeathSound(LivingEntity living) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("EntityUtil.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-obfuscation-methodhandle-mixin-invoker" })
+        assertFalse(srcDir.resolve("modporter/mixin/ModPorterLivingEntityInvoker.java").exists())
+        assertTrue(content.contains("return null;"), content)
     }
 
     @Test

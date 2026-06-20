@@ -696,6 +696,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `obfuscation method handle migration binds source declared fields`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateObfuscationReflectionMethodHandles")
+        assertTrue(start >= 0, "migrateObfuscationReflectionMethodHandles is missing")
+        val end = source.indexOf("private fun restoreNonItemStackGetTagCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "fixed LivingEntity findMethod marker" to """modified.contains("ObfuscationReflectionHelper.findMethod(LivingEntity.class, \"m_5592_\"")""",
+            "fixed LivingEntity handle field" to "handle_LivingEntity_getDeathSound",
+            "fixed HangingEntity findMethod marker" to """modified.contains("ObfuscationReflectionHelper.findMethod(HangingEntity.class, \"m_6022_\"")""",
+            "fixed HangingEntity handle field" to "handle_HangingEntity_setDirection"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "obfuscation method-handle migration contains $label" }
+
+        assertTrue(
+            body.contains("collectObfuscationMethodHandleBindings(original)") &&
+                body.contains("binding.handleFieldName") &&
+                body.contains("methodHandleFieldsForUnreflectedMethod(code, methodFieldName, declaredHandleFields)") &&
+                body.contains("val code = maskJavaComments(source)") &&
+                body.contains("javaMethodHeaderDeclaresParameter(enclosingMethod, \"HangingEntity\", entityArg)") &&
+                body.contains("javaMethodHeaderDeclaresParameter(enclosingMethod, \"Direction\", directionArg)"),
+            "Obfuscation method-handle migration must bind findMethod, unreflect, handle field, and invoke calls from source structure"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Obfuscation method-handle migration must not depend on fixed sample field names or whole-file method markers: $offenders"
+        )
+    }
+
+    @Test
     fun `required access transformer collection uses typed source evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

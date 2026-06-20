@@ -1791,17 +1791,20 @@ public static void $methodName(EntityRenderersEvent.AddLayers $eventParam) {
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val original = javaFile.readText()
-                if (!original.contains("ObfuscationReflectionHelper.findMethod(") ||
-                    !original.contains("MethodHandle")) {
-                    return@forEach
-                }
+                val bindings = collectObfuscationMethodHandleBindings(original)
+                if (bindings.isEmpty()) return@forEach
 
                 var modified = original
                 var touched = false
                 val invokerImports = linkedSetOf<String>()
-                if (modified.contains("ObfuscationReflectionHelper.findMethod(LivingEntity.class, \"m_5592_\"") &&
-                    modified.contains("handle_LivingEntity_getDeathSound")) {
-                    modified = replaceLivingEntityDeathSoundMethodHandle(modified)
+                bindings.firstOrNull {
+                    it.targetClassSimple == "LivingEntity" &&
+                        it.obfuscatedMethodName == "m_5592_" &&
+                        it.parameterTypeSimples.isEmpty()
+                }?.let { binding ->
+                    val replaced = replaceLivingEntityDeathSoundMethodHandle(modified, binding.handleFieldName)
+                    if (replaced == modified) return@let
+                    modified = replaced
                     val packageName = javaPackageName(original) ?: return@forEach
                     invokerImports.add("${generatedMixinPackage(packageName)}.ModPorterLivingEntityInvoker")
                     changes.addAll(ensureMixinInvoker(
@@ -1820,9 +1823,14 @@ public static void $methodName(EntityRenderersEvent.AddLayers $eventParam) {
                     ))
                     touched = true
                 }
-                if (modified.contains("ObfuscationReflectionHelper.findMethod(HangingEntity.class, \"m_6022_\"") &&
-                    modified.contains("handle_HangingEntity_setDirection")) {
-                    modified = replaceHangingEntitySetDirectionMethodHandle(modified)
+                bindings.firstOrNull {
+                    it.targetClassSimple == "HangingEntity" &&
+                        it.obfuscatedMethodName == "m_6022_" &&
+                        it.parameterTypeSimples == listOf("Direction")
+                }?.let { binding ->
+                    val replaced = replaceHangingEntitySetDirectionMethodHandle(modified, binding.handleFieldName)
+                    if (replaced == modified) return@let
+                    modified = replaced
                     val packageName = javaPackageName(original) ?: return@forEach
                     invokerImports.add("${generatedMixinPackage(packageName)}.ModPorterHangingEntityInvoker")
                     changes.addAll(ensureMixinInvoker(
@@ -1869,29 +1877,147 @@ public static void $methodName(EntityRenderersEvent.AddLayers $eventParam) {
         return changes
     }
 
-    private fun replaceLivingEntityDeathSoundMethodHandle(source: String): String {
-        val methodMatch = Regex("""@Nullable\s+public\s+static\s+SoundEvent\s+getDeathSound\s*\(\s*LivingEntity\s+([A-Za-z_$][\w$]*)\s*\)\s*\{""")
-            .find(source)
-            ?: return source
-        val param = methodMatch.groupValues[1]
-        val openBrace = source.indexOf('{', methodMatch.range.first)
-        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
-        if (closeBrace <= openBrace) return source
-        val replacement = """
-@Nullable
-public static SoundEvent getDeathSound(LivingEntity $param) {
+    private data class ObfuscationMethodHandleBinding(
+        val targetClassSimple: String,
+        val obfuscatedMethodName: String,
+        val parameterTypeSimples: List<String>,
+        val methodFieldName: String,
+        val handleFieldName: String
+    )
+
+    private fun collectObfuscationMethodHandleBindings(source: String): List<ObfuscationMethodHandleBinding> {
+        val code = maskJavaComments(source)
+        val declaredHandleFields = Regex(
+            """(?m)\b(?:private|protected|public)?\s*static\s+final\s+MethodHandle\s+([A-Za-z_$][\w$]*)\s*;"""
+        ).findAll(code).map { it.groupValues[1] }.toSet()
+        if (declaredHandleFields.isEmpty()) return emptyList()
+
+        val methodFields = Regex(
+            """(?m)\b(?:private|protected|public)?\s*static\s+final\s+Method\s+([A-Za-z_$][\w$]*)\s*=\s*(?:ObfuscationReflectionHelper|net\.neoforged\.fml\.util\.ObfuscationReflectionHelper|net\.minecraftforge\.fml\.util\.ObfuscationReflectionHelper)\.findMethod\s*\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.class\s*,\s*"([^"]+)"([^;]*)\)\s*;"""
+        ).findAll(code)
+
+        return methodFields.flatMap { methodMatch ->
+            val methodFieldName = methodMatch.groupValues[1]
+            val targetClassSimple = methodMatch.groupValues[2].substringAfterLast('.')
+            val obfuscatedMethodName = methodMatch.groupValues[3]
+            val parameterTypeSimples = Regex("""([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.class""")
+                .findAll(methodMatch.groupValues[4])
+                .map { it.groupValues[1].substringAfterLast('.') }
+                .toList()
+            methodHandleFieldsForUnreflectedMethod(code, methodFieldName, declaredHandleFields)
+                .map { handleFieldName ->
+                    ObfuscationMethodHandleBinding(
+                        targetClassSimple = targetClassSimple,
+                        obfuscatedMethodName = obfuscatedMethodName,
+                        parameterTypeSimples = parameterTypeSimples,
+                        methodFieldName = methodFieldName,
+                        handleFieldName = handleFieldName
+                    )
+                }
+        }.toList()
+    }
+
+    private fun methodHandleFieldsForUnreflectedMethod(
+        code: String,
+        methodFieldName: String,
+        declaredHandleFields: Set<String>
+    ): Set<String> {
+        val unreflectedVariables = Regex(
+            """\b([A-Za-z_$][\w$]*)\s*=\s*(?:[A-Za-z_$][\w$]*|MethodHandles\.lookup\(\))\.unreflect\s*\(\s*${Regex.escape(methodFieldName)}\s*\)"""
+        ).findAll(code).map { it.groupValues[1] }.toSet()
+
+        return unreflectedVariables.flatMap { variable ->
+            buildList {
+                if (variable in declaredHandleFields) add(variable)
+                Regex("""\b([A-Za-z_$][\w$]*)\s*=\s*${Regex.escape(variable)}\s*;""")
+                    .findAll(code)
+                    .map { it.groupValues[1] }
+                    .filter { it in declaredHandleFields }
+                    .forEach { add(it) }
+            }
+        }.toSet()
+    }
+
+    private fun replaceLivingEntityDeathSoundMethodHandle(source: String, handleName: String): String {
+        var searchStart = 0
+        while (true) {
+            val code = maskJavaComments(source)
+            val methodMatch = Regex(
+                """(?m)(?:^[ \t]*(?:@[^\r\n]+)\r?\n)*[ \t]*(?:public|protected|private)\s+static\s+(?:@Nullable\s+)?SoundEvent\s+[A-Za-z_$][\w$]*\s*\(\s*LivingEntity\s+([A-Za-z_$][\w$]*)\s*\)\s*(?:throws\s+[^{;]+)?\{"""
+            ).find(code, searchStart) ?: return source
+            val param = methodMatch.groupValues[1]
+            val openBrace = code.indexOf('{', methodMatch.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(code, openBrace) else -1
+            if (closeBrace <= openBrace) return source
+            val body = code.substring(openBrace + 1, closeBrace)
+            val invokesBoundHandle = Regex(
+                """\b${Regex.escape(handleName)}\s*\.\s*(?:invokeExact|invoke)\s*\(\s*${Regex.escape(param)}\s*\)"""
+            ).containsMatchIn(body)
+            if (!invokesBoundHandle) {
+                searchStart = closeBrace + 1
+                continue
+            }
+            val header = source.substring(methodMatch.range.first, openBrace + 1).trimEnd()
+            val replacement = """
+$header
         return ((ModPorterLivingEntityInvoker) $param).modporter${'$'}getDeathSound();
     }
 """.trimIndent()
-        return source.substring(0, methodMatch.range.first) +
-            replacement +
-            source.substring(closeBrace + 1)
+            return source.substring(0, methodMatch.range.first) +
+                replacement +
+                source.substring(closeBrace + 1)
+        }
     }
 
-    private fun replaceHangingEntitySetDirectionMethodHandle(source: String): String =
-        Regex(
-            """(?s)try\s*\{\s*handle_HangingEntity_setDirection\.invoke\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\);\s*\}\s*catch\s*\(\s*Throwable\s+[A-Za-z_$][\w$]*\s*\)\s*\{\s*[A-Za-z_$][\w$]*\.printStackTrace\(\);\s*\}"""
-        ).replace(source) { match -> "((ModPorterHangingEntityInvoker) ${match.groupValues[1]}).modporter${'$'}setDirection(${match.groupValues[2]});" }
+    private fun replaceHangingEntitySetDirectionMethodHandle(source: String, handleName: String): String {
+        var result = source
+        var searchStart = 0
+        while (true) {
+            val code = maskJavaComments(result)
+            val match = Regex(
+                """(?s)try\s*\{\s*${Regex.escape(handleName)}\s*\.\s*(?:invokeExact|invoke)\s*\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\);\s*\}\s*catch\s*\(\s*Throwable\s+[A-Za-z_$][\w$]*\s*\)\s*\{\s*[A-Za-z_$][\w$]*\.printStackTrace\(\);\s*\}"""
+            ).find(code, searchStart) ?: return result
+            val entityArg = match.groupValues[1]
+            val directionArg = match.groupValues[2]
+            val enclosingMethod = findJavaMethodSourceContaining(code, match.range.first)
+            val hasTypedArguments = enclosingMethod != null &&
+                javaMethodHeaderDeclaresParameter(enclosingMethod, "HangingEntity", entityArg) &&
+                javaMethodHeaderDeclaresParameter(enclosingMethod, "Direction", directionArg)
+            if (!hasTypedArguments) {
+                searchStart = match.range.last + 1
+                continue
+            }
+            val replacement = "((ModPorterHangingEntityInvoker) $entityArg).modporter${'$'}setDirection($directionArg);"
+            result = result.substring(0, match.range.first) +
+                replacement +
+                result.substring(match.range.last + 1)
+            searchStart = match.range.first + replacement.length
+        }
+    }
+
+    private fun findJavaMethodSourceContaining(source: String, offset: Int): String? {
+        val methodPattern = Regex(
+            """(?m)(?:^|[\r\n])([ \t]*(?:@[^\r\n]+\s*)*(?:(?:public|protected|private|static|final|synchronized|native|abstract|strictfp)\s+)*(?:<[^>{};]+>\s*)?(?:[A-Za-z_$][\w$]*(?:\s*<[^>{};]+>)?(?:\s*\[\s*])?(?:\s*,\s*)?|\?|extends|super|&|\.)+(?:\s+)+[A-Za-z_$][\w$]*\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\s*\{)"""
+        )
+        return methodPattern.findAll(source)
+            .mapNotNull { match ->
+                val openBrace = source.indexOf('{', match.range.first)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+                if (closeBrace > openBrace && offset in openBrace..closeBrace) {
+                    source.substring(match.range.first, closeBrace + 1)
+                } else {
+                    null
+                }
+            }
+            .lastOrNull()
+    }
+
+    private fun javaMethodHeaderDeclaresParameter(methodSource: String, typeSimpleName: String, variableName: String): Boolean {
+        val header = methodSource.substringBefore("{")
+        return Regex(
+            """(?:^|[,(]\s*)(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(typeSimpleName)}\s+${Regex.escape(variableName)}\b"""
+        ).containsMatchIn(header)
+    }
 
     private fun removeObfuscationMethodHandleScaffolding(source: String): String {
         var result = source
