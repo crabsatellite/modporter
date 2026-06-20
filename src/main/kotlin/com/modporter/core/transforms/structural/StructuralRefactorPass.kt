@@ -8763,6 +8763,7 @@ $fields
         "LivingEntity",
         "Mob",
         "PathfinderMob",
+        "FlyingMob",
         "Monster",
         "Slime",
         "MagmaCube",
@@ -8780,6 +8781,21 @@ $fields
         "Projectile",
         "ThrowableProjectile",
         "AbstractArrow"
+    )
+
+    private fun javaItemBaseTypes(): Set<String> = setOf(
+        "Item",
+        "BlockItem",
+        "TieredItem",
+        "DiggerItem",
+        "SwordItem",
+        "ArmorItem",
+        "BowItem",
+        "CrossbowItem",
+        "ShieldItem",
+        "BucketItem",
+        "SpawnEggItem",
+        "RecordItem"
     )
 
     private fun migrateCommonNeoForge121Apis(projectDir: Path, dryRun: Boolean): List<Change> {
@@ -15566,17 +15582,43 @@ ${indent}}
 
     private fun migrateMthTrigonometryFloatArguments(source: String): String {
         if (!source.contains("Mth.sin(") && !source.contains("Mth.cos(")) return source
-        val doubleVariables = Regex("""\bdouble\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(source)
-            .map { it.groupValues[1] }
-            .toSet()
-        if (doubleVariables.isEmpty()) return source
-
         var result = source
-        for (variable in doubleVariables) {
-            val escaped = Regex.escape(variable)
-            result = Regex("""\bMth\.sin\(\s*$escaped\s*\)""").replace(result, "Mth.sin((float) $variable)")
-            result = Regex("""\bMth\.cos\(\s*$escaped\s*\)""").replace(result, "Mth.cos((float) $variable)")
+        val methodPattern = Regex("""(?m)(?:public|protected|private)?\s*(?:static\s+)?[\w<>\[\].?,\s]+\s+[A-Za-z_$][\w$]*\s*\([^;{}]*\)\s*\{""")
+        var cursor = 0
+        while (true) {
+            val method = methodPattern.find(result, cursor) ?: break
+            val openBrace = result.indexOf('{', method.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = method.range.last + 1
+                continue
+            }
+            val methodText = result.substring(method.range.first, closeBrace + 1)
+            val doubleVariables = Regex("""\bdouble\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(methodText)
+                .map { it.groupValues[1] }
+                .toSet()
+            val floatVariables = Regex("""\bfloat\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(methodText)
+                .map { it.groupValues[1] }
+                .toSet()
+            var rewrittenMethod = methodText
+            for (variable in doubleVariables - floatVariables) {
+                val escaped = Regex.escape(variable)
+                rewrittenMethod = Regex("""\bMth\.sin\(\s*$escaped\s*\)""").replace(rewrittenMethod, "Mth.sin((float) $variable)")
+                rewrittenMethod = Regex("""\bMth\.cos\(\s*$escaped\s*\)""").replace(rewrittenMethod, "Mth.cos((float) $variable)")
+            }
+            for (variable in floatVariables) {
+                val escaped = Regex.escape(variable)
+                rewrittenMethod = Regex("""\bMth\.sin\(\s*\(float\)\s*$escaped\s*\)""").replace(rewrittenMethod, "Mth.sin($variable)")
+                rewrittenMethod = Regex("""\bMth\.cos\(\s*\(float\)\s*$escaped\s*\)""").replace(rewrittenMethod, "Mth.cos($variable)")
+            }
+            if (rewrittenMethod != methodText) {
+                result = result.substring(0, method.range.first) + rewrittenMethod + result.substring(closeBrace + 1)
+                cursor = method.range.first + rewrittenMethod.length
+            } else {
+                cursor = closeBrace + 1
+            }
         }
         return result
     }
@@ -16014,6 +16056,7 @@ ${indent}}
             result = Regex("""\bBufferBuilder\s+([A-Za-z_$][\w$]*)\s*=\s*${Regex.escape(tesselator)}\.getBuilder\(\)\s*;""")
                 .replace(result) { match -> "BufferBuilder ${match.groupValues[1]} = null;" }
         }
+        result = migrateTesselatorBuilderArgumentsToTesselator(result)
 
         result = Regex(
             """(?m)^([ \t]*)BufferBuilder\s+([A-Za-z_$][\w$]*)\s*=\s*Tesselator\.getInstance\(\)\.getBuilder\(\)\s*;\s*\r?\n[ \t]*\2\s*=\s*Tesselator\.getInstance\(\)\.begin\("""
@@ -16057,6 +16100,56 @@ ${indent}}
         }
         if (needsBufferBuilder) {
             result = addImportIfMissing(result, "com.mojang.blaze3d.vertex.BufferBuilder")
+        }
+        return result
+    }
+
+    private fun migrateTesselatorBuilderArgumentsToTesselator(source: String): String {
+        val tesselatorParameterMethods = Regex(
+            """(?m)\b(?:public|protected|private)\s+(?:static\s+)?[\w<>\[\].?,\s]+\s+([A-Za-z_$][\w$]*)\s*\(\s*Tesselator\s+[A-Za-z_$][\w$]*\s*\)"""
+        ).findAll(source).map { it.groupValues[1] }.toSet()
+        if (tesselatorParameterMethods.isEmpty()) return source
+
+        var result = source
+        val methodPattern = Regex("""(?m)(?:public|protected|private)\s+(?:static\s+)?[\w<>\[\].?,\s]+\s+[A-Za-z_$][\w$]*\s*\([^)]*\)\s*\{""")
+        var cursor = 0
+        while (true) {
+            val method = methodPattern.find(result, cursor) ?: break
+            val openBrace = result.indexOf('{', method.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = method.range.last + 1
+                continue
+            }
+            var body = result.substring(openBrace + 1, closeBrace)
+            val originalBody = body
+            val tesselator = Regex("""\bTesselator\s+([A-Za-z_$][\w$]*)\s*=\s*Tesselator\.getInstance\(\)\s*;""")
+                .find(body)
+                ?.groupValues
+                ?.get(1)
+            if (tesselator != null) {
+                val builderVariables = linkedSetOf<String>()
+                Regex("""\bBufferBuilder\s+([A-Za-z_$][\w$]*)\s*=\s*(?:${Regex.escape(tesselator)}\.getBuilder\(\)|null)\s*;""")
+                    .findAll(body)
+                    .forEach { builderVariables += it.groupValues[1] }
+                for (builder in builderVariables) {
+                    for (methodName in tesselatorParameterMethods) {
+                        body = Regex("""\b((?:this\.)?${Regex.escape(methodName)}\s*\()\s*${Regex.escape(builder)}\s*(\))""")
+                            .replace(body, "$1$tesselator$2")
+                    }
+                    val withoutDeclaration = Regex("""(?m)^[ \t]*BufferBuilder\s+${Regex.escape(builder)}\s*=\s*null\s*;\s*\r?\n""")
+                        .replace(body, "")
+                    if (!Regex("""\b${Regex.escape(builder)}\b""").containsMatchIn(withoutDeclaration)) {
+                        body = withoutDeclaration
+                    }
+                }
+            }
+            if (body != originalBody) {
+                result = result.substring(0, openBrace + 1) + body + result.substring(closeBrace)
+                cursor = openBrace + 1 + body.length
+            } else {
+                cursor = closeBrace + 1
+            }
         }
         return result
     }
@@ -22090,8 +22183,9 @@ ${indent}}"""
                 trimmed.startsWith("net.minecraft.resources.ResourceLocation.")) {
                 return true
             }
-            if (!Regex("""^[A-Za-z_$][\w$]*$""").matches(trimmed)) return false
-            val declaration = Regex("""\b(?:net\.minecraft\.resources\.)?ResourceLocation\s+${Regex.escape(trimmed)}\b""")
+            if (!Regex("""^(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*$""").matches(trimmed)) return false
+            val simpleName = trimmed.substringAfterLast('.')
+            val declaration = Regex("""\b(?:net\.minecraft\.resources\.)?ResourceLocation\s+${Regex.escape(simpleName)}\b""")
             return declaration.containsMatchIn(source) || declaration.containsMatchIn(result)
         }
 
@@ -23906,6 +24000,13 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 else -> null
             }
         }
+        result = rewriteJavaInvocation(result, "Component.Serializer.toJson") { args ->
+            if (args.size == 1) {
+                "net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, ${args[0].trim()}).getOrThrow().toString()"
+            } else {
+                null
+            }
+        }
         result = rewriteJavaInvocation(result, "Component.Serializer.toJsonTree") { args ->
             if (args.size == 1) {
                 "net.minecraft.network.chat.ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, ${args[0].trim()}).getOrThrow()"
@@ -24965,7 +25066,17 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
             val returnMatches = Regex("""return\s+(.+?);""", RegexOption.DOT_MATCHES_ALL)
                 .findAll(methodText)
                 .toList()
-            if (returnMatches.size != 1) continue
+            if (returnMatches.size != 1) {
+                val rewrittenMultiReturnMethod = rewriteDimensionsMethodReturnsWithLegacyEyeHeight(
+                    methodText,
+                    targetPoseName = match.groupValues[1],
+                    legacyPoseName = legacyPoseName,
+                    legacyEyeExpression = legacyEyeExpression
+                ) ?: continue
+                return source.substring(0, match.range.first) +
+                    rewrittenMultiReturnMethod +
+                    source.substring(closeBrace + 1)
+            }
             val returnMatch = returnMatches.single()
             val returnedDimensions = returnMatch.groupValues[1].trim()
             val localName = uniqueLocalNameInScope(methodText, "dimensions")
@@ -24994,6 +25105,35 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
                 source.substring(closeBrace + 1)
         }
         return null
+    }
+
+    private fun rewriteDimensionsMethodReturnsWithLegacyEyeHeight(
+        methodText: String,
+        targetPoseName: String,
+        legacyPoseName: String,
+        legacyEyeExpression: String
+    ): String? {
+        var eyeExpression = legacyEyeExpression
+        if (legacyPoseName != targetPoseName) {
+            eyeExpression = Regex("""\b${Regex.escape(legacyPoseName)}\b""").replace(eyeExpression, targetPoseName)
+        }
+        if (Regex("""\bsuper\.(?:getStandingEyeHeight|getEyeHeight)\s*\(""").containsMatchIn(eyeExpression) ||
+            Regex("""\b[A-Za-z_$][\w$]*\.height\(\)""").containsMatchIn(eyeExpression) ||
+            eyeExpression.contains("this.getBbHeight()")) {
+            return null
+        }
+
+        var changed = false
+        val rewritten = Regex("""return\s+(.+?);""", RegexOption.DOT_MATCHES_ALL).replace(methodText) { match ->
+            val returnedDimensions = match.groupValues[1].trim()
+            if (returnedDimensions.contains(".withEyeHeight(")) {
+                match.value
+            } else {
+                changed = true
+                "return ($returnedDimensions).withEyeHeight($eyeExpression);"
+            }
+        }
+        return if (changed) rewritten else null
     }
 
     private fun migrateLegacyNbtUtilsBlockPosCompoundSource(source: String): String {
@@ -25547,6 +25687,15 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
             result = rewriteJavaCall(result, "getLootTable") { receiver, args ->
                 if (args.size != 1) return@rewriteJavaCall null
                 val lootTable = args[0].trim()
+                val nestedLootTableKey = unwrapLootTableResourceKeyCreate(lootTable)
+                if (nestedLootTableKey != null &&
+                    (isLootTableResourceKeyExpression(nestedLootTableKey) ||
+                        isLocalLootTableResourceKeyExpression(result, nestedLootTableKey))) {
+                    return@rewriteJavaCall "$receiver.getLootTable($nestedLootTableKey)"
+                }
+                if (isLocalLootTableResourceKeyExpression(result, lootTable)) {
+                    return@rewriteJavaCall null
+                }
                 if (isLootTableResourceKeyExpression(lootTable)) {
                     null
                 } else {
@@ -25787,8 +25936,47 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         return trimmed.contains("ResourceKey.create(") ||
             trimmed.startsWith("BuiltInLootTables.") ||
             trimmed.endsWith(".getDefaultLootTable()") ||
+            trimmed.endsWith(".getLootTable()") ||
             trimmed.endsWith(".getLootLocation()") ||
             Regex("""(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*(?:Loot|LootTables)\.[A-Z0-9_]+""").matches(trimmed)
+    }
+
+    private fun unwrapLootTableResourceKeyCreate(expression: String): String? {
+        val trimmed = expression.trim()
+        val prefix = "ResourceKey.create("
+        if (!trimmed.startsWith(prefix) || !trimmed.endsWith(")")) return null
+        val args = splitTopLevelJavaArgs(trimmed.substring(prefix.length, trimmed.length - 1))
+        if (args.size != 2) return null
+        if (args[0].trim() != "Registries.LOOT_TABLE") return null
+        return args[1].trim()
+    }
+
+    private fun isLocalLootTableResourceKeyExpression(source: String, expression: String): Boolean {
+        val trimmed = expression.trim()
+        val memberCall = Regex("""^(?:this\.)?([A-Za-z_$][\w$]*)\s*\(\s*\)$""")
+            .matchEntire(trimmed)
+        if (memberCall != null) {
+            val methodName = memberCall.groupValues[1]
+            val resourceKeyMethodPattern = Regex(
+                """\b(?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s+)*(?:public|protected|private)?\s*(?:abstract\s+)?(?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s+)*(?:net\.minecraft\.resources\.)?ResourceKey\s*<\s*(?:net\.minecraft\.world\.level\.storage\.loot\.)?LootTable\s*>\s+${Regex.escape(methodName)}\s*\("""
+            )
+            if (resourceKeyMethodPattern.containsMatchIn(source)) return true
+            val legacyResourceLocationMethodPattern = Regex(
+                """\b(?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s+)*(?:public|protected|private)?\s*(?:abstract\s+)?(?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s+)*(?:net\.minecraft\.resources\.)?ResourceLocation\s+${Regex.escape(methodName)}\s*\("""
+            )
+            if (methodName.contains("LootTable") && legacyResourceLocationMethodPattern.containsMatchIn(source)) return true
+        }
+
+        val simpleName = trimmed.substringAfterLast('.')
+        if (!Regex("""[A-Za-z_$][\w$]*""").matches(simpleName)) return false
+        val resourceKeyFieldPattern = Regex(
+            """\b(?:net\.minecraft\.resources\.)?ResourceKey\s*<\s*(?:net\.minecraft\.world\.level\.storage\.loot\.)?LootTable\s*>\s+${Regex.escape(simpleName)}\b"""
+        )
+        if (resourceKeyFieldPattern.containsMatchIn(source)) return true
+        val legacyResourceLocationFieldPattern = Regex(
+            """\b(?:net\.minecraft\.resources\.)?ResourceLocation\s+${Regex.escape(simpleName)}\b"""
+        )
+        return simpleName.contains("LootTable") && legacyResourceLocationFieldPattern.containsMatchIn(source)
     }
 
     private fun migrateLegacySpawnEggItemTypeCalls(source: String): String {
@@ -26617,6 +26805,9 @@ $methodBody
         }
         if (result.contains("RegisterMenuScreensEvent")) {
             result = addImportIfMissing(result, "net.neoforged.neoforge.client.event.RegisterMenuScreensEvent")
+        }
+        if (Regex("""(?m)^[ \t]*@SubscribeEvent\b""").containsMatchIn(result)) {
+            result = addImportIfMissing(result, "net.neoforged.bus.api.SubscribeEvent")
         }
         if (!result.contains("MenuScreens.")) {
             result = removeImport(result, "net.minecraft.client.gui.screens.MenuScreens")
@@ -33489,7 +33680,7 @@ ${modifierLines.joinToString("\n")}
         if (!source.contains("isEdible()")) return source
         var result = source
         collectJavaClassDeclarations(source).asReversed().forEach { declaration ->
-            if (!javaClassExtendsAny(declaration, setOf("Item"), javaInheritanceIndex)) return@forEach
+            if (!javaClassExtendsAny(declaration, javaItemBaseTypes(), javaInheritanceIndex)) return@forEach
             val classBody = source.substring(declaration.bodyRange.first + 1, declaration.bodyRange.last)
             if (Regex("""\bgetFoodProperties\s*\(\s*ItemStack\b""").containsMatchIn(classBody)) return@forEach
             val methodPattern = Regex(
@@ -33553,7 +33744,7 @@ ${indent}}
             }
             if (trimmedReceiver == "this") {
                 val declaration = enclosingJavaClassDeclaration(source, offset) ?: return@rewriteJavaCallWithOffset null
-                if (!javaClassExtendsAny(declaration, setOf("Item"), javaInheritanceIndex)) return@rewriteJavaCallWithOffset null
+                if (!javaClassExtendsAny(declaration, javaItemBaseTypes(), javaInheritanceIndex)) return@rewriteJavaCallWithOffset null
                 val classBody = source.substring(declaration.bodyRange.first + 1, declaration.bodyRange.last)
                 if (Regex("""\bpublic\s+boolean\s+isEdible\s*\(""").containsMatchIn(classBody)) {
                     return@rewriteJavaCallWithOffset null
@@ -33591,7 +33782,7 @@ ${indent}}
             }
             if (trimmedReceiver == "this") {
                 val declaration = enclosingJavaClassDeclaration(source, offset) ?: return@rewriteJavaCallWithOffset null
-                if (!javaClassExtendsAny(declaration, setOf("Item"), javaInheritanceIndex)) return@rewriteJavaCallWithOffset null
+                if (!javaClassExtendsAny(declaration, javaItemBaseTypes(), javaInheritanceIndex)) return@rewriteJavaCallWithOffset null
                 val classBody = source.substring(declaration.bodyRange.first + 1, declaration.bodyRange.last)
                 if (component.endsWith("DataComponents.FOOD") &&
                     Regex("""\bpublic\s+boolean\s+isEdible\s*\(""").containsMatchIn(classBody)) {

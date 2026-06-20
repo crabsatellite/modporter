@@ -12335,6 +12335,11 @@ class StructuralRefactorExtraTest {
                     double x = Mth.sin(angle) * radius;
                     double z = Mth.cos(angle) * radius;
                 }
+
+                void straighten(float angle, double force) {
+                    double x = Mth.sin((float) angle) * force;
+                    double z = Mth.cos((float) angle) * force;
+                }
             }
         """.trimIndent())
 
@@ -12352,6 +12357,9 @@ class StructuralRefactorExtraTest {
         assertFalse(wingedMount.contains("public EntityDimensions getDimensions(Pose pose)"), wingedMount)
         assertTrue(trigShape.contains("double x = Mth.sin((float) angle) * radius;"), trigShape)
         assertTrue(trigShape.contains("double z = Mth.cos((float) angle) * radius;"), trigShape)
+        assertTrue(trigShape.contains("double x = Mth.sin(angle) * force;"), trigShape)
+        assertTrue(trigShape.contains("double z = Mth.cos(angle) * force;"), trigShape)
+        assertFalse(trigShape.contains("Mth.sin((float) angle) * force"), trigShape)
     }
 
     @Test
@@ -19822,6 +19830,206 @@ class StructuralRefactorExtraTest {
         assertTrue(rarity.contains("public void verifyComponentsAfterLoad(ItemStack stack)"))
         assertTrue(frosted.contains("this.addAttributeModifier(Attributes.MOVEMENT_SPEED, SPEED, -0.15D, AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL);"))
         assertTrue(Regex("""(?s)public boolean applyEffectTick\([^)]*\)\s*\{.*return true;\s*\}""").containsMatchIn(frosted), frosted)
+    }
+
+    @Test
+    fun `migrates NeoForge 121 compile API surfaces by structural shape`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMenus.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.MenuScreens;
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.api.distmarker.OnlyIn;
+            import net.neoforged.neoforge.client.event.RegisterMenuScreensEvent;
+
+            public class ExampleMenus {
+                @OnlyIn(Dist.CLIENT)
+                public static void renderScreens() {
+                    MenuScreens.register(ExampleMenuTypes.EXAMPLE.get(), ExampleScreen::new);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LootSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.level.storage.loot.LootTable;
+            import org.jetbrains.annotations.Nullable;
+
+            public abstract class LootSurface {
+                public void drop(ServerLevel serverLevel, Entity entity) {
+                    serverLevel.getServer().reloadableRegistries().getLootTable(this.getBlockLootTable());
+                    serverLevel.getServer().reloadableRegistries().getLootTable(ResourceKey.create(Registries.LOOT_TABLE, entity.getLootTable()));
+                }
+
+                public abstract @Nullable ResourceLocation getBlockLootTable();
+            }
+        """.trimIndent())
+        srcDir.resolve("FlyingBoss.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityDimensions;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.FlyingMob;
+            import net.minecraft.world.entity.Pose;
+            import net.minecraft.world.level.Level;
+
+            public class FlyingBoss extends FlyingMob {
+                private final EntityDimensions small = EntityDimensions.fixed(1.0F, 1.0F);
+                private final EntityDimensions large = EntityDimensions.fixed(2.0F, 2.0F);
+
+                protected FlyingBoss(EntityType<? extends FlyingBoss> type, Level level) {
+                    super(type, level);
+                }
+
+                @Override
+                public EntityDimensions getDimensions(Pose pose) {
+                    return this.isAlive() ? this.large : this.small;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RidingMob.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityDimensions;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.Pose;
+            import net.minecraft.world.entity.monster.Monster;
+            import net.minecraft.world.level.Level;
+
+            public class RidingMob extends Monster {
+                protected RidingMob(EntityType<? extends RidingMob> type, Level level) {
+                    super(type, level);
+                }
+
+                @Override
+                public float getEyeHeight(Pose pose) {
+                    return 0.25F;
+                }
+
+                @Override
+                public EntityDimensions getDefaultDimensions(Pose pose) {
+                    if (!this.getPassengers().isEmpty()) {
+                        return EntityDimensions.scalable(2.25F, 1.25F);
+                    } else {
+                        return super.getDefaultDimensions(pose);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SkySurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+            import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+            import com.mojang.blaze3d.vertex.MeshData;
+            import com.mojang.blaze3d.vertex.Tesselator;
+            import com.mojang.blaze3d.vertex.VertexFormat;
+
+            public class SkySurface {
+                private void createStars() {
+                    Tesselator tesselator = Tesselator.getInstance();
+                    BufferBuilder bufferbuilder = tesselator.getBuilder();
+                    MeshData renderedBuffer = this.drawStars(bufferbuilder);
+                    renderedBuffer.close();
+                }
+
+                private MeshData drawStars(Tesselator tesselator) {
+                    BufferBuilder bufferBuilder = tesselator.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION);
+                    return bufferBuilder.buildOrThrow();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BookSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.StringTag;
+            import net.minecraft.network.chat.Component;
+
+            public class BookSurface {
+                public StringTag page(String key) {
+                    return StringTag.valueOf(Component.Serializer.toJson(Component.translatable(key)));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FoodBlockItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.InteractionResult;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.item.context.BlockPlaceContext;
+            import net.minecraft.world.item.context.UseOnContext;
+            import net.minecraft.world.level.block.Block;
+
+            public class FoodBlockItem extends BlockItem {
+                public FoodBlockItem(Block block, Properties properties) {
+                    super(block, properties);
+                }
+
+                @Override
+                public InteractionResult useOn(UseOnContext context) {
+                    InteractionResult result = this.place(new BlockPlaceContext(context));
+                    return !result.consumesAction() && this.isEdible() ? this.use(context.getLevel(), context.getPlayer(), context.getHand()).getResult() : result;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SlowEffect.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectCategory;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+
+            public class SlowEffect extends MobEffect {
+                public static final ResourceLocation SPEED = ResourceLocation.fromNamespaceAndPath("example", "speed");
+
+                public SlowEffect() {
+                    super(MobEffectCategory.HARMFUL, 0x56CBFD);
+                    this.addAttributeModifier(Attributes.MOVEMENT_SPEED, SlowEffect.SPEED.toString(), -0.15D, AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val menus = srcDir.resolve("ExampleMenus.java").readText()
+        val loot = srcDir.resolve("LootSurface.java").readText()
+        val flyingBoss = srcDir.resolve("FlyingBoss.java").readText()
+        val ridingMob = srcDir.resolve("RidingMob.java").readText()
+        val sky = srcDir.resolve("SkySurface.java").readText()
+        val book = srcDir.resolve("BookSurface.java").readText()
+        val food = srcDir.resolve("FoodBlockItem.java").readText()
+        val slowEffect = srcDir.resolve("SlowEffect.java").readText()
+
+        assertTrue(menus.contains("import net.neoforged.bus.api.SubscribeEvent;"), menus)
+        assertTrue(menus.contains("@SubscribeEvent"), menus)
+        assertTrue(menus.contains("renderScreens(RegisterMenuScreensEvent event)"), menus)
+        assertTrue(menus.contains("event.register(ExampleMenuTypes.EXAMPLE.get(), ExampleScreen::new);"), menus)
+        assertFalse(menus.contains("MenuScreens.register"), menus)
+        assertTrue(loot.contains("getLootTable(this.getBlockLootTable())"), loot)
+        assertTrue(loot.contains("getLootTable(entity.getLootTable())"), loot)
+        assertTrue(loot.contains("@Nullable ResourceKey<LootTable> getBlockLootTable()"), loot)
+        assertFalse(loot.contains("ResourceKey.create(Registries.LOOT_TABLE, this.getBlockLootTable())"), loot)
+        assertFalse(loot.contains("ResourceKey.create(Registries.LOOT_TABLE, entity.getLootTable())"), loot)
+        assertTrue(flyingBoss.contains("public EntityDimensions getDefaultDimensions(Pose pose)"), flyingBoss)
+        assertTrue(flyingBoss.contains("super.getDefaultDimensions(").not(), flyingBoss)
+        assertFalse(flyingBoss.contains("public EntityDimensions getDimensions(Pose pose)"), flyingBoss)
+        assertFalse(ridingMob.contains("float getEyeHeight(Pose pose)"), ridingMob)
+        assertTrue(ridingMob.contains("return (EntityDimensions.scalable(2.25F, 1.25F)).withEyeHeight(0.25F);"), ridingMob)
+        assertTrue(ridingMob.contains("return (super.getDefaultDimensions(pose)).withEyeHeight(0.25F);"), ridingMob)
+        assertTrue(sky.contains("MeshData renderedBuffer = this.drawStars(tesselator);"), sky)
+        assertFalse(sky.contains("BufferBuilder bufferbuilder = null;"), sky)
+        assertTrue(book.contains("ComponentSerialization.CODEC.encodeStart(com.mojang.serialization.JsonOps.INSTANCE, Component.translatable(key)).getOrThrow().toString()"), book)
+        assertTrue(food.contains("this.components().has(DataComponents.FOOD)"), food)
+        assertTrue(slowEffect.contains("this.addAttributeModifier(Attributes.MOVEMENT_SPEED, SlowEffect.SPEED, -0.15D, AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL);"), slowEffect)
     }
 
     @Test
