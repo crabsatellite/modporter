@@ -589,6 +589,33 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `structural migrations do not synthesize placeholder names for unclear source structure`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val forbiddenMarkers = listOf(
+            """ifBlank { "CUSTOM" }""",
+            """ifBlank { "custom" }""",
+            "?: \"output\""
+        )
+        val offenders = forbiddenMarkers
+            .filter { marker -> source.contains(marker) }
+
+        assertTrue(
+            source.contains("private fun enumExtensionNamePart(value: String): String?") &&
+                source.contains("private fun prefixedEnumExtensionName(modId: String, legacyName: String): String?") &&
+                source.contains("private fun legacyRaritySerializedName(modId: String, legacyName: String): String?") &&
+                source.contains("private fun enumExtensionNameParameter(modId: String, legacyName: String): String?"),
+            "Enum extension naming helpers must fail closed when source literals cannot be normalized"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Production structural migrations must not invent placeholder enum/resource/provider names: $offenders"
+        )
+    }
+
+    @Test
     fun `client only build detection ignores comments and strings`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

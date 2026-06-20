@@ -11232,31 +11232,35 @@ $fields
         val name: String
     )
 
-    private fun enumExtensionNamePart(value: String): String =
-        value.uppercase().replace(Regex("""[^A-Z0-9_]+"""), "_").trim('_').ifBlank { "CUSTOM" }
+    private fun enumExtensionNamePart(value: String): String? =
+        value.uppercase().replace(Regex("""[^A-Z0-9_]+"""), "_").trim('_').takeIf { it.isNotBlank() }
 
-    private fun prefixedEnumExtensionName(modId: String, legacyName: String): String {
-        val enumPrefix = enumExtensionNamePart(modId)
-        val rawEnumName = enumExtensionNamePart(legacyName)
+    private fun prefixedEnumExtensionName(modId: String, legacyName: String): String? {
+        val enumPrefix = enumExtensionNamePart(modId) ?: return null
+        val rawEnumName = enumExtensionNamePart(legacyName) ?: return null
         return if (rawEnumName.startsWith("${enumPrefix}_")) rawEnumName else "${enumPrefix}_$rawEnumName"
     }
 
-    private fun legacyRaritySerializedName(modId: String, legacyName: String): String {
+    private fun legacyRaritySerializedName(modId: String, legacyName: String): String? {
+        val namespace = modId.lowercase().replace(Regex("""[^a-z0-9_.-]+"""), "_").trim('_', '.', '-')
+            .takeIf { it.isNotBlank() }
+            ?: return null
         val trimmed = legacyName.trim()
         if (Regex("""^[a-z0-9_.-]+:[a-z0-9_./-]+$""").matches(trimmed)) return trimmed
-        val namespaceDotPrefix = "$modId."
+        val namespaceDotPrefix = "$namespace."
         if (trimmed.startsWith(namespaceDotPrefix)) {
             val path = trimmed.removePrefix(namespaceDotPrefix)
                 .lowercase()
                 .replace(Regex("""[^a-z0-9_./-]+"""), "_")
                 .trim('_', '.', '/', '-')
-            if (path.isNotBlank()) return "$modId:$path"
+            if (path.isNotBlank()) return "$namespace:$path"
         }
         val path = trimmed.lowercase()
             .replace(Regex("""[^a-z0-9_./-]+"""), "_")
             .trim('_', '.', '/', '-')
-            .ifBlank { "custom" }
-        return "$modId:$path"
+            .takeIf { it.isNotBlank() }
+            ?: return null
+        return "$namespace:$path"
     }
 
     private fun migrateLegacyRarityEnumExtensions(projectDir: Path, dryRun: Boolean): List<Change> {
@@ -11291,12 +11295,17 @@ $fields
                     ?.let { Regex("""(?:net\.minecraft\.)?ChatFormatting\.([A-Z0-9_]+)""").matchEntire(it)?.groupValues?.get(1) }
                 if (args.size == 2 && rarityName != null && colorName != null) {
                     val enumName = prefixedEnumExtensionName(modId, rarityName)
+                    val serializedName = legacyRaritySerializedName(modId, rarityName)
+                    if (enumName == null || serializedName == null) {
+                        cursor = closeParen + 1
+                        continue
+                    }
                     val methodName = "Rarity_${enumName}".replace(Regex("""[^A-Za-z0-9_]+"""), "_")
                     extensions[enumName] = LegacyRarityExtension(
                         sourceFile = file,
                         packageName = packageName,
                         rarityName = rarityName,
-                        serializedName = legacyRaritySerializedName(modId, rarityName),
+                        serializedName = serializedName,
                         colorName = colorName,
                         enumName = enumName,
                         methodName = methodName
@@ -11514,6 +11523,10 @@ $methods
                     continue
                 }
                 val enumName = prefixedEnumExtensionName(modId, categoryName)
+                if (enumName == null) {
+                    cursor = closeParen + 1
+                    continue
+                }
                 val methodName = "RecipeBookCategory_${enumName}".replace(Regex("""[^A-Za-z0-9_]+"""), "_")
                 val iconExpressions = args.drop(1).map { it.trim() }.filter { it.isNotBlank() }
                 if (iconExpressions.isEmpty()) {
@@ -11621,6 +11634,10 @@ $methods
                 val typeName = if (args.size == 1) javaStringLiteralValue(args[0].trim()) else null
                 if (typeName != null) {
                     val enumName = prefixedEnumExtensionName(modId, typeName)
+                    if (enumName == null) {
+                        cursor = closeParen + 1
+                        continue
+                    }
                     extensions.putIfAbsent(enumName, LegacyRecipeBookTypeExtension(enumName))
                     replacements += original.substring(match.range.first, closeParen + 1) to """RecipeBookType.valueOf("$enumName")"""
                 }
@@ -11889,7 +11906,8 @@ $methods
             !isJavaIntegerLiteral(despawnDistance)) {
             return null
         }
-        val enumName = prefixedEnumExtensionName(modId, enumNameArgument)
+        val enumName = prefixedEnumExtensionName(modId, enumNameArgument) ?: return null
+        val namespacedSerializedName = enumExtensionNameParameter(modId, serializedName) ?: return null
         val methodName = "MobCategory_${enumName}".replace(Regex("""[^A-Za-z0-9_]+"""), "_")
         return LegacyMobCategoryExtension(
             sourceFile = sourceFile,
@@ -11897,7 +11915,7 @@ $methods
             enumName = enumName,
             methodName = methodName,
             oldSerializedName = serializedName,
-            serializedName = enumExtensionNameParameter(modId, serializedName),
+            serializedName = namespacedSerializedName,
             maxInstances = maxInstances,
             friendly = friendly,
             persistent = persistent,
@@ -11905,8 +11923,10 @@ $methods
         )
     }
 
-    private fun enumExtensionNameParameter(modId: String, legacyName: String): String {
+    private fun enumExtensionNameParameter(modId: String, legacyName: String): String? {
         val namespace = modId.lowercase().replace(Regex("""[^a-z0-9_.-]+"""), "_").trim('_', '.', '-')
+            .takeIf { it.isNotBlank() }
+            ?: return null
         val rawPath = legacyName.substringAfter(':')
         val normalizedPath = rawPath
             .lowercase()
@@ -11916,7 +11936,8 @@ $methods
             .removePrefix("${namespace}.")
             .removePrefix("${namespace}/")
             .trim('_', '.', '/', '-')
-            .ifBlank { "custom" }
+            .takeIf { it.isNotBlank() }
+            ?: return null
         return "$namespace:$normalizedPath"
     }
 
@@ -28326,7 +28347,7 @@ $methodBody
                     if (closeParen < 0) break
                     val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
                     if (args.none { it.trim() == providerExpression } && args.isNotEmpty()) {
-                        val outputArg = args.firstOrNull()?.trim() ?: "output"
+                        val outputArg = args.first().trim()
                         val replacementArgs = (listOf(outputArg, providerExpression) + args.drop(1).map { it.trim() }).joinToString(", ")
                         val replacement = "new $className($replacementArgs)"
                         result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)

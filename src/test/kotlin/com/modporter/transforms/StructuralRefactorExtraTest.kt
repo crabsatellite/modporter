@@ -18896,6 +18896,83 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy rarity enum extension migration fails closed for unnameable literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("BrokenRarity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.ChatFormatting;
+            import net.minecraft.world.item.Rarity;
+
+            public class BrokenRarity {
+                public static final Rarity BROKEN = Rarity.create("!!!", ChatFormatting.GREEN);
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("BrokenRarity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("""Rarity.create("!!!", ChatFormatting.GREEN)"""), migrated)
+        assertFalse(migrated.contains("Rarity.valueOf("), migrated)
+        assertFalse(srcDir.resolve("NeoForgeEnumExtensions.java").exists())
+        assertFalse(tempDir.resolve("src/main/resources/META-INF/enumextensions.json").exists())
+        assertTrue(
+            result.changes.none { it.ruleId.startsWith("struct-rarity-enum-extension") },
+            "unnameable rarity literals must not be migrated with synthetic fallback names: ${result.changes}"
+        )
+    }
+
+    @Test
+    fun `legacy mob category enum extension migration fails closed for unnameable literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("BrokenMobCategories.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.MobCategory;
+
+            public class BrokenMobCategories {
+                public static final MobCategory BAD_ENUM = MobCategory.create("!!!", "sky_monster", 4, false, false, 128);
+                public static final MobCategory BAD_SERIALIZED = MobCategory.create("SKY_MONSTER", "???", 4, false, false, 128);
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("BrokenMobCategories.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("""MobCategory.create("!!!", "sky_monster", 4, false, false, 128)"""), migrated)
+        assertTrue(migrated.contains("""MobCategory.create("SKY_MONSTER", "???", 4, false, false, 128)"""), migrated)
+        assertFalse(migrated.contains("MobCategory.valueOf("), migrated)
+        assertFalse(srcDir.resolve("NeoForgeEnumExtensions.java").exists())
+        assertFalse(tempDir.resolve("src/main/resources/META-INF/enumextensions.json").exists())
+        assertTrue(
+            result.changes.none { it.ruleId.startsWith("struct-mobcategory-enum-extension") },
+            "unnameable mob category literals must not be migrated with synthetic fallback names: ${result.changes}"
+        )
+    }
+
+    @Test
     fun `migrates legacy mob category create calls to enum extension metadata`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val metaInf = tempDir.resolve("src/main/resources/META-INF")
