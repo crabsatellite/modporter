@@ -4844,7 +4844,14 @@ $itemArguments
         val javaFiles = Files.walk(srcDir)
             .filter { it.extension == "java" }
             .toList()
-        val compatPackage = detectGeneratedCompatPackage(projectDir)
+        var detectedCompatPackage: String? = null
+        fun compatPackage(): String {
+            val existing = detectedCompatPackage
+            if (existing != null) return existing
+            val detected = detectRequiredGeneratedCompatPackage(projectDir, "custom entity capability LazyOptional bridge")
+            detectedCompatPackage = detected
+            return detected
+        }
         val changes = mutableListOf<Change>()
         val entityCapabilityNames = linkedSetOf<String>()
         val entityAttachmentNames = linkedSetOf<String>()
@@ -4971,11 +4978,13 @@ $itemArguments
                 "net.neoforged.neoforge.capabilities.ICapabilitySerializable",
                 "com.modporter.compat.Capability",
                 "com.modporter.compat.LazyOptional",
-                "$compatPackage.LazyOptional",
                 "javax.annotation.Nonnull",
                 "org.jetbrains.annotations.NotNull",
                 "org.jetbrains.annotations.Nullable"
             ).forEach { modified = removeImport(modified, it) }
+            modified = Regex(
+                """(?m)^[ \t]*import\s+com\.modporter\.generated\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.compat\.LazyOptional;\s*\r?\n"""
+            ).replace(modified, "")
             val withoutCapabilityProviderImports = Regex("""(?m)^[ \t]*import\s+[\w.]+\.CapabilityProvider;\s*\r?\n""")
                 .replace(modified, "")
             if (!Regex("""\bCapabilityProvider\b""").containsMatchIn(withoutCapabilityProviderImports)) {
@@ -5049,13 +5058,13 @@ $itemArguments
             var text = javaFile.readText()
             val original = text
             if (entityAttachmentNames.isNotEmpty() && capabilityListNames.any { text.contains("$it.") }) {
-                text = rewriteLegacyAttachmentCapabilityQueries(text, capabilityListNames, entityAttachmentNames, compatPackage)
+                text = rewriteLegacyAttachmentCapabilityQueries(text, capabilityListNames, entityAttachmentNames) { compatPackage() }
             }
             if (entityCapabilityNames.isNotEmpty() && capabilityListNames.any { text.contains("$it.") } && text.contains(".getCapability(")) {
-                text = rewriteLegacyEntityCapabilityQueries(text, capabilityListNames, entityCapabilityNames, compatPackage)
+                text = rewriteLegacyEntityCapabilityQueries(text, capabilityListNames, entityCapabilityNames) { compatPackage() }
             }
             if (levelCapabilityNames.isNotEmpty() && capabilityListNames.any { text.contains("$it.") }) {
-                text = rewriteLegacyLevelCapabilityQueries(text, capabilityListNames, levelCapabilityNames, compatPackage)
+                text = rewriteLegacyLevelCapabilityQueries(text, capabilityListNames, levelCapabilityNames)
             }
             if (capabilityListNames.any { text.contains("::attach") }) {
                 text = text.lines()
@@ -5353,8 +5362,7 @@ $helpers
     private fun rewriteLegacyLevelCapabilityQueries(
         source: String,
         capabilityListNames: Set<String>,
-        levelCapabilityNames: Set<String>,
-        compatPackage: String
+        levelCapabilityNames: Set<String>
     ): String {
         var result = source
         val ownerAlternation = capabilityListNames.joinToString("|") { Regex.escape(it) }
@@ -5379,7 +5387,7 @@ $helpers
         source: String,
         capabilityListNames: Set<String>,
         entityCapabilityNames: Set<String>,
-        compatPackage: String
+        compatPackage: () -> String
     ): String {
         var result = source
         val listAlternation = capabilityListNames.joinToString("|") { Regex.escape(it) }
@@ -5397,7 +5405,7 @@ $helpers
         result = queryPattern.replace(result) { match ->
             val receiver = match.groupValues[1]
             val capability = match.groupValues[2]
-            "$compatPackage.LazyOptional.ofNullable($receiver.getCapability($capability, null))"
+            "${compatPackage()}.LazyOptional.ofNullable($receiver.getCapability($capability, null))"
         }
         return result
     }
@@ -5406,7 +5414,7 @@ $helpers
         source: String,
         capabilityListNames: Set<String>,
         attachmentCapabilityNames: Set<String>,
-        compatPackage: String
+        compatPackage: () -> String
     ): String {
         var result = source
         val ownerAlternation = capabilityListNames.joinToString("|") { Regex.escape(it) }
@@ -5422,7 +5430,7 @@ $helpers
             """(?<![A-Za-z0-9_$])([A-Za-z_$][\w$]*(?:(?:\.[A-Za-z_$][\w$]*)|(?:\.[A-Za-z_$][\w$]*\(\)))*)\.getCapability\(\s*(($ownerAlternation)\.($fieldAlternation))\s*(?:,\s*null\s*)?\)"""
         )
         result = directPattern.replace(result) { match ->
-            "$compatPackage.LazyOptional.ofNullable(${match.groupValues[1]}.getData(${match.groupValues[2]}.get()))"
+            "${compatPackage()}.LazyOptional.ofNullable(${match.groupValues[1]}.getData(${match.groupValues[2]}.get()))"
         }
         return result
     }

@@ -655,6 +655,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `custom entity capability LazyOptional bridge uses required source mod ids`() {
+        val structuralPass = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = structuralPass.indexOf("private fun migrateCustomEntityCapabilities")
+        assertTrue(start >= 0, "migrateCustomEntityCapabilities is missing")
+        val end = structuralPass.indexOf("\n    private fun findCapabilityImplementations", start)
+        assertTrue(end > start, "migrateCustomEntityCapabilities boundary is missing")
+        val body = structuralPass.substring(start, end)
+        val offenders = listOf(
+            "placeholder compat resolver" to "detectGeneratedCompatPackage(projectDir)",
+            "shared package fallback" to "?: \"shared\"",
+            "blank mod id fallback" to "ifBlank { \"mod\" }"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Custom entity capability LazyOptional bridge must not synthesize generated compat package ids: $offenders"
+        )
+        assertTrue(
+            body.contains("""detectRequiredGeneratedCompatPackage(projectDir, "custom entity capability LazyOptional bridge")"""),
+            "Custom entity capability LazyOptional bridge must use a required source-derived mod id gate"
+        )
+        assertTrue(
+            structuralPass.contains("private fun rewriteLegacyEntityCapabilityQueries(") &&
+                structuralPass.contains("compatPackage: () -> String"),
+            "Custom entity capability query rewrites must resolve compat packages lazily at the bridge site"
+        )
+    }
+
+    @Test
     fun `resource mod id detection does not infer constant owners from file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot

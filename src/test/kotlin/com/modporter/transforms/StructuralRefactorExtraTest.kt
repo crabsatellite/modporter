@@ -3352,10 +3352,84 @@ class StructuralRefactorExtraTest {
         val result = StructuralRefactorPass().apply(tempDir)
         val capabilities = capabilityDir.resolve("ExampleCapabilities.java").readText()
 
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
         assertTrue(result.changes.any { it.ruleId == "struct-custom-entity-capabilities" })
         assertTrue(capabilities.contains("import net.minecraft.core.Direction;"), capabilities)
         assertTrue(capabilities.contains("EntityCapability<PlayerData, Direction> PLAYER_DATA"), capabilities)
         assertTrue(capabilities.contains("event.registerEntity(PLAYER_DATA"), capabilities)
+        assertFalse(capabilities.contains("com.modporter.generated.shared"))
+    }
+
+    @Test
+    fun `custom entity capability LazyOptional bridge hard gates missing source mod id`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val capabilityDir = srcDir.resolve("capability")
+        capabilityDir.createDirectories()
+
+        capabilityDir.resolve("PlayerData.java").writeText("""
+            package com.example.capability;
+
+            import net.minecraft.world.entity.player.Player;
+
+            public interface PlayerData {
+                void setEntity(Player player);
+            }
+        """.trimIndent())
+        capabilityDir.resolve("PlayerDataCapability.java").writeText("""
+            package com.example.capability;
+
+            public class PlayerDataCapability implements PlayerData {
+                public void setEntity(net.minecraft.world.entity.player.Player player) {
+                }
+            }
+        """.trimIndent())
+        capabilityDir.resolve("ExampleCapabilities.java").writeText("""
+            package com.example.capability;
+
+            import com.modporter.compat.Capability;
+            import com.modporter.compat.CapabilityManager;
+            import com.modporter.compat.CapabilityToken;
+            import net.minecraft.world.entity.Entity;
+            import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
+            import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
+
+            public class ExampleCapabilities {
+                public static final Capability<PlayerData> PLAYER_DATA = CapabilityManager.get(new CapabilityToken<>() {});
+
+                public static void registerCapabilities(RegisterCapabilitiesEvent event) {
+                    event.register(PlayerData.class);
+                }
+
+                public static void attachCapabilities(AttachCapabilitiesEvent<Entity> event) {
+                    event.addCapability(null, new PlayerDataCapability());
+                }
+            }
+        """.trimIndent())
+        capabilityDir.resolve("PlayerDataAccess.java").writeText("""
+            package com.example.capability;
+
+            import net.minecraft.world.entity.player.Player;
+
+            public class PlayerDataAccess {
+                public Object read(Player player) {
+                    return player.getCapability(ExampleCapabilities.PLAYER_DATA);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val access = capabilityDir.resolve("PlayerDataAccess.java").readText()
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Custom entity capability migration error") &&
+                    it.contains("Cannot derive generated compat package") &&
+                    it.contains("custom entity capability LazyOptional bridge")
+            },
+            "Expected missing mod id hard gate, got: ${result.errors}"
+        )
+        assertFalse(access.contains("com.modporter.generated.shared"))
+        assertFalse(access.contains("com.modporter.generated.mod"))
     }
 
     @Test
