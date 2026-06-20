@@ -23363,11 +23363,15 @@ class StructuralRefactorExtraTest {
                 }
             }
         """.trimIndent())
-        networkDir.resolve("ModNetwork.java").writeText("""
+        networkDir.resolve("PayloadRegistrations.java").writeText("""
             package com.example.network;
 
-            public class ModNetwork {
-                public static void register(Object event) {
+            import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
+            import net.neoforged.neoforge.network.registration.PayloadRegistrar;
+
+            public class PayloadRegistrations {
+                public static void register(RegisterPayloadHandlersEvent event) {
+                    PayloadRegistrar registrar = event.registrar("example").versioned("1");
                     registrar.playToServer(DemoPacket.TYPE, DemoPacket.STREAM_CODEC, DemoPacket::handle);
                 }
             }
@@ -23410,6 +23414,65 @@ class StructuralRefactorExtraTest {
         assertTrue(networkTest.contains("import com.example.network.DemoPacket;"))
         assertTrue(networkTest.contains("Object channel = DemoPacket.TYPE;"))
         assertTrue(!networkTest.contains("LegacyNetwork.CHANNEL"))
+    }
+
+    @Test
+    fun `source backed payload surface does not guess channel replacement when multiple payloads are registered`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+        networkDir.resolve("PayloadRegistrations.java").writeText("""
+            package com.example.network;
+
+            import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
+            import net.neoforged.neoforge.network.registration.PayloadRegistrar;
+
+            public class PayloadRegistrations {
+                public static void register(RegisterPayloadHandlersEvent event) {
+                    PayloadRegistrar registrar = event.registrar("example").versioned("1");
+                    registrar.playToServer(FirstPacket.TYPE, FirstPacket.STREAM_CODEC, FirstPacket::handle);
+                    registrar.playToServer(SecondPacket.TYPE, SecondPacket.STREAM_CODEC, SecondPacket::handle);
+                }
+            }
+        """.trimIndent())
+        networkDir.resolve("FirstPacket.java").writeText("""
+            package com.example.network;
+
+            public class FirstPacket {
+                public static final Object TYPE = new Object();
+                public static final Object STREAM_CODEC = new Object();
+                public static void handle(FirstPacket packet, Object context) {}
+            }
+        """.trimIndent())
+        networkDir.resolve("SecondPacket.java").writeText("""
+            package com.example.network;
+
+            public class SecondPacket {
+                public static final Object TYPE = new Object();
+                public static final Object STREAM_CODEC = new Object();
+                public static void handle(SecondPacket packet, Object context) {}
+            }
+        """.trimIndent())
+        srcDir.resolve("NetworkTest.java").writeText("""
+            package com.example;
+
+            import com.example.network.LegacyNetwork;
+
+            public class NetworkTest {
+                public void check() {
+                    Object channel = LegacyNetwork.CHANNEL;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val networkTest = srcDir.resolve("NetworkTest.java").readText()
+
+        assertTrue(networkTest.contains("import com.example.network.LegacyNetwork;"))
+        assertTrue(networkTest.contains("Object channel = LegacyNetwork.CHANNEL;"))
+        assertTrue(!networkTest.contains("FirstPacket.TYPE"))
+        assertTrue(!networkTest.contains("SecondPacket.TYPE"))
     }
 
     @Test

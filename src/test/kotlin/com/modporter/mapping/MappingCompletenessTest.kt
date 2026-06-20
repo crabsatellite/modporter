@@ -2375,6 +2375,33 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `source backed payload migration does not depend on generated network class names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateSourceBackedAccessorCalls")
+        assertTrue(start >= 0, "migrateSourceBackedAccessorCalls is missing")
+        val end = source.indexOf("private fun migrateUseItemOnInteractionResultReturns", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "generated ModNetwork class marker" to Regex("""class\s+ModNetwork|class ModNetwork|ModNetwork\.java"""),
+            "untyped registrar text marker" to Regex("""source\.contains\("registrar\."\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "source-backed payload migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Source-backed payload migration must use PayloadRegistrar registration structure, not generated network class names or raw registrar text: $offenders"
+        )
+        assertTrue(body.contains("registeredPayloadTypes(source)"))
+        assertTrue(body.contains("PayloadRegistrar"))
+    }
+
+    @Test
     fun `legacy advancement trigger migration does not depend on fixed project class names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

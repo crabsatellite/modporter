@@ -41437,46 +41437,46 @@ public class ${builder.className} implements RecipeBuilder {
             }
         }
 
-        data class PayloadSurface(val packageName: String, val className: String)
-        val payloadByPackage = javaFiles.mapNotNull { file ->
+        val payloadTypesByPackage = javaFiles.flatMap { file ->
             val source = file.readText()
-            if (!source.contains("class ModNetwork") || !source.contains("registrar.")) return@mapNotNull null
             val packageName = packageNameOf(source)
-            val payloadClass = Regex("""registrar\.[A-Za-z_$][\w$]*\(\s*($id)\.TYPE""")
-                .find(source)
-                ?.groupValues
-                ?.get(1)
-                ?: return@mapNotNull null
-            packageName to PayloadSurface(packageName, payloadClass)
-        }.toMap()
+            registeredPayloadTypes(source)
+                .map { packageName to it }
+        }
+            .groupBy({ it.first }, { it.second })
+            .mapValues { (_, payloadTypes) -> payloadTypes.toSet() }
+            .filterValues { it.size == 1 }
+            .mapValues { (_, payloadTypes) -> payloadTypes.single() }
 
         val changes = mutableListOf<Change>()
         javaFiles.forEach { file ->
             val original = file.readText()
             var modified = original
-            accessorsByType.forEach { (typeName, methods) ->
+            for ((typeName, methods) in accessorsByType) {
                 val variables = Regex("""\b(?:final\s+)?${Regex.escape(typeName)}\s+($id)\b""")
                     .findAll(original)
                     .map { it.groupValues[1] }
                     .toSet()
-                if (variables.isEmpty()) return@forEach
-                variables.forEach { variable ->
-                    methods.forEach { (accessor, getter) ->
+                if (variables.isNotEmpty()) {
+                    for (variable in variables) {
+                        for ((accessor, getter) in methods) {
                         modified = Regex("""\b${Regex.escape(variable)}\.${Regex.escape(accessor)}\(\)""")
                             .replace(modified, "$variable.$getter()")
+                        }
                     }
                 }
             }
-            recordSetterLikeAccessorsByType.forEach { (typeName, methods) ->
+            for ((typeName, methods) in recordSetterLikeAccessorsByType) {
                 val variables = Regex("""\b(?:final\s+)?${Regex.escape(typeName)}\s+($id)\b""")
                     .findAll(original)
                     .map { it.groupValues[1] }
                     .toSet()
-                if (variables.isEmpty()) return@forEach
-                variables.forEach { variable ->
-                    methods.forEach { (setterLike, component) ->
+                if (variables.isNotEmpty()) {
+                    for (variable in variables) {
+                        for ((setterLike, component) in methods) {
                         modified = Regex("""\b${Regex.escape(variable)}\.${Regex.escape(setterLike)}\(\)""")
                             .replace(modified, "$variable.$component()")
+                        }
                     }
                 }
             }
@@ -41496,19 +41496,20 @@ public class ${builder.className} implements RecipeBuilder {
             }
 
             if (modified.contains(".CHANNEL")) {
-                Regex("""(?m)^import\s+([\w.]+)\.($id);\s*$""")
+                val imports = Regex("""(?m)^import\s+([\w.]+)\.($id);\s*$""")
                     .findAll(modified)
                     .toList()
-                    .forEach { importMatch ->
-                        val packageName = importMatch.groupValues[1]
-                        val importedType = importMatch.groupValues[2]
-                        val payload = payloadByPackage[packageName] ?: return@forEach
-                        val channelReference = "$importedType.CHANNEL"
-                        if (!modified.contains(channelReference)) return@forEach
-                        val payloadImport = "import ${payload.packageName}.${payload.className};"
+                for (importMatch in imports) {
+                    val packageName = importMatch.groupValues[1]
+                    val importedType = importMatch.groupValues[2]
+                    val payloadType = payloadTypesByPackage[packageName] ?: continue
+                    val channelReference = "$importedType.CHANNEL"
+                    if (modified.contains(channelReference)) {
+                        val payloadImport = "import $packageName.$payloadType;"
                         modified = modified.replace(importMatch.value, payloadImport)
-                        modified = modified.replace(channelReference, "${payload.className}.TYPE")
+                        modified = modified.replace(channelReference, "$payloadType.TYPE")
                     }
+                }
             }
 
             if (modified != original) {
@@ -41525,6 +41526,27 @@ public class ${builder.className} implements RecipeBuilder {
             }
         }
         return changes
+    }
+
+    private fun registeredPayloadTypes(source: String): Set<String> {
+        if (!source.contains(".TYPE") || !source.contains("PayloadRegistrar")) {
+            return emptySet()
+        }
+        val id = """[A-Za-z_$][\w$]*"""
+        val code = maskJavaCommentsAndLiterals(source)
+        val registrarVariables = Regex(
+            """(?:net\.neoforged\.neoforge\.network\.registration\.)?PayloadRegistrar\s+($id)\s*="""
+        )
+            .findAll(code)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (registrarVariables.isEmpty()) return emptySet()
+        return registrarVariables.flatMap { registrar ->
+            Regex("""\b${Regex.escape(registrar)}\.$id\s*\(\s*($id)\.TYPE\b""")
+                .findAll(code)
+                .map { it.groupValues[1] }
+                .toList()
+        }.toSet()
     }
 
     private fun migrateUseItemOnInteractionResultReturns(projectDir: Path, dryRun: Boolean): List<Change> {
