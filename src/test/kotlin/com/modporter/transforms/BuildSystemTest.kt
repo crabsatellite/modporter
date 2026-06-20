@@ -151,6 +151,36 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `gradle properties mod id detection ignores text block documentation`() {
+        val projectDir = tempDir.resolve("p6-text-block-modid")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("""
+            minecraft_version=1.20.1
+            forge_version=47.2.0
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "public final class ExampleMod {",
+            "    String docs() {",
+            "        return \"\"\"",
+            "            @Mod(\"examplemod\")",
+            "            public static final String MODID = \"examplemod\";",
+            "            \"\"\";",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("gradle.properties").readText()
+
+        assertFalse(content.contains("mod_id=examplemod"), content)
+        assertFalse(result.changes.any { it.ruleId == "build-props-mod-id" }, result.changes.toString())
+    }
+
+    @Test
     fun `normalizes neoforge properties without double prefixing`() {
         val projectDir = tempDir.resolve("neoforge-props")
         projectDir.createDirectories()

@@ -4235,30 +4235,43 @@ $body
     }
 
     /**
-     * Detect mod ID from @Mod annotation in Java source files.
+     * Detect a unique concrete mod ID from executable @Mod evidence in Java source files.
      */
     private fun detectModId(projectDir: Path): String? {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return null
+        val candidates = linkedSetOf<String>()
         try {
             val javaFiles = java.nio.file.Files.walk(srcDir)
                 .filter { it.toString().endsWith(".java") }
                 .toList()
             for (file in javaFiles) {
                 val text = file.toFile().readText()
-                // Match @Mod("modid") directly
-                val directMatch = Regex("""@Mod\s*\(\s*"(\w+)"\s*\)""").find(text)
-                if (directMatch != null) return directMatch.groupValues[1]
-                // Match @Mod(ClassName.CONST) and resolve the constant
-                val constRef = Regex("""@Mod\s*\(\s*(\w+)\.(\w+)\s*\)""").find(text)
-                if (constRef != null) {
-                    val constName = constRef.groupValues[2]
-                    val constVal = Regex("$constName\\s*=\\s*\"(\\w+)\"").find(text)
-                    if (constVal != null) return constVal.groupValues[1]
-                }
+                val code = maskJavaComments(text)
+                val executableCode = maskJavaCommentsAndLiterals(text)
+
+                Regex("""@Mod\s*\(\s*"([A-Za-z0-9_.-]+)"\s*\)""")
+                    .findAll(code)
+                    .filter { match ->
+                        executableCode
+                            .substring(match.range.first, match.range.last + 1)
+                            .contains("@Mod")
+                    }
+                    .forEach { candidates.add(it.groupValues[1]) }
+
+                Regex("""@Mod\s*\(\s*(?:[A-Za-z_$][\w$]*\.)?([A-Za-z_$][\w$]*)\s*\)""")
+                    .findAll(code)
+                    .filter { match ->
+                        executableCode
+                            .substring(match.range.first, match.range.last + 1)
+                            .contains("@Mod")
+                    }
+                    .forEach { match ->
+                        findJavaStringConstant(text, match.groupValues[1])?.let(candidates::add)
+                    }
             }
         } catch (_: Exception) {}
-        return null
+        return candidates.singleOrNull()
     }
 
     private fun addMavenRepositoryContentFilters(

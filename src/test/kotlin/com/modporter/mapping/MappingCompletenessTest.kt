@@ -2435,12 +2435,16 @@ class MappingCompletenessTest {
 
         val projectModAnnotation = functionBody("projectModAnnotationExpression")
         val modIdFromModClass = functionBody("modIdExpressionFromModClass")
+        val legacyDetectModId = functionBody("detectModId")
         val uniqueModId = functionBody("detectUniqueProjectModId")
         val stringConstant = functionBody("findJavaStringConstant")
         val forbidden = listOf(
             "project @Mod raw package scan" to (projectModAnnotation to Regex("""\.find\(source\)""")),
             "mod class raw annotation scan" to (modIdFromModClass to Regex("""@Mod[\s\S]{0,120}\.find\(source\)""")),
             "mod class raw class scan" to (modIdFromModClass to Regex("""\bclass[\s\S]{0,120}\.find\(source\)""")),
+            "legacy mod id raw direct scan" to (legacyDetectModId to Regex("""@Mod[\s\S]{0,160}\.find\(text\)""")),
+            "legacy mod id raw annotation scan" to (legacyDetectModId to Regex("""@Mod[\s\S]{0,160}\.findAll\(text\)""")),
+            "legacy mod id raw constant scan" to (legacyDetectModId to Regex("""\.find\(text\)""")),
             "unique mod id raw annotation scan" to (uniqueModId to Regex("""@Mod[\s\S]{0,160}\.findAll\(text\)""")),
             "string constant raw scan" to (stringConstant to Regex("""\.find\(source\)"""))
         )
@@ -2455,6 +2459,10 @@ class MappingCompletenessTest {
                 modIdFromModClass.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
                 modIdFromModClass.contains(".find(code)") &&
                 modIdFromModClass.contains(".find(executableCode)") &&
+                legacyDetectModId.contains("val code = maskJavaComments(text)") &&
+                legacyDetectModId.contains("val executableCode = maskJavaCommentsAndLiterals(text)") &&
+                legacyDetectModId.contains(".findAll(code)") &&
+                legacyDetectModId.contains("return candidates.singleOrNull()") &&
                 uniqueModId.contains("val code = maskJavaComments(text)") &&
                 uniqueModId.contains("val executableCode = maskJavaCommentsAndLiterals(text)") &&
                 uniqueModId.contains(".findAll(code)") &&
