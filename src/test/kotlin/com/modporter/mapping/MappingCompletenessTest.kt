@@ -440,6 +440,72 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `nitrogen fuel migrations use typed API shape evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val structuralSource = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val resourceSource = projectRoot
+            .resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt")
+            .readText()
+
+        fun functionBody(source: String, startMarker: String, endMarker: String): String {
+            val start = source.indexOf(startMarker)
+            assertTrue(start >= 0, "$startMarker is missing")
+            val end = source.indexOf(endMarker, start + 1).let { if (it < 0) source.length else it }
+            return source.substring(start, end)
+        }
+
+        val structuralBody = functionBody(
+            structuralSource,
+            "private fun migrateNitrogenFuelCategorySource",
+            "private fun collectNitrogenFuelTextureFields"
+        )
+        val resourceBody = functionBody(
+            resourceSource,
+            "private fun collectNitrogenFuelSpriteSpecs",
+            "private fun collectJavaStringConstants"
+        )
+        val forbiddenMarkers = listOf(
+            """source.contains("com.aetherteam.nitrogen.integration.")""",
+            """source.contains("categories.fuel.AbstractFuelCategory")""",
+            """result.contains("com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory")""",
+            """result.contains("com.aetherteam.nitrogen.integration.rei.categories.fuel.AbstractFuelCategory")""",
+            """result.contains("new AbstractFuelCategory(")""",
+            """result.contains("getTexture()")"""
+        )
+        val offenders = listOf(
+            "structural" to structuralBody,
+            "resource" to resourceBody
+        ).flatMap { (label, body) ->
+            forbiddenMarkers
+                .filter { marker -> body.contains(marker) }
+                .map { marker -> "$label Nitrogen fuel migration uses broad marker $marker" }
+        }
+
+        assertTrue(
+            structuralBody.contains("containsNitrogenFuelCategoryApiUse(source, \"jei\")") &&
+                structuralBody.contains("containsNitrogenFuelCategoryApiUse(source, \"rei\")") &&
+                structuralBody.contains("containsNitrogenFuelGetTextureOverride(result)") &&
+                structuralBody.contains("containsNitrogenFuelCategoryConstructorCall(result)") &&
+                structuralSource.contains("maskJavaComments(source)") &&
+                structuralSource.contains("maskJavaCommentsAndLiterals(source)"),
+            "Structural Nitrogen fuel migration must use typed API-shape evidence and comment masking"
+        )
+        assertTrue(
+            resourceBody.contains("commentMaskedSources") &&
+                resourceBody.contains("containsNitrogenFuelCategoryApiUse(source)") &&
+                resourceSource.contains("maskJavaComments(source)") &&
+                resourceSource.contains("maskJavaCommentsAndLiterals(source)"),
+            "Resource Nitrogen fuel sprite migration must use typed API-shape evidence and comment masking"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Nitrogen fuel migrations must not infer API ownership from broad file markers: $offenders"
+        )
+    }
+
+    @Test
     fun `backpack container API migration binds inventory wrapper to slot constructor`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

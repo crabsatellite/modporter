@@ -20902,6 +20902,50 @@ ${indent}}"""
         return true
     }
 
+    private fun maskJavaComments(source: String): String {
+        val result = StringBuilder(source.length)
+        var index = 0
+        var inLineComment = false
+        var inBlockComment = false
+        while (index < source.length) {
+            val ch = source[index]
+            val next = source.getOrNull(index + 1)
+
+            when {
+                inLineComment -> {
+                    if (ch == '\r' || ch == '\n') {
+                        inLineComment = false
+                        result.append(ch)
+                    } else {
+                        result.append(' ')
+                    }
+                }
+                inBlockComment -> {
+                    if (ch == '*' && next == '/') {
+                        result.append("  ")
+                        index++
+                        inBlockComment = false
+                    } else {
+                        result.append(if (ch == '\r' || ch == '\n') ch else ' ')
+                    }
+                }
+                ch == '/' && next == '/' -> {
+                    result.append("  ")
+                    index++
+                    inLineComment = true
+                }
+                ch == '/' && next == '*' -> {
+                    result.append("  ")
+                    index++
+                    inBlockComment = true
+                }
+                else -> result.append(ch)
+            }
+            index++
+        }
+        return result.toString()
+    }
+
     private fun maskJavaCommentsAndLiterals(source: String): String {
         val result = StringBuilder(source.length)
         var index = 0
@@ -31162,8 +31206,8 @@ ${indent}}
     )
 
     private fun migrateNitrogenFuelCategorySource(source: String): String {
-        if (!source.contains("com.aetherteam.nitrogen.integration.") ||
-            !source.contains("categories.fuel.AbstractFuelCategory")) {
+        if (!containsNitrogenFuelCategoryApiUse(source, "jei") &&
+            !containsNitrogenFuelCategoryApiUse(source, "rei")) {
             return source
         }
 
@@ -31171,9 +31215,8 @@ ${indent}}
         if (textureFields.isEmpty()) return source
 
         var result = source
-        val jeiFuelCategory =
-            result.contains("com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory")
-        if (jeiFuelCategory && result.contains("getTexture()")) {
+        val jeiFuelCategory = containsNitrogenFuelCategoryApiUse(result, "jei")
+        if (jeiFuelCategory && containsNitrogenFuelGetTextureOverride(result)) {
             result = Regex("""\bResourceLocation\s+getTexture\s*\(\s*\)""")
                 .replace(result, "ResourceLocation getBackgroundTexture()")
             if (!result.contains("getIconTexture()")) {
@@ -31197,9 +31240,8 @@ ${indent}}
             }
         }
 
-        val reiFuelCategory =
-            result.contains("com.aetherteam.nitrogen.integration.rei.categories.fuel.AbstractFuelCategory")
-        if (reiFuelCategory && result.contains("new AbstractFuelCategory(")) {
+        val reiFuelCategory = containsNitrogenFuelCategoryApiUse(result, "rei")
+        if (reiFuelCategory && containsNitrogenFuelCategoryConstructorCall(result)) {
             val fieldByName = textureFields.associateBy { it.fieldName }
             collectNewAbstractFuelCategoryTextureFields(result, fieldByName).forEach { field ->
                 val constantStem = nitrogenFuelConstantStem(field.fieldName)
@@ -31223,14 +31265,39 @@ ${indent}}
         return result
     }
 
+    private fun containsNitrogenFuelCategoryApiUse(source: String, integration: String): Boolean {
+        val code = maskJavaCommentsAndLiterals(source)
+        val fqType =
+            """com\.aetherteam\.nitrogen\.integration\.${Regex.escape(integration)}\.categories\.fuel\.AbstractFuelCategory"""
+        val hasImport = Regex("""(?m)^\s*import\s+$fqType\s*;""").containsMatchIn(code)
+        val simpleTypeUse = Regex("""\bextends\s+AbstractFuelCategory\b|\bnew\s+AbstractFuelCategory\s*\(""")
+            .containsMatchIn(code)
+        val qualifiedTypeUse = Regex("""\bextends\s+$fqType\b|\bnew\s+$fqType\s*\(""")
+            .containsMatchIn(code)
+        return qualifiedTypeUse || (hasImport && simpleTypeUse)
+    }
+
+    private fun containsNitrogenFuelGetTextureOverride(source: String): Boolean {
+        val code = maskJavaCommentsAndLiterals(source)
+        return Regex("""\bResourceLocation\s+getTexture\s*\(\s*\)""").containsMatchIn(code)
+    }
+
+    private fun containsNitrogenFuelCategoryConstructorCall(source: String): Boolean {
+        val code = maskJavaCommentsAndLiterals(source)
+        return Regex("""\bnew\s+AbstractFuelCategory\s*\(""").containsMatchIn(code) ||
+            Regex("""\bnew\s+com\.aetherteam\.nitrogen\.integration\.rei\.categories\.fuel\.AbstractFuelCategory\s*\(""")
+                .containsMatchIn(code)
+    }
+
     private fun collectNitrogenFuelTextureFields(source: String): List<NitrogenFuelTextureField> {
+        val code = maskJavaComments(source)
         val id = """[A-Za-z_$][\w$]*"""
         val resourceLocationExpression =
             """(?:new\s+ResourceLocation|ResourceLocation\.fromNamespaceAndPath|net\.minecraft\.resources\.ResourceLocation\.fromNamespaceAndPath)"""
         val fieldPattern = Regex(
             """(?m)\bResourceLocation\s+($id)\s*=\s*$resourceLocationExpression\s*\(\s*([^,\r\n]+?)\s*,\s*"textures/gui/menu/([^"]+?)\.png"\s*\)\s*;"""
         )
-        return fieldPattern.findAll(source).map { match ->
+        return fieldPattern.findAll(code).map { match ->
             val fieldName = match.groupValues[1]
             val namespaceExpression = match.groupValues[2].trim()
             val menuPath = "textures/gui/menu/${match.groupValues[3]}.png"
@@ -31264,18 +31331,19 @@ ${indent}}
         replacementFields: (NitrogenFuelTextureField) -> Pair<String, String>
     ): String {
         var result = source
+        var code = maskJavaCommentsAndLiterals(result)
         var cursor = 0
         val token = "new AbstractFuelCategory("
         while (true) {
-            val tokenIndex = result.indexOf(token, cursor)
+            val tokenIndex = code.indexOf(token, cursor)
             if (tokenIndex < 0) break
             val openParen = tokenIndex + "new AbstractFuelCategory".length
-            val closeParen = findMatchingParen(result, openParen)
+            val closeParen = findMatchingParen(code, openParen)
             if (closeParen < 0) {
                 cursor = tokenIndex + token.length
                 continue
             }
-            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            val args = splitTopLevelJavaArgs(code.substring(openParen + 1, closeParen))
             if (args.size != 2) {
                 cursor = closeParen + 1
                 continue
@@ -31288,6 +31356,7 @@ ${indent}}
             val (textureField, backgroundField) = replacementFields(field)
             val replacementArgs = "${args[0].trim()}, $textureField, $backgroundField"
             result = result.substring(0, openParen + 1) + replacementArgs + result.substring(closeParen)
+            code = maskJavaCommentsAndLiterals(result)
             cursor = openParen + 1 + replacementArgs.length
         }
         return result
@@ -31298,18 +31367,19 @@ ${indent}}
         fields: Map<String, NitrogenFuelTextureField>
     ): List<NitrogenFuelTextureField> {
         val found = linkedSetOf<NitrogenFuelTextureField>()
+        val code = maskJavaCommentsAndLiterals(source)
         var cursor = 0
         val token = "new AbstractFuelCategory("
         while (true) {
-            val tokenIndex = source.indexOf(token, cursor)
+            val tokenIndex = code.indexOf(token, cursor)
             if (tokenIndex < 0) break
             val openParen = tokenIndex + "new AbstractFuelCategory".length
-            val closeParen = findMatchingParen(source, openParen)
+            val closeParen = findMatchingParen(code, openParen)
             if (closeParen < 0) {
                 cursor = tokenIndex + token.length
                 continue
             }
-            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            val args = splitTopLevelJavaArgs(code.substring(openParen + 1, closeParen))
             if (args.size == 2) {
                 fields[args[1].trim()]?.let { found += it }
             }

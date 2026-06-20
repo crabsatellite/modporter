@@ -3108,7 +3108,8 @@ class ResourceMigrationPass(
         if (javaSources.isEmpty()) return emptySet()
 
         val sourceTexts = javaSources.associateWith { it.readText() }
-        val stringConstants = collectJavaStringConstants(sourceTexts.values)
+        val commentMaskedSources = sourceTexts.mapValues { (_, source) -> maskJavaComments(source) }
+        val stringConstants = collectJavaStringConstants(commentMaskedSources.values)
         val specs = linkedSetOf<NitrogenFuelSpriteSpec>()
         val resourceLocationExpression =
             """(?:new\s+ResourceLocation|ResourceLocation\.fromNamespaceAndPath|net\.minecraft\.resources\.ResourceLocation\.fromNamespaceAndPath)"""
@@ -3116,9 +3117,8 @@ class ResourceMigrationPass(
             """\bResourceLocation\s+[A-Za-z_$][\w$]*\s*=\s*$resourceLocationExpression\s*\(\s*([^,\r\n]+?)\s*,\s*"textures/gui/menu/([^"]+?)\.png"\s*\)\s*;"""
         )
 
-        sourceTexts.values.forEach { source ->
-            if (!source.contains("com.aetherteam.nitrogen.integration.") ||
-                !source.contains("categories.fuel.AbstractFuelCategory")) {
+        commentMaskedSources.values.forEach { source ->
+            if (!containsNitrogenFuelCategoryApiUse(source)) {
                 return@forEach
             }
             texturePattern.findAll(source).forEach { match ->
@@ -3151,6 +3151,23 @@ class ResourceMigrationPass(
             }
         }
         return specs
+    }
+
+    private fun containsNitrogenFuelCategoryApiUse(source: String): Boolean {
+        val code = maskJavaCommentsAndLiterals(source)
+        return containsNitrogenFuelCategoryApiUse(code, "jei") ||
+            containsNitrogenFuelCategoryApiUse(code, "rei")
+    }
+
+    private fun containsNitrogenFuelCategoryApiUse(code: String, integration: String): Boolean {
+        val fqType =
+            """com\.aetherteam\.nitrogen\.integration\.${Regex.escape(integration)}\.categories\.fuel\.AbstractFuelCategory"""
+        val hasImport = Regex("""(?m)^\s*import\s+$fqType\s*;""").containsMatchIn(code)
+        val simpleTypeUse = Regex("""\bextends\s+AbstractFuelCategory\b|\bnew\s+AbstractFuelCategory\s*\(""")
+            .containsMatchIn(code)
+        val qualifiedTypeUse = Regex("""\bextends\s+$fqType\b|\bnew\s+$fqType\s*\(""")
+            .containsMatchIn(code)
+        return qualifiedTypeUse || (hasImport && simpleTypeUse)
     }
 
     private fun collectJavaStringConstants(sources: Iterable<String>): Map<String, String> {
@@ -3189,6 +3206,66 @@ class ResourceMigrationPass(
             return trimmed.trim('"')
         }
         return constants[trimmed]
+    }
+
+    private fun maskJavaComments(source: String): String {
+        val chars = source.toCharArray()
+        var index = 0
+        while (index < chars.size) {
+            when {
+                index + 1 < chars.size && chars[index] == '/' && chars[index + 1] == '/' -> {
+                    chars[index] = ' '
+                    chars[index + 1] = ' '
+                    index += 2
+                    while (index < chars.size && chars[index] != '\n' && chars[index] != '\r') {
+                        chars[index++] = ' '
+                    }
+                }
+                index + 1 < chars.size && chars[index] == '/' && chars[index + 1] == '*' -> {
+                    chars[index] = ' '
+                    chars[index + 1] = ' '
+                    index += 2
+                    while (index + 1 < chars.size && !(chars[index] == '*' && chars[index + 1] == '/')) {
+                        if (chars[index] != '\n' && chars[index] != '\r') chars[index] = ' '
+                        index++
+                    }
+                    if (index + 1 < chars.size) {
+                        chars[index] = ' '
+                        chars[index + 1] = ' '
+                        index += 2
+                    }
+                }
+                else -> index++
+            }
+        }
+        return String(chars)
+    }
+
+    private fun maskJavaCommentsAndLiterals(source: String): String {
+        val chars = maskJavaComments(source).toCharArray()
+        var index = 0
+        while (index < chars.size) {
+            if (chars[index] == '"' || chars[index] == '\'') {
+                val quote = chars[index]
+                chars[index++] = ' '
+                var escaped = false
+                while (index < chars.size) {
+                    val current = chars[index]
+                    if (current != '\n' && current != '\r') chars[index] = ' '
+                    index++
+                    if (escaped) {
+                        escaped = false
+                    } else if (current == '\\') {
+                        escaped = true
+                    } else if (current == quote) {
+                        break
+                    }
+                }
+            } else {
+                index++
+            }
+        }
+        return String(chars)
     }
 
     private fun cropNitrogenFuelSprite(

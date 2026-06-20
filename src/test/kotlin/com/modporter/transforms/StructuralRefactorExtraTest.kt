@@ -20589,6 +20589,61 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `Nitrogen fuel category migration ignores comments and strings without API type use`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleNotes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleNotes {
+                public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath("example", "textures/gui/menu/altar.png");
+                String note = "import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory; class Fake extends AbstractFuelCategory { ResourceLocation getTexture() { return TEXTURE; } }";
+                // import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory;
+                // class FakeFuelCategory extends AbstractFuelCategory {
+                //   ResourceLocation getTexture() { return TEXTURE; }
+                // }
+
+                public ResourceLocation getTexture() {
+                    return TEXTURE;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val source = srcDir.resolve("ExampleNotes.java").readText()
+        assertFalse(source.contains("MODPORTER_NITROGEN_FUEL"), source)
+        assertTrue(source.contains("public ResourceLocation getTexture()"), source)
+        assertFalse(source.contains("getBackgroundTexture()"), source)
+    }
+
+    @Test
+    fun `Nitrogen fuel category migration ignores commented texture and method members`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleFuelCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleFuelCategory extends AbstractFuelCategory {
+                // public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath("example", "textures/gui/menu/altar.png");
+                // public ResourceLocation getTexture() { return TEXTURE; }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val source = srcDir.resolve("ExampleFuelCategory.java").readText()
+        assertFalse(source.contains("MODPORTER_NITROGEN_FUEL"), source)
+        assertFalse(source.contains("getBackgroundTexture()"), source)
+        assertFalse(source.contains("getIconTexture()"), source)
+    }
+
+    @Test
     fun `migrates legacy projectile weapon continuous fire into projectile weapon hooks`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
