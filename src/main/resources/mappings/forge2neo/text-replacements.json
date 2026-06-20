@@ -2919,22 +2919,6 @@
       "isRegex": true
     },
     {
-      "id": "import-Registries-add-ResourceLocation",
-      "pattern": "import net.minecraft.core.registries.Registries;\\r?\\n(?!import net.minecraft.resources.ResourceLocation;)",
-      "replacement": "import net.minecraft.core.registries.Registries;\nimport net.minecraft.resources.ResourceLocation;\n",
-      "description": "Add ResourceLocation import alongside Registries (needed for register() migration)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "recipe-registerevent-register-string",
-      "pattern": "registry\\.register\\(\"(\\w+)\",",
-      "replacement": "registry.register(ResourceLocation.parse(\"$1\"),",
-      "description": "RegisterEvent registry.register(String, obj) -> registry.register(ResourceLocation.parse(String), obj); unqualified ids remain visible to compile/runtime gates",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "container-loadAllItems-provider",
       "pattern": "ContainerHelper\\.loadAllItems\\(([^,\\r\\n]+),\\s*([^;\\r\\n]+)\\)",
       "replacement": "ContainerHelper.loadAllItems($1, $2, net.minecraft.core.RegistryAccess.EMPTY)",

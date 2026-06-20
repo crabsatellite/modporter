@@ -3712,7 +3712,6 @@ class BuildSystemTest {
 
             import com.example.ExampleMod;
             import net.minecraft.core.registries.Registries;
-            import net.minecraft.resources.ResourceLocation;
             import net.neoforged.bus.api.SubscribeEvent;
             import net.neoforged.fml.common.Mod.EventBusSubscriber;
             import net.neoforged.neoforge.registries.RegisterEvent;
@@ -3722,7 +3721,8 @@ class BuildSystemTest {
                 @SubscribeEvent
                 public static void registerRecipeSerializers(RegisterEvent event) {
                     event.register(Registries.RECIPE_SERIALIZER, registry -> {
-                        registry.register(ResourceLocation.parse("wand_upgrade"), RecipeWandUpgrade.SERIALIZER);
+                        registry.register("wand_upgrade", RecipeWandUpgrade.SERIALIZER);
+                        registry.register("example:qualified_upgrade", QualifiedUpgrade.SERIALIZER);
                     });
                 }
             }
@@ -3732,8 +3732,47 @@ class BuildSystemTest {
         val content = itemDir.resolve("ModItems.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "build-registerevent-resource-location-namespace" })
+        assertTrue(content.contains("import net.minecraft.resources.ResourceLocation;"))
         assertTrue(content.contains("""registry.register(ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "wand_upgrade"), RecipeWandUpgrade.SERIALIZER);"""))
+        assertTrue(content.contains("""registry.register(ResourceLocation.parse("example:qualified_upgrade"), QualifiedUpgrade.SERIALIZER);"""))
         assertFalse(content.contains("""ResourceLocation.parse("wand_upgrade")"""))
+        assertFalse(content.contains("""registry.register("wand_upgrade""""))
+    }
+
+    @Test
+    fun `register event string ids are not namespaced without source mod id evidence`() {
+        val projectDir = tempDir.resolve("p19-registerevent-location-no-modid")
+        val itemDir = projectDir.resolve("src/main/java/com/example/items")
+        itemDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        itemDir.resolve("ModItems.java").writeText("""
+            package com.example.items;
+
+            import net.minecraft.core.registries.Registries;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.registries.RegisterEvent;
+
+            public class ModItems {
+                @SubscribeEvent
+                public static void registerRecipeSerializers(RegisterEvent event) {
+                    event.register(Registries.RECIPE_SERIALIZER, registry -> {
+                        registry.register("wand_upgrade", RecipeWandUpgrade.SERIALIZER);
+                    });
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = itemDir.resolve("ModItems.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "build-registerevent-resource-location-namespace" })
+        assertTrue(content.contains("""registry.register("wand_upgrade", RecipeWandUpgrade.SERIALIZER);"""))
+        assertFalse(content.contains("minecraft:wand_upgrade"))
+        assertFalse(content.contains("ResourceLocation.fromNamespaceAndPath"))
     }
 
     @Test

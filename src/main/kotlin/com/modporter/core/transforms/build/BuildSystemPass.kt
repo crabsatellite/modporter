@@ -5032,42 +5032,65 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val original = javaFile.readText()
-                if (!original.contains("registry.register(ResourceLocation.parse(")) return@forEach
+                if (!original.contains("RegisterEvent") ||
+                    (!original.contains("registry.register(ResourceLocation.parse(") &&
+                        !Regex("""registry\.register\(\s*"[A-Za-z0-9_./:-]+"\s*,""").containsMatchIn(original))) {
+                    return@forEach
+                }
 
-                val modIdExpr = Regex("""@EventBusSubscriber\s*\([^)]*\bmodid\s*=\s*([^,)]+)""")
-                    .find(original)
-                    ?.groupValues
-                    ?.get(1)
-                    ?.trim()
-                    ?: Regex("""@Mod\s*\(\s*([^)]+?)\s*\)""")
+                var resolvedModIdExpr: String? = null
+                fun sourceModIdExpr(): String? {
+                    resolvedModIdExpr?.let { return it }
+                    val detected = Regex("""@EventBusSubscriber\s*\([^)]*\bmodid\s*=\s*([^,)]+)""")
                         .find(original)
                         ?.groupValues
                         ?.get(1)
                         ?.trim()
-                    ?: Regex("""(?:public\s+)?(?:static\s+)?final\s+String\s+(?:MODID|MOD_ID)\s*=\s*"([^"]+)"""")
-                        .find(original)
-                        ?.groupValues
-                        ?.get(1)
-                        ?.let { "\"$it\"" }
-                    ?: detectModId(projectDir)?.let { "\"$it\"" }
-                    ?: return@forEach
+                        ?: Regex("""@Mod\s*\(\s*([^)]+?)\s*\)""")
+                            .find(original)
+                            ?.groupValues
+                            ?.get(1)
+                            ?.trim()
+                        ?: Regex("""(?:public\s+)?(?:static\s+)?final\s+String\s+(?:MODID|MOD_ID)\s*=\s*"([^"]+)"""")
+                            .find(original)
+                            ?.groupValues
+                            ?.get(1)
+                            ?.let { "\"$it\"" }
+                        ?: detectModId(projectDir)?.let { "\"$it\"" }
+                    resolvedModIdExpr = detected
+                    return detected
+                }
 
-                val modified = Regex("""registry\.register\(\s*ResourceLocation\.parse\("([A-Za-z0-9_./-]+)"\)\s*,""")
+                var modified = Regex("""registry\.register\(\s*ResourceLocation\.parse\("([A-Za-z0-9_./:-]+)"\)\s*,""")
                     .replace(original) { match ->
                         val path = match.groupValues[1]
                         if (path.contains(":")) {
                             match.value
                         } else {
-                            """registry.register(ResourceLocation.fromNamespaceAndPath($modIdExpr, "$path"),"""
+                            sourceModIdExpr()
+                                ?.let { modIdExpr -> """registry.register(ResourceLocation.fromNamespaceAndPath($modIdExpr, "$path"),""" }
+                                ?: match.value
+                        }
+                    }
+                modified = Regex("""registry\.register\(\s*"([A-Za-z0-9_./:-]+)"\s*,""")
+                    .replace(modified) { match ->
+                        val id = match.groupValues[1]
+                        if (id.contains(":")) {
+                            """registry.register(ResourceLocation.parse("$id"),"""
+                        } else {
+                            sourceModIdExpr()
+                                ?.let { modIdExpr -> """registry.register(ResourceLocation.fromNamespaceAndPath($modIdExpr, "$id"),""" }
+                                ?: match.value
                         }
                     }
 
                 if (modified != original) {
+                    modified = ensureJavaImport(modified, "net.minecraft.resources.ResourceLocation")
                     changes.add(Change(
                         file = javaFile,
                         line = 1,
                         description = "Namespace RegisterEvent resource location IDs with the current mod id",
-                        before = "registry.register(ResourceLocation.parse(\"name\"), ...)",
+                        before = "registry.register(\"name\", ...) or registry.register(ResourceLocation.parse(\"name\"), ...)",
                         after = "registry.register(ResourceLocation.fromNamespaceAndPath(MODID, \"name\"), ...)",
                         confidence = Confidence.HIGH,
                         ruleId = "build-registerevent-resource-location-namespace"

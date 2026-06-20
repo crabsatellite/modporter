@@ -77,6 +77,23 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `text replacements do not migrate register event string ids without source structure`() {
+        val db = MappingDatabase.loadDefault()
+        val offenders = db.getTextReplacements()
+            .filter { rule ->
+                rule.pattern.contains("registry") &&
+                    rule.pattern.contains("register") &&
+                    (rule.pattern.contains("\"") || rule.replacement.contains("ResourceLocation.parse"))
+            }
+            .map { it.id }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "RegisterEvent string-id migration needs source-derived mod id structure and must not be a text replacement: $offenders"
+        )
+    }
+
+    @Test
     fun `text replacements do not rewrite untyped getTag calls`() {
         val db = MappingDatabase.loadDefault()
         val offenders = db.getTextReplacements()
