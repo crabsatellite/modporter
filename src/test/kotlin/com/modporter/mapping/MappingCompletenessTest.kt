@@ -767,6 +767,72 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `season helper reflection migration uses masked method local evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun rewriteSeasonStateReflectionWithoutReflection")
+        assertTrue(start >= 0, "rewriteSeasonStateReflectionWithoutReflection is missing")
+        val end = source.indexOf("private fun removeRedundantClassForNameOnClassObjects", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw source getSeasonState scan" to """source.contains("getSeasonState")""",
+            "raw source getSubSeason scan" to """source.contains("getSubSeason")""",
+            "raw source Class.forName scan" to """source.contains("Class.forName(")""",
+            "raw method body Class.forName scan" to """source.substring(openBrace + 1, closeBrace).contains("Class.forName(")""",
+            "raw resolve body extraction" to """val resolveBody = source.substring(resolveOpenBrace + 1, resolveCloseBrace)"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "SeasonHelper reflection migration contains $label" }
+
+        assertTrue(
+            body.contains("val code = maskJavaComments(source)") &&
+                body.contains("findAll(code)") &&
+                body.contains("val methodBody = code.substring(openBrace + 1, closeBrace)") &&
+                body.contains("val resolveBody = code.substring(resolveOpenBrace + 1, resolveCloseBrace)") &&
+                body.contains("methodBody.contains(\"Class.forName(\")") &&
+                body.contains("methodBody.contains(\"getSeasonState\")"),
+            "SeasonHelper reflection migration must prove the Class.forName/getMethod flow from executable method-local code"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "SeasonHelper reflection migration must not use raw source or raw method text as evidence: $offenders"
+        )
+    }
+
+    @Test
+    fun `reflected optional dependency scan ignores comments`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun reflectedBinaryClassNames")
+        assertTrue(start >= 0, "reflectedBinaryClassNames is missing")
+        val end = source.indexOf("private fun insertDependencies", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw file text scan" to """pattern.findAll(javaFile.readText())"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "reflected optional dependency scan contains $label" }
+
+        assertTrue(
+            body.contains("val code = maskJavaComments(javaFile.readText())") &&
+                body.contains("pattern.findAll(code)"),
+            "Reflected optional dependency collection must ignore comments when scanning Class.forName references"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Reflected optional dependency collection must not use raw Java text as evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `required access transformer collection uses typed source evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

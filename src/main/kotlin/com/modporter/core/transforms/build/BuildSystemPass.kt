@@ -2270,27 +2270,28 @@ $header
     }
 
     private fun rewriteSeasonStateReflectionWithoutReflection(source: String): String {
-        if (!source.contains("getSeasonState") ||
-            !source.contains("getSubSeason") ||
-            !source.contains("Class.forName(")) {
+        val code = maskJavaComments(source)
+        if (!code.contains("getSeasonState") ||
+            !code.contains("getSubSeason") ||
+            !code.contains("Class.forName(")) {
             return source
         }
 
         val resolveMethodMatch = Regex("""private\s+static\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{""")
-            .findAll(source)
+            .findAll(code)
             .firstOrNull { match ->
-                val openBrace = source.indexOf('{', match.range.first)
-                val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
-                closeBrace > openBrace &&
-                    source.substring(openBrace + 1, closeBrace).contains("Class.forName(") &&
-                    source.substring(openBrace + 1, closeBrace).contains("getSeasonState")
+                val openBrace = code.indexOf('{', match.range.first)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(code, openBrace) else -1
+                if (closeBrace <= openBrace) return@firstOrNull false
+                val methodBody = code.substring(openBrace + 1, closeBrace)
+                methodBody.contains("Class.forName(") && methodBody.contains("getSeasonState")
             }
             ?: return source
-        val resolveOpenBrace = source.indexOf('{', resolveMethodMatch.range.first)
-        val resolveCloseBrace = if (resolveOpenBrace >= 0) findMatchingBrace(source, resolveOpenBrace) else -1
+        val resolveOpenBrace = code.indexOf('{', resolveMethodMatch.range.first)
+        val resolveCloseBrace = if (resolveOpenBrace >= 0) findMatchingBrace(code, resolveOpenBrace) else -1
         if (resolveCloseBrace <= resolveOpenBrace) return source
         val resolveMethodName = resolveMethodMatch.groupValues[1]
-        val resolveBody = source.substring(resolveOpenBrace + 1, resolveCloseBrace)
+        val resolveBody = code.substring(resolveOpenBrace + 1, resolveCloseBrace)
 
         val helperMatch = Regex("""Class<\?>\s+[A-Za-z_$][\w$]*\s*=\s*Class\.forName\(\s*"([^"]+)"\s*\)\s*;\s*([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\.getMethod\(\s*"getSeasonState"\s*,\s*Level\.class\s*\)""")
             .find(resolveBody)
@@ -4503,7 +4504,8 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         java.nio.file.Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
-                pattern.findAll(javaFile.readText()).forEach { match ->
+                val code = maskJavaComments(javaFile.readText())
+                pattern.findAll(code).forEach { match ->
                     names.add(match.groupValues[1])
                 }
             }

@@ -1228,6 +1228,39 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `reflected optional API dependency scan ignores comments`() {
+        val projectDir = tempDir.resolve("reflected-optional-api-comment")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            dependencies {
+                implementation "com.example:kept:1.0.0"
+            }
+        """.trimIndent())
+        srcDir.resolve("SeasonCompat.java").writeText("""
+            package com.example;
+
+            public class SeasonCompat {
+                void resolve() {
+                    // Class.forName("sereneseasons.api.season.SeasonHelper");
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-reflected-optional-api-dependencies" })
+        assertFalse(content.contains("serene-seasons"), content)
+        assertFalse(content.contains("cursemaven"), content)
+    }
+
+    @Test
     fun `rewrites class for name isInstance checks without member reflection`() {
         val projectDir = tempDir.resolve("class-for-name-isinstance")
         val srcDir = projectDir.resolve("src/main/java/com/example")
@@ -1392,6 +1425,53 @@ class BuildSystemTest {
         assertFalse(content.contains(".getMethod("))
         assertFalse(content.contains("java.lang.reflect.Method"))
         assertFalse(content.contains(".invoke("))
+    }
+
+    @Test
+    fun `season helper reflection migration ignores commented reflection flow`() {
+        val projectDir = tempDir.resolve("season-helper-comment")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            dependencies {
+            }
+        """.trimIndent())
+        srcDir.resolve("SeasonCompat.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.Level;
+
+            public class SeasonCompat {
+                public enum WinterSubSeason { NONE, EARLY, MID, LATE }
+
+                private static void resolveSeasonApi() {
+                    // Class<?> seasonHelper = Class.forName("sereneseasons.api.season.SeasonHelper");
+                    // seasonHelperGetState = seasonHelper.getMethod("getSeasonState", Level.class);
+                    // Class<?> iSeasonState = Class.forName("sereneseasons.api.season.ISeasonState");
+                    // seasonStateGetSubSeason = iSeasonState.getMethod("getSubSeason");
+                    // Class<?> subSeason = Class.forName("sereneseasons.api.season.Season${'$'}SubSeason");
+                    // subSeasonName = subSeason.getMethod("name");
+                }
+
+                public static WinterSubSeason getWinterSubSeason(Level level) {
+                    return WinterSubSeason.NONE;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("SeasonCompat.java").readText()
+        val build = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertFalse(result.changes.any { it.ruleId == "build-reflected-optional-api-dependencies" })
+        assertFalse(content.contains("SeasonHelper.getSeasonState"), content)
+        assertFalse(build.contains("serene-seasons"), build)
     }
 
     @Test
