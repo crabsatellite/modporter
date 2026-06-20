@@ -621,6 +621,38 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `build mod id helpers do not scan arbitrary constant references`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val helpers = listOf(
+            "inferModIdExpression",
+            "detectWorldCarverModIdExpression"
+        )
+        val forbidden = listOf(
+            "prefix owner namespace shortcut" to ".prefix\\(",
+            "arbitrary MODID constant alternation" to "(MOD_ID|MODID|ID)",
+            "arbitrary ID constant alternation" to "(ID|MOD_ID|MODID)"
+        )
+
+        val offenders = helpers.flatMap { helper ->
+            val start = source.indexOf("private fun $helper")
+            if (start < 0) return@flatMap listOf("$helper is missing")
+            val end = source.indexOf("\n    private fun ", start + 1).let { if (it < 0) source.length else it }
+            val body = source.substring(start, end)
+            forbidden
+                .filter { (_, marker) -> body.contains(marker) }
+                .map { (label, _) -> "$helper contains $label" }
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Build-system mod id helpers must use @Mod, subscriber modid, or project metadata, not arbitrary constant references: $offenders"
+        )
+    }
+
+    @Test
     fun `default migration surfaces do not retreat to manual handling`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val scannedRoots = listOf(

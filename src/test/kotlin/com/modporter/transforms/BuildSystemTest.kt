@@ -3424,6 +3424,16 @@ class BuildSystemTest {
                 }
             }
         """.trimIndent())
+        projectDir.resolve("src/main/java/com/example/ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
 
         val result = pass.apply(projectDir)
         val recipe = dataDir.resolve("ExampleRecipeProvider.java").readText()
@@ -3433,7 +3443,7 @@ class BuildSystemTest {
 
         assertTrue(result.changes.any { it.ruleId == "build-datagen-api-121" })
         assertTrue(recipe.contains("public ExampleRecipeProvider(PackOutput packOutput, CompletableFuture<HolderLookup.Provider> lookupProvider)"))
-        assertTrue(recipe.contains("super(packOutput, ExampleMod.MODID, lookupProvider);"))
+        assertTrue(recipe.contains("super(packOutput, com.example.ExampleMod.MODID, lookupProvider);"))
         assertTrue(lootTable.contains("public ExampleLootTableProvider(PackOutput packOutput, CompletableFuture<HolderLookup.Provider> lookupProvider)"))
         assertTrue(lootTable.contains("lookupProvider"))
         assertTrue(lootModifier.contains("public ExampleLootModifierProvider(PackOutput output, CompletableFuture<HolderLookup.Provider> lookupProvider, String modid)"))
@@ -3562,6 +3572,61 @@ class BuildSystemTest {
         assertTrue(recipe.contains("CompletableFuture<HolderLookup.Provider> lookupProvider"))
         assertTrue(recipe.contains("super(packOutput, \"examplemod\", lookupProvider);"))
         assertTrue(modData.contains("new ExampleRecipeProvider(packOutput, event.getLookupProvider())"))
+    }
+
+    @Test
+    fun `mmlib recipe provider does not derive mod id from unrelated constants`() {
+        val projectDir = tempDir.resolve("p19-mmlib-datagen-unrelated-modid")
+        val dataDir = projectDir.resolve("src/main/java/com/example/data")
+        dataDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        dataDir.resolve("ExampleRecipeProvider.java").writeText("""
+            package com.example.data;
+
+            import cn.mcmod_mmf.mmlib.data.AbstractRecipeProvider;
+            import com.dependency.DependencyMod;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.recipes.RecipeOutput;
+
+            public class ExampleRecipeProvider extends AbstractRecipeProvider {
+                public ExampleRecipeProvider(PackOutput packOutput) {
+                    super(packOutput);
+                }
+
+                protected void buildRecipes(RecipeOutput output) {
+                    save(output, DependencyMod.MODID);
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("ModData.java").writeText("""
+            package com.example.data;
+
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class ModData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput packOutput = generator.getPackOutput();
+                    generator.addProvider(true, new ExampleRecipeProvider(packOutput));
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val recipe = dataDir.resolve("ExampleRecipeProvider.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive mod id for AbstractRecipeProvider ExampleRecipeProvider") },
+            "Expected hard migration error, got: ${result.errors}"
+        )
+        assertFalse(recipe.contains("DependencyMod.MODID, lookupProvider"))
+        assertTrue(recipe.contains("super(packOutput);"))
     }
 
     @Test
@@ -3861,6 +3926,42 @@ class BuildSystemTest {
         assertFalse(carvers.contains("@SubscribeEvent"))
         assertTrue(mod.contains("com.example.init.ExampleCarvers.CARVER_TYPES.register(modbus);"))
         assertFalse(mod.contains("ExampleCarvers::register"))
+    }
+
+    @Test
+    fun `world carver migration does not derive mod id from unrelated constants`() {
+        val projectDir = tempDir.resolve("p19-world-carvers-unrelated-modid")
+        val initDir = projectDir.resolve("src/main/java/com/example/init")
+        initDir.createDirectories()
+        initDir.resolve("ExampleCarvers.java").writeText("""
+            package com.example.init;
+
+            import com.dependency.DependencyMod;
+            import com.example.world.ExampleCavesCarver;
+            import net.minecraft.world.level.levelgen.carver.CaveCarverConfiguration;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.registries.ForgeRegistries;
+            import net.neoforged.neoforge.registries.RegisterEvent;
+
+            public class ExampleCarvers {
+                public static final ExampleCavesCarver EXAMPLE_CAVES = new ExampleCavesCarver(CaveCarverConfiguration.CODEC, false);
+
+                @SubscribeEvent
+                public static void register(RegisterEvent evt) {
+                    evt.register(ForgeRegistries.Keys.WORLD_CARVERS, helper -> helper.register(DependencyMod.prefix("example_caves"), EXAMPLE_CAVES));
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val carvers = initDir.resolve("ExampleCarvers.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive mod id for world carver registration") },
+            "Expected hard migration error, got: ${result.errors}"
+        )
+        assertFalse(carvers.contains("DeferredRegister<WorldCarver<?>> CARVER_TYPES"))
+        assertTrue(carvers.contains("DependencyMod.prefix(\"example_caves\")"))
     }
 
     @Test

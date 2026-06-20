@@ -3919,18 +3919,6 @@ $body
             ?.takeIf { it.isNotBlank() }
             ?.let { return it }
 
-        Regex("\\b([A-Za-z_$][\\w$]*)\\.prefix\\(\\s*\"")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
-            ?.takeIf { it.isNotBlank() }
-            ?.let { return "$it.ID" }
-
-        Regex("""\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.(ID|MOD_ID|MODID)\b""")
-            .find(source)
-            ?.value
-            ?.let { return it }
-
         return projectModIdExpression(projectDir)
     }
 
@@ -4754,30 +4742,75 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
     }
 
     private fun inferModIdExpression(source: String, projectDir: Path): String? {
-        Regex("""\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.(MOD_ID|MODID|ID)\b""")
-            .find(source)
-            ?.value
-            ?.let { return it }
-
-        Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)""")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
-            ?.let { return "\"$it\"" }
-
-        Regex("""@Mod\s*\(\s*([^)]+?)\s*\)""")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?.let { return it }
+        modIdExpressionFromModClass(source, className = null, packageName = null)?.let { return it }
 
         return projectModIdExpression(projectDir)
     }
 
     private fun projectModIdExpression(projectDir: Path): String? =
-        detectUniqueProjectModId(projectDir)?.let(::javaStringLiteral)
+        projectModAnnotationExpression(projectDir)
+            ?: detectUniqueProjectModId(projectDir)?.let(::javaStringLiteral)
+
+    private fun projectModAnnotationExpression(projectDir: Path): String? {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return null
+        val javaFiles = java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .toList()
+        val expressions = javaFiles
+            .mapNotNull { file ->
+                val source = file.readText()
+                val className = file.fileName.toString().removeSuffix(".java")
+                val packageName = Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+                    .find(source)
+                    ?.groupValues
+                    ?.get(1)
+                modIdExpressionFromModClass(source, className, packageName)
+            }
+            .distinct()
+            .toList()
+        return expressions.singleOrNull()
+    }
+
+    private fun modIdExpressionFromModClass(source: String, className: String?, packageName: String?): String? {
+        val rawArgument = Regex("""@Mod\s*\(\s*([^)]+?)\s*\)""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
+            ?: return null
+        val argument = Regex("""(?:value\s*=\s*)?(.+)""")
+            .matchEntire(rawArgument)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
+            ?: return null
+        if (argument.isBlank() || argument.any { it == ';' || it == '{' || it == '}' || it == '\n' || it == '\r' }) {
+            return null
+        }
+        Regex(""""([^"]+)"""").matchEntire(argument)?.let { literal ->
+            return javaStringLiteral(literal.groupValues[1])
+        }
+
+        val localClassName = className ?: Regex("""(?m)\bclass\s+([A-Za-z_$][\w$]*)\b""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+        val constantName = when {
+            Regex("""[A-Za-z_$][\w$]*""").matches(argument) -> argument
+            localClassName != null -> Regex("""${Regex.escape(localClassName)}\.([A-Za-z_$][\w$]*)""")
+                .matchEntire(argument)
+                ?.groupValues
+                ?.get(1)
+            else -> null
+        } ?: return null
+        findJavaStringConstant(source, constantName) ?: return null
+        val owner = listOfNotNull(packageName?.takeIf { it.isNotBlank() }, localClassName)
+            .joinToString(".")
+            .takeIf { it.isNotBlank() }
+            ?: return null
+        return "$owner.$constantName"
+    }
 
     private fun detectUniqueProjectModId(projectDir: Path): String? {
         val candidates = linkedSetOf<String>()
