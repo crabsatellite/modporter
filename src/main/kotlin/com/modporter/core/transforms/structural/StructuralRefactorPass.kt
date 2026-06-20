@@ -236,6 +236,15 @@ class StructuralRefactorPass : Pass {
             errors.add("Block entity capability migration error: ${e.message}")
         }
 
+        // Rewrite legacy capability lookups through source-declared facade
+        // get(Player) methods before the facade itself is converted.
+        try {
+            val capabilityFacadeLookupChanges = migrateLegacyCapabilityFacadeLookups(projectDir, dryRun)
+            changes.addAll(capabilityFacadeLookupChanges)
+        } catch (e: Exception) {
+            errors.add("Legacy capability facade lookup migration error: ${e.message}")
+        }
+
         // Migrate legacy player capability facades to NeoForge attachments.
         try {
             val capabilityFacadeChanges = migrateLegacyCapabilityFacadeToAttachment(projectDir, dryRun)
@@ -7275,6 +7284,201 @@ $registrations
         val attachmentClassName: String,
         val attachmentPath: String
     )
+
+    private data class LegacyCapabilityFacadeLookupSpec(
+        val file: Path,
+        val packageName: String,
+        val className: String,
+        val dataType: String,
+        val fieldName: String
+    ) {
+        val qualifiedClassName: String
+            get() = if (packageName.isBlank()) className else "$packageName.$className"
+    }
+
+    private fun migrateLegacyCapabilityFacadeLookups(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        val lookupSpecs = collectLegacyCapabilityFacadeLookupSpecs(javaFiles)
+        if (lookupSpecs.isEmpty()) return changes
+
+        for (javaFile in javaFiles) {
+            val original = javaFile.readText()
+            val sourcePackage = packageNameOf(original)
+            val applicableSpecs = lookupSpecs.filter { it.file != javaFile }
+            if (applicableSpecs.isEmpty()) continue
+            val migrated = migrateLegacyCapabilityFacadeLookupsSource(original, sourcePackage, applicableSpecs)
+            if (migrated == original) continue
+            if (!dryRun) {
+                javaFile.writeText(migrated)
+            }
+            changes.add(Change(
+                file = javaFile,
+                line = lineNumberAt(original, Regex("""\bgetCapability\s*\(""").find(original)?.range?.first ?: 0),
+                description = "Rewrite legacy capability lookup through its source-declared facade getter",
+                before = "LazyOptional.ofNullable(player.getCapability(Facade.FIELD)).ifPresent(...)",
+                after = "Facade.get(player).ifPresent(...)",
+                confidence = Confidence.HIGH,
+                ruleId = "struct-legacy-capability-facade-lookup"
+            ))
+        }
+
+        return changes
+    }
+
+    private fun collectLegacyCapabilityFacadeLookupSpecs(javaFiles: List<Path>): List<LegacyCapabilityFacadeLookupSpec> {
+        val specs = mutableListOf<LegacyCapabilityFacadeLookupSpec>()
+        for (javaFile in javaFiles) {
+            legacyCapabilityFacadeSpec(javaFile)?.let { spec ->
+                specs.add(
+                    LegacyCapabilityFacadeLookupSpec(
+                        file = spec.file,
+                        packageName = spec.packageName,
+                        className = spec.className,
+                        dataType = spec.dataType,
+                        fieldName = spec.fieldName
+                    )
+                )
+            }
+            specs.addAll(legacyCapabilityFacadeLookupSpecs(javaFile))
+        }
+        return specs.distinctBy { "${it.qualifiedClassName}.${it.fieldName}" }
+    }
+
+    private fun legacyCapabilityFacadeLookupSpecs(file: Path): List<LegacyCapabilityFacadeLookupSpec> {
+        val source = file.readText()
+        if (!source.contains("LazyOptional") || !source.contains("Player") || !source.contains(" get(")) {
+            return emptyList()
+        }
+        val className = classNameOfJavaSource(source) ?: return emptyList()
+        val packageName = packageNameOf(source)
+        val typeRef = """[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*"""
+        val getterDataTypes = Regex(
+            """(?:public|protected|private)?\s*static\s+(?:$typeRef\.)?LazyOptional\s*<\s*($typeRef)\s*>\s+get\s*\(\s*(?:$typeRef\.)?Player\s+[A-Za-z_$][\w$]*\s*\)"""
+        )
+            .findAll(source)
+            .map { it.groupValues[1].substringAfterLast('.') }
+            .toSet()
+        if (getterDataTypes.isEmpty()) return emptyList()
+
+        return getterDataTypes.flatMap { dataType ->
+            val typedFields = Regex(
+                """(?m)\b(?:public|protected|private)?\s*static\s+(?:final\s+)?(?:$typeRef\.)?Capability\s*<\s*(?:$typeRef\.)?${Regex.escape(dataType)}\s*>\s+([A-Z_$][A-Z0-9_$]*)\b"""
+            )
+                .findAll(source)
+                .map { it.groupValues[1] }
+                .toSet()
+            val objectFields = Regex(
+                """(?m)\b(?:public|protected|private)?\s*static\s+final\s+Object\s+([A-Z_$][A-Z0-9_$]*)\b"""
+            )
+                .findAll(source)
+                .map { it.groupValues[1] }
+                .toSet()
+            val fields = when {
+                typedFields.isNotEmpty() -> typedFields
+                objectFields.size == 1 -> objectFields
+                else -> emptySet()
+            }
+            fields.map { fieldName ->
+                LegacyCapabilityFacadeLookupSpec(
+                    file = file,
+                    packageName = packageName,
+                    className = className,
+                    dataType = dataType,
+                    fieldName = fieldName
+                )
+            }
+        }
+    }
+
+    private fun migrateLegacyCapabilityFacadeLookupsSource(
+        source: String,
+        sourcePackage: String,
+        specs: List<LegacyCapabilityFacadeLookupSpec>
+    ): String {
+        var result = source
+        for (spec in specs) {
+            val referencePattern = legacyCapabilityFacadeReferencePattern(source, sourcePackage, spec) ?: continue
+            result = migrateLegacyCapabilityFacadeLookupSource(result, referencePattern, spec.fieldName)
+        }
+        return if (result != source) {
+            removeUnusedImportsBySimpleNamePattern(result, Regex("""LazyOptional"""))
+        } else {
+            source
+        }
+    }
+
+    private fun legacyCapabilityFacadeReferencePattern(
+        source: String,
+        sourcePackage: String,
+        spec: LegacyCapabilityFacadeLookupSpec
+    ): String? {
+        val qualified = Regex.escape(spec.qualifiedClassName)
+        val simple = Regex.escape(spec.className)
+        val canUseSimpleName = sourcePackage == spec.packageName ||
+            Regex("""(?m)^[ \t]*import\s+${Regex.escape(spec.qualifiedClassName)};\s*$""").containsMatchIn(source) ||
+            (spec.packageName.isNotBlank() &&
+                Regex("""(?m)^[ \t]*import\s+${Regex.escape(spec.packageName)}\.\*;\s*$""").containsMatchIn(source))
+        val usesQualifiedName = Regex("""(?<![.\w$])$qualified\s*\.""").containsMatchIn(source)
+        return when {
+            canUseSimpleName && usesQualifiedName -> """(?:$qualified|$simple)"""
+            canUseSimpleName -> simple
+            usesQualifiedName -> qualified
+            else -> null
+        }
+    }
+
+    private fun migrateLegacyCapabilityFacadeLookupSource(
+        source: String,
+        facadeReferencePattern: String,
+        fieldName: String
+    ): String {
+        val identifier = """[A-Za-z_$][\w$]*"""
+        val receiver = """$identifier(?:\s*\.\s*$identifier(?:\s*\([^()]*\))?)*"""
+        val lookup = """($receiver)\s*\.\s*getCapability\s*\(\s*($facadeReferencePattern)\s*\.\s*${Regex.escape(fieldName)}\s*(?:,\s*null\s*)?\)"""
+        val lazyOptional = """(?:$identifier(?:\s*\.\s*$identifier)*\s*\.\s*)?LazyOptional\s*\.\s*ofNullable"""
+        var result = source
+        result = Regex(
+            """$lazyOptional\s*\(\s*$lookup\s*\)\s*\.\s*ifPresent\s*\(\s*($identifier)\s*->\s*\{(.*?)\}\s*\)\s*;""",
+            RegexOption.DOT_MATCHES_ALL
+        ).replace(result) { match ->
+            val receiverExpression = match.groupValues[1].trim()
+            val facadeExpression = match.groupValues[2].trim()
+            val parameterName = match.groupValues[3].trim()
+            val body = match.groupValues[4]
+            "$facadeExpression.get($receiverExpression).ifPresent($parameterName -> {$body});"
+        }
+        result = Regex("""$lazyOptional\s*\(\s*$lookup\s*\)\s*\.\s*ifPresent\s*\(\s*([^;{}]+?)\s*\)\s*;""")
+            .replace(result) { match ->
+                val receiverExpression = match.groupValues[1].trim()
+                val facadeExpression = match.groupValues[2].trim()
+                val consumer = match.groupValues[3].trim()
+                "$facadeExpression.get($receiverExpression).ifPresent($consumer);"
+            }
+        result = Regex(
+            """$lookup\s*\.\s*ifPresent\s*\(\s*($identifier)\s*->\s*\{(.*?)\}\s*\)\s*;""",
+            RegexOption.DOT_MATCHES_ALL
+        ).replace(result) { match ->
+            val receiverExpression = match.groupValues[1].trim()
+            val facadeExpression = match.groupValues[2].trim()
+            val parameterName = match.groupValues[3].trim()
+            val body = match.groupValues[4]
+            "$facadeExpression.get($receiverExpression).ifPresent($parameterName -> {$body});"
+        }
+        result = Regex("""$lookup\s*\.\s*ifPresent\s*\(\s*([^;{}]+?)\s*\)\s*;""")
+            .replace(result) { match ->
+                val receiverExpression = match.groupValues[1].trim()
+                val facadeExpression = match.groupValues[2].trim()
+                val consumer = match.groupValues[3].trim()
+                "$facadeExpression.get($receiverExpression).ifPresent($consumer);"
+            }
+        return result
+    }
 
     private fun migrateLegacyCapabilityFacadeToAttachment(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
@@ -15231,23 +15435,6 @@ ${indent}}
                 result = addImportIfMissing(result, "javax.annotation.Nullable")
             }
             result = addImportIfMissing(result, "net.minecraft.world.entity.player.Player")
-        }
-
-        result = Regex("""(\w+)\.getCapability\(DirtinessCapability\.DIRTINESS\)\.ifPresent\(data\s*->\s*\{\s*(.*?)\s*\}\);""", RegexOption.DOT_MATCHES_ALL)
-            .replace(result) { match ->
-                val playerName = match.groupValues[1]
-                val body = match.groupValues[2].trimIndent()
-                "DirtinessData data = DirtinessCapability.getOrNull($playerName);\n                        if (data != null) {\n                            $body\n                        }"
-            }
-        if (result != source && result.contains("DirtinessData data = DirtinessCapability.getOrNull(")) {
-            val dirtinessDataImport = Regex("""(?m)^[ \t]*import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.DirtinessCapability;\s*$""")
-                .find(result)
-                ?.groupValues
-                ?.get(1)
-                ?.let { "$it.DirtinessData" }
-            if (dirtinessDataImport != null) {
-                result = addImportIfMissing(result, dirtinessDataImport)
-            }
         }
 
         result = migrateJava21StrictWarningSource(result)

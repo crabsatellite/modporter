@@ -3078,6 +3078,9 @@ class StructuralRefactorExtraTest {
             import net.minecraft.nbt.CompoundTag;
 
             class CleanlinessState {
+                public void reset() {
+                }
+
                 public CompoundTag serializeNBT() {
                     return new CompoundTag();
                 }
@@ -3119,12 +3122,29 @@ class StructuralRefactorExtraTest {
             }
         """.trimIndent())
 
+        cleanDir.resolve("CleanlinessUse.java").writeText("""
+            package com.example.clean;
+
+            import net.minecraft.world.entity.player.Player;
+
+            class CleanlinessUse {
+                void reset(Player player) {
+                    com.modporter.compat.LazyOptional.ofNullable(player.getCapability(CleanlinessBridge.CLEAN_STATE, null)).ifPresent(CleanlinessState::reset);
+                    player.getCapability(CleanlinessBridge.CLEAN_STATE).ifPresent(state -> {
+                        state.reset();
+                    });
+                }
+            }
+        """.trimIndent())
+
         val result = StructuralRefactorPass().apply(tempDir)
         val facade = cleanDir.resolve("WrongFacadeFile.java").readText()
         val attachment = cleanDir.resolve("CleanlinessBridgeAttachment.java").readText()
         val data = cleanDir.resolve("WrongDataFile.java").readText()
         val mod = cleanDir.resolve("ExampleMod.java").readText()
+        val use = cleanDir.resolve("CleanlinessUse.java").readText()
 
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-facade-lookup" })
         assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-bridge" })
         assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-register" })
         assertTrue(result.changes.any { it.ruleId == "struct-legacy-capability-data-attachment-serializable" })
@@ -3144,6 +3164,9 @@ class StructuralRefactorExtraTest {
         assertTrue(data.contains("deserializeNBT(HolderLookup.Provider provider, CompoundTag tag)"), data)
         assertTrue(mod.contains("CleanlinessBridgeAttachment.register(modEventBus);"), mod)
         assertFalse(mod.contains("DirtinessAttachment"), mod)
+        assertTrue(use.contains("CleanlinessBridge.get(player).ifPresent(CleanlinessState::reset);"), use)
+        assertTrue(use.contains("CleanlinessBridge.get(player).ifPresent(state -> {"), use)
+        assertFalse(use.contains("getCapability(CleanlinessBridge.CLEAN_STATE"), use)
     }
 
     @Test
@@ -22755,22 +22778,24 @@ class StructuralRefactorExtraTest {
                 public static final DeferredRegister<Item> ITEMS = null;
             }
         """.trimIndent())
-        srcDir.resolve("DirtinessCapability.java").writeText("""
+        srcDir.resolve("CleanlinessBridge.java").writeText("""
             package com.example;
 
             import com.modporter.generated.example.compat.LazyOptional;
             import net.minecraft.world.entity.player.Player;
 
-            public final class DirtinessCapability {
-                public static LazyOptional<DirtinessData> get(Player player) {
-                    return LazyOptional.of(() -> new DirtinessData());
+            public final class CleanlinessBridge {
+                public static final Object CLEAN_STATE = null;
+
+                public static LazyOptional<CleanlinessState> get(Player player) {
+                    return LazyOptional.of(() -> new CleanlinessState());
                 }
             }
         """.trimIndent())
-        srcDir.resolve("DirtinessData.java").writeText("""
+        srcDir.resolve("CleanlinessState.java").writeText("""
             package com.example;
 
-            public class DirtinessData {
+            public class CleanlinessState {
                 public void clean() {}
             }
         """.trimIndent())
@@ -22781,7 +22806,7 @@ class StructuralRefactorExtraTest {
 
             public class CapabilityUseSurface {
                 public void clean(Player player) {
-                    com.modporter.generated.example.compat.LazyOptional.ofNullable(player.getCapability(DirtinessCapability.DIRTINESS, null)).ifPresent(DirtinessData::clean);
+                    com.modporter.generated.example.compat.LazyOptional.ofNullable(player.getCapability(CleanlinessBridge.CLEAN_STATE, null)).ifPresent(CleanlinessState::clean);
                 }
             }
         """.trimIndent())
@@ -22878,9 +22903,9 @@ class StructuralRefactorExtraTest {
         assertTrue(screenCollectionSize.contains("this.currentPageNumber < this.pages.size() - 1"))
         assertTrue(!screenCollectionSize.contains("this.pages.getSize()"))
         assertTrue(registry.contains("DeferredHolder<Item, BlockItem> registerBlockItem"))
-        assertTrue(capability.contains("DirtinessCapability.get(player).ifPresent(DirtinessData::clean)"))
-        assertTrue(!capability.contains("LazyOptional.ofNullable(DirtinessCapability.get"))
-        assertTrue(!capability.contains("DirtinessCapability.DIRTINESS"))
+        assertTrue(capability.contains("CleanlinessBridge.get(player).ifPresent(CleanlinessState::clean)"))
+        assertTrue(!capability.contains("LazyOptional.ofNullable(CleanlinessBridge.get"))
+        assertTrue(!capability.contains("CleanlinessBridge.CLEAN_STATE"))
         assertTrue(externalUuid.contains("private static final UUID HOT_BATH_TEMP_MODIFIER_UUID = UUID.fromString"))
         assertTrue(externalUuid.contains("TemperatureUtil.addTemperatureModifier(player, 1.0D, HOT_BATH_TEMP_MODIFIER_UUID)"))
         assertTrue(!externalUuid.contains("ResourceLocation HOT_BATH_TEMP_MODIFIER_UUID"))

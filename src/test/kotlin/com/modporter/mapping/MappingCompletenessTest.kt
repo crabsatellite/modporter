@@ -1120,6 +1120,35 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy capability facade lookup migration does not depend on dirtiness class names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyCapabilityFacadeLookups")
+        assertTrue(start >= 0, "migrateLegacyCapabilityFacadeLookups is missing")
+        val end = source.indexOf("private fun migrateLegacyCapabilityFacadeToAttachment", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "fixed DirtinessCapability name" to "DirtinessCapability",
+            "fixed DirtinessData name" to "DirtinessData",
+            "fixed DirtinessAttachment name" to "DirtinessAttachment",
+            "old direct dirtiness getCapability rewrite" to "getCapability(DirtinessCapability.DIRTINESS",
+            "old dirtiness getOrNull block rewrite" to "DirtinessData data = DirtinessCapability.getOrNull",
+            "dirtiness rule id" to "struct-dirtiness"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "legacy capability facade lookup migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy capability facade lookup migrations must use source-declared facade/data owners, not dirtiness-specific names: $offenders"
+        )
+    }
+
+    @Test
     fun `build mod id helpers do not scan arbitrary constant references`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
