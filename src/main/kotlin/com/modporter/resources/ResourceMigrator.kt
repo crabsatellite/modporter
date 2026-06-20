@@ -3195,20 +3195,30 @@ class ResourceMigrationPass(
         val constantPattern = Regex(
             """\b(?:public|protected|private)?\s*static\s+final\s+String\s+([A-Za-z_$][\w$]*)\s*=\s*"([^"]+)""""
         )
-        sources.forEach { source ->
+        sources.forEach { rawSource ->
+            val source = maskJavaComments(rawSource)
+            val executableSource = maskJavaCommentsAndLiterals(rawSource)
             val packageName = packagePattern.find(source)?.groupValues?.get(1).orEmpty()
-            constantPattern.findAll(source).forEach { match ->
-                val name = match.groupValues[1]
-                val value = match.groupValues[2]
-                val className = javaTypeNameContainingOffset(source, match.range.first)
-                simpleValues.getOrPut(name) { linkedSetOf() } += value
-                if (className != null) {
-                    constants["$className.$name"] = value
-                    if (packageName.isNotBlank()) {
-                        constants["$packageName.$className.$name"] = value
+            constantPattern.findAll(source)
+                .filter { match ->
+                    val executableSegment = executableSource.substring(match.range.first, match.range.last + 1)
+                    executableSegment.contains("static") &&
+                        executableSegment.contains("final") &&
+                        executableSegment.contains("String") &&
+                        executableSegment.contains("=")
+                }
+                .forEach { match ->
+                    val name = match.groupValues[1]
+                    val value = match.groupValues[2]
+                    val className = javaTypeNameContainingOffset(source, match.range.first)
+                    simpleValues.getOrPut(name) { linkedSetOf() } += value
+                    if (className != null) {
+                        constants["$className.$name"] = value
+                        if (packageName.isNotBlank()) {
+                            constants["$packageName.$className.$name"] = value
+                        }
                     }
                 }
-            }
         }
         simpleValues.forEach { (name, values) ->
             if (values.size == 1) {

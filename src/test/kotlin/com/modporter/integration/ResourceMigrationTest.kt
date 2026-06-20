@@ -1659,6 +1659,51 @@ class ResourceMigrationTest {
     }
 
     @Test
+    fun `legacy Nitrogen fuel sprite generation ignores text block namespace constants`() {
+        val projectDir = tempDir.resolve("nitrogenfuel-text-block-namespace")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val textureDir = projectDir.resolve("src/main/resources/assets/example/textures/gui/menu")
+        srcDir.createDirectories()
+        textureDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "public class ExampleMod {",
+            "    public String docs() {",
+            "        return \"\"\"",
+            "            public static final String MODID = \"example\";",
+            "            \"\"\";",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+        srcDir.resolve("ExampleFuelCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleFuelCategory extends AbstractFuelCategory {
+                public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "textures/gui/menu/altar.png");
+            }
+        """.trimIndent())
+
+        val source = BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB)
+        ImageIO.write(source, "png", textureDir.resolve("altar.png").toFile())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Cannot resolve Nitrogen fuel texture namespace expression 'ExampleMod.MODID'")
+            },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(result.changes.any { it.ruleId == "res-nitrogen-fuel-icon-sprite" })
+        assertFalse(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_icon.png").exists())
+    }
+
+    @Test
     fun `legacy Nitrogen fuel sprite generation rejects placeholder sprite stems`() {
         val projectDir = tempDir.resolve("nitrogenfuel-placeholder-stem")
         val srcDir = projectDir.resolve("src/main/java/com/example")

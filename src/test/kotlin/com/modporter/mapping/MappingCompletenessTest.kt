@@ -1753,6 +1753,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `resource string constant collection uses executable declarations`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val resourceMigrator = projectRoot
+            .resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt")
+            .readText()
+        val start = resourceMigrator.indexOf("private fun collectJavaStringConstants")
+        assertTrue(start >= 0, "collectJavaStringConstants is missing")
+        val end = resourceMigrator.indexOf("\n    private fun resolveJavaStringExpression", start + 1).let {
+            if (it < 0) resourceMigrator.length else it
+        }
+        val body = resourceMigrator.substring(start, end)
+        val forbidden = listOf(
+            "raw source constant scan" to "sources.forEach { source ->",
+            "unfiltered constant scan" to "constantPattern.findAll(source).forEach"
+        )
+        val offenders = forbidden
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "collectJavaStringConstants contains $label" }
+
+        assertTrue(
+            body.contains("val source = maskJavaComments(rawSource)") &&
+                body.contains("val executableSource = maskJavaCommentsAndLiterals(rawSource)") &&
+                body.contains("constantPattern.findAll(source)") &&
+                body.contains("val executableSegment = executableSource.substring(match.range.first, match.range.last + 1)") &&
+                body.contains("executableSegment.contains(\"static\")") &&
+                body.contains("executableSegment.contains(\"final\")") &&
+                body.contains("executableSegment.contains(\"String\")"),
+            "Resource string constant collection must capture values from comment-masked code but prove declarations from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Resource string constant collection must not accept comments or text blocks as constants: $offenders"
+        )
+    }
+
+    @Test
     fun `code awarded advancement detection does not infer constant owners from file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot
