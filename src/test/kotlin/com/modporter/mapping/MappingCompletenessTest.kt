@@ -2502,6 +2502,7 @@ class MappingCompletenessTest {
             "main class raw annotation scan" to (detectModMainClass to Regex("""@Mod[\s\S]{0,120}containsMatchIn\(text\)""")),
             "annotation argument raw scan" to (modAnnotationArgument to Regex("""@Mod[\s\S]{0,120}\.find\(source\)""")),
             "explicit mod id raw main scan" to (explicitModIdReference to Regex("""@Mod[\s\S]{0,160}\.find\(mainText\)""")),
+            "explicit mod id file-name owner" to (explicitModIdReference to Regex("""mainClass\.fileName""")),
             "detect text raw direct scan" to (detectModIdFromText to Regex("""@Mod[\s\S]{0,160}\.find\(text\)""")),
             "detect text raw constant scan" to (detectModIdFromText to Regex("""\.find\(text\)""")),
             "static constant raw contains scan" to (staticStringConstant to Regex("""containsMatchIn\(source\)"""))
@@ -2520,6 +2521,7 @@ class MappingCompletenessTest {
                 modAnnotationArgument.contains(".find(code)") &&
                 explicitModIdReference.contains("val code = maskJavaComments(mainText)") &&
                 explicitModIdReference.contains("val executableCode = maskJavaCommentsAndLiterals(mainText)") &&
+                explicitModIdReference.contains("val className = classNameOfJavaSource(mainText) ?: return null") &&
                 explicitModIdReference.contains(".find(code)") &&
                 detectModIdFromText.contains("val code = maskJavaComments(text)") &&
                 detectModIdFromText.contains("val executableCode = maskJavaCommentsAndLiterals(text)") &&

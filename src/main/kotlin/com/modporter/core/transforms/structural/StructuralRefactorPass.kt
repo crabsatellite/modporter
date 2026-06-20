@@ -7954,7 +7954,7 @@ public final class ${spec.attachmentClassName} {
     ): String? {
         if (mainClass != null && mainText.isNotBlank()) {
             val mainPackage = packageNameOf(mainText)
-            val className = mainClass.fileName.toString().removeSuffix(".java")
+            val className = classNameOfJavaSource(mainText) ?: return null
             val classRef = if (mainPackage.isBlank() || mainPackage == generatedPackage) {
                 className
             } else {
