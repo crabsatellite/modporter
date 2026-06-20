@@ -3412,6 +3412,70 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `loot function entity and int codec migration rejects local variable member fallbacks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AmbiguousSpawnFunction.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import com.google.gson.JsonSyntaxException;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.functions.LootItemConditionalFunction;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+
+            public class AmbiguousSpawnFunction extends LootItemConditionalFunction {
+                private final EntityType<?> targetType;
+                private final int amount;
+
+                protected AmbiguousSpawnFunction(LootItemCondition[] conditions, EntityType<?> targetType, int amount) {
+                    super(conditions);
+                    this.targetType = targetType;
+                    this.amount = amount;
+                }
+
+                public LootItemFunctionType getType() {
+                    return null;
+                }
+
+                public ItemStack run(ItemStack stack, LootContext context) {
+                    return stack;
+                }
+
+                public static class Serializer extends LootItemConditionalFunction.Serializer<AmbiguousSpawnFunction> {
+                    public void serialize(JsonObject json, AmbiguousSpawnFunction instance, JsonSerializationContext context) {
+                        json.addProperty("marker", instance.amount);
+                    }
+
+                    public AmbiguousSpawnFunction deserialize(JsonObject json, JsonDeserializationContext context, LootItemCondition[] conditions) {
+                        EntityType<?> entityType = EntityType.byString(GsonHelper.getAsString(json, "entity")).orElseThrow(() -> new JsonSyntaxException("No value present!"));
+                        int count = GsonHelper.getAsInt(json, "count");
+                        return new AmbiguousSpawnFunction(conditions, entityType, count);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(tempDir)
+
+        val ambiguous = srcDir.resolve("AmbiguousSpawnFunction.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(ambiguous.contains("MapCodec<AmbiguousSpawnFunction>"), ambiguous)
+        assertTrue(ambiguous.contains("LootItemConditionalFunction.Serializer<AmbiguousSpawnFunction>"), ambiguous)
+        assertTrue(ambiguous.contains("EntityType.byString(GsonHelper.getAsString(json, \"entity\"))"), ambiguous)
+        assertTrue(ambiguous.contains("GsonHelper.getAsInt(json, \"count\")"), ambiguous)
+    }
+
+    @Test
     fun `legacy neoforge recipe condition serializers migrate to condition codecs`() {
         val projectDir = createTestFile("""
             package com.example;

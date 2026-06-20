@@ -1636,10 +1636,10 @@ $fieldLines
         val codecFields = constructorArgs.drop(1).map { argument ->
             val arg = argument.trim()
             entityLocals[arg]?.let { key ->
-                val member = entityMembersByKey[key] ?: arg
+                val member = entityMembersByKey[key] ?: return null
                 """		BuiltInRegistries.ENTITY_TYPE.byNameCodec().fieldOf("$key").forGetter(o -> o.$member)"""
             } ?: intLocals[arg]?.let { key ->
-                val member = intMembersByKey[key] ?: arg
+                val member = intMembersByKey[key] ?: return null
                 """		com.mojang.serialization.Codec.INT.fieldOf("$key").forGetter(o -> o.$member)"""
             } ?: return null
         }

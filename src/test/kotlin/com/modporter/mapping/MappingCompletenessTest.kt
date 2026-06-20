@@ -655,6 +655,30 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `loot entity and int function codec migrations do not use local variable member fallback`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun inferEntityTypeAndIntLootFunctionCodecField")
+        assertTrue(start >= 0, "inferEntityTypeAndIntLootFunctionCodecField is missing")
+        val end = source.indexOf("private fun migrateLootTypeRegistryCodecConstructors", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "constructor local variable member fallback" to "?: arg"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "loot entity/int function codec migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Loot entity/int function codec migrations must derive object member names from serializer source, not local variable names: $offenders"
+        )
+    }
+
+    @Test
     fun `production mod event bus migrations do not synthesize variable names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(
