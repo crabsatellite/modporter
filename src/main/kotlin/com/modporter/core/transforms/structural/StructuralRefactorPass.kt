@@ -248,7 +248,7 @@ class StructuralRefactorPass : Pass {
 
         // Migrate legacy player capability facades to NeoForge attachments.
         try {
-            val capabilityFacadeChanges = migrateLegacyCapabilityFacadeToAttachment(projectDir, dryRun)
+            val capabilityFacadeChanges = migrateLegacyCapabilityFacadeToAttachment(projectDir, dryRun, errors)
             changes.addAll(capabilityFacadeChanges)
         } catch (e: Exception) {
             errors.add("Legacy capability facade attachment migration error: ${e.message}")
@@ -7487,7 +7487,7 @@ $registrations
     private fun collectLegacyCapabilityFacadeLookupSpecs(javaFiles: List<Path>): List<LegacyCapabilityFacadeLookupSpec> {
         val specs = mutableListOf<LegacyCapabilityFacadeLookupSpec>()
         for (javaFile in javaFiles) {
-            legacyCapabilityFacadeSpec(javaFile)?.let { spec ->
+            legacyCapabilityFacadeSpec(javaFile, mutableListOf())?.let { spec ->
                 specs.add(
                     LegacyCapabilityFacadeLookupSpec(
                         file = spec.file,
@@ -7633,7 +7633,11 @@ $registrations
         return result
     }
 
-    private fun migrateLegacyCapabilityFacadeToAttachment(projectDir: Path, dryRun: Boolean): List<Change> {
+    private fun migrateLegacyCapabilityFacadeToAttachment(
+        projectDir: Path,
+        dryRun: Boolean,
+        errors: MutableList<String>
+    ): List<Change> {
         val changes = mutableListOf<Change>()
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return changes
@@ -7646,7 +7650,7 @@ $registrations
         val originalMainText = mainClass?.readText().orEmpty()
         var migratedMainText = originalMainText
 
-        val facadeSpecs = javaFiles.mapNotNull { legacyCapabilityFacadeSpec(it) }
+        val facadeSpecs = javaFiles.mapNotNull { legacyCapabilityFacadeSpec(it, errors) }
         if (facadeSpecs.isEmpty()) return changes
         val dataFilesByType = javaFiles
             .mapNotNull { file ->
@@ -7742,7 +7746,7 @@ $registrations
         return changes
     }
 
-    private fun legacyCapabilityFacadeSpec(file: Path): LegacyCapabilityFacadeSpec? {
+    private fun legacyCapabilityFacadeSpec(file: Path, errors: MutableList<String>): LegacyCapabilityFacadeSpec? {
         val source = file.readText()
         if (!source.contains("CapabilityManager.get") ||
             !source.contains("CapabilityToken") ||
@@ -7768,6 +7772,14 @@ $registrations
         } else {
             className + "Attachment"
         }
+        val attachmentPath = legacyCapabilityAttachmentPath(fieldName, dataType)
+        if (attachmentPath == null) {
+            errors.add(
+                "Cannot derive legacy capability attachment id in ${file.fileName}: " +
+                    "field '$fieldName' and data type '$dataType' do not produce a valid resource path"
+            )
+            return null
+        }
         return LegacyCapabilityFacadeSpec(
             file = file,
             packageName = packageNameOf(source),
@@ -7776,19 +7788,24 @@ $registrations
             dataType = dataType,
             fieldName = fieldName,
             attachmentClassName = attachmentClassName,
-            attachmentPath = legacyCapabilityAttachmentPath(fieldName, dataType)
+            attachmentPath = attachmentPath
         )
     }
 
-    private fun legacyCapabilityAttachmentPath(fieldName: String, dataType: String): String {
-        val normalized = fieldName
+    private fun legacyCapabilityAttachmentPath(fieldName: String, dataType: String): String? {
+        val fieldPath = resourcePathSegment(fieldName)
+            .removeSuffix("_capability")
+        val dataPath = resourcePathSegment(classNameToPath(dataType))
+        return fieldPath
+            .ifBlank { dataPath }
+            .takeIf { it.isNotBlank() }
+    }
+
+    private fun resourcePathSegment(value: String): String =
+        value
             .lowercase()
             .replace(Regex("""[^a-z0-9]+"""), "_")
             .trim('_')
-            .removeSuffix("_capability")
-            .ifBlank { classNameToPath(dataType) }
-        return normalized.ifBlank { "data" }
-    }
 
     private fun legacyCapabilityFacadeBridgeSource(spec: LegacyCapabilityFacadeSpec): String {
         val visibility = if (spec.classIsPublic) "public " else ""

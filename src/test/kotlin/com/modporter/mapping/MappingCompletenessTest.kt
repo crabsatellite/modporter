@@ -1247,7 +1247,8 @@ class MappingCompletenessTest {
             "fixed DirtinessData name" to "DirtinessData",
             "fixed DirtinessAttachment name" to "DirtinessAttachment",
             "dirtiness rule id" to "struct-dirtiness",
-            "java file-name semantic filter" to ".fileName.toString() =="
+            "java file-name semantic filter" to ".fileName.toString() ==",
+            "placeholder attachment id fallback" to "ifBlank { \"data\" }"
         )
             .filter { (_, marker) -> body.contains(marker) }
             .map { (label, _) -> "legacy capability facade migration contains $label" }

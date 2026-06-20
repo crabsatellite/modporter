@@ -3302,6 +3302,54 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy capability facade migration rejects placeholder attachment ids`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/invalid")
+        srcDir.createDirectories()
+
+        srcDir.resolve("InvalidCapability.java").writeText("""
+            package com.example.invalid;
+
+            import com.modporter.compat.CapabilityManager;
+            import com.modporter.compat.CapabilityToken;
+            import com.modporter.compat.LazyOptional;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.player.Player;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
+
+            class ${'$'}${'$'}${'$'} {
+            }
+
+            class InvalidCapability {
+                public static final Object ${'$'}${'$'}${'$'} = CapabilityManager.get(new CapabilityToken<${'$'}${'$'}${'$'}>() {});
+
+                public static LazyOptional<${'$'}${'$'}${'$'}> get(Player player) {
+                    return player.getCapability(${'$'}${'$'}${'$'});
+                }
+
+                public static void attach(AttachCapabilitiesEvent<Entity> event) {
+                    event.addCapability(null, new Provider());
+                }
+
+                static class Provider implements ICapabilityProvider {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Cannot derive legacy capability attachment id in InvalidCapability.java")
+            },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(result.changes.any { it.ruleId == "struct-legacy-capability-attachment-register" })
+        assertFalse(srcDir.resolve("InvalidAttachment.java").exists())
+        assertFalse(srcDir.resolve("InvalidCapabilityAttachment.java").exists())
+    }
+
+    @Test
     fun `custom entity capability migration imports Direction for sided EntityCapability`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val capabilityDir = srcDir.resolve("capability")
