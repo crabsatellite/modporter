@@ -599,6 +599,36 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy item stack random hurt migration does not use whole file server level fallback`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        assertTrue(
+            !source.contains("inferServerLevelExpression("),
+            "Legacy ItemStack.hurt migration must not infer ServerLevel from whole-source declarations"
+        )
+
+        val start = source.indexOf("private fun sourceProvenServerLevelExpressionForLegacyItemStackHurt")
+        assertTrue(start >= 0, "sourceProvenServerLevelExpressionForLegacyItemStackHurt is missing")
+        val end = source.indexOf("private fun legacyItemStackHurtConditionParts", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "whole-source containsMatchIn scan" to "containsMatchIn(source)",
+            "last declaration fallback" to "lastOrNull()"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "legacy ItemStack.hurt migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy ItemStack.hurt migration must use call-site method prefix evidence, not whole-file ServerLevel fallbacks: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy damage bonus migration binds damage source to target hurt`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

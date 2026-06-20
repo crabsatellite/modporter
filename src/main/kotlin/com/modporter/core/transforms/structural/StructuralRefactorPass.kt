@@ -19487,7 +19487,7 @@ ${indent}}
 
             val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
             val hurtPlan = if (args.size == 3 && args[2].trim() == "null") {
-                legacyItemStackHurtPlan(args[1], source)
+                legacyItemStackHurtPlan(args[1], source, receiverStart)
             } else {
                 null
             }
@@ -19579,20 +19579,41 @@ ${indent}}
         val callbackCondition: String?
     )
 
-    private fun legacyItemStackHurtPlan(randomExpression: String, source: String): LegacyItemStackHurtPlan? {
+    private fun legacyItemStackHurtPlan(randomExpression: String, source: String, callOffset: Int): LegacyItemStackHurtPlan? {
         val random = randomExpression.trim()
         val levelExpression = when {
             random.endsWith(".getRandom()") -> random.removeSuffix(".getRandom()").trim()
             random.endsWith(".random") -> random.removeSuffix(".random").trim()
             else -> return null
         }
-        return LegacyItemStackHurtPlan(inferServerLevelExpression(levelExpression, source))
+        return LegacyItemStackHurtPlan(
+            sourceProvenServerLevelExpressionForLegacyItemStackHurt(levelExpression, source, callOffset)
+        )
     }
 
-    private fun inferServerLevelExpression(levelExpression: String, source: String): String? {
+    private fun sourceProvenServerLevelExpressionForLegacyItemStackHurt(
+        levelExpression: String,
+        source: String,
+        callOffset: Int
+    ): String? {
         val level = levelExpression.trim()
+        if (!Regex("""[A-Za-z_$][\w$]*""").matches(level)) return null
+
+        val parameterPattern = Regex(
+            """(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*(?:net\.minecraft\.server\.level\.)?ServerLevel\s+${Regex.escape(level)}$"""
+        )
+        if (currentMethodParametersBeforeOffset(source, callOffset).any { parameter ->
+                parameterPattern.matches(parameter.trim().replace(Regex("""\s+"""), " "))
+            }
+        ) {
+            return level
+        }
+
+        val methodRange = enclosingMethodRange(source, callOffset) ?: return null
+        val methodPrefix = source.substring(methodRange.first, callOffset)
         return level.takeIf {
-            Regex("""\b(?:net\.minecraft\.server\.level\.)?ServerLevel\s+${Regex.escape(level)}\b""").containsMatchIn(source)
+            Regex("""\b(?:final\s+)?(?:net\.minecraft\.server\.level\.)?ServerLevel\s+${Regex.escape(level)}\b""")
+                .containsMatchIn(methodPrefix)
         }
     }
 

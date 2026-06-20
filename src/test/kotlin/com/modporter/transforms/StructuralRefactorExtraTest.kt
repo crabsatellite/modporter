@@ -9537,6 +9537,34 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy random hurt does not use server level evidence from another method`() {
+        val projectDir = createFile("LegacyHurtSurface.java", """
+            package com.example;
+
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            public class LegacyHurtSurface {
+                public void unrelated(ServerLevel level) {
+                }
+
+                public void process(Level level, ItemStack stack) {
+                    stack.hurt(1, level.getRandom(), null);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val transformed = tempDir.resolve("src/main/java/com/example/LegacyHurtSurface.java").readText()
+
+        assertTrue(transformed.contains("stack.setDamageValue(stack.getDamageValue() + 1);"), transformed)
+        assertFalse(transformed.contains("stack.hurtAndBreak(1, level"), transformed)
+        assertFalse(transformed.contains("stack.hurt(1, level.getRandom(), null)"), transformed)
+    }
+
+    @Test
     fun `item enchantment lookup without local registry access uses explicit holder lookup`() {
         val projectDir = createFile("DartItem.java", """
             package com.example;
