@@ -627,6 +627,34 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `production resource migrations do not synthesize placeholder asset stems`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val forbidden = listOf(
+            "blank fuel asset stem fallback" to "ifBlank { \"fuel\" }",
+            "generated fuel fallback asset name" to "nitrogen_fuel_fuel"
+        )
+
+        val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) && it.extension == "kt" }
+                .flatMap { file ->
+                    val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                    val text = file.readText()
+                    forbidden
+                        .filter { (_, marker) -> text.contains(marker) }
+                        .map { (label, _) -> "$relative contains $label" }
+                        .stream()
+                }
+                .toList()
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Resource migrations must derive asset names from source paths or hard-gate, not synthesize placeholder stems: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy pack resource compat package detection does not synthesize placeholder package segments`() {
         val structuralPass = Path.of("")
             .toAbsolutePath()

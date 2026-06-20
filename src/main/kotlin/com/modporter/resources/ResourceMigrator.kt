@@ -3136,7 +3136,13 @@ class ResourceMigrationPass(
                     .substringAfterLast('/')
                     .replace(Regex("""[^A-Za-z0-9_]+"""), "_")
                     .trim('_')
-                    .ifBlank { "fuel" }
+                if (spriteStem.isBlank()) {
+                    errors.add(
+                        "Cannot derive Nitrogen fuel sprite name from legacy texture path " +
+                            "textures/gui/menu/$textureTail.png"
+                    )
+                    return@forEach
+                }
                 specs += NitrogenFuelSpriteSpec(
                     namespace = namespace,
                     menuTexturePath = "textures/gui/menu/$textureTail.png",
