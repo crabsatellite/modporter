@@ -839,6 +839,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `string API verification migration uses executable method body evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun rewriteStringApiVerificationWithoutReflection")
+        assertTrue(start >= 0, "rewriteStringApiVerificationWithoutReflection is missing")
+        val end = source.indexOf("private fun rewriteClassForNameEnumValueOf", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw method lookup" to ").find(source) ?: return source",
+            "raw brace lookup" to "source.indexOf('{', methodMatch.range.first)",
+            "raw brace match" to "findMatchingBrace(source, openBrace)",
+            "raw method body extraction" to "val body = source.substring(openBrace + 1, closeBrace)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "String API verification migration contains $label" }
+
+        assertTrue(
+            body.contains("val code = maskJavaCommentsAndLiterals(source)") &&
+                body.contains(").find(code) ?: return source") &&
+                body.contains("val openBrace = code.indexOf('{', methodMatch.range.first)") &&
+                body.contains("findMatchingBrace(code, openBrace)") &&
+                body.contains("val body = code.substring(openBrace + 1, closeBrace)") &&
+                body.contains("if (!body.contains(\"Class.forName(\")) return source"),
+            "String API verification migration must prove Class.forName from executable method body code"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "String API verification migration must not use raw method text as migration evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `reflected optional dependency scan ignores comments`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
@@ -864,6 +900,37 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty(),
             "Reflected optional dependency collection must not use raw Java text as evidence: $offenders"
+        )
+    }
+
+    @Test
+    fun `forbidden reflection detection ignores comments and literals`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun detectForbiddenReflection")
+        assertTrue(start >= 0, "detectForbiddenReflection is missing")
+        val end = source.indexOf("private fun migrateCoremodScripts", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw Java readLines scan" to "javaFile.readLines()",
+            "line-comment-only skip" to "trimmed.startsWith(\"//\")",
+            "javadoc-line-only skip" to "trimmed.startsWith(\"*\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "Forbidden reflection detection contains $label" }
+
+        assertTrue(
+            body.contains("val code = maskJavaCommentsAndLiterals(javaFile.readText())") &&
+                body.contains("code.lines().forEachIndexed"),
+            "Forbidden reflection detection must scan executable Java code, not comments or string literals"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Forbidden reflection detection must not use raw line text as hardgate evidence: $offenders"
         )
     }
 

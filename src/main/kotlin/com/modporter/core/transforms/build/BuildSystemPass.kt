@@ -2391,14 +2391,15 @@ $header
     }
 
     private fun rewriteStringApiVerificationWithoutReflection(source: String): String {
+        val code = maskJavaCommentsAndLiterals(source)
         val methodMatch = Regex(
             """public\s+static\s+void\s+verifyApiClasses\s*\(\s*String\s+([A-Za-z_$][\w$]*)\s*,\s*String\.\.\.\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
-        ).find(source) ?: return source
+        ).find(code) ?: return source
 
-        val openBrace = source.indexOf('{', methodMatch.range.first)
-        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        val openBrace = code.indexOf('{', methodMatch.range.first)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(code, openBrace) else -1
         if (closeBrace <= openBrace) return source
-        val body = source.substring(openBrace + 1, closeBrace)
+        val body = code.substring(openBrace + 1, closeBrace)
         if (!body.contains("Class.forName(")) return source
 
         val modIdParam = methodMatch.groupValues[1]
@@ -3790,9 +3791,8 @@ $insertion}
         java.nio.file.Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
-                javaFile.readLines().forEachIndexed { index, line ->
-                    val trimmed = line.trim()
-                    if (trimmed.startsWith("//") || trimmed.startsWith("*")) return@forEachIndexed
+                val code = maskJavaCommentsAndLiterals(javaFile.readText())
+                code.lines().forEachIndexed { index, line ->
                     for ((label, pattern) in forbiddenPatterns) {
                         if (pattern.containsMatchIn(line)) {
                             val relative = projectDir.relativize(javaFile).toString().replace('\\', '/')

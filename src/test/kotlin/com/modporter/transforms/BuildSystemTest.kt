@@ -1017,6 +1017,41 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `does not rewrite API verifier when class-for-name appears only in comments or strings`() {
+        val projectDir = tempDir.resolve("class-for-name-api-verifier-comment-string")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("CompatManager.java").writeText("""
+            package com.example;
+
+            public class CompatManager {
+                public static void verifyApiClasses(String modId, String... classNames) {
+                    String marker = "Class.forName(";
+                    // Class.forName(classNames[0]);
+                    if (marker.isEmpty()) {
+                        throw new IllegalStateException("unreachable");
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("CompatManager.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertTrue(source.contains("""String marker = "Class.forName(";"""), source)
+        assertTrue(source.contains("// Class.forName(classNames[0]);"), source)
+        assertFalse(source.contains("ModList.get().isLoaded(modId)"), source)
+        assertFalse(source.contains("import net.neoforged.fml.ModList;"), source)
+    }
+
+    @Test
     fun `generated mixin config resolves templated mods toml mod id from gradle properties`() {
         val projectDir = tempDir.resolve("templated-generated-mixin-config")
         val srcDir = projectDir.resolve("src/main/java/com/example")
