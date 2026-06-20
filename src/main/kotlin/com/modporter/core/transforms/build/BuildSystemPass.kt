@@ -3147,13 +3147,13 @@ config="$configName"
                 if (containsStructureTemplatePoolFieldAccess(source, "rawTemplates")) {
                     entries.add("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates")
                 }
-                if (source.contains(".pendingBlockEntities")) {
+                if (containsChunkPendingBlockEntitiesAccess(source)) {
                     entries.add("public net.minecraft.world.level.chunk.ChunkAccess pendingBlockEntities")
                 }
-                if (source.contains(".firedFromWeapon =")) {
+                if (containsAbstractArrowFieldAccess(source, "firedFromWeapon")) {
                     entries.add("public net.minecraft.world.entity.projectile.AbstractArrow firedFromWeapon")
                 }
-                if (source.contains(".setPierceLevel(")) {
+                if (containsAbstractArrowMethodCall(source, "setPierceLevel")) {
                     entries.add("public net.minecraft.world.entity.projectile.AbstractArrow setPierceLevel(B)V")
                 }
                 if (source.contains("CreativeModeInventoryScreen.selectedTab")) {
@@ -3173,15 +3173,58 @@ config="$configName"
     }
 
     private fun containsStructureTemplatePoolFieldAccess(source: String, fieldName: String): Boolean {
+        return containsTypedJavaFieldAccess(
+            source,
+            """(?:net\.minecraft\.world\.level\.levelgen\.structure\.pools\.)?StructureTemplatePool""",
+            fieldName
+        )
+    }
+
+    private fun containsChunkPendingBlockEntitiesAccess(source: String): Boolean {
+        return containsTypedJavaFieldAccess(
+            source,
+            """(?:net\.minecraft\.world\.level\.chunk\.)?(?:LevelChunk|ChunkAccess)""",
+            "pendingBlockEntities"
+        )
+    }
+
+    private fun containsAbstractArrowFieldAccess(source: String, fieldName: String): Boolean {
+        return containsTypedJavaFieldAccess(
+            source,
+            """(?:net\.minecraft\.world\.entity\.projectile\.)?AbstractArrow""",
+            fieldName
+        )
+    }
+
+    private fun containsAbstractArrowMethodCall(source: String, methodName: String): Boolean {
+        return containsTypedJavaMethodCall(
+            source,
+            """(?:net\.minecraft\.world\.entity\.projectile\.)?AbstractArrow""",
+            methodName
+        )
+    }
+
+    private fun containsTypedJavaFieldAccess(source: String, typePattern: String, fieldName: String): Boolean {
         val code = maskJavaCommentsAndLiterals(source)
-        val poolVariables = Regex(
-            """\b(?:net\.minecraft\.world\.level\.levelgen\.structure\.pools\.)?StructureTemplatePool\s+([A-Za-z_$][\w$]*)\b"""
-        ).findAll(code)
-            .map { it.groupValues[1] }
-            .toSet()
-        return poolVariables.any { variable ->
+        val variables = collectTypedJavaVariables(code, typePattern)
+        return variables.any { variable ->
             Regex("""\b${Regex.escape(variable)}\s*\.\s*${Regex.escape(fieldName)}\b""").containsMatchIn(code)
         }
+    }
+
+    private fun containsTypedJavaMethodCall(source: String, typePattern: String, methodName: String): Boolean {
+        val code = maskJavaCommentsAndLiterals(source)
+        val variables = collectTypedJavaVariables(code, typePattern)
+        return variables.any { variable ->
+            Regex("""\b${Regex.escape(variable)}\s*\.\s*${Regex.escape(methodName)}\s*\(""").containsMatchIn(code)
+        }
+    }
+
+    private fun collectTypedJavaVariables(code: String, typePattern: String): Set<String> {
+        return Regex("""\b(?:$typePattern)\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(code)
+            .map { it.groupValues[1] }
+            .toSet()
     }
 
     private fun maskJavaCommentsAndLiterals(source: String): String {

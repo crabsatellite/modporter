@@ -522,7 +522,10 @@ class MappingCompletenessTest {
         val body = source.substring(start, end)
         val offenders = listOf(
             "whole-file StructureTemplatePool templates scan" to """source.contains("StructureTemplatePool") && source.contains(".templates")""",
-            "whole-file StructureTemplatePool rawTemplates scan" to """source.contains("StructureTemplatePool") && source.contains(".rawTemplates")"""
+            "whole-file StructureTemplatePool rawTemplates scan" to """source.contains("StructureTemplatePool") && source.contains(".rawTemplates")""",
+            "whole-file pendingBlockEntities scan" to """source.contains(".pendingBlockEntities")""",
+            "whole-file firedFromWeapon scan" to """source.contains(".firedFromWeapon =")""",
+            "whole-file setPierceLevel scan" to """source.contains(".setPierceLevel(")"""
         )
             .filter { (_, marker) -> body.contains(marker) }
             .map { (label, _) -> "required AT collection contains $label" }
@@ -530,12 +533,15 @@ class MappingCompletenessTest {
         assertTrue(
             body.contains("containsStructureTemplatePoolFieldAccess(source, \"templates\")") &&
                 body.contains("containsStructureTemplatePoolFieldAccess(source, \"rawTemplates\")") &&
+                body.contains("containsChunkPendingBlockEntitiesAccess(source)") &&
+                body.contains("containsAbstractArrowFieldAccess(source, \"firedFromWeapon\")") &&
+                body.contains("containsAbstractArrowMethodCall(source, \"setPierceLevel\")") &&
                 body.contains("maskJavaCommentsAndLiterals"),
             "Required AT collection must use typed field access evidence, not comment/string or whole-file markers"
         )
         assertTrue(
             offenders.isEmpty(),
-            "Required AT collection must not infer StructureTemplatePool field needs from broad contains checks: $offenders"
+            "Required AT collection must not infer member access needs from broad contains checks: $offenders"
         )
     }
 

@@ -604,6 +604,58 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `adds pending block entity access transformer only for typed chunk field access`() {
+        val projectDir = tempDir.resolve("pending-be-direct-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ChunkDirectAccess.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.chunk.LevelChunk;
+
+            public class ChunkDirectAccess {
+                void clear(LevelChunk chunk) {
+                    chunk.pendingBlockEntities.clear();
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.world.level.chunk.ChunkAccess pendingBlockEntities"), at)
+    }
+
+    @Test
+    fun `pending block entity access transformer collection ignores comments and strings`() {
+        val projectDir = tempDir.resolve("pending-be-comment-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ChunkNotes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.chunk.LevelChunk;
+
+            public class ChunkNotes {
+                String note = "LevelChunk chunk; chunk.pendingBlockEntities.clear();";
+
+                void describe() {
+                    // LevelChunk chunk; chunk.pendingBlockEntities.clear();
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertFalse(atFile.exists())
+    }
+
+    @Test
     fun `migrates entity visibility method reflection to vanilla boss type check`() {
         val projectDir = tempDir.resolve("entity-visibility-reflection")
         val srcDir = projectDir.resolve("src/main/java/com/example")
@@ -1920,6 +1972,33 @@ class BuildSystemTest {
         assertTrue(at.contains("public net.minecraft.world.entity.projectile.AbstractArrow firedFromWeapon"), at)
         assertTrue(at.contains("public net.minecraft.world.entity.projectile.AbstractArrow setPierceLevel(B)V"), at)
         assertTrue(build.contains("accessTransformers"), build)
+    }
+
+    @Test
+    fun `abstract arrow access transformer collection ignores comments and strings`() {
+        val projectDir = tempDir.resolve("projectile-comment-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ProjectileNotes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.projectile.AbstractArrow;
+
+            public class ProjectileNotes {
+                String note = "AbstractArrow arrow; arrow.firedFromWeapon = null; arrow.setPierceLevel((byte) 1);";
+
+                void describe() {
+                    // AbstractArrow arrow; arrow.firedFromWeapon = null; arrow.setPierceLevel((byte) 1);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertFalse(atFile.exists())
     }
 
     @Test
