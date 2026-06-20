@@ -1724,6 +1724,64 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `custom recipe codec hint collection uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val resourceMigrator = projectRoot
+            .resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt")
+            .readText()
+
+        fun functionBody(name: String): String {
+            val start = resourceMigrator.indexOf("private fun $name")
+            assertTrue(start >= 0, "$name is missing")
+            val end = resourceMigrator.indexOf("\n    private fun ", start + 1).let {
+                if (it < 0) resourceMigrator.length else it
+            }
+            return resourceMigrator.substring(start, end)
+        }
+
+        val javaSourceInfo = functionBody("javaSourceInfo")
+        val collectHints = functionBody("collectRecipeDataCodecHints")
+        val collectNamespaces = functionBody("collectRecipeSerializerRegistryNamespaces")
+        val fieldsForType = functionBody("recipeCodecFieldsForType")
+        val fieldsInBlock = functionBody("recipeCodecFieldsInBlock")
+        val forbidden = listOf(
+            "javaSourceInfo raw package/import scan" to (javaSourceInfo to Regex("""\.(find|findAll)\(content\)""")),
+            "recipe register raw precheck" to (collectHints to Regex("""source\.content\.contains\("\.register\("\)""")),
+            "recipe register raw scan" to (collectHints to Regex("""registerPattern\.findAll\(source\.content\)""")),
+            "recipe namespace raw precheck" to (collectNamespaces to Regex("""source\.content\.contains\("DeferredRegister"\)""")),
+            "recipe namespace raw scan" to (collectNamespaces to Regex("""createPattern\.findAll\(source\.content\)""")),
+            "recipe class raw block range" to (fieldsForType to Regex("""javaClassBlockRange\(source\.code""")),
+            "recipe codec field raw scan" to (fieldsInBlock to Regex("""\.(findAll)\(block\)\s*\.map"""))
+        )
+        val offenders = forbidden
+            .filter { (_, scoped) -> scoped.second.containsMatchIn(scoped.first) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            javaSourceInfo.contains("val code = maskJavaComments(content)") &&
+                javaSourceInfo.contains("val executableCode = maskJavaCommentsAndLiterals(content)") &&
+                javaSourceInfo.contains(".find(executableCode)") &&
+                javaSourceInfo.contains(".findAll(executableCode)") &&
+                collectHints.contains("source.executableCode.contains(\".register(\")") &&
+                collectHints.contains("registerPattern.findAll(source.code)") &&
+                collectHints.contains("val executableSegment = source.executableCode.substring(match.range.first, match.range.last + 1)") &&
+                collectNamespaces.contains("source.executableCode.contains(\"DeferredRegister\")") &&
+                collectNamespaces.contains("createPattern.findAll(source.code)") &&
+                fieldsForType.contains("javaClassBlockRange(source.executableCode, className)") &&
+                fieldsForType.contains("recipeCodecFieldsInBlock(classBlock, executableClassBlock)") &&
+                fieldsForType.contains("directSuperclassReference(executableClassBlock, className)") &&
+                fieldsInBlock.contains("val executableSegment = executableBlock.substring(match.range.first, match.range.last + 1)") &&
+                fieldsInBlock.contains("executableSegment.contains(\"ItemStack\")") &&
+                fieldsInBlock.contains("executableSegment.contains(\"CompoundTag\")"),
+            "Custom recipe codec hint collection must read string values from comment-masked code and prove registrations/codecs from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Custom recipe codec hint collection must not treat comments or text blocks as serializer evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `production migrations do not derive mod identity from project directory names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(

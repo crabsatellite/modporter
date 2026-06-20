@@ -1458,22 +1458,28 @@ class ResourceMigrationPass(
         )
 
         for (source in javaSources) {
-            if (!source.content.contains(".register(")) continue
-            registerPattern.findAll(source.content).forEach { match ->
-                val namespace = registryNamespaces[match.groupValues[1]] ?: return@forEach
-                val serializerId = match.groupValues[2]
-                val factoryReference = match.groupValues[3].ifBlank { match.groupValues[4] }
-                val fields = recipeCodecFieldsForFactory(factoryReference, source, index)
-                if (fields.isEmpty) return@forEach
+            if (!source.executableCode.contains(".register(")) continue
+            registerPattern.findAll(source.code)
+                .filter { match ->
+                    val executableSegment = source.executableCode.substring(match.range.first, match.range.last + 1)
+                    executableSegment.contains(".register(") &&
+                        (executableSegment.contains("new") || executableSegment.contains("::new"))
+                }
+                .forEach { match ->
+                    val namespace = registryNamespaces[match.groupValues[1]] ?: return@forEach
+                    val serializerId = match.groupValues[2]
+                    val factoryReference = match.groupValues[3].ifBlank { match.groupValues[4] }
+                    val fields = recipeCodecFieldsForFactory(factoryReference, source, index)
+                    if (fields.isEmpty) return@forEach
 
-                val typeId = "$namespace:$serializerId"
-                if (fields.itemStackFields.isNotEmpty()) {
-                    itemStackFields.getOrPut(typeId) { linkedSetOf() }.addAll(fields.itemStackFields)
+                    val typeId = "$namespace:$serializerId"
+                    if (fields.itemStackFields.isNotEmpty()) {
+                        itemStackFields.getOrPut(typeId) { linkedSetOf() }.addAll(fields.itemStackFields)
+                    }
+                    if (fields.compoundTagFields.isNotEmpty()) {
+                        compoundTagFields.getOrPut(typeId) { linkedSetOf() }.addAll(fields.compoundTagFields)
+                    }
                 }
-                if (fields.compoundTagFields.isNotEmpty()) {
-                    compoundTagFields.getOrPut(typeId) { linkedSetOf() }.addAll(fields.compoundTagFields)
-                }
-            }
         }
 
         return RecipeDataCodecHints(
@@ -1491,12 +1497,18 @@ class ResourceMigrationPass(
             """(?s)\b([A-Za-z_$][\w$]*)\s*=\s*DeferredRegister\.create\(\s*[^,]+,\s*([^)]+?)\s*\)\s*;"""
         )
         for (source in sources) {
-            if (!source.content.contains("DeferredRegister") || !source.content.contains("RecipeSerializer")) continue
-            createPattern.findAll(source.content).forEach { match ->
-                val namespace = resolveJavaStringExpression(match.groupValues[2].trim(), stringConstants)
-                    ?: return@forEach
-                registries[match.groupValues[1]] = namespace
-            }
+            if (!source.executableCode.contains("DeferredRegister") || !source.executableCode.contains("RecipeSerializer")) continue
+            createPattern.findAll(source.code)
+                .filter { match ->
+                    val executableSegment = source.executableCode.substring(match.range.first, match.range.last + 1)
+                    executableSegment.contains("DeferredRegister") &&
+                        executableSegment.contains("create")
+                }
+                .forEach { match ->
+                    val namespace = resolveJavaStringExpression(match.groupValues[2].trim(), stringConstants)
+                        ?: return@forEach
+                    registries[match.groupValues[1]] = namespace
+                }
         }
         return registries
     }
@@ -1521,10 +1533,12 @@ class ResourceMigrationPass(
         if (!visited.add(key)) return RecipeCodecFieldSet.EMPTY
 
         val className = nestedClass ?: source.simpleName
-        val classBlock = extractJavaClassBlock(source.content, className) ?: source.content
-        var fields = recipeCodecFieldsInBlock(classBlock)
+        val classRange = javaClassBlockRange(source.executableCode, className)
+        val classBlock = classRange?.let { source.code.substring(it) } ?: source.code
+        val executableClassBlock = classRange?.let { source.executableCode.substring(it) } ?: source.executableCode
+        var fields = recipeCodecFieldsInBlock(classBlock, executableClassBlock)
 
-        val superclass = directSuperclassReference(classBlock, className)
+        val superclass = directSuperclassReference(executableClassBlock, className)
         if (superclass != null) {
             val parent = resolveJavaTypeReference(superclass, source, index)
             if (parent != null) {
@@ -1534,13 +1548,31 @@ class ResourceMigrationPass(
         return fields
     }
 
-    private fun recipeCodecFieldsInBlock(block: String): RecipeCodecFieldSet {
+    private fun recipeCodecFieldsInBlock(block: String, executableBlock: String): RecipeCodecFieldSet {
         val itemStackFields = Regex(
             """\bItemStack\s*\.\s*CODEC\s*\.\s*(?:optionalFieldOf|fieldOf)\s*\(\s*"([^"]+)""""
-        ).findAll(block).map { it.groupValues[1] }.toSet()
+        )
+            .findAll(block)
+            .filter { match ->
+                val executableSegment = executableBlock.substring(match.range.first, match.range.last + 1)
+                executableSegment.contains("ItemStack") &&
+                    executableSegment.contains("CODEC") &&
+                    (executableSegment.contains("fieldOf") || executableSegment.contains("optionalFieldOf"))
+            }
+            .map { it.groupValues[1] }
+            .toSet()
         val compoundTagFields = Regex(
             """\bCompoundTag\s*\.\s*CODEC\s*\.\s*(?:optionalFieldOf|fieldOf)\s*\(\s*"([^"]+)""""
-        ).findAll(block).map { it.groupValues[1] }.toSet()
+        )
+            .findAll(block)
+            .filter { match ->
+                val executableSegment = executableBlock.substring(match.range.first, match.range.last + 1)
+                executableSegment.contains("CompoundTag") &&
+                    executableSegment.contains("CODEC") &&
+                    (executableSegment.contains("fieldOf") || executableSegment.contains("optionalFieldOf"))
+            }
+            .map { it.groupValues[1] }
+            .toSet()
         return RecipeCodecFieldSet(itemStackFields, compoundTagFields)
     }
 
@@ -1569,8 +1601,10 @@ class ResourceMigrationPass(
 
     private fun javaSourceInfo(file: Path): JavaSourceInfo {
         val content = file.readText()
+        val code = maskJavaComments(content)
+        val executableCode = maskJavaCommentsAndLiterals(content)
         val packageName = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""")
-            .find(content)
+            .find(executableCode)
             ?.groupValues
             ?.get(1)
             .orEmpty()
@@ -1578,7 +1612,7 @@ class ResourceMigrationPass(
         val imports = linkedMapOf<String, String>()
         val wildcardImports = linkedSetOf<String>()
         Regex("""(?m)^\s*import\s+(?!static)([\w.]+(?:\.\*)?)\s*;""")
-            .findAll(content)
+            .findAll(executableCode)
             .forEach { match ->
                 val imported = match.groupValues[1]
                 if (imported.endsWith(".*")) {
@@ -1588,7 +1622,7 @@ class ResourceMigrationPass(
                 }
             }
         val fqName = if (packageName.isBlank()) simpleName else "$packageName.$simpleName"
-        return JavaSourceInfo(file, content, packageName, simpleName, fqName, imports, wildcardImports)
+        return JavaSourceInfo(file, content, code, executableCode, packageName, simpleName, fqName, imports, wildcardImports)
     }
 
     private fun resolveJavaTypeReference(
@@ -1654,12 +1688,17 @@ class ResourceMigrationPass(
     }
 
     private fun extractJavaClassBlock(source: String, className: String): String? {
+        val range = javaClassBlockRange(source, className) ?: return null
+        return source.substring(range)
+    }
+
+    private fun javaClassBlockRange(source: String, className: String): IntRange? {
         val classMatch = Regex("""\bclass\s+${Regex.escape(className)}\b""").find(source) ?: return null
         val openBrace = source.indexOf('{', classMatch.range.last + 1)
         if (openBrace < 0) return null
         val closeBrace = findMatchingJavaBrace(source, openBrace)
         if (closeBrace < 0) return null
-        return source.substring(classMatch.range.first, closeBrace + 1)
+        return classMatch.range.first..closeBrace
     }
 
     private fun findMatchingJavaBrace(source: String, openBrace: Int): Int {
@@ -2823,6 +2862,8 @@ class ResourceMigrationPass(
     private data class JavaSourceInfo(
         val file: Path,
         val content: String,
+        val code: String,
+        val executableCode: String,
         val packageName: String,
         val simpleName: String,
         val fqName: String,

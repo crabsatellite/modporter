@@ -435,6 +435,72 @@ class ResourceMigrationTest {
     }
 
     @Test
+    fun `custom recipe data fields ignore text block serializer codecs`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/resmod")
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        javaDir.createDirectories()
+        recipeDir.createDirectories()
+
+        javaDir.resolve("ResMod.java").writeText("""
+            package resmod;
+
+            public final class ResMod {
+                public static final String MODID = "resmod";
+            }
+        """.trimIndent())
+        javaDir.resolve("ModRecipeSerializers.java").writeText("""
+            package resmod;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModRecipeSerializers {
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS = DeferredRegister.create(Registries.RECIPE_SERIALIZER, ResMod.MODID);
+                public static final DeferredHolder<RecipeSerializer<?>, IncubationRecipe.Serializer> INCUBATION = RECIPE_SERIALIZERS.register("incubation", IncubationRecipe.Serializer::new);
+            }
+        """.trimIndent())
+        javaDir.resolve("IncubationRecipe.java").writeText(listOf(
+            "package resmod;",
+            "",
+            "import net.minecraft.nbt.CompoundTag;",
+            "import net.minecraft.world.item.crafting.RecipeSerializer;",
+            "",
+            "public final class IncubationRecipe {",
+            "    public static class Serializer implements RecipeSerializer<IncubationRecipe> {",
+            "        String docs() {",
+            "            return \"\"\"",
+            "                CompoundTag.CODEC.optionalFieldOf(\"tag\").forGetter(recipe -> null)",
+            "                \"\"\";",
+            "        }",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+        recipeDir.resolve("incubation.json").writeText("""
+            {
+              "type": "resmod:incubation",
+              "ingredient": {
+                "item": "resmod:egg"
+              },
+              "tag": "{Hungry:1b}"
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val incubation = projectDir.resolve("src/generated/resources/data/resmod/recipe/incubation.json").readText()
+        assertFalse(
+            result.changes.any { it.ruleId == "res-recipe-snbt-compound-tag" },
+            "Text block serializer codec examples must not drive recipe SNBT component migration"
+        )
+        assertTrue(incubation.contains(""""tag": "{Hungry:1b}""""), incubation)
+        assertFalse(incubation.contains(""""tag": {"""), incubation)
+    }
+
+    @Test
     fun `farmers delight cutting result array entries migrate to item stack object`() {
         val projectDir = setupResourceProject()
         val recipeDir = projectDir.resolve("src/main/resources/data/resmod/recipes")
