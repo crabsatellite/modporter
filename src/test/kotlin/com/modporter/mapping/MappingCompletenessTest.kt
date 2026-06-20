@@ -2479,6 +2479,63 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `structural mod id helpers use executable Java evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+
+        fun functionBody(name: String): String {
+            val start = source.indexOf("private fun $name")
+            assertTrue(start >= 0, "$name is missing")
+            val end = source.indexOf("\n    private fun ", start + 1).let { if (it < 0) source.length else it }
+            return source.substring(start, end)
+        }
+
+        val detectModId = functionBody("detectModId")
+        val detectModMainClass = functionBody("detectModMainClass")
+        val modAnnotationArgument = functionBody("modAnnotationArgumentExpression")
+        val explicitModIdReference = functionBody("explicitModIdReferenceForGeneratedClass")
+        val detectModIdFromText = functionBody("detectModIdFromText")
+        val staticStringConstant = functionBody("hasStaticFinalStringConstant")
+        val forbidden = listOf(
+            "main class raw annotation scan" to (detectModMainClass to Regex("""@Mod[\s\S]{0,120}containsMatchIn\(text\)""")),
+            "annotation argument raw scan" to (modAnnotationArgument to Regex("""@Mod[\s\S]{0,120}\.find\(source\)""")),
+            "explicit mod id raw main scan" to (explicitModIdReference to Regex("""@Mod[\s\S]{0,160}\.find\(mainText\)""")),
+            "detect text raw direct scan" to (detectModIdFromText to Regex("""@Mod[\s\S]{0,160}\.find\(text\)""")),
+            "detect text raw constant scan" to (detectModIdFromText to Regex("""\.find\(text\)""")),
+            "static constant raw contains scan" to (staticStringConstant to Regex("""containsMatchIn\(source\)"""))
+        )
+        val offenders = forbidden
+            .filter { (_, scoped) -> scoped.second.containsMatchIn(scoped.first) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            detectModId.contains("val candidates = linkedSetOf<String>()") &&
+                detectModId.contains("detectModIdFromText(text)?.let(candidates::add)") &&
+                detectModId.contains("return candidates.singleOrNull()") &&
+                detectModMainClass.contains("maskJavaCommentsAndLiterals(text)") &&
+                modAnnotationArgument.contains("val code = maskJavaComments(source)") &&
+                modAnnotationArgument.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                modAnnotationArgument.contains(".find(code)") &&
+                explicitModIdReference.contains("val code = maskJavaComments(mainText)") &&
+                explicitModIdReference.contains("val executableCode = maskJavaCommentsAndLiterals(mainText)") &&
+                explicitModIdReference.contains(".find(code)") &&
+                detectModIdFromText.contains("val code = maskJavaComments(text)") &&
+                detectModIdFromText.contains("val executableCode = maskJavaCommentsAndLiterals(text)") &&
+                detectModIdFromText.contains(".find(code)") &&
+                staticStringConstant.contains("val code = maskJavaComments(source)") &&
+                staticStringConstant.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                staticStringConstant.contains(".find(code)"),
+            "Structural mod id helpers must read @Mod and constants from comment-masked Java and prove executable source evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Structural mod id helpers must not treat comments or text blocks as mod id evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `text resource namespace helpers do not infer mod id from data directories`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

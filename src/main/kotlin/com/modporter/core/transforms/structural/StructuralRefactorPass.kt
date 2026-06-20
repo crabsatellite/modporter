@@ -2834,14 +2834,15 @@ ${registrations.distinct().joinToString("\n")}
     private fun detectModId(projectDir: Path): String? {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return null
+        val candidates = linkedSetOf<String>()
         try {
             val javaFiles = Files.walk(srcDir).filter { it.toString().endsWith(".java") }.toList()
             for (file in javaFiles) {
                 val text = file.readText()
-                detectModIdFromText(text)?.let { return it }
+                detectModIdFromText(text)?.let(candidates::add)
             }
         } catch (_: Exception) {}
-        return null
+        return candidates.singleOrNull()
     }
 
     /**
@@ -2854,7 +2855,7 @@ ${registrations.distinct().joinToString("\n")}
             val javaFiles = Files.walk(srcDir).filter { it.toString().endsWith(".java") }.toList()
             for (file in javaFiles) {
                 val text = file.readText()
-                if (Regex("""@Mod\s*\(""").containsMatchIn(text)) return file
+                if (Regex("""@Mod\s*\(""").containsMatchIn(maskJavaCommentsAndLiterals(text))) return file
             }
         } catch (_: Exception) {}
         return null
@@ -7920,8 +7921,15 @@ public final class ${spec.attachmentClassName} {
             ?: throw IllegalStateException("Cannot derive mod id expression for generated class in package $generatedPackage")
 
     private fun modAnnotationArgumentExpression(source: String): String? {
+        val code = maskJavaComments(source)
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val argument = Regex("""@Mod\s*\(\s*([^)]+?)\s*\)""")
-            .find(source)
+            .find(code)
+            ?.takeIf { match ->
+                executableCode
+                    .substring(match.range.first, match.range.last + 1)
+                    .contains("@Mod")
+            }
             ?.groupValues
             ?.get(1)
             ?.trim()
@@ -7952,12 +7960,24 @@ public final class ${spec.attachmentClassName} {
             } else {
                 "$mainPackage.$className"
             }
+            val code = maskJavaComments(mainText)
+            val executableCode = maskJavaCommentsAndLiterals(mainText)
             Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)""")
-                .find(mainText)
+                .find(code)
+                ?.takeIf { match ->
+                    executableCode
+                        .substring(match.range.first, match.range.last + 1)
+                        .contains("@Mod")
+                }
                 ?.let { return "\"${it.groupValues[1]}\"" }
 
             val modArgument = Regex("""@Mod\s*\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\)""")
-                .find(mainText)
+                .find(code)
+                ?.takeIf { match ->
+                    executableCode
+                        .substring(match.range.first, match.range.last + 1)
+                        .contains("@Mod")
+                }
                 ?.groupValues
                 ?.get(1)
             val constName = when {
@@ -7972,7 +7992,12 @@ public final class ${spec.attachmentClassName} {
             }
 
             Regex("""(?m)\b(?:public|private|protected)?\s*static\s+final\s+String\s+(MOD_ID|MODID)\s*=\s*"[^"]+"""")
-                .find(mainText)
+                .find(code)
+                ?.takeIf { match ->
+                    val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                    executableSegment.contains("String") &&
+                        executableSegment.contains("=")
+                }
                 ?.let { return "$classRef.${it.groupValues[1]}" }
         }
         return metadataModId
@@ -7981,19 +8006,47 @@ public final class ${spec.attachmentClassName} {
     }
 
     private fun detectModIdFromText(text: String): String? {
-        Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)""").find(text)?.let { return it.groupValues[1] }
-        val constRef = Regex("""@Mod\s*\(\s*(?:[A-Za-z_$][\w$]*\.)?([A-Za-z_$][\w$]*)\s*\)""").find(text)
+        val code = maskJavaComments(text)
+        val executableCode = maskJavaCommentsAndLiterals(text)
+        Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)""")
+            .find(code)
+            ?.takeIf { match ->
+                executableCode
+                    .substring(match.range.first, match.range.last + 1)
+                    .contains("@Mod")
+            }
+            ?.let { return it.groupValues[1] }
+        val constRef = Regex("""@Mod\s*\(\s*(?:[A-Za-z_$][\w$]*\.)?([A-Za-z_$][\w$]*)\s*\)""")
+            .find(code)
+            ?.takeIf { match ->
+                executableCode
+                    .substring(match.range.first, match.range.last + 1)
+                    .contains("@Mod")
+            }
         if (constRef != null) {
             Regex("""(?m)\b(?:public|private|protected)?\s*static\s+final\s+String\s+${Regex.escape(constRef.groupValues[1])}\s*=\s*"([^"]+)"""")
-                .find(text)
+                .find(code)
+                ?.takeIf { match ->
+                    val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                    executableSegment.contains("String") &&
+                        executableSegment.contains("=")
+                }
                 ?.let { return it.groupValues[1] }
         }
         return null
     }
 
-    private fun hasStaticFinalStringConstant(source: String, name: String): Boolean =
-        Regex("""(?m)\b(?:public|private|protected)?\s*static\s+final\s+String\s+${Regex.escape(name)}\s*=""")
-            .containsMatchIn(source)
+    private fun hasStaticFinalStringConstant(source: String, name: String): Boolean {
+        val code = maskJavaComments(source)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        return Regex("""(?m)\b(?:public|private|protected)?\s*static\s+final\s+String\s+${Regex.escape(name)}\s*=""")
+            .find(code)
+            ?.let { match ->
+                val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                executableSegment.contains("String") &&
+                    executableSegment.contains("=")
+            } == true
+    }
 
     private data class AdvancementTriggerSpec(
         val triggerPackage: String,
