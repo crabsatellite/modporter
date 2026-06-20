@@ -4278,7 +4278,7 @@ $itemArguments
     }
 
     private fun classNameOfJavaSource(source: String): String? =
-        Regex("""(?m)^[ \t]*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b""")
+        Regex("""(?m)^[ \t]*(?:(?:@[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\s*\([^;\r\n]*\))?|public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b""")
             .find(source)
             ?.groupValues
             ?.get(1)
@@ -24437,7 +24437,7 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 !source.contains("PlacementModifierType")) {
                 return@forEach
             }
-            val owner = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+            val owner = classNameOfJavaSource(source) ?: return@forEach
             val packageName = packageNameOf(source)
             val qualifiedOwner = if (packageName.isBlank()) owner else "$packageName.$owner"
             Regex(

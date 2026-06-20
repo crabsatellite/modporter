@@ -23585,6 +23585,46 @@ class StructuralRefactorExtraTest {
                 }
             }
         """.trimIndent())
+        srcDir.resolve("MisnamedPlacementRegistry.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.core.Registry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifier;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+
+            @Deprecated class ActualPlacementRegistry {
+                static final PlacementModifierType<MisnamedFilter> SCATTER = register(ResourceLocation.parse("example:scatter"), MisnamedFilter.CODEC);
+
+                static <P extends PlacementModifier> PlacementModifierType<P> register(ResourceLocation name, Codec<P> codec) {
+                    return Registry.register(BuiltInRegistries.PLACEMENT_MODIFIER_TYPE, name, () -> codec);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("MisnamedFilter.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.world.level.levelgen.placement.PlacementContext;
+            import net.minecraft.world.level.levelgen.placement.PlacementFilter;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+
+            public class MisnamedFilter extends PlacementFilter {
+                public static final Codec<MisnamedFilter> CODEC = Codec.unit(new MisnamedFilter());
+
+                @Override
+                protected boolean shouldPlace(PlacementContext context, net.minecraft.util.RandomSource random, net.minecraft.core.BlockPos pos) {
+                    return true;
+                }
+
+                @Override
+                public PlacementModifierType<?> type() {
+                    return ActualPlacementRegistry.SCATTER;
+                }
+            }
+        """.trimIndent())
         srcDir.resolve("TreeDecoratorRegistry.java").writeText("""
             package com.example;
 
@@ -23627,6 +23667,8 @@ class StructuralRefactorExtraTest {
         val ageProcessor = srcDir.resolve("AgeProcessor.java").readText()
         val placement = srcDir.resolve("PlacementRegistry.java").readText()
         val configFilter = srcDir.resolve("ConfigFilter.java").readText()
+        val misnamedPlacement = srcDir.resolve("MisnamedPlacementRegistry.java").readText()
+        val misnamedFilter = srcDir.resolve("MisnamedFilter.java").readText()
         val treeDecorator = srcDir.resolve("HolidayTreeDecorator.java").readText()
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
@@ -23658,6 +23700,9 @@ class StructuralRefactorExtraTest {
         assertFalse(configFilter.contains(".fieldOf(\"config\")"), configFilter)
         assertTrue(configFilter.contains("import com.mojang.serialization.Codec;"), configFilter)
         assertTrue(configFilter.contains("return PlacementRegistry.CONFIG.get();"), configFilter)
+        assertTrue(misnamedPlacement.contains("DeferredHolder<PlacementModifierType<?>, PlacementModifierType<MisnamedFilter>> SCATTER = register(\"scatter\", MisnamedFilter.CODEC);"), misnamedPlacement)
+        assertTrue(misnamedFilter.contains("return ActualPlacementRegistry.SCATTER.get();"), misnamedFilter)
+        assertFalse(misnamedFilter.contains("MisnamedPlacementRegistry"), misnamedFilter)
         assertTrue(treeDecorator.contains("import com.mojang.serialization.MapCodec;"), treeDecorator)
         assertTrue(treeDecorator.contains("public static final MapCodec<HolidayTreeDecorator> CODEC = BlockStateProvider.CODEC.fieldOf(\"provider\").xmap(HolidayTreeDecorator::new, value -> value.provider);"), treeDecorator)
         assertFalse(treeDecorator.contains("import com.mojang.serialization.Codec;"), treeDecorator)
