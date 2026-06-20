@@ -992,6 +992,30 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `worldgen region accessor migrations do not infer mixin owners from java file names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun legacyWorldGenRegionStructureManagerAccessor")
+        assertTrue(start >= 0, "legacyWorldGenRegionStructureManagerAccessor is missing")
+        val end = source.indexOf("private fun rewriteWorldGenRegionStructureManagerAccessorCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "java file-name owner fallback" to Regex("""javaTopLevelTypeName\(source\)\s*\?:\s*file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "WorldGenRegion accessor collector contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "WorldGenRegion accessor migrations must use source-declared mixin owners, not Java file-name fallback inference: $offenders"
+        )
+    }
+
+    @Test
     fun `build mod id helpers do not scan arbitrary constant references`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

@@ -16689,6 +16689,21 @@ class StructuralRefactorExtraTest {
                 StructureManager example${'$'}getStructureManager();
             }
         """.trimIndent())
+        val misnamedAccessorFile = accessorDir.resolve("MisnamedWorldGenRegionAccessor.java")
+        misnamedAccessorFile.writeText("""
+            package com.example.mixin.mixins.common.accessor;
+
+            import net.minecraft.server.level.WorldGenRegion;
+            import net.minecraft.world.level.StructureManager;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.gen.Accessor;
+
+            @Deprecated @Mixin(WorldGenRegion.class)
+            interface ActualWorldGenRegionAccessor {
+                @Accessor("structureManager")
+                StructureManager example${'$'}getStructureManager();
+            }
+        """.trimIndent())
         worldDir.resolve("DungeonBlacklistFilter.java").writeText("""
             package com.example.world;
 
@@ -16709,6 +16724,25 @@ class StructuralRefactorExtraTest {
                 }
             }
         """.trimIndent())
+        accessorDir.resolve("AccessorLocalUsage.java").writeText("""
+            package com.example.mixin.mixins.common.accessor;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.server.level.WorldGenRegion;
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.level.StructureManager;
+            import net.minecraft.world.level.levelgen.placement.PlacementContext;
+
+            class AccessorLocalUsage {
+                protected boolean shouldPlace(PlacementContext context, RandomSource random, BlockPos pos) {
+                    if (!(context.getLevel() instanceof WorldGenRegion)) {
+                        return false;
+                    }
+                    StructureManager structureManager = ((ActualWorldGenRegionAccessor) context.getLevel()).example${'$'}getStructureManager();
+                    return structureManager.getStructureAt(pos, null).isValid();
+                }
+            }
+        """.trimIndent())
         val mixinConfig = resourcesDir.resolve("example.mixins.json")
         mixinConfig.writeText("""
             {
@@ -16717,6 +16751,7 @@ class StructuralRefactorExtraTest {
               "mixins": [
                 "common.OtherMixin",
                 "common.accessor.WorldGenRegionAccessor",
+                "common.accessor.ActualWorldGenRegionAccessor",
                 "common.accessor.KeepAccessor"
               ]
             }
@@ -16725,11 +16760,17 @@ class StructuralRefactorExtraTest {
         val result = StructuralRefactorPass().apply(tempDir)
 
         val filter = worldDir.resolve("DungeonBlacklistFilter.java").readText()
+        val localUsage = accessorDir.resolve("AccessorLocalUsage.java").readText()
         val config = mixinConfig.readText()
         assertTrue(filter.contains("StructureManager structureManager = context.getLevel().getLevel().structureManager();"), filter)
         assertFalse(filter.contains("WorldGenRegionAccessor"), filter)
+        assertTrue(localUsage.contains("StructureManager structureManager = context.getLevel().getLevel().structureManager();"), localUsage)
+        assertFalse(localUsage.contains("ActualWorldGenRegionAccessor"), localUsage)
+        assertFalse(localUsage.contains("MisnamedWorldGenRegionAccessor"), localUsage)
         assertFalse(accessorFile.exists())
+        assertFalse(misnamedAccessorFile.exists())
         assertFalse(config.contains("common.accessor.WorldGenRegionAccessor"), config)
+        assertFalse(config.contains("common.accessor.ActualWorldGenRegionAccessor"), config)
         assertTrue(config.contains("common.OtherMixin"), config)
         assertTrue(config.contains("common.accessor.KeepAccessor"), config)
         assertTrue(result.changes.any { it.ruleId == "struct-worldgenregion-structuremanager-accessor-call" })

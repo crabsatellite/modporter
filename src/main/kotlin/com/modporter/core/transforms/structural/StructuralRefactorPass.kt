@@ -4430,7 +4430,7 @@ $itemArguments
         val methodName = Regex(
             """(?m)^[ \t]*(?:public\s+)?(?:StructureManager|net\.minecraft\.world\.level\.StructureManager)\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*;"""
         ).find(source)?.groupValues?.get(1) ?: return null
-        val simpleName = javaTopLevelTypeName(source) ?: file.fileName.toString().removeSuffix(".java")
+        val simpleName = javaTopLevelTypeName(source) ?: return null
         return WorldGenRegionStructureManagerAccessor(
             file = file,
             packageName = packageNameOf(source),
@@ -10443,12 +10443,7 @@ $fields
         return result
     }
 
-    private fun javaTopLevelTypeName(source: String): String? {
-        return Regex("""(?m)^[ \t]*(?:(?:public|protected|private|abstract|final|static)\s+)*(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b""")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
-    }
+    private fun javaTopLevelTypeName(source: String): String? = classNameOfJavaSource(source)
 
     private fun javaClassNames(source: String): List<String> {
         return Regex("""\b(?:class|record|enum)\s+([A-Za-z_$][\w$]*)\b""")
