@@ -653,6 +653,31 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `text resource namespace helpers do not infer mod id from data directories`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val helper = "projectMetadataNamespaces"
+        val start = source.indexOf("private fun $helper")
+        assertTrue(start >= 0, "$helper is missing")
+        val end = source.indexOf("\n    private fun ", start + 1).let { if (it < 0) source.length else it }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "data directory scan" to ".resolve(\"data\")",
+            "directory namespace listing" to "Files.list"
+        )
+        val offenders = forbidden
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "$helper contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Resource namespace helpers must use mod metadata or source expressions, not data directory names: $offenders"
+        )
+    }
+
+    @Test
     fun `default migration surfaces do not retreat to manual handling`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val scannedRoots = listOf(

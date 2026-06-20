@@ -312,7 +312,7 @@ class TextReplacementPass(
         }
 
         val beforeTierSorting = content
-        content = migrateTierSortingRegistryTiers(content, tierIncorrectTagResources, projectDir, file)
+        content = migrateTierSortingRegistryTiers(content, tierIncorrectTagResources, projectDir, file, errors)
         if (content != beforeTierSorting) {
             changes.add(
                 Change(
@@ -1034,7 +1034,8 @@ $streamFields,
         source: String,
         tierIncorrectTagResources: MutableList<TierIncorrectTagResource>,
         projectDir: Path,
-        sourceFile: Path
+        sourceFile: Path,
+        errors: MutableList<String>
     ): String {
         if (!source.contains("TierSortingRegistry.registerTier(") &&
             !source.contains("TierSortingRegistry.isCorrectTierForDrops(")) {
@@ -1058,7 +1059,7 @@ $streamFields,
                 if (closeParen < 0) break
 
                 val inside = result.substring(openParen + 1, closeParen)
-                val replacement = migrateTierSortingRegistryCall(inside, tierIncorrectTagResources, projectDir, sourceFile)
+                val replacement = migrateTierSortingRegistryCall(inside, tierIncorrectTagResources, projectDir, sourceFile, errors)
                 if (replacement == null) {
                     builder.append(result, cursor, closeParen + 1)
                 } else {
@@ -1134,7 +1135,8 @@ $streamFields,
         callInside: String,
         tierIncorrectTagResources: MutableList<TierIncorrectTagResource>,
         projectDir: Path,
-        sourceFile: Path
+        sourceFile: Path,
+        errors: MutableList<String>
     ): String? {
         val args = splitTopLevelArguments(callInside)
         if (args.isEmpty()) return null
@@ -1153,9 +1155,15 @@ $streamFields,
         val incorrectTag = toolName?.let { incorrectToolTagExpression(oldNeedsTag, it) }
             ?: if (simpleArgs.size == 7) incorrectBlockTagForMiningLevel(simpleArgs[0].trim()) else oldNeedsTag
         if (toolName != null && miningLevel != null) {
+            val namespace = namespaceFromTagExpression(oldNeedsTag, projectDir, sourceFile)
+            if (namespace == null && projectMetadataNamespaces(projectDir).singleOrNull() == null) {
+                val relative = projectDir.relativize(sourceFile).toString().replace('\\', '/')
+                errors.add("Cannot derive namespace for custom tool tier tag '$oldNeedsTag' in $relative")
+                return null
+            }
             tierIncorrectTagResources.add(
                 TierIncorrectTagResource(
-                    namespace = namespaceFromTagExpression(oldNeedsTag, projectDir, sourceFile),
+                    namespace = namespace,
                     path = "incorrect_for_${toolName}_tool",
                     vanillaReference = vanillaIncorrectTagForMiningLevel(miningLevel),
                     sourceTagExpression = oldNeedsTag
@@ -1293,11 +1301,11 @@ $streamFields,
     ) {
         if (specs.isEmpty()) return
         val resourceDirs = targetResourceDirs(projectDir)
-        val inferredNamespaces = inferredProjectDataNamespaces(projectDir)
+        val metadataNamespaces = projectMetadataNamespaces(projectDir)
         val emittedTargets = mutableSetOf<Path>()
 
         for (spec in specs.distinct()) {
-            val namespaces = spec.namespace?.let { listOf(it) } ?: inferredNamespaces.singleOrNull()?.let { listOf(it) }
+            val namespaces = spec.namespace?.let { listOf(it) } ?: metadataNamespaces.singleOrNull()?.let { listOf(it) }
             if (namespaces.isNullOrEmpty()) continue
 
             for (resourceDir in resourceDirs) {
@@ -1349,20 +1357,9 @@ $streamFields,
         return listOf(projectDir.resolve("src/main/resources"))
     }
 
-    private fun inferredProjectDataNamespaces(projectDir: Path): List<String> {
+    private fun projectMetadataNamespaces(projectDir: Path): List<String> {
         val namespaces = linkedSetOf<String>()
         existingResourceDirs(projectDir).forEach { resourceDir ->
-            val dataDir = resourceDir.resolve("data")
-            if (dataDir.exists()) {
-                Files.list(dataDir).use { stream ->
-                    stream
-                        .filter { Files.isDirectory(it) }
-                        .map { it.fileName.toString() }
-                        .filter { it !in setOf("minecraft", "forge", "neoforge", "c") }
-                        .filter { Regex("""[a-z0-9_.-]+""").matches(it) }
-                        .forEach { namespaces.add(it) }
-                }
-            }
             readModIds(resourceDir.resolve("META-INF/mods.toml")).forEach(namespaces::add)
             readModIds(resourceDir.resolve("META-INF/neoforge.mods.toml")).forEach(namespaces::add)
         }
