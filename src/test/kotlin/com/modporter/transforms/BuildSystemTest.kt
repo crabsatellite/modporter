@@ -1052,6 +1052,45 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `does not generate enum mixin invoker from commented class-for-name flow`() {
+        val projectDir = tempDir.resolve("commented-enum-class-for-name")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("FluidMixin.java").writeText("""
+            package com.example;
+
+            public class FluidMixin {
+                @SuppressWarnings({"rawtypes", "unchecked"})
+                private static Object blockingSpaceType() {
+                    // try {
+                    //     Class<?> spaceType = Class.forName("com.simibubi.create.content.fluids.transfer.FluidFillingBehaviour${'$'}SpaceType");
+                    //     return Enum.valueOf((Class<? extends Enum>) spaceType.asSubclass(Enum.class), "BLOCKING");
+                    // } catch (ClassNotFoundException e) {
+                    //     throw new IllegalStateException("Create FluidFillingBehaviour.SpaceType is unavailable", e);
+                    // }
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("FluidMixin.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-enum-mixin-invoker" })
+        assertTrue(source.contains("@SuppressWarnings({\"rawtypes\", \"unchecked\"})"), source)
+        assertTrue(source.contains("""//     Class<?> spaceType = Class.forName("com.simibubi.create.content.fluids.transfer.FluidFillingBehaviour${'$'}SpaceType");"""), source)
+        assertFalse(source.contains("ModPorterSpaceTypeAccessor"), source)
+        assertFalse(srcDir.resolve("modporter/mixin/ModPorterSpaceTypeAccessor.java").exists())
+    }
+
+    @Test
     fun `generated mixin config resolves templated mods toml mod id from gradle properties`() {
         val projectDir = tempDir.resolve("templated-generated-mixin-config")
         val srcDir = projectDir.resolve("src/main/java/com/example")

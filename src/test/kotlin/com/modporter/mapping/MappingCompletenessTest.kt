@@ -839,6 +839,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `class for name enum valueOf migration uses executable try evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun rewriteClassForNameEnumValueOf")
+        assertTrue(start >= 0, "rewriteClassForNameEnumValueOf is missing")
+        val end = source.indexOf("private fun rewriteDeferredHolderReflectionCollectors", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw source enum flow scan" to "tryPattern.findAll(source)",
+            "raw source replacement match list" to "tryPattern.findAll(source).toList()"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "Class.forName enum valueOf migration contains $label" }
+
+        assertTrue(
+            body.contains("val code = maskJavaComments(source)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val matches = tryPattern.findAll(code)") &&
+                body.contains("executablePattern.matchEntire") &&
+                body.contains("executableCode.substring(match.range.first, match.range.last + 1)") &&
+                body.contains("if (matches.isEmpty()) return source to emptyList()") &&
+                body.contains("for (match in matches.asReversed())"),
+            "Class.forName enum valueOf migration must prove the try/Class.forName/Enum.valueOf flow from executable Java code"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Class.forName enum valueOf migration must not use raw source text as migration evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `string API verification migration uses executable method body evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

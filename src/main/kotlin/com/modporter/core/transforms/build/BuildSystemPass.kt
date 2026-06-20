@@ -2436,9 +2436,24 @@ public static void verifyApiClasses(String $modIdParam, String... $classNamesPar
             """try\s*\{\s*Class<\?>\s+([A-Za-z_$][\w$]*)\s*=\s*Class\.forName\(\s*"([^"]+\$([A-Za-z_$][\w$]*))"\s*\)\s*;\s*return\s+Enum\.valueOf\(\s*\(Class<\? extends Enum>\)\s*\1\.asSubclass\(Enum\.class\)\s*,\s*"([A-Za-z_$][\w$]*)"\s*\)\s*;\s*\}\s*catch\s*\(\s*ClassNotFoundException\s+[A-Za-z_$][\w$]*\s*\)\s*\{[^{}]*\}""",
             RegexOption.DOT_MATCHES_ALL
         )
+        val code = maskJavaComments(source)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val executablePattern = Regex(
+            """try\s*\{\s*Class<\?>\s+([A-Za-z_$][\w$]*)\s*=\s*Class\.forName\(\s*\)\s*;\s*return\s+Enum\.valueOf\(\s*\(Class<\? extends Enum>\)\s*\1\.asSubclass\(Enum\.class\)\s*,\s*\)\s*;\s*\}\s*catch\s*\(\s*ClassNotFoundException\s+[A-Za-z_$][\w$]*\s*\)\s*\{[^{}]*\}""",
+            RegexOption.DOT_MATCHES_ALL
+        )
+        val matches = tryPattern.findAll(code)
+            .filter { match ->
+                val executableMatch = executablePattern.matchEntire(
+                    executableCode.substring(match.range.first, match.range.last + 1)
+                )
+                executableMatch?.groupValues?.get(1) == match.groupValues[1]
+            }
+            .toList()
+        if (matches.isEmpty()) return source to emptyList()
         val accessorImports = linkedSetOf<String>()
 
-        for (match in tryPattern.findAll(source).toList().asReversed()) {
+        for (match in matches.asReversed()) {
             val binaryName = match.groupValues[2]
             val simpleNestedName = match.groupValues[3]
             val enumConstant = match.groupValues[4]
