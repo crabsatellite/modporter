@@ -521,21 +521,33 @@ class MappingCompletenessTest {
         }
         val body = source.substring(start, end)
         val offenders = listOf(
+            "whole-file availableGoals scan" to """source.contains(".availableGoals")""",
+            "whole-file findLightningTargetAround scan" to """source.contains(".findLightningTargetAround(")""",
             "whole-file StructureTemplatePool templates scan" to """source.contains("StructureTemplatePool") && source.contains(".templates")""",
             "whole-file StructureTemplatePool rawTemplates scan" to """source.contains("StructureTemplatePool") && source.contains(".rawTemplates")""",
             "whole-file pendingBlockEntities scan" to """source.contains(".pendingBlockEntities")""",
             "whole-file firedFromWeapon scan" to """source.contains(".firedFromWeapon =")""",
-            "whole-file setPierceLevel scan" to """source.contains(".setPierceLevel(")"""
+            "whole-file setPierceLevel scan" to """source.contains(".setPierceLevel(")""",
+            "whole-file CreativeModeInventoryScreen selectedTab scan" to """source.contains("CreativeModeInventoryScreen.selectedTab")""",
+            "whole-file skyBuffer scan" to """source.contains(".skyBuffer")""",
+            "whole-file darkBuffer scan" to """source.contains(".darkBuffer")""",
+            "whole-file rainSoundTime scan" to """source.contains(".rainSoundTime")"""
         )
             .filter { (_, marker) -> body.contains(marker) }
             .map { (label, _) -> "required AT collection contains $label" }
 
         assertTrue(
-            body.contains("containsStructureTemplatePoolFieldAccess(source, \"templates\")") &&
+            body.contains("containsGoalSelectorAvailableGoalsAccess(source)") &&
+                body.contains("containsServerLevelFindLightningTargetCall(source)") &&
+                body.contains("containsStructureTemplatePoolFieldAccess(source, \"templates\")") &&
                 body.contains("containsStructureTemplatePoolFieldAccess(source, \"rawTemplates\")") &&
                 body.contains("containsChunkPendingBlockEntitiesAccess(source)") &&
                 body.contains("containsAbstractArrowFieldAccess(source, \"firedFromWeapon\")") &&
                 body.contains("containsAbstractArrowMethodCall(source, \"setPierceLevel\")") &&
+                body.contains("containsCreativeModeInventorySelectedTabAccess(source)") &&
+                body.contains("containsLevelRendererFieldAccess(source, \"skyBuffer\")") &&
+                body.contains("containsLevelRendererFieldAccess(source, \"darkBuffer\")") &&
+                body.contains("containsLevelRendererFieldAccess(source, \"rainSoundTime\")") &&
                 body.contains("maskJavaCommentsAndLiterals"),
             "Required AT collection must use typed field access evidence, not comment/string or whole-file markers"
         )

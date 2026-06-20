@@ -3135,10 +3135,10 @@ config="$configName"
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val source = javaFile.readText()
-                if (source.contains(".availableGoals")) {
+                if (containsGoalSelectorAvailableGoalsAccess(source)) {
                     entries.add("public net.minecraft.world.entity.ai.goal.GoalSelector availableGoals")
                 }
-                if (source.contains(".findLightningTargetAround(")) {
+                if (containsServerLevelFindLightningTargetCall(source)) {
                     entries.add("public net.minecraft.server.level.ServerLevel findLightningTargetAround(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/BlockPos;")
                 }
                 if (containsStructureTemplatePoolFieldAccess(source, "templates")) {
@@ -3156,20 +3156,36 @@ config="$configName"
                 if (containsAbstractArrowMethodCall(source, "setPierceLevel")) {
                     entries.add("public net.minecraft.world.entity.projectile.AbstractArrow setPierceLevel(B)V")
                 }
-                if (source.contains("CreativeModeInventoryScreen.selectedTab")) {
+                if (containsCreativeModeInventorySelectedTabAccess(source)) {
                     entries.add("public net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen selectedTab")
                 }
-                if (source.contains(".skyBuffer")) {
+                if (containsLevelRendererFieldAccess(source, "skyBuffer")) {
                     entries.add("public net.minecraft.client.renderer.LevelRenderer skyBuffer")
                 }
-                if (source.contains(".darkBuffer")) {
+                if (containsLevelRendererFieldAccess(source, "darkBuffer")) {
                     entries.add("public net.minecraft.client.renderer.LevelRenderer darkBuffer")
                 }
-                if (source.contains(".rainSoundTime")) {
+                if (containsLevelRendererFieldAccess(source, "rainSoundTime")) {
                     entries.add("public net.minecraft.client.renderer.LevelRenderer rainSoundTime")
                 }
             }
         return entries
+    }
+
+    private fun containsGoalSelectorAvailableGoalsAccess(source: String): Boolean {
+        return containsTypedJavaFieldAccess(
+            source,
+            """(?:net\.minecraft\.world\.entity\.ai\.goal\.)?GoalSelector""",
+            "availableGoals"
+        )
+    }
+
+    private fun containsServerLevelFindLightningTargetCall(source: String): Boolean {
+        return containsTypedJavaMethodCall(
+            source,
+            """(?:net\.minecraft\.server\.level\.)?ServerLevel""",
+            "findLightningTargetAround"
+        )
     }
 
     private fun containsStructureTemplatePoolFieldAccess(source: String, fieldName: String): Boolean {
@@ -3204,6 +3220,22 @@ config="$configName"
         )
     }
 
+    private fun containsCreativeModeInventorySelectedTabAccess(source: String): Boolean {
+        return containsJavaStaticFieldAccess(
+            source,
+            """(?:net\.minecraft\.client\.gui\.screens\.inventory\.)?CreativeModeInventoryScreen""",
+            "selectedTab"
+        )
+    }
+
+    private fun containsLevelRendererFieldAccess(source: String, fieldName: String): Boolean {
+        return containsTypedJavaFieldAccess(
+            source,
+            """(?:net\.minecraft\.client\.renderer\.)?LevelRenderer""",
+            fieldName
+        )
+    }
+
     private fun containsTypedJavaFieldAccess(source: String, typePattern: String, fieldName: String): Boolean {
         val code = maskJavaCommentsAndLiterals(source)
         val variables = collectTypedJavaVariables(code, typePattern)
@@ -3218,6 +3250,11 @@ config="$configName"
         return variables.any { variable ->
             Regex("""\b${Regex.escape(variable)}\s*\.\s*${Regex.escape(methodName)}\s*\(""").containsMatchIn(code)
         }
+    }
+
+    private fun containsJavaStaticFieldAccess(source: String, ownerTypePattern: String, fieldName: String): Boolean {
+        val code = maskJavaCommentsAndLiterals(source)
+        return Regex("""\b(?:$ownerTypePattern)\s*\.\s*${Regex.escape(fieldName)}\b""").containsMatchIn(code)
     }
 
     private fun collectTypedJavaVariables(code: String, typePattern: String): Set<String> {

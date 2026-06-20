@@ -536,6 +536,176 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `adds goal selector and server level access transformers only for typed member access`() {
+        val projectDir = tempDir.resolve("goal-lightning-direct-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ServerHooks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.entity.ai.goal.GoalSelector;
+
+            public class ServerHooks {
+                void patch(GoalSelector selector, ServerLevel level, BlockPos origin) {
+                    selector.availableGoals.clear();
+                    level.findLightningTargetAround(origin);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.world.entity.ai.goal.GoalSelector availableGoals"), at)
+        assertTrue(
+            at.contains("public net.minecraft.server.level.ServerLevel findLightningTargetAround(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/BlockPos;"),
+            at
+        )
+    }
+
+    @Test
+    fun `goal selector and server level access transformer collection ignores comments and strings`() {
+        val projectDir = tempDir.resolve("goal-lightning-comment-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ServerNotes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.entity.ai.goal.GoalSelector;
+
+            public class ServerNotes {
+                String note = "GoalSelector selector; selector.availableGoals; ServerLevel level; level.findLightningTargetAround(origin);";
+
+                void describe() {
+                    // GoalSelector selector; selector.availableGoals.clear();
+                    // ServerLevel level; level.findLightningTargetAround(origin);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertFalse(atFile.exists())
+    }
+
+    @Test
+    fun `adds creative selected tab access transformer only for static field access`() {
+        val projectDir = tempDir.resolve("creative-selectedtab-direct-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CreativeDirectAccess.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
+            import net.minecraft.world.item.CreativeModeTab;
+
+            public class CreativeDirectAccess {
+                CreativeModeTab selected() {
+                    return CreativeModeInventoryScreen.selectedTab;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen selectedTab"), at)
+    }
+
+    @Test
+    fun `creative selected tab access transformer collection ignores comments and strings`() {
+        val projectDir = tempDir.resolve("creative-selectedtab-comment-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CreativeNotes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
+
+            public class CreativeNotes {
+                String note = "CreativeModeInventoryScreen.selectedTab";
+
+                void describe() {
+                    // CreativeModeInventoryScreen.selectedTab
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertFalse(atFile.exists())
+    }
+
+    @Test
+    fun `adds level renderer access transformers only for typed field access`() {
+        val projectDir = tempDir.resolve("level-renderer-direct-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RendererAccess.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.renderer.LevelRenderer;
+
+            public class RendererAccess {
+                void capture(LevelRenderer renderer) {
+                    Object sky = renderer.skyBuffer;
+                    Object dark = renderer.darkBuffer;
+                    int rain = renderer.rainSoundTime;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.client.renderer.LevelRenderer skyBuffer"), at)
+        assertTrue(at.contains("public net.minecraft.client.renderer.LevelRenderer darkBuffer"), at)
+        assertTrue(at.contains("public net.minecraft.client.renderer.LevelRenderer rainSoundTime"), at)
+    }
+
+    @Test
+    fun `level renderer access transformer collection ignores comments and strings`() {
+        val projectDir = tempDir.resolve("level-renderer-comment-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RendererNotes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.renderer.LevelRenderer;
+
+            public class RendererNotes {
+                String note = "LevelRenderer renderer; renderer.skyBuffer; renderer.darkBuffer; renderer.rainSoundTime;";
+
+                void describe() {
+                    // LevelRenderer renderer; renderer.skyBuffer; renderer.darkBuffer; renderer.rainSoundTime;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertFalse(atFile.exists())
+    }
+
+    @Test
     fun `migrates pending block entity reflection field to access transformer`() {
         val projectDir = tempDir.resolve("pending-be-reflection")
         val srcDir = projectDir.resolve("src/main/java/com/example")
