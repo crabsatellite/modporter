@@ -39244,14 +39244,31 @@ $writeLines
 
     private fun findMatchingBrace(source: String, openBrace: Int): Int {
         var depth = 0
-        for (i in openBrace until source.length) {
+        var i = openBrace
+        while (i < source.length) {
+            if (i + 2 < source.length && source[i] == '"' && source[i + 1] == '"' && source[i + 2] == '"') {
+                i = source.indexOf("\"\"\"", i + 3).let { if (it < 0) source.length - 1 else it + 2 }
+                i++
+                continue
+            }
+            if (i + 1 < source.length && source[i] == '/' && source[i + 1] == '/') {
+                i = source.indexOf('\n', i + 2).let { if (it < 0) source.length else it + 1 }
+                continue
+            }
+            if (i + 1 < source.length && source[i] == '/' && source[i + 1] == '*') {
+                i = source.indexOf("*/", i + 2).let { if (it < 0) source.length else it + 2 }
+                continue
+            }
             when (source[i]) {
+                '"' -> i = skipJavaStringLiteral(source, i)
+                '\'' -> i = skipJavaCharLiteral(source, i)
                 '{' -> depth++
                 '}' -> {
                     depth--
                     if (depth == 0) return i
                 }
             }
+            i++
         }
         return -1
     }
@@ -42069,36 +42086,20 @@ public class ${builder.className} implements RecipeBuilder {
             .toList()
             .forEach { file ->
                 var text = file.readText()
-                val original = text
                 var removed = false
 
                 // Find inner classes with @EventBusSubscriber repeatedly (text changes after each removal)
                 var match = innerClassPattern.find(text)
                 while (match != null) {
-                    val annotationLine = match.groupValues[1]
-                    val classOpenLine = match.groupValues[2]
                     val className = match.groupValues[3]
-                    val classBodyStart = match.range.last + 1
-
-                    // Find the matching closing brace by counting braces
-                    var braceCount = 1
-                    var pos = classBodyStart
-                    while (pos < text.length && braceCount > 0) {
-                        when (text[pos]) {
-                            '{' -> braceCount++
-                            '}' -> braceCount--
-                        }
-                        pos++
-                    }
-
-                    if (braceCount != 0) {
-                        // Couldn't match braces, skip
-                        match = innerClassPattern.find(text, match.range.last + 1)
-                        continue
+                    val classOpenBrace = match.range.last
+                    val closeBrace = findMatchingBrace(text, classOpenBrace)
+                    if (closeBrace < 0) {
+                        error("Cannot match @EventBusSubscriber inner class body for $className in $file")
                     }
 
                     // Extract the class body (between opening { and closing })
-                    val classBody = text.substring(classBodyStart, pos - 1)
+                    val classBody = text.substring(classOpenBrace + 1, closeBrace)
 
                     // Check if the class has any non-empty methods
                     // A method signature: access modifiers + return type + name + params + body
@@ -42119,7 +42120,7 @@ public class ${builder.className} implements RecipeBuilder {
                     if (!hasNonEmptyMethod) {
                         // Remove the entire inner class block including annotation and trailing newline
                         val startIdx = match.range.first
-                        var endIdx = pos
+                        var endIdx = closeBrace + 1
                         // Consume trailing whitespace/newline
                         while (endIdx < text.length && (text[endIdx] == '\r' || text[endIdx] == '\n')) {
                             endIdx++

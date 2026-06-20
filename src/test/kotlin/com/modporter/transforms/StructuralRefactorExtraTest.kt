@@ -755,6 +755,44 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `empty subscriber cleanup ignores braces inside literals and comments`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ExampleMod.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class ExampleMod {
+                @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+                public static class EmptySubscriber {
+                    private static final String DOC = "{";
+                    // { old migration marker text, not Java structure
+
+                    @SubscribeEvent
+                    public static void gatherData(GatherDataEvent event) {
+                    }
+                }
+
+                public void stillHere() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = file.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString())
+        assertTrue(result.changes.any { it.ruleId == "struct-remove-empty-subscriber-class" })
+        assertFalse(transformed.contains("EmptySubscriber"), transformed)
+        assertTrue(transformed.contains("public void stillHere()"), transformed)
+        assertTrue(transformed.trimEnd().endsWith("}"), transformed)
+    }
+
+    @Test
     fun `common bus mod event listener migration matches declared handler type names`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

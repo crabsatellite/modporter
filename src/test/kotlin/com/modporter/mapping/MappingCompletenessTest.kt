@@ -1030,6 +1030,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `structural brace matching ignores Java comments and literals`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val braceStart = source.indexOf("private fun findMatchingBrace")
+        assertTrue(braceStart >= 0, "findMatchingBrace is missing")
+        val braceEnd = source.indexOf("private fun migrateEventBusSubscriberStaticMethodsSource", braceStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val braceBody = source.substring(braceStart, braceEnd)
+        val cleanupStart = source.indexOf("private fun removeEmptySubscriberClasses")
+        assertTrue(cleanupStart >= 0, "removeEmptySubscriberClasses is missing")
+        val cleanupBody = source.substring(cleanupStart)
+
+        val offenders = listOf(
+            "missing string literal skip" to !braceBody.contains("skipJavaStringLiteral(source, i)"),
+            "missing char literal skip" to !braceBody.contains("skipJavaCharLiteral(source, i)"),
+            "missing text block skip" to !braceBody.contains("source.indexOf(\"\\\"\\\"\\\"\", i + 3)"),
+            "missing line comment skip" to !braceBody.contains("source[i] == '/' && source[i + 1] == '/'"),
+            "missing block comment skip" to !braceBody.contains("source[i] == '/' && source[i + 1] == '*'"),
+            "empty subscriber raw brace counter" to cleanupBody.contains("braceCount"),
+            "empty subscriber silent brace skip" to cleanupBody.contains("Couldn't match braces"),
+            "empty subscriber lacks hard error" to !cleanupBody.contains("Cannot match @EventBusSubscriber inner class body")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Structural brace matching must use Java-aware parsing and expose unmatched subscriber bodies: $offenders"
+        )
+    }
+
+    @Test
     fun `resource missing item model collection uses executable registration evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
