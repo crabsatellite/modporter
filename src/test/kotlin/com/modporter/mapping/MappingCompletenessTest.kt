@@ -214,6 +214,13 @@ class MappingCompletenessTest {
     fun `third party API migration markers are declared API surfaces`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val apiSurfaceFile = projectRoot.resolve("src/main/resources/mappings/forge2neo/api-surfaces.json")
+        data class ApiSurface(
+            val id: String,
+            val markers: List<String>,
+            val ruleIdPrefixes: List<String>,
+            val allowedFiles: Set<String>
+        )
+
         val surfaces = Json.parseToJsonElement(apiSurfaceFile.readText()).jsonArray.map { element ->
             val json = element.jsonObject
             val id = json.getValue("id").jsonPrimitive.content
@@ -221,14 +228,18 @@ class MappingCompletenessTest {
                 .flatMap { key ->
                     json[key]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
                 }
-            id to markers
+            ApiSurface(
+                id = id,
+                markers = markers,
+                ruleIdPrefixes = json["ruleIdPrefixes"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty(),
+                allowedFiles = json["allowedFiles"]?.jsonArray?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
+            )
         }
-        val declaredMarkers = surfaces.flatMap { (_, markers) -> markers }
         val malformed = surfaces
-            .filter { (id, markers) -> id.isBlank() || markers.isEmpty() }
-            .map { (id, _) -> id.ifBlank { "<blank>" } }
+            .filter { surface -> surface.id.isBlank() || surface.markers.isEmpty() || surface.allowedFiles.isEmpty() }
+            .map { surface -> surface.id.ifBlank { "<blank>" } }
 
-        assertTrue(malformed.isEmpty(), "API surfaces must have ids and markers: $malformed")
+        assertTrue(malformed.isEmpty(), "API surfaces must have ids, markers, and allowed files: $malformed")
 
         val scannedRoots = listOf(
             projectRoot.resolve("src/main/kotlin"),
@@ -258,10 +269,7 @@ class MappingCompletenessTest {
             "vazkii.botania"
         )
 
-        fun declared(root: String): Boolean =
-            declaredMarkers.any { marker -> root.startsWith(marker) || marker.startsWith(root) }
-
-        val rootOffenders = scannedRoots
+        val productionFiles = scannedRoots
             .filter { Files.exists(it) }
             .flatMap { root ->
                 Files.walk(root).use { stream ->
@@ -275,46 +283,74 @@ class MappingCompletenessTest {
                         .toList()
                 }
             }
+        val productionRelativeFiles = productionFiles
+            .map { file -> projectRoot.relativize(file).invariantSeparatorsPathString }
+            .toSet()
+        val allowedFileOffenders = surfaces.flatMap { surface ->
+            surface.allowedFiles
+                .filter { allowed -> allowed !in productionRelativeFiles }
+                .map { allowed -> "${surface.id} allows non-production file $allowed" }
+        }
+
+        fun surfacesDeclaring(root: String): List<ApiSurface> =
+            surfaces.filter { surface ->
+                surface.markers.any { marker -> root.startsWith(marker) || marker.startsWith(root) }
+            }
+
+        val undeclaredRootOffenders = productionFiles
             .flatMap { file ->
                 val relative = projectRoot.relativize(file).invariantSeparatorsPathString
                 val text = file.readText()
                 thirdPartyRoots
-                    .filter { root -> text.contains(root) && !declared(root) }
+                    .filter { root -> text.contains(root) && surfacesDeclaring(root).isEmpty() }
                     .map { root -> "$relative contains undeclared third-party API marker $root" }
             }
 
-        val ruleIdPrefixes = declaredMarkers.filter { it.endsWith("-") }
-        val ruleIdOffenders = scannedRoots
-            .filter { Files.exists(it) }
-            .flatMap { root ->
-                Files.walk(root).use { stream ->
-                    stream
-                        .filter { Files.isRegularFile(it) }
-                        .filter { it.extension in setOf("kt", "json", "toml", "properties") }
-                        .filter { file ->
-                            val relative = projectRoot.relativize(file).invariantSeparatorsPathString
-                            relative !in excludedFiles
+        val markerScopeOffenders = productionFiles
+            .flatMap { file ->
+                val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                val text = file.readText()
+                surfaces.flatMap { surface ->
+                    surface.markers
+                        .filter { marker -> text.contains(marker) && relative !in surface.allowedFiles }
+                        .map { marker ->
+                            "$relative contains ${surface.id} marker $marker outside declared API-surface files"
                         }
-                        .toList()
                 }
             }
+
+        val ruleIdPrefixes = surfaces.flatMap { surface ->
+            surface.ruleIdPrefixes.map { prefix -> prefix to surface }
+        }
+
+        val ruleIdOffenders = productionFiles
             .flatMap { file ->
                 val relative = projectRoot.relativize(file).invariantSeparatorsPathString
                 Regex(""""((?:struct|res|build)-[a-z0-9]+-[^"]*)"""")
                     .findAll(file.readText())
                     .map { it.groupValues[1] }
                     .filter { ruleId ->
-                        listOf("nitrogen", "cumulus", "curios", "quark").any { ruleId.contains("-$it-") } &&
-                            ruleIdPrefixes.none { ruleId.startsWith(it) }
+                        listOf("nitrogen", "cumulus", "curios", "quark").any { ruleId.contains("-$it-") }
                     }
-                    .map { ruleId -> "$relative contains undeclared third-party API rule id $ruleId" }
+                    .flatMap { ruleId ->
+                        val declaringSurfaces = ruleIdPrefixes
+                            .filter { (prefix, _) -> ruleId.startsWith(prefix) }
+                            .map { (_, surface) -> surface }
+                        when {
+                            declaringSurfaces.isEmpty() ->
+                                listOf("$relative contains undeclared third-party API rule id $ruleId")
+                            declaringSurfaces.none { surface -> relative in surface.allowedFiles } ->
+                                listOf("$relative contains third-party API rule id $ruleId outside declared API-surface files")
+                            else -> emptyList()
+                        }
+                    }
                     .toList()
             }
 
-        val offenders = rootOffenders + ruleIdOffenders
+        val offenders = allowedFileOffenders + undeclaredRootOffenders + markerScopeOffenders + ruleIdOffenders
         assertTrue(
             offenders.isEmpty(),
-            "Third-party API migrations must be declared surfaces, not ad hoc mod-specific rules: $offenders"
+            "Third-party API migrations must stay inside declared API surfaces, not ad hoc mod-specific rules: $offenders"
         )
     }
 

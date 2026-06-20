@@ -9,6 +9,10 @@
       "res-nitrogen-",
       "struct-nitrogen-"
     ],
+    "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt",
+      "src/main/kotlin/com/modporter/resources/ResourceMigrator.kt"
+    ],
     "rationale": "Nitrogen is a published library API dependency used by source projects; migrations must target its API surface, not an individual benchmark mod."
   },
   {
@@ -19,6 +23,9 @@
     ],
     "ruleIdPrefixes": [
       "struct-cumulus-"
+    ],
+    "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt"
     ],
     "rationale": "Cumulus is a published menu API dependency; migrations must be API-surface rules."
   },
@@ -34,6 +41,10 @@
     "ruleIdPrefixes": [
       "struct-curios-"
     ],
+    "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt"
+    ],
     "rationale": "Curios is a public accessory API with Forge to NeoForge package and semantic changes."
   },
   {
@@ -48,6 +59,11 @@
     "ruleIdPrefixes": [
       "jei-"
     ],
+    "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt",
+      "src/main/resources/mappings/forge2neo/text-replacements.json"
+    ],
     "rationale": "JEI is a public integration API whose Forge and NeoForge surfaces differ."
   },
   {
@@ -59,6 +75,9 @@
     "ruleIdPrefixes": [
       "lootr-"
     ],
+    "allowedFiles": [
+      "src/main/resources/mappings/forge2neo/text-replacements.json"
+    ],
     "rationale": "Lootr exposes loader-specific package roots that require explicit Forge to NeoForge API mapping."
   },
   {
@@ -69,6 +88,9 @@
     ],
     "ruleIdPrefixes": [
       "struct-quark-"
+    ],
+    "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt"
     ],
     "rationale": "Quark is a public dependency API; any migration must be tied to the API package, not to a benchmark target."
   },
@@ -97,6 +119,10 @@
       "vazkii.botania"
     ],
     "ruleIdPrefixes": [],
+    "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt",
+      "src/main/kotlin/com/modporter/core/transforms/build/DependencyResolver.kt"
+    ],
     "rationale": "Dependency coordinate handling is metadata-driven resolution, not source-shape migration logic."
   }
 ]
