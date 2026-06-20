@@ -2281,6 +2281,74 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `condition codec registration errors when mod event bus is not source-derived`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.common.crafting.CraftingHelper;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+
+                public ExampleMod() {
+                    CraftingHelper.register(ExampleCondition.Serializer.INSTANCE);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleLoot.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ExampleLoot {
+                public static final DeferredRegister<LootItemConditionType> CONDITIONS =
+                        DeferredRegister.create(Registries.LOOT_CONDITION_TYPE, ExampleMod.MOD_ID);
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleCondition.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.MapCodec;
+            import net.neoforged.neoforge.common.conditions.ICondition;
+
+            public class ExampleCondition implements ICondition {
+                public static final String CONDITION_ID = "example_enabled";
+                public static final ExampleCondition INSTANCE = new ExampleCondition();
+                public static final MapCodec<ExampleCondition> CODEC = MapCodec.unit(INSTANCE);
+
+                @Override
+                public MapCodec<? extends ICondition> codec() {
+                    return CODEC;
+                }
+
+                @Override
+                public boolean test(IContext context) {
+                    return true;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().analyze(tempDir)
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Condition codec registration migration error") &&
+                    it.contains("Cannot derive mod event bus variable")
+            },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(mod.contains("modEventBus"))
+        assertFalse(mod.contains("CONDITION_CODECS.register(modEventBus)"))
+    }
+
+    @Test
     fun `migrates legacy item attribute modifier overrides to item attribute components`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

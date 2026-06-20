@@ -533,6 +533,34 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `production mod event bus migrations do not synthesize variable names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val forbidden = listOf(
+            "modEventBus elvis fallback" to "?: \"modEventBus\"",
+            "eventBus elvis fallback" to "?: \"eventBus\""
+        )
+
+        val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) && it.extension == "kt" }
+                .flatMap { file ->
+                    val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                    val text = file.readText()
+                    forbidden
+                        .filter { (_, marker) -> text.contains(marker) }
+                        .map { (label, _) -> "$relative contains $label" }
+                        .stream()
+                }
+                .toList()
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Mod event bus migrations must derive the bus variable from source structure, not synthesize variable names: $offenders"
+        )
+    }
+
+    @Test
     fun `production migrations do not synthesize minecraft namespace when mod id is missing`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val quotedMinecraftStringLiteral = "\"\\\"minecraft\\\"\""

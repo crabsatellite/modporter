@@ -2175,14 +2175,50 @@ $registrations
     }
 
     private fun detectModBusVariable(source: String): String? =
-        Regex("""\bpublic\s+\w+\s*\([^)]*\bIEventBus\s+(\w+)[^)]*\)\s*\{""")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
-            ?: Regex("""\bIEventBus\s+(\w+)\s*=""")
-                .find(source)
-                ?.groupValues
-                ?.get(1)
+        resolveModEventBusName(source)
+
+    private fun requireModEventBusName(source: String, context: String): String =
+        resolveModEventBusName(source)
+            ?: error(
+                "Cannot derive mod event bus variable for $context: expected an @Mod constructor " +
+                    "IEventBus parameter or an IEventBus local assigned from getEventBus()/getModEventBus()"
+            )
+
+    private data class ConstructorSection(
+        val header: String,
+        val body: String
+    )
+
+    private fun resolveModEventBusName(source: String): String? {
+        val className = classNameOfJavaSource(source) ?: return null
+        val busType = """(?:IEventBus|net\.neoforged\.bus\.api\.IEventBus)"""
+        val parameterBus = Regex("""\b(?:final\s+)?$busType\s+([A-Za-z_$][\w$]*)\b""")
+        val localEventBus = Regex(
+            """\b$busType\s+([A-Za-z_$][\w$]*)\s*=\s*[^;]*(?:getEventBus|getModEventBus)\s*\(\s*\)\s*;"""
+        )
+
+        for (constructor in constructorSections(source, className)) {
+            parameterBus.find(constructor.header)?.groupValues?.get(1)?.let { return it }
+            localEventBus.find(constructor.body)?.groupValues?.get(1)?.let { return it }
+        }
+
+        return null
+    }
+
+    private fun constructorSections(source: String, className: String): List<ConstructorSection> {
+        val constructorPattern = Regex(
+            """\b(?:public|protected|private)?\s*${Regex.escape(className)}\s*\([^)]*\)\s*\{"""
+        )
+        return constructorPattern.findAll(source).mapNotNull { match ->
+            val openBrace = source.indexOf('{', match.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (openBrace < 0 || closeBrace <= openBrace) return@mapNotNull null
+            ConstructorSection(
+                header = source.substring(match.range.first, openBrace),
+                body = source.substring(openBrace + 1, closeBrace)
+            )
+        }.toList()
+    }
 
     private fun cleanupInlineSimpleChannelRegistrations(srcDir: Path, dryRun: Boolean): List<Change> {
         val hasGeneratedNetwork = Files.walk(srcDir)
@@ -3456,11 +3492,7 @@ ${registrations.distinct().joinToString("\n")}
         var mainText = mainClass.readText()
         val originalMainText = mainText
         val mainPackage = packageNameOf(mainText)
-        val constructorBusName = Regex("""public\s+\w+\s*\([^)]*\bIEventBus\s+(\w+)""")
-            .find(mainText)
-            ?.groupValues
-            ?.get(1)
-            ?: "modEventBus"
+        val constructorBusName = requireModEventBusName(mainText, "fluid bucket capability listener registration")
 
         for (migration in migrations) {
             val itemRefs = findRegisteredItemReferences(javaFiles, migration.className)
@@ -3773,7 +3805,7 @@ $itemArguments
         fun outsideClientGuard(match: MatchResult): Boolean =
             isClientOnlyRegistration || clientGuardRanges.none { match.range.first in it }
         val busDeclarationIndent = Regex(
-            """(?m)^([ \t]*)IEventBus\s+${Regex.escape(eventBusName)}\s*=[^;]*;\s*$"""
+            """(?m)^([ \t]*)IEventBus\s+${Regex.escape(eventBusName)}\s*=\s*[^;]*(?:getEventBus|getModEventBus)\s*\(\s*\)\s*;\s*$"""
         ).findAll(source)
             .firstOrNull(::insideConstructor)
             ?.groupValues
@@ -3803,7 +3835,7 @@ $itemArguments
 
         if (constructorBody != null) {
             val localDeclaration = Regex(
-                """(?m)^([ \t]*)IEventBus\s+${Regex.escape(eventBusName)}\s*=[^;]*;\s*$"""
+                """(?m)^([ \t]*)IEventBus\s+${Regex.escape(eventBusName)}\s*=\s*[^;]*(?:getEventBus|getModEventBus)\s*\(\s*\)\s*;\s*$"""
             ).findAll(source)
                 .filter { insideConstructor(it) && outsideClientGuard(it) }
                 .firstOrNull()
@@ -3834,20 +3866,19 @@ $itemArguments
     }
 
     private fun findConstructorBodyWithEventBus(source: String, eventBusName: String): IntRange? {
-        val className = Regex("""\b(?:public\s+)?class\s+(\w+)\b""")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
-            ?: return null
-        val constructorPattern = Regex("""\bpublic\s+${Regex.escape(className)}\s*\([^)]*\)\s*\{""")
+        val className = classNameOfJavaSource(source) ?: return null
+        val constructorPattern = Regex("""\b(?:public|protected|private)?\s*${Regex.escape(className)}\s*\([^)]*\)\s*\{""")
         for (constructorMatch in constructorPattern.findAll(source)) {
             val openBrace = source.indexOf('{', constructorMatch.range.first)
             val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
             if (openBrace < 0 || closeBrace <= openBrace) continue
             val header = source.substring(constructorMatch.range.first, openBrace)
             val body = source.substring(openBrace + 1, closeBrace)
-            val parameterBus = Regex("""\bIEventBus\s+${Regex.escape(eventBusName)}\b""").containsMatchIn(header)
-            val localBus = Regex("""\bIEventBus\s+${Regex.escape(eventBusName)}\s*=""").containsMatchIn(body)
+            val busType = """(?:IEventBus|net\.neoforged\.bus\.api\.IEventBus)"""
+            val parameterBus = Regex("""\b(?:final\s+)?$busType\s+${Regex.escape(eventBusName)}\b""").containsMatchIn(header)
+            val localBus = Regex(
+                """\b$busType\s+${Regex.escape(eventBusName)}\s*=\s*[^;]*(?:getEventBus|getModEventBus)\s*\(\s*\)\s*;"""
+            ).containsMatchIn(body)
             if (parameterBus || localBus) {
                 return (openBrace + 1) until closeBrace
             }
@@ -3969,11 +4000,7 @@ $itemArguments
                 val originalMainText = mainText
                 val mainPackage = packageNameOf(mainText)
                 val capabilityPackage = packageNameOf(capabilityText)
-                val constructorBusName = Regex("""public\s+\w+\s*\([^)]*\bIEventBus\s+(\w+)""")
-                    .find(mainText)
-                    ?.groupValues
-                    ?.get(1)
-                    ?: "modEventBus"
+                val constructorBusName = requireModEventBusName(mainText, "custom fluid capability listener registration")
 
                 if (!mainText.contains("CustomFluidCapabilities::registerCapabilities")) {
                     if (capabilityPackage != mainPackage) {
@@ -4188,7 +4215,7 @@ $itemArguments
         if (mainText.contains("${migration.compatClassName}::registerCuriosCapabilities")) return emptyList()
         val originalMainText = mainText
         val mainPackage = packageNameOf(mainText)
-        val constructorBusName = inferModEventBusName(mainText)
+        val constructorBusName = requireModEventBusName(mainText, "Curios item capability listener registration")
 
         if (migration.compatPackageName != mainPackage) {
             mainText = addImportIfMissing(mainText, "${migration.compatPackageName}.${migration.compatClassName}")
@@ -4651,17 +4678,6 @@ $itemArguments
         return changes
     }
 
-    private fun inferModEventBusName(source: String): String =
-        Regex("""public\s+\w+\s*\([^)]*\bIEventBus\s+([A-Za-z_$][\w$]*)""")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
-            ?: Regex("""\bIEventBus\s+([A-Za-z_$][\w$]*)\s*=\s*[^;]*getEventBus\(\)\s*;""")
-                .find(source)
-                ?.groupValues
-                ?.get(1)
-            ?: "modEventBus"
-
     private data class LegacyEntityCapability(
         val fieldName: String,
         val apiType: String,
@@ -4934,7 +4950,7 @@ $itemArguments
             val call = "$ownerClass.registerAttachments("
             if (mainClass.readText().contains(call)) continue
             var migratedMain = mainClass.readText()
-            val busName = detectModBusVariable(migratedMain) ?: "modEventBus"
+            val busName = requireModEventBusName(migratedMain, "attachment registration")
             val mainPackage = packageNameOf(migratedMain)
             if (ownerPackage != mainPackage) {
                 migratedMain = addImportIfMissing(migratedMain, "$ownerPackage.$ownerClass")
@@ -6617,15 +6633,7 @@ public class DelegatingPackResources extends AbstractPackResources {
         var mainText = mainClass.readText()
         val originalMainText = mainText
         val mainPackage = packageNameOf(mainText)
-        val constructorBusName = Regex("""\bIEventBus\s+([A-Za-z_$][\w$]*)\s*=""")
-            .find(mainText)
-            ?.groupValues
-            ?.get(1)
-            ?: Regex("""public\s+\w+\s*\([^)]*\bIEventBus\s+([A-Za-z_$][\w$]*)""")
-                .find(mainText)
-                ?.groupValues
-                ?.get(1)
-            ?: "modEventBus"
+        val constructorBusName = requireModEventBusName(mainText, "block entity fluid capability listener registration")
 
         for (migration in migrations) {
             if (mainText.contains("${migration.className}::registerCapabilities")) continue
@@ -6744,15 +6752,7 @@ public class DelegatingPackResources extends AbstractPackResources {
         var mainText = mainClass.readText()
         val originalMainText = mainText
         val mainPackage = packageNameOf(mainText)
-        val constructorBusName = Regex("""\bIEventBus\s+([A-Za-z_$][\w$]*)\s*=""")
-            .find(mainText)
-            ?.groupValues
-            ?.get(1)
-            ?: Regex("""public\s+\w+\s*\([^)]*\bIEventBus\s+([A-Za-z_$][\w$]*)""")
-                .find(mainText)
-                ?.groupValues
-                ?.get(1)
-            ?: "modEventBus"
+        val constructorBusName = requireModEventBusName(mainText, "block entity capability listener registration")
 
         for (migration in migrations) {
             if (mainText.contains("${migration.className}::registerCapabilities")) continue
@@ -7332,11 +7332,7 @@ $registrations
         if (mainClass != null && mainText.isNotBlank() && !mainText.contains("DirtinessAttachment.register(")) {
             var migratedMain = mainText
             val mainPackage = packageNameOf(migratedMain)
-            val constructorBusName = Regex("""public\s+\w+\s*\([^)]*\bIEventBus\s+(\w+)""")
-                .find(migratedMain)
-                ?.groupValues
-                ?.get(1)
-                ?: "modEventBus"
+            val constructorBusName = requireModEventBusName(migratedMain, "Dirtiness attachment registration")
 
             if (packageName != mainPackage) {
                 migratedMain = addImportIfMissing(migratedMain, "$packageName.DirtinessAttachment")
@@ -7624,11 +7620,7 @@ public final class DirtinessAttachment {
         if (mainClass != null && mainText.isNotBlank() && !mainText.contains("ExtraEventsRegister.register(")) {
             var migratedMain = mainText
             val mainPackage = packageNameOf(migratedMain)
-            val constructorBusName = Regex("""public\s+\w+\s*\([^)]*\bIEventBus\s+(\w+)""")
-                .find(migratedMain)
-                ?.groupValues
-                ?.get(1)
-                ?: "modEventBus"
+            val constructorBusName = requireModEventBusName(migratedMain, "legacy extra event registration")
 
             if (registrarPackage != mainPackage) {
                 migratedMain = addImportIfMissing(migratedMain, "$registrarPackage.ExtraEventsRegister")
@@ -7856,15 +7848,7 @@ public final class DirtinessAttachment {
         val original = mainClass.readText()
         var text = original
         val mainPackage = packageNameOf(text)
-        val constructorBusName = Regex("""public\s+\w+\s*\([^)]*\bIEventBus\s+(\w+)""")
-            .find(text)
-            ?.groupValues
-            ?.get(1)
-            ?: Regex("""\bIEventBus\s+(\w+)\s*=""")
-                .find(text)
-                ?.groupValues
-                ?.get(1)
-            ?: "modEventBus"
+        val constructorBusName = requireModEventBusName(text, "advancement trigger registration")
         for ((registryFile, fileRegistrations) in registrations.groupBy { it.registryFile }) {
             val first = fileRegistrations.first()
             val classRef = if (first.registryPackage == mainPackage) {
@@ -8060,15 +8044,7 @@ public final class DirtinessAttachment {
         val original = mainClass.readText()
         var text = original
         val mainPackage = packageNameOf(text)
-        val constructorBusName = Regex("""public\s+\w+\s*\([^)]*\bIEventBus\s+(\w+)""")
-            .find(text)
-            ?.groupValues
-            ?.get(1)
-            ?: Regex("""\bIEventBus\s+(\w+)\s*=""")
-                .find(text)
-                ?.groupValues
-                ?.get(1)
-            ?: "modEventBus"
+        val constructorBusName = requireModEventBusName(text, "condition codec registration")
         val classRef = if (registryPackage == mainPackage || registryPackage.isBlank()) {
             registryClassName
         } else {
@@ -40945,14 +40921,7 @@ public class ${builder.className} implements RecipeBuilder {
                 val matches = badListenerPattern.findAll(original).toList()
                 if (matches.isEmpty()) return@forEach
 
-                val modBusVar = Regex(
-                    """\bIEventBus\s+(\w+)\s*=\s*[^;]*(?:getEventBus|getModEventBus)\s*\(\s*\)\s*;"""
-                ).find(original)?.groupValues?.get(1)
-                    ?: Regex("""\bpublic\s+\w+\s*\([^)]*\bIEventBus\s+(\w+)[^)]*\)\s*\{""")
-                        .find(original)
-                        ?.groupValues
-                        ?.get(1)
-                    ?: return@forEach
+                val modBusVar = detectModBusVariable(original) ?: return@forEach
 
                 val refsToRegister = matches.map { it.groupValues[1] }.distinct()
                 var modified = badListenerPattern.replace(original, "")
@@ -41029,14 +40998,7 @@ public class ${builder.className} implements RecipeBuilder {
         if (!srcDir.exists()) return changes
         val mainFile = detectModMainClass(projectDir) ?: return changes
         var mainText = mainFile.readText()
-        val modBusVar = Regex(
-            """\bIEventBus\s+(\w+)\s*=\s*[^;]*(?:getEventBus|getModEventBus)\s*\(\s*\)\s*;"""
-        ).find(mainText)?.groupValues?.get(1)
-            ?: Regex("""\bpublic\s+\w+\s*\([^)]*\bIEventBus\s+(\w+)[^)]*\)\s*\{""")
-                .find(mainText)
-                ?.groupValues
-                ?.get(1)
-            ?: return changes
+        val modBusVar = detectModBusVariable(mainText) ?: return changes
 
         val clientOnlyEventNames = setOf(
             "EntityRenderersEvent",
@@ -41165,12 +41127,16 @@ public class ${builder.className} implements RecipeBuilder {
     }
 
     private fun mainConstructorIndent(source: String, eventBusName: String): String {
-        val localLine = Regex("""(?m)^([ \t]*)IEventBus\s+${Regex.escape(eventBusName)}\s*=""")
+        val localLine = Regex(
+            """(?m)^([ \t]*)IEventBus\s+${Regex.escape(eventBusName)}\s*=\s*[^;]*(?:getEventBus|getModEventBus)\s*\(\s*\)\s*;"""
+        )
             .find(source)
             ?.groupValues
             ?.get(1)
         if (localLine != null) return localLine
-        return Regex("""(?m)^([ \t]*)public\s+\w+\s*\([^)]*\bIEventBus\s+${Regex.escape(eventBusName)}\b[^)]*\)\s*\{""")
+        val className = classNameOfJavaSource(source)
+        if (className == null) return "        "
+        return Regex("""(?m)^([ \t]*)(?:public|protected|private)?\s*${Regex.escape(className)}\s*\([^)]*\bIEventBus\s+${Regex.escape(eventBusName)}\b[^)]*\)\s*\{""")
             .find(source)
             ?.groupValues
             ?.get(1)
