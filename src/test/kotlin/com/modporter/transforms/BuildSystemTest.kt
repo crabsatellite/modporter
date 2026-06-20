@@ -1052,6 +1052,40 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `does not remove commented class-for-name eager load`() {
+        val projectDir = tempDir.resolve("commented-class-for-name-eager-load")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("CompatManager.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.common.NeoForge;
+
+            public class CompatManager {
+                public static void registerEventHandler(Class<?> handlerClass) throws Exception {
+                    /*
+                    Class.forName(handlerClass.getName(), true, handlerClass.getClassLoader());
+                    */
+                    NeoForge.EVENT_BUS.register(handlerClass);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("CompatManager.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertTrue(source.contains("Class.forName(handlerClass.getName(), true, handlerClass.getClassLoader());"), source)
+        assertTrue(source.contains("NeoForge.EVENT_BUS.register(handlerClass);"), source)
+    }
+
+    @Test
     fun `does not generate enum mixin invoker from commented class-for-name flow`() {
         val projectDir = tempDir.resolve("commented-enum-class-for-name")
         val srcDir = projectDir.resolve("src/main/java/com/example")

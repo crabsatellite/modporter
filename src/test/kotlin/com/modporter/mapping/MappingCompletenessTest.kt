@@ -804,6 +804,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `redundant class for name removal uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun removeRedundantClassForNameOnClassObjects")
+        assertTrue(start >= 0, "removeRedundantClassForNameOnClassObjects is missing")
+        val end = source.indexOf("private fun rewriteClassForNamePresenceChecksWithoutReflection", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw regex replacement" to ".replace(source, \"\")",
+            "raw source match scan" to "pattern.findAll(source)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "Redundant Class.forName removal contains $label" }
+
+        assertTrue(
+            body.contains("val code = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val matches = pattern.findAll(code).toList()") &&
+                body.contains("for (match in matches.asReversed())") &&
+                body.contains("result.substring(0, match.range.first)") &&
+                body.contains("result.substring(match.range.last + 1)"),
+            "Redundant Class.forName removal must delete only executable Java statements"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Redundant Class.forName removal must not delete raw source text: $offenders"
+        )
+    }
+
+    @Test
     fun `class for name presence migration uses executable source evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

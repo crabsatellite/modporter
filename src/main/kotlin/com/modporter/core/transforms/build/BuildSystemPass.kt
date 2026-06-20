@@ -2338,9 +2338,18 @@ $header
         return result
     }
 
-    private fun removeRedundantClassForNameOnClassObjects(source: String): String =
-        Regex("""(?m)^[ \t]*Class\.forName\(\s*([A-Za-z_$][\w$]*)\.getName\(\)\s*,\s*true\s*,\s*\1\.getClassLoader\(\)\s*\);\s*\r?\n""")
-            .replace(source, "")
+    private fun removeRedundantClassForNameOnClassObjects(source: String): String {
+        val code = maskJavaCommentsAndLiterals(source)
+        val pattern = Regex("""(?m)^[ \t]*Class\.forName\(\s*([A-Za-z_$][\w$]*)\.getName\(\)\s*,\s*true\s*,\s*\1\.getClassLoader\(\)\s*\);\s*\r?\n""")
+        val matches = pattern.findAll(code).toList()
+        if (matches.isEmpty()) return source
+
+        var result = source
+        for (match in matches.asReversed()) {
+            result = result.substring(0, match.range.first) + result.substring(match.range.last + 1)
+        }
+        return result
+    }
 
     private fun rewriteClassForNamePresenceChecksWithoutReflection(source: String): String {
         val code = maskJavaComments(source)
