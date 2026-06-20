@@ -3339,6 +3339,79 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `loot conditional function codec migration rejects member name fallbacks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AmbiguousItemSwap.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import com.google.gson.JsonSyntaxException;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.functions.LootItemConditionalFunction;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+
+            public class AmbiguousItemSwap extends LootItemConditionalFunction {
+                private final Item replacement;
+                private final Item fallback;
+                private final boolean selected;
+
+                protected AmbiguousItemSwap(LootItemCondition[] conditions, Item replacement, Item fallback, boolean selected) {
+                    super(conditions);
+                    this.replacement = replacement;
+                    this.fallback = fallback;
+                    this.selected = selected;
+                }
+
+                public LootItemFunctionType getType() {
+                    return null;
+                }
+
+                public ItemStack run(ItemStack stack, LootContext context) {
+                    return new ItemStack(this.replacement, stack.getCount());
+                }
+
+                public static class Serializer extends LootItemConditionalFunction.Serializer<AmbiguousItemSwap> {
+                    public void serialize(JsonObject object, AmbiguousItemSwap function, JsonSerializationContext serializationContext) {
+                        object.addProperty("marker", function.selected);
+                    }
+
+                    public AmbiguousItemSwap deserialize(JsonObject object, JsonDeserializationContext deserializationContext, LootItemCondition[] conditions) {
+                        Item item;
+                        boolean success;
+                        try {
+                            item = GsonHelper.getAsItem(object, "item");
+                            success = true;
+                        } catch (JsonSyntaxException e) {
+                            item = GsonHelper.getAsItem(object, "default");
+                            success = false;
+                        }
+                        return new AmbiguousItemSwap(conditions, item, GsonHelper.getAsItem(object, "default"), success);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(tempDir)
+
+        val ambiguous = srcDir.resolve("AmbiguousItemSwap.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(ambiguous.contains("MapCodec<AmbiguousItemSwap>"), ambiguous)
+        assertTrue(ambiguous.contains("LootItemConditionalFunction.Serializer<AmbiguousItemSwap>"), ambiguous)
+        assertTrue(ambiguous.contains("GsonHelper.getAsItem(object, \"item\")"), ambiguous)
+        assertTrue(ambiguous.contains("GsonHelper.getAsItem(object, \"default\")"), ambiguous)
+    }
+
+    @Test
     fun `legacy neoforge recipe condition serializers migrate to condition codecs`() {
         val projectDir = createTestFile("""
             package com.example;

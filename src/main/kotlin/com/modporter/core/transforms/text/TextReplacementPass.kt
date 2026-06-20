@@ -1595,13 +1595,13 @@ $fieldLines
 
         val itemMember = Regex(
             """\b(?:object|json)\.addProperty\s*\(\s*"item"\s*,\s*BuiltInRegistries\.ITEM\.getKey\s*\(\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\s*\)"""
-        ).find(serializer)?.groupValues?.get(1) ?: "item"
+        ).find(serializer)?.groupValues?.get(1) ?: return null
         val defaultMembers = Regex(
             """\b(?:object|json)\.addProperty\s*\(\s*"default"\s*,\s*BuiltInRegistries\.ITEM\.getKey\s*\(\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\s*\)"""
         ).findAll(serializer).map { it.groupValues[1] }.toList()
-        val defaultMember = defaultMembers.lastOrNull() ?: "oldItem"
+        val defaultMember = defaultMembers.lastOrNull() ?: return null
         val successMember = Regex("""if\s*\(\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\s*\)""")
-            .find(serializer)?.groupValues?.get(1) ?: "success"
+            .find(serializer)?.groupValues?.get(1) ?: return null
 
         return """
 	public static final MapCodec<$className> CODEC = com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec(instance -> commonFields(instance).and(instance.group(

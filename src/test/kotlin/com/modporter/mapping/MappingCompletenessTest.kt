@@ -629,6 +629,32 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `loot conditional function codec migrations do not synthesize member names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun inferLootConditionalFunctionCodecField")
+        assertTrue(start >= 0, "inferLootConditionalFunctionCodecField is missing")
+        val end = source.indexOf("private fun inferEntityTypeAndIntLootFunctionCodecField", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "item member fallback" to "?: \"item\"",
+            "default item member fallback" to "?: \"oldItem\"",
+            "success member fallback" to "?: \"success\""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "loot conditional function codec migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Loot conditional function codec migrations must derive member names from serializer source, not synthesize placeholders: $offenders"
+        )
+    }
+
+    @Test
     fun `production mod event bus migrations do not synthesize variable names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(
