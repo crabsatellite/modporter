@@ -740,6 +740,70 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `deferred register owner collectors use declared Java type names instead of file names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public ExampleMod(IEventBus bus) {
+                    bus.addListener(ActualListenerRegistry::register);
+                    DeferredRegister<?>[] registers = { };
+                    for (DeferredRegister<?> register : registers) {
+                        register.register(bus);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("WrongListenerOwnerFile.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.levelgen.carver.WorldCarver;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            class ActualListenerRegistry {
+                static final DeferredRegister<WorldCarver<?>> CARVER_TYPES = DeferredRegister.create(Registries.CARVER, ExampleMod.ID);
+
+                static void register(IEventBus bus) {
+                    CARVER_TYPES.register(bus);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("WrongArrayOwnerFile.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            class ActualArrayRegistry {
+                static final DeferredRegister<PlacementModifierType<?>> PLACEMENT_MODIFIER_TYPES = DeferredRegister.create(Registries.PLACEMENT_MODIFIER_TYPE, ExampleMod.ID);
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredregister-listener" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredregister-array-completeness" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(main.contains("ActualListenerRegistry.CARVER_TYPES.register(bus);"), main)
+        assertTrue(main.contains("DeferredRegister<?>[] registers = { com.example.ActualArrayRegistry.PLACEMENT_MODIFIER_TYPES };"), main)
+        assertFalse(main.contains("WrongListenerOwnerFile"), main)
+        assertFalse(main.contains("WrongArrayOwnerFile"), main)
+        assertFalse(main.contains("::register"), main)
+    }
+
+    @Test
     fun `detects ifPresent and orElse on capability-related expressions`() {
         val projectDir = createFile("CapUsage.java", """
             package com.example;

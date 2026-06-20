@@ -12403,11 +12403,12 @@ ${entries.joinToString(",\n")}
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return emptyList()
         val mainClass = detectModMainClass(projectDir) ?: return emptyList()
+        val mainSource = mainClass.readText()
+        val mainName = classNameOfJavaSource(mainSource) ?: return emptyList()
+        val mainPackage = packageNameOf(mainSource)
+        val mainQualifiedName = if (mainPackage.isBlank()) mainName else "$mainPackage.$mainName"
         val fields = collectDeferredRegisterFields(srcDir)
-            .filterNot { it.ownerQualifiedName == packageNameOf(mainClass.readText()).let { pkg ->
-                val mainName = classNameOfJavaSource(mainClass.readText()) ?: mainClass.fileName.toString().removeSuffix(".java")
-                if (pkg.isBlank()) mainName else "$pkg.$mainName"
-            } }
+            .filterNot { it.ownerQualifiedName == mainQualifiedName }
         if (fields.isEmpty()) return emptyList()
 
         val original = mainClass.readText()
@@ -12980,7 +12981,7 @@ ${entries.joinToString(",\n")}
             .forEach { javaFile ->
                 val source = javaFile.readText()
                 if (!source.contains("DeferredRegister")) return@forEach
-                val className = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+                val className = classNameOfJavaSource(source) ?: return@forEach
                 val classBody = javaClassBodyRange(source, className)
                 val field = Regex("""\bDeferredRegister\b[^\r\n;=]*\s+([A-Z][A-Z0-9_]*)\s*=""")
                     .findAll(source)
@@ -13000,7 +13001,7 @@ ${entries.joinToString(",\n")}
             .forEach { javaFile ->
                 val source = javaFile.readText()
                 if (!source.contains("DeferredRegister")) return@forEach
-                val className = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+                val className = classNameOfJavaSource(source) ?: return@forEach
                 val classBody = javaClassBodyRange(source, className)
                 val packageName = packageNameOf(source)
                 val qualifiedName = if (packageName.isBlank()) className else "$packageName.$className"
@@ -13131,7 +13132,7 @@ ${entries.joinToString(",\n")}
             .forEach { javaFile ->
                 val source = javaFile.readText()
                 if (!source.contains("DeferredHolder")) return@forEach
-                val owner = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+                val owner = classNameOfJavaSource(source) ?: return@forEach
                 Regex(
                     """(?m)\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?(?:net\.neoforged\.neoforge\.registries\.)?DeferredHolder\s*<[^;\r\n=]+>\s+([A-Za-z_$][\w$]*)\b"""
                 ).findAll(source)
@@ -13150,7 +13151,7 @@ ${entries.joinToString(",\n")}
             .forEach { javaFile ->
                 val source = javaFile.readText()
                 if (!source.contains("DeferredHolder") || !source.contains(registryType)) return@forEach
-                val owner = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+                val owner = classNameOfJavaSource(source) ?: return@forEach
                 val packageName = packageNameOf(source)
                 Regex(
                     """(?m)\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?(?:net\.neoforged\.neoforge\.registries\.)?DeferredHolder\s*<\s*(?:[A-Za-z_$][\w$]*\.)*$typePattern\s*,[^;\r\n=]+>\s+([A-Za-z_$][\w$]*)\b"""
