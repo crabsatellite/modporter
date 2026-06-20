@@ -1353,6 +1353,36 @@ class ResourceMigrationTest {
     }
 
     @Test
+    fun `registered item text block documentation does not generate missing model`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/com/example")
+        javaDir.createDirectories()
+        javaDir.resolve("ItemRegister.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "class ItemRegister {",
+            "    static void docs() {",
+            "        String example = \"\"\"",
+            "            ITEMS.register(\"sample_item\", () -> new Item(new Item.Properties()));",
+            "            \"\"\";",
+            "        if (example.isEmpty()) throw new IllegalStateException();",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+        val textureDir = projectDir.resolve("src/main/resources/assets/resmod/textures/item")
+        textureDir.createDirectories()
+        textureDir.resolve("sample_item.png").writeText("png")
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val model = projectDir.resolve("src/main/resources/assets/resmod/models/item/sample_item.json")
+        assertFalse(result.changes.any { it.ruleId == "res-create-missing-item-model" })
+        assertFalse(model.exists(), "Documentation-only item registration must not create a model")
+    }
+
+    @Test
     fun `generated resources do not duplicate item models already in main resources`() {
         val projectDir = setupResourceProject()
         val javaDir = projectDir.resolve("src/main/java/com/example")

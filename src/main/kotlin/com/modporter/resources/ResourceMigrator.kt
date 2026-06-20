@@ -3007,10 +3007,19 @@ class ResourceMigrationPass(
             sources
                 .filter { Files.isRegularFile(it) && it.toString().endsWith(".java") }
                 .forEach { file ->
-                    registerPattern.findAll(file.readText()).forEach { match ->
-                        val id = match.groupValues[1]
-                        items.putIfAbsent(id, RegisteredItem(id, match.groupValues[2]))
-                    }
+                    val source = file.readText()
+                    val code = maskJavaComments(source)
+                    val executableCode = maskJavaCommentsAndLiterals(source)
+                    registerPattern.findAll(code)
+                        .filter { match ->
+                            val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                            executableSegment.contains("ITEMS.register(") &&
+                                executableSegment.contains("new")
+                        }
+                        .forEach { match ->
+                            val id = match.groupValues[1]
+                            items.putIfAbsent(id, RegisteredItem(id, match.groupValues[2]))
+                        }
                 }
         }
         return items.values.toList()

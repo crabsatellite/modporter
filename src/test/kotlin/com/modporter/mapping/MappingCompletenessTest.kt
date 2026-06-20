@@ -1018,6 +1018,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `resource missing item model collection uses executable registration evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt")
+            .readText()
+        val start = source.indexOf("private fun detectRegisteredItems")
+        assertTrue(start >= 0, "detectRegisteredItems is missing")
+        val end = source.indexOf("private fun itemModelJson", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw file text registration scan" to "registerPattern.findAll(file.readText())"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "missing item model registration detection contains $label" }
+
+        assertTrue(
+            body.contains("val source = file.readText()") &&
+                body.contains("val code = maskJavaComments(source)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("registerPattern.findAll(code)") &&
+                body.contains("val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)") &&
+                body.contains("executableSegment.contains(\"ITEMS.register(\")"),
+            "Missing item model generation must capture item ids from comment-masked source but prove registrations from executable Java code"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Missing item model generation must not use raw Java text as registration evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `forbidden reflection detection ignores comments and literals`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
