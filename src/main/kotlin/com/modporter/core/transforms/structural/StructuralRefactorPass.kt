@@ -2851,14 +2851,17 @@ ${registrations.distinct().joinToString("\n")}
     private fun detectModMainClass(projectDir: Path): Path? {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return null
+        val candidates = mutableListOf<Path>()
         try {
             val javaFiles = Files.walk(srcDir).filter { it.toString().endsWith(".java") }.toList()
             for (file in javaFiles) {
                 val text = file.readText()
-                if (Regex("""@Mod\s*\(""").containsMatchIn(maskJavaCommentsAndLiterals(text))) return file
+                if (Regex("""@Mod\s*\(""").containsMatchIn(maskJavaCommentsAndLiterals(text))) {
+                    candidates.add(file)
+                }
             }
         } catch (_: Exception) {}
-        return null
+        return candidates.singleOrNull()
     }
 
     private fun migrateMissingMappingsAliases(projectDir: Path, dryRun: Boolean): List<Change> {

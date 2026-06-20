@@ -2500,6 +2500,7 @@ class MappingCompletenessTest {
         val staticStringConstant = functionBody("hasStaticFinalStringConstant")
         val forbidden = listOf(
             "main class raw annotation scan" to (detectModMainClass to Regex("""@Mod[\s\S]{0,120}containsMatchIn\(text\)""")),
+            "main class first-match return" to (detectModMainClass to Regex("""return\s+file""")),
             "annotation argument raw scan" to (modAnnotationArgument to Regex("""@Mod[\s\S]{0,120}\.find\(source\)""")),
             "explicit mod id raw main scan" to (explicitModIdReference to Regex("""@Mod[\s\S]{0,160}\.find\(mainText\)""")),
             "explicit mod id file-name owner" to (explicitModIdReference to Regex("""mainClass\.fileName""")),
@@ -2515,7 +2516,9 @@ class MappingCompletenessTest {
             detectModId.contains("val candidates = linkedSetOf<String>()") &&
                 detectModId.contains("detectModIdFromText(text)?.let(candidates::add)") &&
                 detectModId.contains("return candidates.singleOrNull()") &&
+                detectModMainClass.contains("val candidates = mutableListOf<Path>()") &&
                 detectModMainClass.contains("maskJavaCommentsAndLiterals(text)") &&
+                detectModMainClass.contains("return candidates.singleOrNull()") &&
                 modAnnotationArgument.contains("val code = maskJavaComments(source)") &&
                 modAnnotationArgument.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
                 modAnnotationArgument.contains(".find(code)") &&
