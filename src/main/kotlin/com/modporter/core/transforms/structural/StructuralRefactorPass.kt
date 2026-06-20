@@ -20952,11 +20952,13 @@ ${indent}}"""
         var inLineComment = false
         var inBlockComment = false
         var inString = false
+        var inTextBlock = false
         var inChar = false
         var escaped = false
         while (index < source.length) {
             val ch = source[index]
             val next = source.getOrNull(index + 1)
+            val nextTwo = source.getOrNull(index + 2)
 
             when {
                 inLineComment -> {
@@ -20974,6 +20976,14 @@ ${indent}}"""
                         inBlockComment = false
                     } else {
                         result.append(if (ch == '\r' || ch == '\n') ch else ' ')
+                    }
+                }
+                inTextBlock -> {
+                    result.append(if (ch == '\r' || ch == '\n') ch else ' ')
+                    if (ch == '"' && next == '"' && nextTwo == '"') {
+                        result.append("  ")
+                        index += 2
+                        inTextBlock = false
                     }
                 }
                 inString -> {
@@ -20997,6 +21007,12 @@ ${indent}}"""
                     result.append("  ")
                     index++
                     inBlockComment = true
+                }
+                ch == '"' && next == '"' && nextTwo == '"' -> {
+                    result.append("   ")
+                    index += 2
+                    inTextBlock = true
+                    escaped = false
                 }
                 ch == '"' -> {
                     result.append(' ')

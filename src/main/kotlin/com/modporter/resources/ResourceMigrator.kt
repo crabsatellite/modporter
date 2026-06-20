@@ -3245,7 +3245,22 @@ class ResourceMigrationPass(
         val chars = maskJavaComments(source).toCharArray()
         var index = 0
         while (index < chars.size) {
-            if (chars[index] == '"' || chars[index] == '\'') {
+            if (index + 2 < chars.size && chars[index] == '"' && chars[index + 1] == '"' && chars[index + 2] == '"') {
+                chars[index] = ' '
+                chars[index + 1] = ' '
+                chars[index + 2] = ' '
+                index += 3
+                while (index + 2 < chars.size && !(chars[index] == '"' && chars[index + 1] == '"' && chars[index + 2] == '"')) {
+                    if (chars[index] != '\n' && chars[index] != '\r') chars[index] = ' '
+                    index++
+                }
+                if (index + 2 < chars.size) {
+                    chars[index] = ' '
+                    chars[index + 1] = ' '
+                    chars[index + 2] = ' '
+                    index += 3
+                }
+            } else if (chars[index] == '"' || chars[index] == '\'') {
                 val quote = chars[index]
                 chars[index++] = ' '
                 var escaped = false

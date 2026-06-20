@@ -790,12 +790,18 @@ class MappingCompletenessTest {
 
         assertTrue(
             body.contains("val code = maskJavaComments(source)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
                 body.contains("findAll(code)") &&
                 body.contains("val methodBody = code.substring(openBrace + 1, closeBrace)") &&
+                body.contains("val executableMethodBody = executableCode.substring(openBrace + 1, closeBrace)") &&
                 body.contains("val resolveBody = code.substring(resolveOpenBrace + 1, resolveCloseBrace)") &&
-                body.contains("methodBody.contains(\"Class.forName(\")") &&
-                body.contains("methodBody.contains(\"getSeasonState\")"),
-            "SeasonHelper reflection migration must prove the Class.forName/getMethod flow from executable method-local code"
+                body.contains("val executableResolveBody = executableCode.substring(resolveOpenBrace + 1, resolveCloseBrace)") &&
+                body.contains("fun MatchResult.hasExecutableClassForNameGetMethod()") &&
+                body.contains("val executableSegment = executableResolveBody.substring(range.first, range.last + 1)") &&
+                body.contains("executableSegment.contains(\"Class.forName(\")") &&
+                body.contains("executableSegment.contains(\".getMethod(\")") &&
+                body.contains("firstOrNull { it.hasExecutableClassForNameGetMethod() }"),
+            "SeasonHelper reflection migration must capture API names from comment-masked code but prove reflection calls from executable method-local code"
         )
         assertTrue(
             offenders.isEmpty(),
@@ -943,7 +949,7 @@ class MappingCompletenessTest {
     }
 
     @Test
-    fun `reflected optional dependency scan ignores comments`() {
+    fun `reflected optional dependency scan ignores comments and literals`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
             .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
@@ -961,13 +967,53 @@ class MappingCompletenessTest {
             .map { (label, _) -> "reflected optional dependency scan contains $label" }
 
         assertTrue(
-            body.contains("val code = maskJavaComments(javaFile.readText())") &&
-                body.contains("pattern.findAll(code)"),
-            "Reflected optional dependency collection must ignore comments when scanning Class.forName references"
+            body.contains("val source = javaFile.readText()") &&
+                body.contains("val code = maskJavaComments(source)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("pattern.findAll(code)") &&
+                body.contains("executableCode.substring(match.range.first, match.range.last + 1)") &&
+                body.contains(".contains(\"Class.forName(\")"),
+            "Reflected optional dependency collection must capture class names from comment-masked code but prove Class.forName from executable Java code"
         )
         assertTrue(
             offenders.isEmpty(),
             "Reflected optional dependency collection must not use raw Java text as evidence: $offenders"
+        )
+    }
+
+    @Test
+    fun `java comment and literal masks handle text blocks`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val maskImplementations = listOf(
+            "BuildSystemPass" to projectRoot.resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt"),
+            "ResourceMigrator" to projectRoot.resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt"),
+            "StructuralRefactorPass" to projectRoot.resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+        )
+
+        val offenders = maskImplementations.mapNotNull { (label, path) ->
+            val source = path.readText()
+            val start = source.indexOf("private fun maskJavaCommentsAndLiterals")
+            if (start < 0) return@mapNotNull "$label is missing maskJavaCommentsAndLiterals"
+            val end = source.indexOf("\n    private fun", start + 1).let {
+                if (it < 0) source.length else it
+            }
+            val body = source.substring(start, end)
+            val charArrayScannerHandlesTextBlocks =
+                body.contains("index + 2 < chars.size") &&
+                    body.contains("chars[index + 2]") &&
+                    body.contains("index += 3")
+            val stateScannerHandlesTextBlocks =
+                body.contains("var inTextBlock = false") &&
+                    body.contains("val nextTwo = source.getOrNull(index + 2)") &&
+                    body.contains("result.append(\"   \")")
+            if (charArrayScannerHandlesTextBlocks || stateScannerHandlesTextBlocks) null else {
+                "$label maskJavaCommentsAndLiterals does not mask Java text blocks"
+            }
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Java comment/literal masking must treat text blocks as literals so documentation cannot drive migrations: $offenders"
         )
     }
 

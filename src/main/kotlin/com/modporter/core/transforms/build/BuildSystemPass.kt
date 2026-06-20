@@ -2271,9 +2271,11 @@ $header
 
     private fun rewriteSeasonStateReflectionWithoutReflection(source: String): String {
         val code = maskJavaComments(source)
+        val executableCode = maskJavaCommentsAndLiterals(source)
         if (!code.contains("getSeasonState") ||
             !code.contains("getSubSeason") ||
-            !code.contains("Class.forName(")) {
+            !executableCode.contains("Class.forName(") ||
+            !executableCode.contains(".getMethod(")) {
             return source
         }
 
@@ -2284,7 +2286,11 @@ $header
                 val closeBrace = if (openBrace >= 0) findMatchingBrace(code, openBrace) else -1
                 if (closeBrace <= openBrace) return@firstOrNull false
                 val methodBody = code.substring(openBrace + 1, closeBrace)
-                methodBody.contains("Class.forName(") && methodBody.contains("getSeasonState")
+                val executableMethodBody = executableCode.substring(openBrace + 1, closeBrace)
+                methodBody.contains("getSeasonState") &&
+                    methodBody.contains("getSubSeason") &&
+                    executableMethodBody.contains("Class.forName(") &&
+                    executableMethodBody.contains(".getMethod(")
             }
             ?: return source
         val resolveOpenBrace = code.indexOf('{', resolveMethodMatch.range.first)
@@ -2292,19 +2298,29 @@ $header
         if (resolveCloseBrace <= resolveOpenBrace) return source
         val resolveMethodName = resolveMethodMatch.groupValues[1]
         val resolveBody = code.substring(resolveOpenBrace + 1, resolveCloseBrace)
+        val executableResolveBody = executableCode.substring(resolveOpenBrace + 1, resolveCloseBrace)
+
+        fun MatchResult.hasExecutableClassForNameGetMethod(): Boolean {
+            val executableSegment = executableResolveBody.substring(range.first, range.last + 1)
+            return executableSegment.contains("Class.forName(") &&
+                executableSegment.contains(".getMethod(")
+        }
 
         val helperMatch = Regex("""Class<\?>\s+[A-Za-z_$][\w$]*\s*=\s*Class\.forName\(\s*"([^"]+)"\s*\)\s*;\s*([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\.getMethod\(\s*"getSeasonState"\s*,\s*Level\.class\s*\)""")
-            .find(resolveBody)
+            .findAll(resolveBody)
+            .firstOrNull { it.hasExecutableClassForNameGetMethod() }
             ?: return source
         val helperClass = helperMatch.groupValues[1]
         val helperMethodField = helperMatch.groupValues[2]
         val stateMatch = Regex("""Class<\?>\s+[A-Za-z_$][\w$]*\s*=\s*Class\.forName\(\s*"([^"]+)"\s*\)\s*;\s*([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\.getMethod\(\s*"getSubSeason"\s*\)""")
-            .find(resolveBody)
+            .findAll(resolveBody)
+            .firstOrNull { it.hasExecutableClassForNameGetMethod() }
             ?: return source
         val stateClass = stateMatch.groupValues[1]
         val stateMethodField = stateMatch.groupValues[2]
         val subSeasonMatch = Regex("""Class<\?>\s+[A-Za-z_$][\w$]*\s*=\s*Class\.forName\(\s*"([^"]+\$[A-Za-z_$][\w$]*)"\s*\)\s*;\s*([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\.getMethod\(\s*"name"\s*\)""")
-            .find(resolveBody)
+            .findAll(resolveBody)
+            .firstOrNull { it.hasExecutableClassForNameGetMethod() }
             ?: return source
         val subSeasonBinary = subSeasonMatch.groupValues[1]
         val subSeasonNameField = subSeasonMatch.groupValues[2]
@@ -3545,6 +3561,22 @@ config="$configName"
                         index += 2
                     }
                 }
+                index + 2 < chars.size && chars[index] == '"' && chars[index + 1] == '"' && chars[index + 2] == '"' -> {
+                    chars[index] = ' '
+                    chars[index + 1] = ' '
+                    chars[index + 2] = ' '
+                    index += 3
+                    while (index + 2 < chars.size && !(chars[index] == '"' && chars[index + 1] == '"' && chars[index + 2] == '"')) {
+                        if (chars[index] != '\n' && chars[index] != '\r') chars[index] = ' '
+                        index++
+                    }
+                    if (index + 2 < chars.size) {
+                        chars[index] = ' '
+                        chars[index + 1] = ' '
+                        chars[index + 2] = ' '
+                        index += 3
+                    }
+                }
                 chars[index] == '"' || chars[index] == '\'' -> {
                     val quote = chars[index]
                     chars[index++] = ' '
@@ -4548,10 +4580,17 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         java.nio.file.Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
-                val code = maskJavaComments(javaFile.readText())
-                pattern.findAll(code).forEach { match ->
-                    names.add(match.groupValues[1])
-                }
+                val source = javaFile.readText()
+                val code = maskJavaComments(source)
+                val executableCode = maskJavaCommentsAndLiterals(source)
+                pattern.findAll(code)
+                    .filter { match ->
+                        executableCode.substring(match.range.first, match.range.last + 1)
+                            .contains("Class.forName(")
+                    }
+                    .forEach { match ->
+                        names.add(match.groupValues[1])
+                    }
             }
         return names
     }

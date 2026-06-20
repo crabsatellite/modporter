@@ -1583,6 +1583,61 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `season helper reflection migration ignores text block reflection documentation`() {
+        val projectDir = tempDir.resolve("season-helper-text-block")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            dependencies {
+            }
+        """.trimIndent())
+        srcDir.resolve("SeasonCompat.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "import net.minecraft.world.level.Level;",
+            "",
+            "public class SeasonCompat {",
+            "    public enum WinterSubSeason { NONE, EARLY, MID, LATE }",
+            "",
+            "    private static void resolveSeasonApi() {",
+            "        String documented = \"\"\"",
+            "            Class<?> seasonHelper = Class.forName(\"sereneseasons.api.season.SeasonHelper\");",
+            "            seasonHelperGetState = seasonHelper.getMethod(\"getSeasonState\", Level.class);",
+            "            Class<?> iSeasonState = Class.forName(\"sereneseasons.api.season.ISeasonState\");",
+            "            seasonStateGetSubSeason = iSeasonState.getMethod(\"getSubSeason\");",
+            "            Class<?> subSeason = Class.forName(\"sereneseasons.api.season.Season${'$'}SubSeason\");",
+            "            subSeasonName = subSeason.getMethod(\"name\");",
+            "            \"\"\";",
+            "        if (documented.isEmpty()) {",
+            "            throw new IllegalStateException(\"unreachable\");",
+            "        }",
+            "    }",
+            "",
+            "    public static WinterSubSeason getWinterSubSeason(Level level) {",
+            "        return WinterSubSeason.NONE;",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("SeasonCompat.java").readText()
+        val build = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertFalse(result.changes.any { it.ruleId == "build-reflected-optional-api-dependencies" })
+        assertTrue(content.contains("String documented = \"\"\""), content)
+        assertFalse(content.contains("SeasonHelper.getSeasonState(level)"), content)
+        assertFalse(content.contains("import sereneseasons.api.season.SeasonHelper;"), content)
+        assertFalse(build.contains("serene-seasons"), build)
+    }
+
+    @Test
     fun `rewrites DeferredHolder reflection collectors to explicit registry lists`() {
         val projectDir = tempDir.resolve("deferredholder-reflection-collector")
         val srcDir = projectDir.resolve("src/main/java/com/example")
