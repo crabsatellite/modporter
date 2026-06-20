@@ -159,7 +159,7 @@ class BuildSystemPass(
 
         try {
             changes.addAll(rewriteLegacyCapabilityHooks(projectDir, dryRun))
-            changes.addAll(addLegacyCapabilityShims(projectDir, dryRun))
+            changes.addAll(addLegacyCapabilityShims(projectDir, dryRun, errors))
         } catch (e: Exception) {
             errors.add("Failed to add legacy capability compatibility shims: ${e.message}")
         }
@@ -5515,12 +5515,11 @@ public final class ${grower.className} {
         return classPattern.replace(result, replacement)
     }
 
-    private fun migrateLegacyTreeGrowerSubclass(source: String, projectDir: Path): String {
+    private fun migrateLegacyTreeGrowerSubclass(source: String, compatPackage: String): String {
         if (!source.contains("getConfiguredFeature(") && !source.contains("getConfiguredMegaFeature(")) return source
         val classPattern = Regex("""\bclass\s+(\w+)\s+extends\s+(AbstractMegaTreeGrower|AbstractTreeGrower|TreeGrower)\b""")
         if (!classPattern.containsMatchIn(source)) return source
 
-        val compatPackage = detectCompatShimPackage(projectDir)
         var result = source
         result = removeJavaImport(result, "net.minecraft.world.level.block.grower.AbstractTreeGrower")
         result = removeJavaImport(result, "net.minecraft.world.level.block.grower.AbstractMegaTreeGrower")
@@ -5532,8 +5531,7 @@ public final class ${grower.className} {
         return result
     }
 
-    private fun ensureLegacyTreeGrowerCompatBase(projectDir: Path, dryRun: Boolean): List<Change> {
-        val compatPackage = detectCompatShimPackage(projectDir)
+    private fun ensureLegacyTreeGrowerCompatBase(projectDir: Path, compatPackage: String, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
         val compatFile = srcDir.resolve(compatPackage.replace('.', '/')).resolve("ModPorterAbstractTreeGrower.java")
         val source = legacyTreeGrowerCompatSource(compatPackage)
@@ -5966,6 +5964,8 @@ public abstract class ModPorterAbstractTreeGrower extends TreeGrower {
 
         if (growers.isEmpty()) return changes
 
+        val compatPackage = detectRequiredCompatShimPackage(projectDir, "legacy tree grower compatibility base")
+
         java.nio.file.Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .filter { javaFile -> growers.none { it.path == javaFile } }
@@ -6009,7 +6009,7 @@ public abstract class ModPorterAbstractTreeGrower extends TreeGrower {
 
         for (grower in growers) {
             val original = grower.path.readText()
-            val migrated = migrateLegacyTreeGrowerSubclass(original, projectDir)
+            val migrated = migrateLegacyTreeGrowerSubclass(original, compatPackage)
             if (migrated != original) {
                 if (!dryRun) grower.path.writeText(migrated)
                 changes.add(Change(
@@ -6024,7 +6024,7 @@ public abstract class ModPorterAbstractTreeGrower extends TreeGrower {
             }
         }
 
-        changes.addAll(ensureLegacyTreeGrowerCompatBase(projectDir, dryRun))
+        changes.addAll(ensureLegacyTreeGrowerCompatBase(projectDir, compatPackage, dryRun))
         changes.addAll(ensureAccessTransformerEntries(
             projectDir,
             listOf("public-f net.minecraft.world.level.block.grower.TreeGrower"),
@@ -6769,12 +6769,25 @@ public class AbstractRecipeSerializer<T extends AbstractRecipe> implements Recip
         return changes
     }
 
-    private fun addLegacyCapabilityShims(projectDir: Path, dryRun: Boolean): List<Change> {
+    private fun addLegacyCapabilityShims(projectDir: Path, dryRun: Boolean, errors: MutableList<String>): List<Change> {
         val changes = mutableListOf<Change>()
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return changes
-        val compatPackage = detectCompatShimPackage(projectDir)
-        val compatPath = compatPackage.replace('.', '/')
+
+        var resolvedCompatPackage: String? = null
+        var failedCompatPackage = false
+        fun compatPackage(): String? {
+            resolvedCompatPackage?.let { return it }
+            if (failedCompatPackage) return null
+            return try {
+                detectRequiredCompatShimPackage(projectDir, "legacy source compatibility shims")
+                    .also { resolvedCompatPackage = it }
+            } catch (e: Exception) {
+                failedCompatPackage = true
+                errors.add(e.message ?: "Cannot derive generated compat shim package for legacy source compatibility shims")
+                null
+            }
+        }
 
         var needsLazyOptional = false
         var needsCapability = false
@@ -6801,86 +6814,126 @@ public class AbstractRecipeSerializer<T extends AbstractRecipe> implements Recip
                     }
                 }
                 val textForCapabilities = staleLazyOptionalRemoved
-                val relocatedLazyOptionalSource = relocateLazyOptionalImports(textForCapabilities, compatPackage)
-                if (relocatedLazyOptionalSource != textForCapabilities) {
-                    needsLazyOptional = true
-                    changes.add(Change(
-                        file = javaFile,
-                        line = 1,
-                        description = "Relocate LazyOptional compatibility import out of NeoForge package",
-                        before = "net.neoforged.neoforge.common.util.LazyOptional",
-                        after = "$compatPackage.LazyOptional",
-                        confidence = Confidence.HIGH,
-                        ruleId = "build-relocate-lazyoptional-import"
-                    ))
-                    if (!dryRun) {
-                        javaFile.writeText(relocatedLazyOptionalSource)
+                var capabilitySource = textForCapabilities
+                val hasLazyOptionalRelocationSource = listOf(
+                    "net.minecraftforge.common.util.LazyOptional",
+                    "net.neoforged.neoforge.common.util.LazyOptional",
+                    "net.minecraftforge.common.util.*",
+                    "net.neoforged.neoforge.common.util.*",
+                    "com.modporter.compat.LazyOptional"
+                ).any { textForCapabilities.contains(it) }
+                if (hasLazyOptionalRelocationSource) {
+                    val packageName = compatPackage() ?: return@forEach
+                    val relocatedLazyOptionalSource = relocateLazyOptionalImports(textForCapabilities, packageName)
+                    if (relocatedLazyOptionalSource != textForCapabilities) {
+                        needsLazyOptional = true
+                        capabilitySource = relocatedLazyOptionalSource
+                        changes.add(Change(
+                            file = javaFile,
+                            line = 1,
+                            description = "Relocate LazyOptional compatibility import out of NeoForge package",
+                            before = "net.neoforged.neoforge.common.util.LazyOptional",
+                            after = "$packageName.LazyOptional",
+                            confidence = Confidence.HIGH,
+                            ruleId = "build-relocate-lazyoptional-import"
+                        ))
+                        if (!dryRun) {
+                            javaFile.writeText(relocatedLazyOptionalSource)
+                        }
                     }
                 } else if (sourceWithoutJavaImports(textForCapabilities).contains("LazyOptional")) {
-                    needsLazyOptional = true
+                    if (compatPackage() != null) {
+                        needsLazyOptional = true
+                    }
                 }
-                val capabilitySource = if (relocatedLazyOptionalSource != textForCapabilities) relocatedLazyOptionalSource else textForCapabilities
-                val relocatedCapability = relocateCapabilityImports(capabilitySource, compatPackage)
-                if (relocatedCapability != capabilitySource) {
-                    needsCapability = true
-                    changes.add(Change(
-                        file = javaFile,
-                        line = 1,
-                        description = "Relocate Capability compatibility import out of NeoForge package",
-                        before = "net.neoforged.neoforge.capabilities.Capability",
-                        after = "$compatPackage.Capability",
-                        confidence = Confidence.HIGH,
-                        ruleId = "build-relocate-capability-import"
-                    ))
-                    if (!dryRun) {
-                        javaFile.writeText(relocatedCapability)
+
+                var conditionalSource = capabilitySource
+                val hasCapabilityRelocationSource = listOf(
+                    "net.neoforged.neoforge.capabilities.Capability",
+                    "com.modporter.compat.Capability"
+                ).any { capabilitySource.contains(it) }
+                if (hasCapabilityRelocationSource) {
+                    val packageName = compatPackage() ?: return@forEach
+                    val relocatedCapability = relocateCapabilityImports(capabilitySource, packageName)
+                    if (relocatedCapability != capabilitySource) {
+                        needsCapability = true
+                        conditionalSource = relocatedCapability
+                        changes.add(Change(
+                            file = javaFile,
+                            line = 1,
+                            description = "Relocate Capability compatibility import out of NeoForge package",
+                            before = "net.neoforged.neoforge.capabilities.Capability",
+                            after = "$packageName.Capability",
+                            confidence = Confidence.HIGH,
+                            ruleId = "build-relocate-capability-import"
+                        ))
+                        if (!dryRun) {
+                            javaFile.writeText(relocatedCapability)
+                        }
                     }
                 } else if (capabilitySource.contains("net.neoforged.neoforge.capabilities.Capability") ||
                     Regex("""\bCapability\s*<""").containsMatchIn(capabilitySource)) {
-                    needsCapability = true
+                    if (compatPackage() != null) {
+                        needsCapability = true
+                    }
                 }
-                val conditionalSource = if (relocatedCapability != capabilitySource) relocatedCapability else capabilitySource
-                val relocatedConditionalRecipe = relocateConditionalRecipeImports(conditionalSource, compatPackage)
-                if (relocatedConditionalRecipe != conditionalSource) {
-                    needsConditionalRecipe = true
-                    changes.add(Change(
-                        file = javaFile,
-                        line = 1,
-                        description = "Relocate removed ConditionalRecipe builder API to generated NeoForge RecipeOutput adapter",
-                        before = "net.neoforged.neoforge.common.crafting.ConditionalRecipe",
-                        after = "$compatPackage.ConditionalRecipe",
-                        confidence = Confidence.HIGH,
-                        ruleId = "build-relocate-conditionalrecipe-import"
-                    ))
-                    if (!dryRun) {
-                        javaFile.writeText(relocatedConditionalRecipe)
+
+                var renderSource = conditionalSource
+                val hasConditionalRecipeRelocationSource = listOf(
+                    "net.minecraftforge.common.crafting.ConditionalRecipe",
+                    "net.neoforged.neoforge.common.crafting.ConditionalRecipe"
+                ).any { conditionalSource.contains(it) }
+                if (hasConditionalRecipeRelocationSource) {
+                    val packageName = compatPackage() ?: return@forEach
+                    val relocatedConditionalRecipe = relocateConditionalRecipeImports(conditionalSource, packageName)
+                    if (relocatedConditionalRecipe != conditionalSource) {
+                        needsConditionalRecipe = true
+                        renderSource = relocatedConditionalRecipe
+                        changes.add(Change(
+                            file = javaFile,
+                            line = 1,
+                            description = "Relocate removed ConditionalRecipe builder API to generated NeoForge RecipeOutput adapter",
+                            before = "net.neoforged.neoforge.common.crafting.ConditionalRecipe",
+                            after = "$packageName.ConditionalRecipe",
+                            confidence = Confidence.HIGH,
+                            ruleId = "build-relocate-conditionalrecipe-import"
+                        ))
+                        if (!dryRun) {
+                            javaFile.writeText(relocatedConditionalRecipe)
+                        }
                     }
                 } else if (conditionalSource.contains("ConditionalRecipe.builder()") ||
                     Regex("""\bConditionalRecipe\.Builder\b""").containsMatchIn(conditionalSource)) {
-                    needsConditionalRecipe = true
-                }
-                val renderSource = if (relocatedConditionalRecipe != conditionalSource) relocatedConditionalRecipe else conditionalSource
-                val relocatedRenderUtils = relocateRenderUtilsImportsAndCalls(renderSource, compatPackage)
-                if (relocatedRenderUtils != renderSource) {
-                    needsRenderUtils = true
-                    changes.add(Change(
-                        file = javaFile,
-                        line = 1,
-                        description = "Relocate removed MMLib RenderUtils fluid helper to generated GUI fluid renderer",
-                        before = "cn.mcmod_mmf.mmlib.client.RenderUtils.renderFluidStack(...)",
-                        after = "$compatPackage.RenderUtils.renderFluidStack(guiGraphics, ...)",
-                        confidence = Confidence.HIGH,
-                        ruleId = "build-relocate-renderutils-fluid"
-                    ))
-                    if (!dryRun) {
-                        javaFile.writeText(relocatedRenderUtils)
+                    if (compatPackage() != null) {
+                        needsConditionalRecipe = true
                     }
-                } else if (renderSource.contains("RenderUtils.renderFluidStack(")) {
-                    needsRenderUtils = true
+                }
+                if (renderSource.contains("cn.mcmod_mmf.mmlib.client.RenderUtils") ||
+                    renderSource.contains("RenderUtils.renderFluidStack(")) {
+                    val packageName = compatPackage() ?: return@forEach
+                    val relocatedRenderUtils = relocateRenderUtilsImportsAndCalls(renderSource, packageName)
+                    if (relocatedRenderUtils != renderSource) {
+                        needsRenderUtils = true
+                        changes.add(Change(
+                            file = javaFile,
+                            line = 1,
+                            description = "Relocate removed MMLib RenderUtils fluid helper to generated GUI fluid renderer",
+                            before = "cn.mcmod_mmf.mmlib.client.RenderUtils.renderFluidStack(...)",
+                            after = "$packageName.RenderUtils.renderFluidStack(guiGraphics, ...)",
+                            confidence = Confidence.HIGH,
+                            ruleId = "build-relocate-renderutils-fluid"
+                        ))
+                        if (!dryRun) {
+                            javaFile.writeText(relocatedRenderUtils)
+                        }
+                    }
                 }
             }
 
-        if (needsLazyOptional) {
+        val compatPackage = resolvedCompatPackage
+        val compatPath = compatPackage?.replace('.', '/')
+
+        if (needsLazyOptional && compatPackage != null && compatPath != null) {
             val shim = srcDir.resolve("$compatPath/LazyOptional.java")
             if (!shim.exists()) {
                 changes.add(Change(
@@ -6899,7 +6952,7 @@ public class AbstractRecipeSerializer<T extends AbstractRecipe> implements Recip
             }
         }
 
-        if (needsCapability) {
+        if (needsCapability && compatPackage != null && compatPath != null) {
             val shim = srcDir.resolve("$compatPath/Capability.java")
             if (!shim.exists()) {
                 changes.add(Change(
@@ -6918,7 +6971,7 @@ public class AbstractRecipeSerializer<T extends AbstractRecipe> implements Recip
             }
         }
 
-        if (needsConditionalRecipe) {
+        if (needsConditionalRecipe && compatPackage != null && compatPath != null) {
             val shim = srcDir.resolve("$compatPath/ConditionalRecipe.java")
             if (!shim.exists()) {
                 changes.add(Change(
@@ -6937,7 +6990,7 @@ public class AbstractRecipeSerializer<T extends AbstractRecipe> implements Recip
             }
         }
 
-        if (needsRenderUtils) {
+        if (needsRenderUtils && compatPackage != null && compatPath != null) {
             val shim = srcDir.resolve("$compatPath/RenderUtils.java")
             if (!shim.exists()) {
                 changes.add(Change(
@@ -6956,26 +7009,27 @@ public class AbstractRecipeSerializer<T extends AbstractRecipe> implements Recip
             }
         }
 
-        changes.addAll(removeOldGlobalCapabilityShims(srcDir, dryRun))
+        if (!failedCompatPackage) {
+            changes.addAll(removeOldGlobalCapabilityShims(srcDir, dryRun))
+        }
 
         return changes
     }
 
-    private fun detectCompatShimPackage(projectDir: Path): String {
-        val modIdFromProperties = projectDir.resolve("gradle.properties")
-            .takeIf { it.exists() }
-            ?.readText()
-            ?.let { Regex("""(?m)^mod_?id\s*=\s*([A-Za-z0-9_.-]+)\s*$""").find(it)?.groupValues?.get(1) }
-        val modId = modIdFromProperties ?: detectModId(projectDir)
-        val packageSegment = modId?.let(::sanitizePackageSegment) ?: "shared"
+    private fun detectRequiredCompatShimPackage(projectDir: Path, reason: String): String {
+        val modId = detectUniqueProjectModId(projectDir)
+            ?: error("Cannot derive generated compat shim package for $reason: missing or ambiguous @Mod annotation and mod metadata mod id")
+        val packageSegment = sanitizeRequiredPackageSegment(modId, reason)
         return "com.modporter.generated.$packageSegment.compat"
     }
 
-    private fun sanitizePackageSegment(value: String): String {
+    private fun sanitizeRequiredPackageSegment(value: String, reason: String): String {
         val sanitized = value.lowercase()
             .replace(Regex("""[^a-z0-9_]"""), "_")
             .trim('_')
-            .ifBlank { "mod" }
+        require(sanitized.isNotBlank()) {
+            "Cannot derive generated compat shim package for $reason: mod id '$value' has no valid Java package segment"
+        }
         return if (sanitized.first().isDigit()) "m$sanitized" else sanitized
     }
 

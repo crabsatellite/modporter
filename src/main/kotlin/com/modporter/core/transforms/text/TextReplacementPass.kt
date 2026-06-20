@@ -787,22 +787,30 @@ $streamFields,
         if (!source.contains("PartialNBTIngredient")) return source
 
         var result = source
-        result = removeImportLine(result, "net.neoforged.neoforge.common.crafting.PartialNBTIngredient")
+        var changed = false
 
         result = Regex(
-            """(?s)public\s+final\s+PartialNBTIngredient\s+scepter\s*\(\s*Item\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*return\s+PartialNBTIngredient\.of\s*\(\s*\1\s*,\s*Util\.make\s*\(\s*\(\s*\)\s*->\s*\{\s*CompoundTag\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+CompoundTag\s*\(\s*\)\s*;\s*\2\.putInt\s*\(\s*ItemStack\.TAG_DAMAGE\s*,\s*\1\.getMaxDamage\s*\(\s*\)\s*\)\s*;\s*return\s+\2\s*;\s*\}\s*\)\s*\)\s*;\s*\}"""
+            """(?s)public\s+final\s+PartialNBTIngredient\s+([A-Za-z_$][\w$]*)\s*\(\s*Item\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*return\s+PartialNBTIngredient\.of\s*\(\s*\2\s*,\s*Util\.make\s*\(\s*\(\s*\)\s*->\s*\{\s*CompoundTag\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+CompoundTag\s*\(\s*\)\s*;\s*\3\.putInt\s*\(\s*ItemStack\.TAG_DAMAGE\s*,\s*\2\.getMaxDamage\s*\(\s*\)\s*\)\s*;\s*return\s+\3\s*;\s*\}\s*\)\s*\)\s*;\s*\}"""
         ).replace(result) { match ->
-            val item = match.groupValues[1]
-            "public final Ingredient scepter(Item $item) {\n\t\treturn DataComponentIngredient.of(false, DataComponents.DAMAGE, $item.getMaxDamage(), $item);\n\t}"
+            changed = true
+            val method = match.groupValues[1]
+            val item = match.groupValues[2]
+            "public final Ingredient $method(Item $item) {\n\t\treturn DataComponentIngredient.of(false, DataComponents.DAMAGE, $item.getMaxDamage(), $item);\n\t}"
         }
 
         result = Regex(
-            """(?s)public\s+final\s+PartialNBTIngredient\s+potion\s*\(\s*Potion\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*return\s+PartialNBTIngredient\.of\s*\(\s*Items\.POTION\s*,\s*Util\.make\s*\(\s*\(\s*\)\s*->\s*\{\s*CompoundTag\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+CompoundTag\s*\(\s*\)\s*;\s*\2\.putString\s*\(\s*"Potion"\s*,\s*BuiltInRegistries\.POTION\.getKey\s*\(\s*\1\s*\)\.toString\s*\(\s*\)\s*\)\s*;\s*return\s+\2\s*;\s*\}\s*\)\s*\)\s*;\s*\}"""
+            """(?s)public\s+final\s+PartialNBTIngredient\s+([A-Za-z_$][\w$]*)\s*\(\s*Potion\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*return\s+PartialNBTIngredient\.of\s*\(\s*Items\.POTION\s*,\s*Util\.make\s*\(\s*\(\s*\)\s*->\s*\{\s*CompoundTag\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+CompoundTag\s*\(\s*\)\s*;\s*\3\.putString\s*\(\s*"Potion"\s*,\s*BuiltInRegistries\.POTION\.getKey\s*\(\s*\2\s*\)\.toString\s*\(\s*\)\s*\)\s*;\s*return\s+\3\s*;\s*\}\s*\)\s*\)\s*;\s*\}"""
         ).replace(result) { match ->
-            val potion = match.groupValues[1]
-            "public final Ingredient potion(Holder<Potion> $potion) {\n\t\treturn DataComponentIngredient.of(false, DataComponents.POTION_CONTENTS, new PotionContents($potion), Items.POTION);\n\t}"
+            changed = true
+            val method = match.groupValues[1]
+            val potion = match.groupValues[2]
+            "public final Ingredient $method(Holder<Potion> $potion) {\n\t\treturn DataComponentIngredient.of(false, DataComponents.POTION_CONTENTS, new PotionContents($potion), Items.POTION);\n\t}"
         }
 
+        if (!changed) return source
+        if (!usesSymbolOutsideImports(result, "PartialNBTIngredient")) {
+            result = removeImportLine(result, "net.neoforged.neoforge.common.crafting.PartialNBTIngredient")
+        }
         if (!usesSymbolOutsideImports(result, "Util")) result = removeImportLine(result, "net.minecraft.Util")
         if (!usesSymbolOutsideImports(result, "CompoundTag")) result = removeImportLine(result, "net.minecraft.nbt.CompoundTag")
         if (!usesSymbolOutsideImports(result, "ItemStack")) result = removeImportLine(result, "net.minecraft.world.item.ItemStack")

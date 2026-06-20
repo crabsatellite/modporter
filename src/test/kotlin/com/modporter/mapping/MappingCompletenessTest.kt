@@ -259,6 +259,9 @@ class MappingCompletenessTest {
             "ConstructionWand",
             "constructionwand",
             "glass_sword",
+            "scepter_repair",
+            "ModPorterScepterRepairRecipe",
+            "_scepter",
             "FermenterRecipe",
             "DistillerRecipe"
         )
@@ -596,7 +599,10 @@ class MappingCompletenessTest {
             "literal modid return" to "return \"\\\"modid\\\"\"",
             "literal modid elvis fallback" to "?: \"\\\"modid\\\"\"",
             "plain modid elvis fallback" to "?: \"modid\"",
-            "package-tail modid fallback" to "substringAfterLast('.', \"modid\")"
+            "package-tail modid fallback" to "substringAfterLast('.', \"modid\")",
+            "generated compat shared package fallback" to "?: \"shared\"",
+            "generated compat blank mod package fallback" to "ifBlank { \"mod\" }",
+            "legacy generated compat placeholder resolver" to "private fun detectGeneratedCompatPackage"
         )
 
         val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->

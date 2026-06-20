@@ -2474,12 +2474,42 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `legacy compatibility shims hard gate missing project mod id`() {
+        val projectDir = tempDir.resolve("p13-missing-modid")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        srcDir.resolve("Machine.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.common.util.LazyOptional;
+
+            public class Machine {
+                private final LazyOptional<Object> handler = LazyOptional.of(Object::new);
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("Machine.java").readText()
+
+        assertTrue(result.errors.any { it.contains("Cannot derive generated compat shim package for legacy source compatibility shims") })
+        assertTrue(source.contains("import net.neoforged.neoforge.common.util.LazyOptional;"))
+        assertFalse(projectDir.resolve("src/main/java/com/modporter/generated/shared/compat/LazyOptional.java").exists())
+        assertFalse(result.changes.any { it.ruleId == "build-add-lazyoptional-shim" })
+    }
+
+    @Test
     fun `rewrites legacy abstract tree grower call sites`() {
         val projectDir = tempDir.resolve("p14")
         val treeDir = projectDir.resolve("src/main/java/com/example/tree")
         val blockDir = projectDir.resolve("src/main/java/com/example/block")
         treeDir.createDirectories()
         blockDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=examplemod\n")
         projectDir.resolve("build.gradle").writeText("""
             plugins {
                 id 'net.minecraftforge.gradle' version '[6.0,6.2)'
@@ -2530,16 +2560,50 @@ class BuildSystemTest {
         assertFalse(registry.contains(";import"))
         assertTrue(registry.contains("private static SaplingBlock sapling(TreeGrower grower)"))
         assertTrue(registry.contains("new CherryTreeGrower()"))
-        assertTrue(grower.contains("import com.modporter.generated.shared.compat.ModPorterAbstractTreeGrower;"))
+        assertTrue(grower.contains("import com.modporter.generated.examplemod.compat.ModPorterAbstractTreeGrower;"))
         assertTrue(grower.contains("public class CherryTreeGrower extends ModPorterAbstractTreeGrower"))
         assertTrue(grower.contains("protected ResourceKey<ConfiguredFeature<?, ?>> getConfiguredFeature"))
         assertFalse(grower.contains("extends AbstractTreeGrower"))
-        val compatBase = projectDir.resolve("src/main/java/com/modporter/generated/shared/compat/ModPorterAbstractTreeGrower.java").readText()
+        val compatBase = projectDir.resolve("src/main/java/com/modporter/generated/examplemod/compat/ModPorterAbstractTreeGrower.java").readText()
         assertTrue(compatBase.contains("extends TreeGrower"))
         assertTrue(compatBase.contains("protected abstract ResourceKey<ConfiguredFeature<?, ?>> getConfiguredFeature"))
         val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
         assertTrue(atFile.contains("public-f net.minecraft.world.level.block.grower.TreeGrower"))
         assertFalse(projectDir.resolve("src/main/java/net/minecraft/world/level/block/grower/AbstractTreeGrower.java").exists())
+    }
+
+    @Test
+    fun `legacy abstract tree grower compat hard gates missing project mod id`() {
+        val projectDir = tempDir.resolve("p14-missing-modid")
+        val treeDir = projectDir.resolve("src/main/java/com/example/tree")
+        treeDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        treeDir.resolve("CherryTreeGrower.java").writeText("""
+            package com.example.tree;
+
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.level.block.grower.AbstractTreeGrower;
+            import net.minecraft.world.level.levelgen.feature.ConfiguredFeature;
+
+            public class CherryTreeGrower extends AbstractTreeGrower {
+                @Override
+                protected ResourceKey<ConfiguredFeature<?, ?>> getConfiguredFeature(RandomSource random, boolean flowers) {
+                    return TreeFeatures.CHERRY_KEY;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val grower = treeDir.resolve("CherryTreeGrower.java").readText()
+
+        assertTrue(result.errors.any { it.contains("Cannot derive generated compat shim package for legacy tree grower compatibility base") })
+        assertTrue(grower.contains("extends AbstractTreeGrower"))
+        assertFalse(projectDir.resolve("src/main/java/com/modporter/generated/shared/compat/ModPorterAbstractTreeGrower.java").exists())
     }
 
     @Test

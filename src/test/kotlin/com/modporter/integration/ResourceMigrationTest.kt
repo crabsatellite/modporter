@@ -981,7 +981,7 @@ class ResourceMigrationTest {
     }
 
     @Test
-    fun `damaged scepter repair recipes use namespaced custom 1_21 recipe type`() {
+    fun `damaged item repair recipes do not synthesize mod specific scepter serializers`() {
         val projectDir = setupResourceProject()
         val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes/equipment")
         val javaDir = projectDir.resolve("src/main/java/resmod/init")
@@ -1034,25 +1034,19 @@ class ResourceMigrationTest {
         val result = ResourceMigrationPass(db).apply(projectDir)
 
         val recipe = projectDir.resolve("src/generated/resources/data/resmod/recipe/equipment/zombie_scepter.json").readText()
-        val generatedSerializer = projectDir.resolve("src/main/java/com/modporter/generated/resmod/recipe/ModPorterScepterRepairRecipe.java").readText()
+        val generatedSerializer = projectDir.resolve("src/main/java/com/modporter/generated/resmod/recipe/ModPorterScepterRepairRecipe.java")
         val registry = javaDir.resolve("ModRecipes.java").readText()
         assertTrue(result.changes.any { it.ruleId == "res-recipe-partial-nbt-component-ingredient" })
-        assertTrue(result.changes.any { it.ruleId == "res-damaged-scepter-repair-recipe-121" })
-        assertTrue(result.changes.any { it.ruleId == "res-generate-scepter-repair-recipe-serializer" })
-        assertTrue(result.changes.any { it.ruleId == "res-register-scepter-repair-recipe-serializer" })
-        assertTrue(recipe.contains(""""type": "resmod:scepter_repair""""))
-        assertTrue(recipe.contains(""""durability": 9"""))
-        assertTrue(recipe.contains(""""repair_ingredients":"""))
+        assertFalse(result.changes.any { it.ruleId.contains("scepter") })
+        assertTrue(recipe.contains(""""type": "minecraft:crafting_shapeless""""))
         assertTrue(recipe.contains(""""type": "neoforge:compound""""))
         assertTrue(recipe.contains(""""type": "neoforge:components""""))
         assertTrue(recipe.contains(""""item": "minecraft:rotten_flesh""""))
-        assertTrue(recipe.contains(""""scepter": "resmod:zombie_scepter""""))
-        assertTrue(generatedSerializer.contains("class ModPorterScepterRepairRecipe extends CustomRecipe"))
-        assertTrue(generatedSerializer.contains("return resmod.init.ModRecipes.MODPORTER_SCEPTER_REPAIR_RECIPE.get();"))
-        assertTrue(registry.contains("import com.modporter.generated.resmod.recipe.ModPorterScepterRepairRecipe;"))
-        assertTrue(registry.contains("RECIPE_SERIALIZERS.register(\"scepter_repair\", ModPorterScepterRepairRecipe.Serializer::new)"))
-        assertFalse(recipe.contains("minecraft:crafting_shapeless"))
-        assertFalse(recipe.contains(""""result":"""))
+        assertTrue(recipe.contains(""""result":"""))
+        assertFalse(recipe.contains("scepter_repair"))
+        assertFalse(generatedSerializer.exists())
+        assertFalse(registry.contains("ModPorterScepterRepairRecipe"))
+        assertFalse(registry.contains("scepter_repair"))
         assertFalse(recipe.contains("partial_nbt"))
     }
 

@@ -5966,18 +5966,6 @@ $helpers
     private fun stripDimensionAccessor(expression: String): String =
         expression.trim().removeSuffix(".dimension()")
 
-    private fun detectGeneratedCompatPackage(projectDir: Path): String {
-        val modId = detectModId(projectDir) ?: projectMetadataModId(projectDir)
-        val sanitized = modId
-            ?.lowercase()
-            ?.replace(Regex("""[^a-z0-9_]"""), "_")
-            ?.trim('_')
-            ?.ifBlank { "mod" }
-            ?.let { if (it.first().isDigit()) "m$it" else it }
-            ?: "shared"
-        return "com.modporter.generated.$sanitized.compat"
-    }
-
     private fun detectRequiredGeneratedCompatPackage(projectDir: Path, reason: String): String {
         val modId = detectModId(projectDir)
             ?: projectMetadataModId(projectDir)

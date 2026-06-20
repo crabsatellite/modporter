@@ -3420,15 +3420,15 @@ class TextReplacementTest {
             import net.minecraft.core.registries.BuiltInRegistries;
 
             public class TestMod {
-                public final PartialNBTIngredient scepter(Item scepter) {
-                    return PartialNBTIngredient.of(scepter, Util.make(() -> {
+                public final PartialNBTIngredient damagedItem(Item item) {
+                    return PartialNBTIngredient.of(item, Util.make(() -> {
                         CompoundTag nbt = new CompoundTag();
-                        nbt.putInt(ItemStack.TAG_DAMAGE, scepter.getMaxDamage());
+                        nbt.putInt(ItemStack.TAG_DAMAGE, item.getMaxDamage());
                         return nbt;
                     }));
                 }
 
-                public final PartialNBTIngredient potion(Potion potion) {
+                public final PartialNBTIngredient potionIngredient(Potion potion) {
                     return PartialNBTIngredient.of(Items.POTION, Util.make(() -> {
                         CompoundTag nbt = new CompoundTag();
                         nbt.putString("Potion", BuiltInRegistries.POTION.getKey(potion).toString());
@@ -3448,14 +3448,47 @@ class TextReplacementTest {
         assertTrue(transformed.contains("import net.minecraft.core.component.DataComponents;"))
         assertTrue(transformed.contains("import net.minecraft.world.item.alchemy.PotionContents;"))
         assertTrue(transformed.contains("import net.neoforged.neoforge.common.crafting.DataComponentIngredient;"))
-        assertTrue(transformed.contains("public final Ingredient scepter(Item scepter)"))
-        assertTrue(transformed.contains("DataComponentIngredient.of(false, DataComponents.DAMAGE, scepter.getMaxDamage(), scepter)"))
-        assertTrue(transformed.contains("public final Ingredient potion(Holder<Potion> potion)"))
+        assertTrue(transformed.contains("public final Ingredient damagedItem(Item item)"))
+        assertTrue(transformed.contains("DataComponentIngredient.of(false, DataComponents.DAMAGE, item.getMaxDamage(), item)"))
+        assertTrue(transformed.contains("public final Ingredient potionIngredient(Holder<Potion> potion)"))
         assertTrue(transformed.contains("DataComponentIngredient.of(false, DataComponents.POTION_CONTENTS, new PotionContents(potion), Items.POTION)"))
         assertFalse(transformed.contains("PartialNBTIngredient"))
         assertFalse(transformed.contains("CompoundTag"))
         assertFalse(transformed.contains("Util.make"))
         assertFalse(transformed.contains("ItemStack.TAG_DAMAGE"))
+    }
+
+    @Test
+    fun `unsupported partial nbt ingredient helpers are not half migrated`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.Util;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.common.crafting.PartialNBTIngredient;
+
+            public class TestMod {
+                public final PartialNBTIngredient custom(Item item) {
+                    return PartialNBTIngredient.of(item, Util.make(() -> {
+                        CompoundTag nbt = new CompoundTag();
+                        nbt.putString("Custom", "value");
+                        return nbt;
+                    }));
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.neoforged.neoforge.common.crafting.PartialNBTIngredient;"))
+        assertTrue(transformed.contains("public final PartialNBTIngredient custom(Item item)"))
+        assertTrue(transformed.contains("PartialNBTIngredient.of(item"))
+        assertFalse(transformed.contains("DataComponentIngredient.of"))
     }
 
     @Test
