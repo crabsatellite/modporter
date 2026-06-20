@@ -1065,6 +1065,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `text and resource Java brace matchers handle text blocks`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val matchers = listOf(
+            "TextReplacementPass" to Triple(
+                projectRoot.resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt"),
+                "private fun findMatchingBrace",
+                "private data class ParticleField"
+            ),
+            "ResourceMigrator" to Triple(
+                projectRoot.resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt"),
+                "private fun findMatchingJavaBrace",
+                "private fun migrateRecipeResultEntries"
+            )
+        )
+
+        val offenders = matchers.mapNotNull { (label, config) ->
+            val (path, startMarker, endMarker) = config
+            val source = path.readText()
+            val start = source.indexOf(startMarker)
+            if (start < 0) return@mapNotNull "$label is missing $startMarker"
+            val end = source.indexOf(endMarker, start + 1).let { if (it < 0) source.length else it }
+            val body = source.substring(start, end)
+            val hasTextBlockSkip =
+                body.contains("source.getOrNull(index + 2) == '\"'") &&
+                    body.contains("source.indexOf(\"\\\"\\\"\\\"\", index + 3)") &&
+                    body.contains("continue")
+            if (hasTextBlockSkip) null else "$label brace matcher does not skip Java text blocks"
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Java brace matchers must treat text blocks as literals so documentation cannot terminate class or method bodies: $offenders"
+        )
+    }
+
+    @Test
     fun `resource missing item model collection uses executable registration evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

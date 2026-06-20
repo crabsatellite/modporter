@@ -3499,15 +3499,28 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         var escaped = false
         var inLineComment = false
         var inBlockComment = false
-        for (i in openBrace until source.length) {
-            val c = source[i]
-            val next = source.getOrNull(i + 1)
+        var index = openBrace
+        while (index < source.length) {
+            val c = source[index]
+            val next = source.getOrNull(index + 1)
+            if (!inString && !inChar && !inLineComment && !inBlockComment &&
+                c == '"' && next == '"' && source.getOrNull(index + 2) == '"'
+            ) {
+                index = source.indexOf("\"\"\"", index + 3).let { if (it < 0) source.length else it + 3 }
+                continue
+            }
             if (inLineComment) {
                 if (c == '\n') inLineComment = false
+                index++
                 continue
             }
             if (inBlockComment) {
-                if (c == '*' && next == '/') inBlockComment = false
+                if (c == '*' && next == '/') {
+                    inBlockComment = false
+                    index += 2
+                    continue
+                }
+                index++
                 continue
             }
             if (inString) {
@@ -3518,6 +3531,7 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
                 } else if (c == '"') {
                     inString = false
                 }
+                index++
                 continue
             }
             if (inChar) {
@@ -3528,29 +3542,35 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
                 } else if (c == '\'') {
                     inChar = false
                 }
+                index++
                 continue
             }
             if (c == '/' && next == '/') {
                 inLineComment = true
+                index += 2
                 continue
             }
             if (c == '/' && next == '*') {
                 inBlockComment = true
+                index += 2
                 continue
             }
             if (c == '"') {
                 inString = true
+                index++
                 continue
             }
             if (c == '\'') {
                 inChar = true
+                index++
                 continue
             }
             if (c == '{') depth++
             if (c == '}') {
                 depth--
-                if (depth == 0) return i
+                if (depth == 0) return index
             }
+            index++
         }
         return -1
     }

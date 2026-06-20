@@ -1756,6 +1756,11 @@ class ResourceMigrationPass(
             val char = source[index]
             val next = source.getOrNull(index + 1)
             when {
+                !inString && !inChar && !inLineComment && !inBlockComment &&
+                    char == '"' && next == '"' && source.getOrNull(index + 2) == '"' -> {
+                    index = source.indexOf("\"\"\"", index + 3).let { if (it < 0) source.length else it + 3 }
+                    continue
+                }
                 inLineComment -> {
                     if (char == '\n' || char == '\r') inLineComment = false
                 }
