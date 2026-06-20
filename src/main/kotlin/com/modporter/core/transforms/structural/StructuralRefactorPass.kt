@@ -21869,7 +21869,6 @@ ${indent}}"""
             val methodText = javaDeclaredMethodText(result, methodName) ?: continue
             if (!methodText.contains("EnchantmentHelper.getDamageBonus(") || !methodText.contains(".getMobType()")) continue
 
-            val damageSourceExpr = firstHurtDamageSourceArgument(methodText) ?: continue
             val serverLevelExpr = sourceProvenServerLevelExpressionForDamageBonus(methodText) ?: continue
             var replacement = methodText
             val baseDamageVariable = Regex("""\b(?:float|double)\s+([A-Za-z_$][\w$]*)\s*=\s*[^;\r\n]*Attributes\.ATTACK_DAMAGE[^;\r\n]*;""")
@@ -21880,19 +21879,21 @@ ${indent}}"""
                 replacement = Regex(
                     """EnchantmentHelper\.getDamageBonus\(\s*([^,]+?)\s*,\s*([A-Za-z_$][\w$]*)\.getMobType\(\)\s*\)"""
                 ).replace(replacement) { match ->
-                    changed = true
                     val stack = match.groupValues[1].trim()
                     val living = match.groupValues[2]
+                    val damageSourceExpr = damageSourceForDamageBonusTarget(methodText, living) ?: return@replace match.value
+                    changed = true
                     "(EnchantmentHelper.modifyDamage($serverLevelExpr, $stack, $living, $damageSourceExpr, $baseDamageVariable) - $baseDamageVariable)"
                 }
             }
             replacement = Regex(
                 """([A-Za-z_$][\w$]*|(?:\d+(?:\.\d+)?F?))\s*\+\s*EnchantmentHelper\.getDamageBonus\(\s*([^,]+?)\s*,\s*([A-Za-z_$][\w$]*)\.getMobType\(\)\s*\)"""
             ).replace(replacement) { match ->
-                changed = true
                 val baseDamage = match.groupValues[1].trim()
                 val stack = match.groupValues[2].trim()
                 val living = match.groupValues[3]
+                val damageSourceExpr = damageSourceForDamageBonusTarget(methodText, living) ?: return@replace match.value
+                changed = true
                 "EnchantmentHelper.modifyDamage($serverLevelExpr, $stack, $living, $damageSourceExpr, $baseDamage)"
             }
             if (replacement != methodText) {
@@ -21999,20 +22000,28 @@ ${indent}}"""
         return source.substring(lineStart, offset).takeWhile { it == ' ' || it == '\t' }
     }
 
-    private fun firstHurtDamageSourceArgument(methodText: String): String? {
+    private fun damageSourceForDamageBonusTarget(methodText: String, livingExpression: String): String? {
+        val hurtReceivers = linkedSetOf(livingExpression)
+        Regex(
+            """([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*(?:\([^;\r\n{}]*\))?)*)\s+instanceof\s+LivingEntity\s+${Regex.escape(livingExpression)}\b"""
+        ).findAll(methodText)
+            .mapTo(hurtReceivers) { it.groupValues[1].trim() }
         val sources = linkedSetOf<String>()
-        var cursor = 0
-        while (cursor < methodText.length) {
-            val tokenIndex = methodText.indexOf(".hurt(", cursor)
-            if (tokenIndex < 0) break
-            val openParen = tokenIndex + ".hurt".length
-            val closeParen = findMatchingParen(methodText, openParen)
-            if (closeParen < 0) break
-            val args = splitTopLevelJavaArgs(methodText.substring(openParen + 1, closeParen))
-            if (args.size >= 2) {
-                sources += args[0].trim()
+        for (receiver in hurtReceivers) {
+            var cursor = 0
+            val token = "$receiver.hurt("
+            while (cursor < methodText.length) {
+                val tokenIndex = methodText.indexOf(token, cursor)
+                if (tokenIndex < 0) break
+                val openParen = tokenIndex + "$receiver.hurt".length
+                val closeParen = findMatchingParen(methodText, openParen)
+                if (closeParen < 0) break
+                val args = splitTopLevelJavaArgs(methodText.substring(openParen + 1, closeParen))
+                if (args.size >= 2) {
+                    sources += args[0].trim()
+                }
+                cursor = closeParen + 1
             }
-            cursor = closeParen + 1
         }
         return sources.singleOrNull()
     }

@@ -599,6 +599,36 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy damage bonus migration binds damage source to target hurt`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        assertTrue(
+            !source.contains("firstHurtDamageSourceArgument"),
+            "Legacy getDamageBonus migration must not use the first or only hurt call from the whole method"
+        )
+
+        val start = source.indexOf("private fun damageSourceForDamageBonusTarget")
+        assertTrue(start >= 0, "damageSourceForDamageBonusTarget is missing")
+        val end = source.indexOf("private fun sourceProvenServerLevelExpressionForDamageBonus", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "whole-method bare hurt scan" to "methodText.indexOf(\".hurt(\", cursor)",
+            "bare hurt token offset" to "tokenIndex + \".hurt\".length"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "legacy getDamageBonus damage source migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy getDamageBonus migration must bind DamageSource to the same LivingEntity target, not any method hurt call: $offenders"
+        )
+    }
+
+    @Test
     fun `production mod event bus migrations do not synthesize variable names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(

@@ -22938,6 +22938,41 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy damage bonus migration requires damage source from matching target hurt`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CombatSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.level.Level;
+
+            public class CombatSurface {
+                public void releaseUsing(ItemStack stack, Level level, LivingEntity firstTarget, LivingEntity entityLiving, Player player) {
+                    if (level.isClientSide()) return;
+                    firstTarget.hurt(player.damageSources().playerAttack(player), 1.0F);
+                    float baseDamage = (float) player.getAttributeValue(Attributes.ATTACK_DAMAGE);
+                    float enchantBonus = EnchantmentHelper.getDamageBonus(stack, entityLiving.getMobType());
+                    entityLiving.setLastHurtByMob(player);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val combat = srcDir.resolve("CombatSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(combat.contains("EnchantmentHelper.getDamageBonus(stack, entityLiving.getMobType())"), combat)
+        assertTrue(combat.contains("firstTarget.hurt(player.damageSources().playerAttack(player), 1.0F);"), combat)
+        assertFalse(combat.contains("EnchantmentHelper.modifyDamage"), combat)
+        assertFalse(combat.contains("import net.minecraft.server.level.ServerLevel;"), combat)
+    }
+
+    @Test
     fun `migrates source shaped compile debt without comment or fallback inference`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
