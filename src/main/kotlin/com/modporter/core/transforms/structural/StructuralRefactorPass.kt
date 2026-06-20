@@ -9509,7 +9509,7 @@ $fields
             .forEach { javaFile ->
                 val source = javaFile.readText()
                 if (!source.contains("ResourceKey<LootTable>") || !source.contains("lootTable")) return@forEach
-                val className = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+                val className = classNameOfJavaSource(source) ?: return@forEach
                 if (Regex("""\bResourceKey\s*<\s*LootTable\s*>\s+lootTable\b""").containsMatchIn(source)) {
                     owners += className
                 }
@@ -9524,7 +9524,7 @@ $fields
             .forEach { javaFile ->
                 val source = javaFile.readText()
                 if (!source.contains("ResourceKey<LootTable>")) return@forEach
-                val className = classNameOfJavaSource(source) ?: javaFile.fileName.toString().removeSuffix(".java")
+                val className = classNameOfJavaSource(source) ?: return@forEach
                 val packageName = packageNameOf(source)
                 Regex(
                     """(?m)\b(?:public|protected|private)\s+static\s+(?:final\s+)?ResourceKey\s*<\s*LootTable\s*>\s+([A-Z][A-Z0-9_]*)\b"""

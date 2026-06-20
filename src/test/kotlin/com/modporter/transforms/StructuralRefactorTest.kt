@@ -78,6 +78,36 @@ class StructuralRefactorTest {
     }
 
     @Test
+    fun `loot table resource keys do not infer owners from java file names`() {
+        val projectDir = createTestFile("LootTables.java", """
+            package com.example;
+
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.world.level.storage.loot.LootTable;
+
+            public static ResourceKey<LootTable> USELESS;
+        """.trimIndent())
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.resolve("Usage.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.world.level.storage.loot.LootTable;
+
+            public class Usage {
+                ResourceKey<LootTable> key = ResourceKey.create(Registries.LOOT_TABLE, LootTables.USELESS);
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val usage = srcDir.resolve("Usage.java").readText()
+
+        assertTrue(usage.contains("ResourceKey.create(Registries.LOOT_TABLE, LootTables.USELESS)"), usage)
+        assertTrue(result.changes.none { it.ruleId == "struct-loot-table-resourcekey-reference" }, result.changes.joinToString("\n"))
+    }
+
+    @Test
     fun `automated structural migrations report high confidence`() {
         val projectDir = createTestFile("ComplexMod.java", """
             package com.example;

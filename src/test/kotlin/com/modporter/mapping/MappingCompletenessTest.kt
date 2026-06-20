@@ -875,6 +875,23 @@ class MappingCompletenessTest {
             keyExpressionOffenders.isEmpty(),
             "Loot table key-expression detection must use API/evidence structure, not owner-name suffix inference: $keyExpressionOffenders"
         )
+
+        val resourceKeyCollectorsStart = source.indexOf("private fun collectResourceKeyLootTableFieldOwners")
+        assertTrue(resourceKeyCollectorsStart >= 0, "collectResourceKeyLootTableFieldOwners is missing")
+        val resourceKeyCollectorsEnd = source.indexOf("private fun collectMapCodecConstantOwners", resourceKeyCollectorsStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val resourceKeyCollectorsBody = source.substring(resourceKeyCollectorsStart, resourceKeyCollectorsEnd)
+        val resourceKeyCollectorOffenders = listOf(
+            "java file-name owner fallback" to Regex("""classNameOfJavaSource\(source\)\s*\?:\s*javaFile\.fileName\.toString\(\)\.removeSuffix\("\.java"\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(resourceKeyCollectorsBody) }
+            .map { (label, _) -> "loot table ResourceKey collectors contain $label" }
+
+        assertTrue(
+            resourceKeyCollectorOffenders.isEmpty(),
+            "Loot table ResourceKey collectors must use source-declared Java owners, not Java file-name fallback inference: $resourceKeyCollectorOffenders"
+        )
     }
 
     @Test
