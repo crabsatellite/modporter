@@ -901,8 +901,7 @@ public class $className extends CustomRecipe {
     private fun detectJavaModIds(javaSources: List<Pair<Path, String>>): Map<String, String> {
         val ids = mutableMapOf<String, String>()
         val simpleValues = linkedMapOf<String, MutableSet<String>>()
-        for ((file, content) in javaSources) {
-            val className = file.fileName.toString().removeSuffix(".java")
+        for ((_, content) in javaSources) {
             val packageName = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""")
                 .find(content)
                 ?.groupValues
@@ -911,7 +910,8 @@ public class $className extends CustomRecipe {
             Regex("static\\s+final\\s+String\\s+(MODID|MOD_ID)\\s*=\\s*\"([^\"]+)\"")
                 .findAll(content)
                 .forEach { match ->
-                    val ownerClass = javaTypeNameContainingOffset(content, match.range.first) ?: className
+                    val ownerClass = javaTypeNameContainingOffset(content, match.range.first)
+                        ?: return@forEach
                     simpleValues.getOrPut(match.groupValues[1]) { linkedSetOf() } += match.groupValues[2]
                     ids["$ownerClass.${match.groupValues[1]}"] = match.groupValues[2]
                     if (packageName.isNotBlank()) {
@@ -926,9 +926,6 @@ public class $className extends CustomRecipe {
                         ids["$packageName.${match.groupValues[2]}"] = match.groupValues[1]
                     }
                 }
-            Regex("@Mod\\s*\\(\\s*\"([^\"]+)\"").find(content)?.let { match ->
-                ids.putIfAbsent(className, match.groupValues[1])
-            }
         }
         simpleValues.forEach { (name, values) ->
             if (values.size == 1) {

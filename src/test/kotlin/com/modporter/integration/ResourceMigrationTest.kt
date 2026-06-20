@@ -111,6 +111,43 @@ class ResourceMigrationTest {
     }
 
     @Test
+    fun `custom enchantment resource keys do not infer mod id owner from java file names`() {
+        val projectDir = tempDir.resolve("ambiguous-enchantment-modid")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public static final String MODID = "example";
+        """.trimIndent())
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+
+            public final class ModEnchantments {
+                public static final net.minecraft.resources.ResourceKey<Enchantment> QUALIFIED =
+                        net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,
+                                net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "qualified"));
+                public static final net.minecraft.resources.ResourceKey<Enchantment> SIMPLE =
+                        net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,
+                                net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(MODID, "simple"));
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertFalse(
+            result.changes.any { it.ruleId == "res-custom-enchantment-data" },
+            "Unsupported mod id constant ownership must not produce custom enchantment data requirements"
+        )
+        assertFalse(
+            result.errors.any { it.contains("Missing source-derived data-driven custom enchantment JSON") },
+            result.errors.joinToString("\n")
+        )
+    }
+
+    @Test
     fun `renames data folders`() {
         val projectDir = setupResourceProject()
         val db = MappingDatabase.loadDefault()

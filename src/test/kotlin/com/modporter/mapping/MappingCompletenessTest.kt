@@ -620,6 +620,33 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `resource mod id detection does not infer constant owners from file names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val resourceMigrator = projectRoot
+            .resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt")
+            .readText()
+        val start = resourceMigrator.indexOf("private fun detectJavaModIds")
+        assertTrue(start >= 0, "detectJavaModIds is missing")
+        val end = resourceMigrator.indexOf("\n    private fun ", start + 1).let {
+            if (it < 0) resourceMigrator.length else it
+        }
+        val body = resourceMigrator.substring(start, end)
+        val forbidden = listOf(
+            "java file-name owner" to Regex("""fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "type-name elvis file fallback" to Regex("""javaTypeNameContainingOffset\([^)]*\)\s*\?:\s*[^;\r\n]*file"""),
+            "bare @Mod file owner fallback" to Regex("""ids\.putIfAbsent\([^,\r\n]*className""")
+        )
+        val offenders = forbidden
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "detectJavaModIds contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Resource mod id detection must use source-declared owners, not Java file-name fallback inference: $offenders"
+        )
+    }
+
+    @Test
     fun `production migrations do not derive mod identity from project directory names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(
