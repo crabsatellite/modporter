@@ -3708,7 +3708,6 @@ public class $className extends CustomRecipe {
                 .filter { Files.isRegularFile(it) && (it.toString().endsWith(".java") || it.toString().endsWith(".kt")) }
                 .forEach { file ->
                     val content = file.readText()
-                    val fallbackClassName = file.fileName.toString().substringBeforeLast('.')
                     val packageName = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""")
                         .find(content)
                         ?.groupValues
@@ -3719,11 +3718,13 @@ public class $className extends CustomRecipe {
                     constantPattern.findAll(content).forEach { match ->
                         val name = match.groupValues[1]
                         val value = match.groupValues[2]
-                        val className = javaTypeNameContainingOffset(content, match.range.first) ?: fallbackClassName
+                        val className = javaTypeNameContainingOffset(content, match.range.first)
                         simpleValues.getOrPut(name) { linkedSetOf() } += value
-                        constants["$className.$name"] = value
-                        if (packageName.isNotBlank()) {
-                            constants["$packageName.$className.$name"] = value
+                        if (className != null) {
+                            constants["$className.$name"] = value
+                            if (packageName.isNotBlank()) {
+                                constants["$packageName.$className.$name"] = value
+                            }
                         }
                     }
                     simpleValues.forEach { (name, values) ->

@@ -1140,6 +1140,68 @@ class ResourceMigrationTest {
     }
 
     @Test
+    fun `code awarded advancement resolves qualified ids from declared class owner`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/com/example")
+        javaDir.createDirectories()
+        javaDir.resolve("Awarder.java").writeText("""
+            package com.example;
+
+            class Awarder {
+                private static final String ADVANCEMENT_ID = "resmod:qualified";
+
+                void award(Object player) {
+                    AdvancementHelper.tryAwardAdvancement(player, Awarder.ADVANCEMENT_ID, "code_triggered");
+                }
+            }
+        """.trimIndent())
+
+        val advancementDir = projectDir.resolve("src/main/resources/data/resmod/advancements")
+        advancementDir.resolve("qualified.json").writeText("""
+            {"display":{"icon":{"item":"resmod:item"}},"criteria":{"code_triggered":{"trigger":"resmod:qualified"}}}
+        """.trimIndent())
+
+        ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val advancement = projectDir.resolve("src/main/resources/data/resmod/advancement/qualified.json").readText()
+        assertTrue(advancement.contains(""""trigger": "minecraft:impossible""""), advancement)
+        assertFalse(advancement.contains(""""trigger":"resmod:qualified""""))
+    }
+
+    @Test
+    fun `code awarded advancement does not infer constant owner from file name`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/com/example")
+        javaDir.createDirectories()
+        javaDir.resolve("Awarder.java").writeText("""
+            package com.example;
+
+            static final String ADVANCEMENT_ID = "resmod:manual";
+
+            class Caller {
+                void award(Object player) {
+                    AdvancementHelper.tryAwardAdvancement(player, Awarder.ADVANCEMENT_ID, "code_triggered");
+                }
+            }
+        """.trimIndent())
+
+        val advancementDir = projectDir.resolve("src/main/resources/data/resmod/advancements")
+        advancementDir.resolve("manual.json").writeText("""
+            {"display":{"icon":{"item":"resmod:item"}},"criteria":{"code_triggered":{"trigger":"resmod:manual"}}}
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val advancement = projectDir.resolve("src/main/resources/data/resmod/advancement/manual.json").readText()
+        assertFalse(
+            result.changes.any { it.ruleId == "res-advancement-code-awarded-trigger" },
+            "Unsupported source shape must not be converted into code-awarded advancement evidence"
+        )
+        assertTrue(advancement.contains(""""trigger":"resmod:manual""""), advancement)
+        assertFalse(advancement.contains("minecraft:impossible"), advancement)
+    }
+
+    @Test
     fun `forge item layers model loader is migrated without changing model structure`() {
         val projectDir = setupResourceProject()
         val modelDir = projectDir.resolve("src/main/resources/assets/resmod/models/item")

@@ -700,6 +700,32 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `code awarded advancement detection does not infer constant owners from file names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val resourceMigrator = projectRoot
+            .resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt")
+            .readText()
+        val start = resourceMigrator.indexOf("private fun detectCodeAwardedAdvancements")
+        assertTrue(start >= 0, "detectCodeAwardedAdvancements is missing")
+        val end = resourceMigrator.indexOf("\n    private fun ", start + 1).let {
+            if (it < 0) resourceMigrator.length else it
+        }
+        val body = resourceMigrator.substring(start, end)
+        val forbidden = listOf(
+            "fallback class name" to Regex("""fallbackClassName"""),
+            "file-name class fallback" to Regex("""javaTypeNameContainingOffset\([^)]*\)\s*\?:\s*[^;\r\n]*fileName""")
+        )
+        val offenders = forbidden
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "detectCodeAwardedAdvancements contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Code-awarded advancement detection must use source-declared constant owners, not file-name fallback inference: $offenders"
+        )
+    }
+
+    @Test
     fun `production migrations do not resolve source constants by qualified tail fallback`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(
