@@ -1,0 +1,102 @@
+[
+  {
+    "id": "nitrogen",
+    "type": "library-api",
+    "packagePrefixes": [
+      "com.aetherteam.nitrogen."
+    ],
+    "ruleIdPrefixes": [
+      "res-nitrogen-",
+      "struct-nitrogen-"
+    ],
+    "rationale": "Nitrogen is a published library API dependency used by source projects; migrations must target its API surface, not an individual benchmark mod."
+  },
+  {
+    "id": "cumulus",
+    "type": "library-api",
+    "packagePrefixes": [
+      "com.aetherteam.cumulus."
+    ],
+    "ruleIdPrefixes": [
+      "struct-cumulus-"
+    ],
+    "rationale": "Cumulus is a published menu API dependency; migrations must be API-surface rules."
+  },
+  {
+    "id": "curios",
+    "type": "library-api",
+    "packagePrefixes": [
+      "top.theillusivec4.curios."
+    ],
+    "coordinatePrefixes": [
+      "top.theillusivec4:"
+    ],
+    "ruleIdPrefixes": [
+      "struct-curios-"
+    ],
+    "rationale": "Curios is a public accessory API with Forge to NeoForge package and semantic changes."
+  },
+  {
+    "id": "jei",
+    "type": "library-api",
+    "packagePrefixes": [
+      "mezz.jei."
+    ],
+    "coordinatePrefixes": [
+      "mezz.jei:"
+    ],
+    "ruleIdPrefixes": [
+      "jei-"
+    ],
+    "rationale": "JEI is a public integration API whose Forge and NeoForge surfaces differ."
+  },
+  {
+    "id": "lootr",
+    "type": "library-api",
+    "packagePrefixes": [
+      "noobanidus.mods.lootr."
+    ],
+    "ruleIdPrefixes": [
+      "lootr-"
+    ],
+    "rationale": "Lootr exposes loader-specific package roots that require explicit Forge to NeoForge API mapping."
+  },
+  {
+    "id": "quark",
+    "type": "library-api",
+    "packagePrefixes": [
+      "org.violetmoon.quark."
+    ],
+    "ruleIdPrefixes": [
+      "struct-quark-"
+    ],
+    "rationale": "Quark is a public dependency API; any migration must be tied to the API package, not to a benchmark target."
+  },
+  {
+    "id": "dependency-coordinate-normalization",
+    "type": "dependency-coordinate-api",
+    "packagePrefixes": [
+      "com.blamejared.crafttweaker",
+      "com.simibubi.create",
+      "dev.engine-room.flywheel",
+      "net.createmod.ponder",
+      "org.valkyrienskies",
+      "sereneseasons.",
+      "squeek.appleskin",
+      "vazkii.botania"
+    ],
+    "coordinatePrefixes": [
+      "com.blamejared.crafttweaker:",
+      "com.simibubi.create",
+      "curse.maven:",
+      "dev.engine-room.flywheel:",
+      "maven.modrinth:",
+      "net.createmod.ponder",
+      "org.valkyrienskies",
+      "squeek.appleskin:",
+      "vazkii.botania"
+    ],
+    "ruleIdPrefixes": [],
+    "rationale": "Dependency coordinate handling is metadata-driven resolution, not source-shape migration logic."
+  }
+]

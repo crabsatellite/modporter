@@ -211,6 +211,114 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `third party API migration markers are declared API surfaces`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val apiSurfaceFile = projectRoot.resolve("src/main/resources/mappings/forge2neo/api-surfaces.json")
+        val surfaces = Json.parseToJsonElement(apiSurfaceFile.readText()).jsonArray.map { element ->
+            val json = element.jsonObject
+            val id = json.getValue("id").jsonPrimitive.content
+            val markers = listOf("packagePrefixes", "coordinatePrefixes", "ruleIdPrefixes")
+                .flatMap { key ->
+                    json[key]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
+                }
+            id to markers
+        }
+        val declaredMarkers = surfaces.flatMap { (_, markers) -> markers }
+        val malformed = surfaces
+            .filter { (id, markers) -> id.isBlank() || markers.isEmpty() }
+            .map { (id, _) -> id.ifBlank { "<blank>" } }
+
+        assertTrue(malformed.isEmpty(), "API surfaces must have ids and markers: $malformed")
+
+        val scannedRoots = listOf(
+            projectRoot.resolve("src/main/kotlin"),
+            projectRoot.resolve("src/main/resources/mappings/forge2neo")
+        )
+        val excludedFiles = setOf(
+            "src/main/resources/mappings/forge2neo/api-surfaces.json",
+            "src/main/resources/mappings/forge2neo/neoforge-deps.json"
+        )
+        val thirdPartyRoots = listOf(
+            "com.aetherteam.",
+            "com.blamejared.crafttweaker",
+            "com.simibubi.create",
+            "curse.maven:",
+            "dev.engine-room.flywheel",
+            "maven.modrinth:",
+            "mezz.jei.",
+            "mezz.jei:",
+            "net.createmod.ponder",
+            "noobanidus.mods.lootr.",
+            "org.valkyrienskies",
+            "org.violetmoon.",
+            "sereneseasons.",
+            "squeek.appleskin",
+            "top.theillusivec4.",
+            "top.theillusivec4:",
+            "vazkii.botania"
+        )
+
+        fun declared(root: String): Boolean =
+            declaredMarkers.any { marker -> root.startsWith(marker) || marker.startsWith(root) }
+
+        val rootOffenders = scannedRoots
+            .filter { Files.exists(it) }
+            .flatMap { root ->
+                Files.walk(root).use { stream ->
+                    stream
+                        .filter { Files.isRegularFile(it) }
+                        .filter { it.extension in setOf("kt", "json", "toml", "properties") }
+                        .filter { file ->
+                            val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                            relative !in excludedFiles
+                        }
+                        .toList()
+                }
+            }
+            .flatMap { file ->
+                val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                val text = file.readText()
+                thirdPartyRoots
+                    .filter { root -> text.contains(root) && !declared(root) }
+                    .map { root -> "$relative contains undeclared third-party API marker $root" }
+            }
+
+        val ruleIdPrefixes = declaredMarkers.filter { it.endsWith("-") }
+        val ruleIdOffenders = scannedRoots
+            .filter { Files.exists(it) }
+            .flatMap { root ->
+                Files.walk(root).use { stream ->
+                    stream
+                        .filter { Files.isRegularFile(it) }
+                        .filter { it.extension in setOf("kt", "json", "toml", "properties") }
+                        .filter { file ->
+                            val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                            relative !in excludedFiles
+                        }
+                        .toList()
+                }
+            }
+            .flatMap { file ->
+                val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                Regex(""""((?:struct|res|build)-[a-z0-9]+-[^"]*)"""")
+                    .findAll(file.readText())
+                    .map { it.groupValues[1] }
+                    .filter { ruleId ->
+                        listOf("nitrogen", "cumulus", "curios", "quark").any { ruleId.contains("-$it-") } &&
+                            ruleIdPrefixes.none { ruleId.startsWith(it) }
+                    }
+                    .map { ruleId -> "$relative contains undeclared third-party API rule id $ruleId" }
+                    .toList()
+            }
+
+        val offenders = rootOffenders + ruleIdOffenders
+        assertTrue(
+            offenders.isEmpty(),
+            "Third-party API migrations must be declared surfaces, not ad hoc mod-specific rules: $offenders"
+        )
+    }
+
+    @Test
     fun `production kotlin sources do not contain TODO placeholder or reflection fallback debt`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val allowedReflectionMigrator = "src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt"
