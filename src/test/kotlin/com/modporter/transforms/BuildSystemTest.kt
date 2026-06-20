@@ -1274,6 +1274,45 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `class for name isInstance migration ignores commented reflection flow`() {
+        val projectDir = tempDir.resolve("class-for-name-isinstance-comment")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("ExternalEntityCompat.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.Entity;
+
+            public class ExternalEntityCompat {
+                private static Class<?> targetClass = null;
+
+                // try {
+                //     targetClass = Class.forName("example.optional.ExternalEntity");
+                //     return targetClass != null && targetClass.isInstance(entity);
+                // } catch (Exception ignored) {
+                //     return false;
+                // }
+                public static boolean isExternalEntity(Entity entity) {
+                    return false;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ExternalEntityCompat.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertTrue(content.contains("return false;"), content)
+        assertFalse(content.contains("modporterRuntimeInstanceOf"), content)
+    }
+
+    @Test
     fun `rewrites season helper reflection to static optional API calls`() {
         val projectDir = tempDir.resolve("season-helper-static-api")
         val srcDir = projectDir.resolve("src/main/java/com/example")

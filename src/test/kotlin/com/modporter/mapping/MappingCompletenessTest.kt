@@ -732,6 +732,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `class for name isInstance migration uses try local executable evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun rewriteClassForNameIsInstanceChecks")
+        assertTrue(start >= 0, "rewriteClassForNameIsInstanceChecks is missing")
+        val end = source.indexOf("private fun ensureRuntimeInstanceHelper", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw source Class.forName assignment" to """).find(source)""",
+            "raw source isInstance return" to """).find(source)""",
+            "raw source try lookup" to "source.lastIndexOf(\"try\""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "Class.forName isInstance migration contains $label" }
+
+        assertTrue(
+            body.contains("val code = maskJavaComments(source)") &&
+                body.contains("findEnclosingTryStartForStatement(code, forNameAssignment.range.first)") &&
+                body.contains("val tryBody = code.substring(openBrace + 1, closeBrace)") &&
+                body.contains("returnPattern.find(tryBody, searchFrom)") &&
+                body.contains("Regex.escape(classVariable)") &&
+                body.contains("findFollowingCatchBlockEnd(code, closeBrace + 1)"),
+            "Class.forName isInstance migration must prove assignment and return inside the same executable try/catch"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Class.forName isInstance migration must not use raw whole-file source as migration evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `required access transformer collection uses typed source evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

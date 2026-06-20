@@ -2174,33 +2174,60 @@ $header
     }
 
     private fun rewriteClassForNameIsInstanceChecks(source: String): String {
-        val forNameAssignment = Regex("""([A-Za-z_$][\w$]*)\s*=\s*Class\.forName\(\s*"([^"]+)"\s*\)\s*;""")
-            .find(source)
-            ?: return source
-        val classVariable = forNameAssignment.groupValues[1]
-        val binaryName = forNameAssignment.groupValues[2]
-        val returnMatch = Regex("""return\s+$classVariable\s*!=\s*null\s*&&\s*$classVariable\.isInstance\(\s*([A-Za-z_$][\w$]*)\s*\)\s*;""")
-            .find(source)
-            ?: return source
-        val valueExpression = returnMatch.groupValues[1]
-        val tryStart = source.lastIndexOf("try", forNameAssignment.range.first)
-        if (tryStart < 0) return source
-        val openBrace = source.indexOf('{', tryStart)
-        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
-        if (closeBrace <= openBrace || returnMatch.range.last > closeBrace) return source
-        val catchEnd = findFollowingCatchBlockEnd(source, closeBrace + 1)
-        if (catchEnd <= closeBrace) return source
+        val code = maskJavaComments(source)
+        val forNameAssignments = Regex("""\b([A-Za-z_$][\w$]*)\s*=\s*Class\.forName\(\s*"([^"]+)"\s*\)\s*;""")
+            .findAll(code)
 
-        var result = source.substring(0, tryStart) +
-            "return modporterRuntimeInstanceOf($valueExpression, \"$binaryName\");" +
-            source.substring(catchEnd + 1)
+        for (forNameAssignment in forNameAssignments) {
+            val classVariable = forNameAssignment.groupValues[1]
+            val binaryName = forNameAssignment.groupValues[2]
+            val tryStart = findEnclosingTryStartForStatement(code, forNameAssignment.range.first)
+            if (tryStart < 0) continue
+            val openBrace = code.indexOf('{', tryStart)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(code, openBrace) else -1
+            if (closeBrace <= openBrace) continue
+            val tryBody = code.substring(openBrace + 1, closeBrace)
+            val searchFrom = (forNameAssignment.range.last - openBrace).coerceAtLeast(0)
+            val returnPattern = Regex(
+                """return\s+${Regex.escape(classVariable)}\s*!=\s*null\s*&&\s*${Regex.escape(classVariable)}\.isInstance\(\s*([A-Za-z_$][\w$]*)\s*\)\s*;"""
+            )
+            val returnMatch = returnPattern.find(tryBody, searchFrom) ?: continue
+            val valueExpression = returnMatch.groupValues[1]
+            val catchEnd = findFollowingCatchBlockEnd(code, closeBrace + 1)
+            if (catchEnd <= closeBrace) continue
 
-        result = Regex("""(?m)^[ \t]*private\s+static\s+Class<\?>\s+${Regex.escape(classVariable)}\s*=\s*null\s*;\s*\r?\n""")
-            .replace(result, "")
-        result = Regex("""(?m)^[ \t]*private\s+static\s+boolean\s+[A-Za-z_$][\w$]*Resolved\s*=\s*false\s*;\s*\r?\n""")
-            .replace(result, "")
+            var result = source.substring(0, tryStart) +
+                "return modporterRuntimeInstanceOf($valueExpression, \"$binaryName\");" +
+                source.substring(catchEnd + 1)
 
-        return ensureRuntimeInstanceHelper(result)
+            result = Regex("""(?m)^[ \t]*private\s+static\s+Class<\?>\s+${Regex.escape(classVariable)}\s*=\s*null\s*;\s*\r?\n""")
+                .replace(result, "")
+            result = Regex("""(?m)^[ \t]*private\s+static\s+boolean\s+[A-Za-z_$][\w$]*Resolved\s*=\s*false\s*;\s*\r?\n""")
+                .replace(result, "")
+
+            return ensureRuntimeInstanceHelper(result)
+        }
+        return source
+    }
+
+    private fun findEnclosingTryStartForStatement(code: String, offset: Int): Int {
+        var searchFrom = offset
+        while (searchFrom >= 0) {
+            val tryStart = code.lastIndexOf("try", searchFrom)
+            if (tryStart < 0) return -1
+            val before = code.getOrNull(tryStart - 1)
+            val after = code.getOrNull(tryStart + 3)
+            if ((before != null && Character.isJavaIdentifierPart(before)) ||
+                (after != null && Character.isJavaIdentifierPart(after))) {
+                searchFrom = tryStart - 1
+                continue
+            }
+            val openBrace = code.indexOf('{', tryStart)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(code, openBrace) else -1
+            if (openBrace in 0 until offset && closeBrace >= offset) return tryStart
+            searchFrom = tryStart - 1
+        }
+        return -1
     }
 
     private fun ensureRuntimeInstanceHelper(source: String): String {
