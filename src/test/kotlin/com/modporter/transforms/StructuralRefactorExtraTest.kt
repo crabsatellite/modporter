@@ -1319,6 +1319,93 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `base packet migration uses declared Java owners instead of file names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+
+        networkDir.resolve("ExampleMod.java").writeText("""
+            package com.example.network;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                    ActualPacketHandler.register();
+                }
+            }
+        """.trimIndent())
+        networkDir.resolve("WrongPacketHandlerFile.java").writeText("""
+            package com.example.network;
+
+            import com.aetherteam.nitrogen.network.BasePacket;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+            import java.util.function.Function;
+
+            class ActualPacketHandler {
+                public static final SimpleChannel INSTANCE = NetworkRegistry.newSimpleChannel(ResourceLocation.fromNamespaceAndPath("example", "main"), () -> "1", "1"::equals, "1"::equals);
+                private static int index;
+
+                public static synchronized void register() {
+                    register(ActualNoticePacket.class, ActualNoticePacket::decode);
+                }
+
+                private static <MSG extends BasePacket> void register(final Class<MSG> packet, Function<FriendlyByteBuf, MSG> decoder) {
+                    INSTANCE.messageBuilder(packet, index++).encoder(BasePacket::encode).decoder(decoder).consumerMainThread(BasePacket::handle).add();
+                }
+            }
+        """.trimIndent())
+        networkDir.resolve("WrongPacketFile.java").writeText("""
+            package com.example.network;
+
+            import com.aetherteam.nitrogen.network.BasePacket;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.world.entity.player.Player;
+
+            record ActualNoticePacket(int value) implements BasePacket {
+                @Override
+                public void encode(FriendlyByteBuf buf) {
+                    buf.writeInt(this.value());
+                }
+
+                public static ActualNoticePacket decode(FriendlyByteBuf buf) {
+                    return new ActualNoticePacket(buf.readInt());
+                }
+
+                @Override
+                public void execute(Player player) {
+                    player.getId();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val packet = networkDir.resolve("WrongPacketFile.java").readText()
+        val handler = networkDir.resolve("WrongPacketHandlerFile.java").readText()
+        val main = networkDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-basepacket-payload" })
+        assertTrue(result.changes.any { it.ruleId == "struct-basepacket-handler-registration" })
+        assertTrue(result.changes.any { it.ruleId == "struct-basepacket-main-registration" })
+        assertTrue(packet.contains("record ActualNoticePacket(int value) implements CustomPacketPayload"), packet)
+        assertTrue(packet.contains("CustomPacketPayload.Type<ActualNoticePacket> TYPE"), packet)
+        assertTrue(packet.contains("StreamCodec.of((buf, packet) -> packet.encode(buf), ActualNoticePacket::decode)"), packet)
+        assertFalse(packet.contains("WrongPacketFile"), packet)
+        assertTrue(handler.contains("class ActualPacketHandler"), handler)
+        assertFalse(handler.contains("public class ActualPacketHandler"), handler)
+        assertTrue(handler.contains("registrar.playBidirectional(ActualNoticePacket.TYPE, ActualNoticePacket.STREAM_CODEC, (payload, context) -> payload.execute(context.player()));"), handler)
+        assertFalse(handler.contains("WrongPacketHandlerFile"), handler)
+        assertTrue(main.contains("modEventBus.addListener(ActualPacketHandler::register);"), main)
+        assertFalse(main.contains("WrongPacketHandlerFile::register"), main)
+    }
+
+    @Test
     fun `server packet handler maps getSender to IPayloadContext player check`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val networkDir = srcDir.resolve("network")

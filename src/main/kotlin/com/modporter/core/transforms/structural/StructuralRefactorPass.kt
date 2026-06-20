@@ -1358,11 +1358,7 @@ ${indent}}
     }
 
     private fun findTypeOpenBrace(content: String, className: String): Int {
-        val typeStart = Regex("""\bpublic\s+(?:(?:static|abstract|final|sealed|non-sealed)\s+)*(?:class|record)\s+${Regex.escape(className)}\b""")
-            .find(content)
-            ?.range
-            ?.first
-            ?: return -1
+        val typeStart = findTypeDeclarationStart(content, className) ?: return -1
         return content.indexOf('{', typeStart)
     }
 
@@ -2282,7 +2278,7 @@ $registrations
     private data class BasePacketPayloadInfo(
         val file: Path,
         val packageName: String,
-        val fileClassName: String,
+        val ownerClassName: String,
         val simpleName: String,
         val referenceName: String,
         val bufferType: String,
@@ -2307,8 +2303,8 @@ $registrations
                 continue
             }
             val packageName = packageNameOf(original)
-            val fileClassName = file.fileName.toString().removeSuffix(".java")
-            val payloadTypes = extractBasePacketPayloadTypes(file, original, packageName, fileClassName)
+            val ownerClassName = classNameOfJavaSource(original) ?: continue
+            val payloadTypes = extractBasePacketPayloadTypes(file, original, packageName, ownerClassName)
             if (payloadTypes.isEmpty()) continue
 
             var modified = original
@@ -2371,7 +2367,7 @@ $registrations
         file: Path,
         source: String,
         packageName: String,
-        fileClassName: String
+        ownerClassName: String
     ): List<BasePacketPayloadInfo> {
         val results = mutableListOf<BasePacketPayloadInfo>()
         val decodePattern = Regex(
@@ -2390,11 +2386,11 @@ $registrations
                     .containsMatchIn(body)) {
                 continue
             }
-            val referenceName = if (simpleName == fileClassName) simpleName else "$fileClassName.$simpleName"
+            val referenceName = if (simpleName == ownerClassName) simpleName else "$ownerClassName.$simpleName"
             results.add(BasePacketPayloadInfo(
                 file = file,
                 packageName = packageName,
-                fileClassName = fileClassName,
+                ownerClassName = ownerClassName,
                 simpleName = simpleName,
                 referenceName = referenceName,
                 bufferType = bufferType,
@@ -2403,11 +2399,13 @@ $registrations
             ))
         }
 
-        val topLevelImplementsBasePacket = Regex(
-            """public\s+(?:abstract\s+)?(?:class|record)\s+${Regex.escape(fileClassName)}\b[\s\S]*?\bimplements\s+BasePacket\b"""
-        ).containsMatchIn(source)
+        val ownerTypeStart = findTypeDeclarationStart(source, ownerClassName)
+        val ownerOpenBrace = ownerTypeStart?.let { source.indexOf('{', it) } ?: -1
+        val topLevelImplementsBasePacket = ownerTypeStart != null &&
+            ownerOpenBrace > ownerTypeStart &&
+            source.substring(ownerTypeStart, ownerOpenBrace).contains("implements BasePacket")
         if (topLevelImplementsBasePacket &&
-            results.none { it.simpleName == fileClassName } &&
+            results.none { it.simpleName == ownerClassName } &&
             Regex("""\bvoid\s+encode\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(source)) {
             // Abstract base packets, such as shared boss-bar packets, still need
             // the BasePacket interface removed. Concrete nested payloads above
@@ -2415,9 +2413,9 @@ $registrations
             results.add(BasePacketPayloadInfo(
                 file = file,
                 packageName = packageName,
-                fileClassName = fileClassName,
-                simpleName = fileClassName,
-                referenceName = fileClassName,
+                ownerClassName = ownerClassName,
+                simpleName = ownerClassName,
+                referenceName = ownerClassName,
                 bufferType = Regex("""\bvoid\s+encode\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+""")
                     .find(source)
                     ?.groupValues
@@ -2430,7 +2428,7 @@ $registrations
     }
 
     private fun findTypeDeclarationStart(source: String, simpleName: String): Int? =
-        Regex("""\bpublic\s+(?:(?:static|abstract|final|sealed|non-sealed)\s+)*(?:class|record)\s+${Regex.escape(simpleName)}\b""")
+        Regex("""(?m)^[ \t]*(?:(?:@[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\s*\([^;\r\n]*\))?|public|protected|private|static|abstract|final|sealed|non-sealed)\s+)*(?:class|record)\s+${Regex.escape(simpleName)}\b""")
             .find(source)
             ?.range
             ?.first
@@ -2480,7 +2478,8 @@ $registrations
                 if (registrations.isEmpty()) return@forEach
 
                 val packageName = packageNameOf(original)
-                val className = file.fileName.toString().removeSuffix(".java")
+                val className = classNameOfJavaSource(original) ?: return@forEach
+                val classIsPublic = javaTopLevelTypeIsPublic(original, className)
                 val packetImports = Regex("""(?m)^[ \t]*import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.network\.packet(?:\.[A-Za-z_$][\w$]*)*(?:\.\*)?);\s*$""")
                     .findAll(original)
                     .map { "import ${it.groupValues[1]};" }
@@ -2492,7 +2491,7 @@ $registrations
 ${packetImports}import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
-public class $className {
+${if (classIsPublic) "public " else ""}class $className {
     public static void register(RegisterPayloadHandlersEvent event) {
         PayloadRegistrar registrar = event.registrar("$modId").versioned("1");
 ${registrations.distinct().joinToString("\n")}
@@ -2545,21 +2544,22 @@ ${registrations.distinct().joinToString("\n")}
         }
         val javaFiles = Files.walk(srcDir).use { stream ->
             stream
-                .filter { it.extension == "java" && it.fileName.toString().removeSuffix(".java") in candidateTypeNames }
+                .filter { it.extension == "java" }
                 .toList()
         }
         for (file in javaFiles) {
             val source = file.readText()
+            if (candidateTypeNames.none { Regex("""\b${Regex.escape(it)}\b""").containsMatchIn(source) }) continue
             val packageName = packageNameOf(source)
-            val fileClassName = file.fileName.toString().removeSuffix(".java")
+            val ownerClassName = classNameOfJavaSource(source) ?: continue
             val decode = Regex(
                 """public\s+static\s+(?:(?:${Regex.escape(packetRef)})|(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(simpleName)})\s+decode\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+[A-Za-z_$][\w$]*\s*\)"""
             ).find(source) ?: continue
-            if (!hasRegisteredPayloadSourceShape(source, fileClassName, simpleName)) continue
+            if (!hasRegisteredPayloadSourceShape(source, ownerClassName, simpleName)) continue
             return BasePacketPayloadInfo(
                 file = file,
                 packageName = packageName,
-                fileClassName = fileClassName,
+                ownerClassName = ownerClassName,
                 simpleName = simpleName,
                 referenceName = packetRef,
                 bufferType = decode.groupValues[1],
@@ -2584,8 +2584,8 @@ ${registrations.distinct().joinToString("\n")}
         }
     }
 
-    private fun hasRegisteredPayloadSourceShape(source: String, fileClassName: String, simpleName: String): Boolean {
-        val typeStart = findTypeDeclarationStart(source, simpleName) ?: findTypeDeclarationStart(source, fileClassName) ?: return false
+    private fun hasRegisteredPayloadSourceShape(source: String, ownerClassName: String, simpleName: String): Boolean {
+        val typeStart = findTypeDeclarationStart(source, simpleName) ?: findTypeDeclarationStart(source, ownerClassName) ?: return false
         val openBrace = source.indexOf('{', typeStart)
         if (openBrace < 0) return false
         val closeBrace = findMatchingBrace(source, openBrace)
