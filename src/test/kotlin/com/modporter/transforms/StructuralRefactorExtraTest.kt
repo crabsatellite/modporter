@@ -4051,6 +4051,96 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy advancement trigger migration uses declared trigger and registrar owners`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val criteriaDir = srcDir.resolve("criteria")
+        criteriaDir.createDirectories()
+
+        criteriaDir.resolve("ExampleMod.java").writeText("""
+            package com.example.criteria;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+
+                public ExampleMod(IEventBus modEventBus) {
+                }
+            }
+        """.trimIndent())
+
+        criteriaDir.resolve("WrongTriggerFile.java").writeText("""
+            package com.example.criteria;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.advancements.CriterionTrigger;
+            import net.minecraft.advancements.CriterionTriggerInstance;
+            import net.minecraft.advancements.critereon.SerializationContext;
+            import net.minecraft.resources.ResourceLocation;
+
+            class RealmTrigger implements CriterionTrigger<RealmTrigger.Instance> {
+                public ResourceLocation getId() {
+                    return null;
+                }
+
+                public Instance createInstance(JsonObject json, DeserializationContext context) {
+                    return new Instance();
+                }
+
+                public static class Instance implements CriterionTriggerInstance {
+                    public JsonObject serializeToJson(SerializationContext context) {
+                        return new JsonObject();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        criteriaDir.resolve("WrongRegistrarFile.java").writeText("""
+            package com.example.criteria;
+
+            import net.minecraft.advancements.CriteriaTriggers;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+
+            class HookRegistrar {
+                @SubscribeEvent
+                public static void registerAdvancementTrigger(FMLCommonSetupEvent event) {
+                    event.enqueueWork(() -> {
+                        CriteriaTriggers.register(new RealmTrigger("example", "realm_open"));
+                    });
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val trigger = criteriaDir.resolve("WrongTriggerFile.java").readText()
+        val registrar = criteriaDir.resolve("WrongRegistrarFile.java").readText()
+        val mod = criteriaDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-advancement-trigger-codec" })
+        assertTrue(result.changes.any { it.ruleId == "struct-advancement-trigger-deferred-register" })
+        assertTrue(result.changes.any { it.ruleId == "struct-advancement-trigger-main-register" })
+        assertTrue(trigger.contains("class RealmTrigger implements CriterionTrigger<RealmTrigger.Instance>"), trigger)
+        assertFalse(trigger.contains("public class RealmTrigger"), trigger)
+        assertTrue(trigger.contains("public @NotNull Codec<Instance> codec()"), trigger)
+        assertFalse(trigger.contains("SerializationContext"), trigger)
+        assertFalse(trigger.contains("WrongTriggerFile"), trigger)
+        assertTrue(registrar.contains("class HookRegistrar"), registrar)
+        assertFalse(registrar.contains("public class HookRegistrar"), registrar)
+        assertTrue(registrar.contains("DeferredRegister<CriterionTrigger<?>> TRIGGERS"), registrar)
+        assertTrue(registrar.contains("Supplier<RealmTrigger> REALM_OPEN_TRIGGER"), registrar)
+        assertTrue(registrar.contains("TRIGGERS.register(\"realm_open\", () -> new RealmTrigger(\"example\", \"realm_open\"))"), registrar)
+        assertFalse(registrar.contains("CriteriaTriggers"), registrar)
+        assertFalse(registrar.contains("AdvancementTrigger"), registrar)
+        assertFalse(registrar.contains("ExtraEventsRegister"), registrar)
+        assertFalse(registrar.contains("WrongRegistrarFile"), registrar)
+        assertTrue(mod.contains("HookRegistrar.register(modEventBus);"), mod)
+        assertFalse(mod.contains("ExtraEventsRegister.register"), mod)
+    }
+
+    @Test
     fun `migrates SimpleCriterionTrigger classes and CriteriaTriggers registry fields`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val advancementDir = srcDir.resolve("advancements")

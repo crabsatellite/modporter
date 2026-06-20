@@ -1065,6 +1065,33 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy advancement trigger migration does not depend on fixed project class names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateAdvancementCriterionTriggers")
+        assertTrue(start >= 0, "migrateAdvancementCriterionTriggers is missing")
+        val end = source.indexOf("private data class LegacyCriterionRegistration", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "fixed trigger file name" to "AdvancementTrigger.java",
+            "fixed registrar file name" to "ExtraEventsRegister.java",
+            "fixed registrar call" to "ExtraEventsRegister.register(",
+            "fixed trigger constructor" to "new AdvancementTrigger"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "legacy advancement trigger migration contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy advancement trigger migrations must use source-declared trigger and registrar owners, not fixed project names: $offenders"
+        )
+    }
+
+    @Test
     fun `build mod id helpers do not scan arbitrary constant references`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

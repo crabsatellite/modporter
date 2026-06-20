@@ -7532,6 +7532,8 @@ public final class DirtinessAttachment {
             .containsMatchIn(source)
 
     private data class AdvancementTriggerSpec(
+        val triggerPackage: String,
+        val triggerClassName: String,
         val namespace: String,
         val path: String
     ) {
@@ -7541,6 +7543,13 @@ public final class DirtinessAttachment {
                 .trim('_')
                 .let { if (it.endsWith("_TRIGGER")) it else "${it}_TRIGGER" }
     }
+
+    private data class LegacyAdvancementTriggerClass(
+        val file: Path,
+        val packageName: String,
+        val className: String,
+        val classIsPublic: Boolean
+    )
 
     private fun migrateAdvancementCriterionTriggers(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
@@ -7553,29 +7562,23 @@ public final class DirtinessAttachment {
 
         changes.addAll(migrateLegacySimpleCriterionTriggers(projectDir, javaFiles, dryRun))
 
-        val triggerFile = javaFiles.firstOrNull { file ->
-            val text = file.readText()
-            file.fileName.toString() == "AdvancementTrigger.java" &&
-                text.contains("class AdvancementTrigger") &&
-                text.contains("CriterionTrigger") &&
-                (text.contains("createInstance") ||
-                    text.contains("serializeToJson") ||
-                    text.contains("SerializationContext") ||
-                    text.contains("DeserializationContext") ||
-                    text.contains("getCriterion()") ||
-                    text.contains("getId()"))
-        }
+        val legacyTriggerClasses = javaFiles
+            .mapNotNull { legacyAdvancementTriggerClass(it) }
+            .associateBy { it.className }
 
-        if (triggerFile != null) {
-            val triggerText = triggerFile.readText()
-            val packageName = packageNameOf(triggerText)
-            val migrated = advancementTriggerCodecSource(packageName)
+        for (trigger in legacyTriggerClasses.values) {
+            val triggerText = trigger.file.readText()
+            val migrated = advancementTriggerCodecSource(
+                packageName = trigger.packageName,
+                className = trigger.className,
+                classIsPublic = trigger.classIsPublic
+            )
             if (triggerText != migrated) {
                 if (!dryRun) {
-                    triggerFile.writeText(migrated)
+                    trigger.file.writeText(migrated)
                 }
                 changes.add(Change(
-                    file = triggerFile,
+                    file = trigger.file,
                     line = 1,
                     description = "Migrate custom advancement trigger to the 1.21 codec CriterionTrigger API",
                     before = "getId/createInstance/serializeToJson legacy trigger",
@@ -7586,81 +7589,109 @@ public final class DirtinessAttachment {
             }
         }
 
-        val registrarFile = javaFiles.firstOrNull { file ->
-            val text = file.readText()
-            file.fileName.toString() == "ExtraEventsRegister.java" &&
-                text.contains("AdvancementTrigger") &&
-                (text.contains("CriteriaTriggers.register") || text.contains("new AdvancementTrigger"))
-        } ?: return changes
-
-        val registrarText = registrarFile.readText()
-        val specs = extractAdvancementTriggerSpecs(registrarText)
-        if (specs.isEmpty()) return changes
-
         val mainClass = detectModMainClass(projectDir)
-        val mainText = mainClass?.readText().orEmpty()
-        val registrarPackage = packageNameOf(registrarText)
-        val triggerPackage = triggerFile?.readText()?.let { packageNameOf(it) }
-            ?: javaFiles.firstOrNull { it.fileName.toString() == "AdvancementTrigger.java" }
-                ?.readText()
-                ?.let { packageNameOf(it) }
-            ?: registrarPackage.substringBeforeLast('.', registrarPackage) + ".advancements"
-        val modRef = modIdReferenceForGeneratedClass(mainClass, mainText, registrarPackage)
-        val migratedRegistrar = extraEventsRegisterAdvancementSource(
-            packageName = registrarPackage,
-            triggerPackage = triggerPackage,
-            modRef = modRef,
-            specs = specs
-        )
+        val originalMainText = mainClass?.readText().orEmpty()
+        var migratedMainText = originalMainText
 
-        if (registrarText != migratedRegistrar) {
-            if (!dryRun) {
-                registrarFile.writeText(migratedRegistrar)
-            }
-            changes.add(Change(
-                file = registrarFile,
-                line = 1,
-                description = "Register custom advancement triggers through DeferredRegister",
-                before = "CriteriaTriggers.register(new AdvancementTrigger(...))",
-                after = "DeferredRegister<CriterionTrigger<?>> TRIGGERS",
-                confidence = Confidence.HIGH,
-                ruleId = "struct-advancement-trigger-deferred-register"
-            ))
-        }
+        for (registrarFile in javaFiles) {
+            val registrarText = registrarFile.readText()
+            if (!registrarText.contains("CriteriaTriggers.register")) continue
+            val specs = extractAdvancementTriggerSpecs(registrarText, legacyTriggerClasses)
+            if (specs.isEmpty()) continue
+            val registrarClassName = classNameOfJavaSource(registrarText) ?: continue
+            val registrarPackage = packageNameOf(registrarText)
+            val registrarClassIsPublic = javaTopLevelTypeIsPublic(registrarText, registrarClassName)
+            val modRef = modIdReferenceForGeneratedClass(mainClass, migratedMainText, registrarPackage)
+            val migratedRegistrar = extraEventsRegisterAdvancementSource(
+                packageName = registrarPackage,
+                className = registrarClassName,
+                classIsPublic = registrarClassIsPublic,
+                modRef = modRef,
+                specs = specs
+            )
 
-        if (mainClass != null && mainText.isNotBlank() && !mainText.contains("ExtraEventsRegister.register(")) {
-            var migratedMain = mainText
-            val mainPackage = packageNameOf(migratedMain)
-            val constructorBusName = requireModEventBusName(migratedMain, "legacy extra event registration")
-
-            if (registrarPackage != mainPackage) {
-                migratedMain = addImportIfMissing(migratedMain, "$registrarPackage.ExtraEventsRegister")
-            }
-            val registration = "        ExtraEventsRegister.register($constructorBusName);"
-            migratedMain = insertModBusListener(migratedMain, constructorBusName, registration, "EntityRegister")
-            if (migratedMain != mainText) {
+            if (registrarText != migratedRegistrar) {
                 if (!dryRun) {
-                    mainClass.writeText(migratedMain)
+                    registrarFile.writeText(migratedRegistrar)
                 }
                 changes.add(Change(
-                    file = mainClass,
+                    file = registrarFile,
                     line = 1,
-                    description = "Register ExtraEventsRegister on the mod event bus",
-                    before = "(no ExtraEventsRegister.register call)",
-                    after = "ExtraEventsRegister.register($constructorBusName)",
+                    description = "Register custom advancement triggers through DeferredRegister",
+                    before = "CriteriaTriggers.register(new legacy CriterionTrigger(...))",
+                    after = "DeferredRegister<CriterionTrigger<?>> TRIGGERS",
                     confidence = Confidence.HIGH,
-                    ruleId = "struct-advancement-trigger-main-register"
+                    ruleId = "struct-advancement-trigger-deferred-register"
                 ))
             }
+
+            if (mainClass != null && migratedMainText.isNotBlank() && !migratedMainText.contains("$registrarClassName.register(")) {
+                val mainPackage = packageNameOf(migratedMainText)
+                val constructorBusName = requireModEventBusName(migratedMainText, "legacy advancement trigger registration")
+                if (registrarPackage != mainPackage) {
+                    migratedMainText = addImportIfMissing(migratedMainText, "$registrarPackage.$registrarClassName")
+                }
+                val registration = "        $registrarClassName.register($constructorBusName);"
+                val updatedMain = insertModBusListener(migratedMainText, constructorBusName, registration, "EntityRegister")
+                if (updatedMain != migratedMainText) {
+                    migratedMainText = updatedMain
+                    changes.add(Change(
+                        file = mainClass,
+                        line = 1,
+                        description = "Register custom advancement trigger DeferredRegister on the mod event bus",
+                        before = "(no $registrarClassName.register call)",
+                        after = "$registrarClassName.register($constructorBusName)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-advancement-trigger-main-register"
+                    ))
+                }
+            }
+        }
+
+        if (mainClass != null && migratedMainText != originalMainText && !dryRun) {
+            mainClass.writeText(migratedMainText)
         }
 
         return changes
     }
 
-    private fun extractAdvancementTriggerSpecs(source: String): List<AdvancementTriggerSpec> {
-        val pattern = Regex("""new\s+AdvancementTrigger\s*\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)""")
+    private fun legacyAdvancementTriggerClass(file: Path): LegacyAdvancementTriggerClass? {
+        val source = file.readText()
+        if (!Regex("""\bimplements\s+(?:[A-Za-z_$][\w$]*\.)*CriterionTrigger\s*<""").containsMatchIn(source)) return null
+        if (!listOf(
+                "createInstance",
+                "serializeToJson",
+                "SerializationContext",
+                "DeserializationContext",
+                "getCriterion()",
+                "getId()"
+            ).any { source.contains(it) }) {
+            return null
+        }
+        val className = classNameOfJavaSource(source) ?: return null
+        return LegacyAdvancementTriggerClass(
+            file = file,
+            packageName = packageNameOf(source),
+            className = className,
+            classIsPublic = javaTopLevelTypeIsPublic(source, className)
+        )
+    }
+
+    private fun extractAdvancementTriggerSpecs(
+        source: String,
+        triggerClasses: Map<String, LegacyAdvancementTriggerClass>
+    ): List<AdvancementTriggerSpec> {
+        val pattern = Regex("""new\s+(?:[A-Za-z_$][\w$]*\.)*([A-Za-z_$][\w$]*)\s*\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)""")
         return pattern.findAll(source)
-            .map { AdvancementTriggerSpec(it.groupValues[1], it.groupValues[2]) }
+            .mapNotNull { match ->
+                val trigger = triggerClasses[match.groupValues[1]] ?: return@mapNotNull null
+                AdvancementTriggerSpec(
+                    triggerPackage = trigger.packageName,
+                    triggerClassName = trigger.className,
+                    namespace = match.groupValues[2],
+                    path = match.groupValues[3]
+                )
+            }
             .distinct()
             .toList()
     }
@@ -8571,7 +8602,13 @@ public class $className extends SimpleCriterionTrigger<$className.$instanceName>
         return result
     }
 
-    private fun advancementTriggerCodecSource(packageName: String): String = """package $packageName;
+    private fun advancementTriggerCodecSource(
+        packageName: String,
+        className: String,
+        classIsPublic: Boolean
+    ): String {
+        val visibility = if (classIsPublic) "public " else ""
+        return """package $packageName;
 
 import com.mojang.serialization.Codec;
 import net.minecraft.advancements.CriterionTrigger;
@@ -8585,11 +8622,11 @@ import org.jetbrains.annotations.NotNull;
 import java.util.HashMap;
 import java.util.Map;
 
-public class AdvancementTrigger implements CriterionTrigger<AdvancementTrigger.Instance> {
+${visibility}class $className implements CriterionTrigger<$className.Instance> {
     private final Map<PlayerAdvancements, CriterionTrigger.Listener<Instance>> listeners = new HashMap<>();
     private final ResourceLocation id;
 
-    public AdvancementTrigger(String modName, String advancementName) {
+    public $className(String modName, String advancementName) {
         this.id = ResourceLocation.fromNamespaceAndPath(modName, advancementName);
     }
 
@@ -8637,30 +8674,37 @@ public class AdvancementTrigger implements CriterionTrigger<AdvancementTrigger.I
     }
 }
 """
+    }
 
     private fun extraEventsRegisterAdvancementSource(
         packageName: String,
-        triggerPackage: String,
+        className: String,
+        classIsPublic: Boolean,
         modRef: String,
         specs: List<AdvancementTriggerSpec>
     ): String {
+        val visibility = if (classIsPublic) "public " else ""
         val fields = specs.joinToString("\n") { spec ->
             """
-    public static final Supplier<AdvancementTrigger> ${spec.fieldName} =
-            TRIGGERS.register("${spec.path}", () -> new AdvancementTrigger("${spec.namespace}", "${spec.path}"));
+    public static final Supplier<${spec.triggerClassName}> ${spec.fieldName} =
+            TRIGGERS.register("${spec.path}", () -> new ${spec.triggerClassName}("${spec.namespace}", "${spec.path}"));
 """.trimEnd()
         }
-        val triggerImport = if (triggerPackage == packageName) "" else "import $triggerPackage.AdvancementTrigger;\n"
+        val triggerImports = specs
+            .map { it.triggerPackage to it.triggerClassName }
+            .distinct()
+            .filter { (triggerPackage, _) -> triggerPackage != packageName }
+            .joinToString("") { (triggerPackage, triggerClassName) -> "import $triggerPackage.$triggerClassName;\n" }
         return """package $packageName;
 
-${triggerImport}import net.minecraft.advancements.CriterionTrigger;
+${triggerImports}import net.minecraft.advancements.CriterionTrigger;
 import net.minecraft.core.registries.Registries;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.neoforge.registries.DeferredRegister;
 
 import java.util.function.Supplier;
 
-public class ExtraEventsRegister {
+${visibility}class $className {
     public static final DeferredRegister<CriterionTrigger<?>> TRIGGERS =
             DeferredRegister.create(Registries.TRIGGER_TYPE, $modRef);
 
