@@ -8328,15 +8328,70 @@ rootProject.name = '%%PROJECT_NAME%%'
          * Generic bracket matcher: find the closing delimiter matching the opener at [openIndex].
          */
         fun findClosing(content: String, openIndex: Int, openChar: Char, closeChar: Char): Int {
+            if (openIndex !in content.indices || content[openIndex] != openChar) return -1
+
             var depth = 0
-            for (i in openIndex until content.length) {
-                when (content[i]) {
+            var i = openIndex
+            while (i < content.length) {
+                val ch = content[i]
+                val next = content.getOrNull(i + 1)
+
+                when {
+                    ch == '/' && next == '/' -> {
+                        val end = content.indexOfAny(charArrayOf('\n', '\r'), i + 2)
+                        i = if (end < 0) content.length else end + 1
+                        continue
+                    }
+                    ch == '/' && next == '*' -> {
+                        val end = content.indexOf("*/", i + 2)
+                        if (end < 0) return -1
+                        i = end + 2
+                        continue
+                    }
+                    ch == '"' && next == '"' && content.getOrNull(i + 2) == '"' -> {
+                        val end = content.indexOf("\"\"\"", i + 3)
+                        if (end < 0) return -1
+                        i = end + 3
+                        continue
+                    }
+                    ch == '\'' && next == '\'' && content.getOrNull(i + 2) == '\'' -> {
+                        val end = content.indexOf("'''", i + 3)
+                        if (end < 0) return -1
+                        i = end + 3
+                        continue
+                    }
+                    ch == '"' || ch == '\'' -> {
+                        i = skipQuotedLiteral(content, i, ch)
+                        if (i < 0) return -1
+                        continue
+                    }
+                }
+
+                when (ch) {
                     openChar -> depth++
                     closeChar -> {
                         depth--
                         if (depth == 0) return i
                     }
                 }
+                i++
+            }
+            return -1
+        }
+
+        private fun skipQuotedLiteral(content: String, startIndex: Int, quote: Char): Int {
+            var escaped = false
+            var i = startIndex + 1
+            while (i < content.length) {
+                val ch = content[i]
+                if (escaped) {
+                    escaped = false
+                } else if (ch == '\\') {
+                    escaped = true
+                } else if (ch == quote) {
+                    return i + 1
+                }
+                i++
             }
             return -1
         }
@@ -8349,11 +8404,14 @@ rootProject.name = '%%PROJECT_NAME%%'
             var inChar = false
             var inLineComment = false
             var inBlockComment = false
+            var inTripleString = false
+            var tripleQuote = '\u0000'
             var escaped = false
             var i = startIndex
             while (i < content.length) {
                 val ch = content[i]
                 val next = content.getOrNull(i + 1)
+                val nextTwo = content.getOrNull(i + 2)
 
                 if (inLineComment) {
                     if (ch == '\n' || ch == '\r') inLineComment = false
@@ -8364,6 +8422,16 @@ rootProject.name = '%%PROJECT_NAME%%'
                     if (ch == '*' && next == '/') {
                         inBlockComment = false
                         i += 2
+                    } else {
+                        i++
+                    }
+                    continue
+                }
+                if (inTripleString) {
+                    if (ch == tripleQuote && next == tripleQuote && nextTwo == tripleQuote) {
+                        inTripleString = false
+                        tripleQuote = '\u0000'
+                        i += 3
                     } else {
                         i++
                     }
@@ -8401,6 +8469,12 @@ rootProject.name = '%%PROJECT_NAME%%'
                     ch == '/' && next == '*' -> {
                         inBlockComment = true
                         i += 2
+                        continue
+                    }
+                    (ch == '"' || ch == '\'') && next == ch && nextTwo == ch -> {
+                        inTripleString = true
+                        tripleQuote = ch
+                        i += 3
                         continue
                     }
                     ch == '"' -> inString = true

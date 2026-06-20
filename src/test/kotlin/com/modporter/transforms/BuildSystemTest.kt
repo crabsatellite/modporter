@@ -34,6 +34,51 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `old style buildscript migration ignores quoted delimiters`() {
+        val projectDir = tempDir.resolve("old-style-quoted-delimiters")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText(listOf(
+            "buildscript {",
+            "    ext.doubleQuoted = \"}\"",
+            "    ext.singleQuoted = '}'",
+            "    ext.tripleDouble = \"\"\"",
+            "        documentation } repositories { dependencies {",
+            "    \"\"\"",
+            "    ext.tripleSingle = '''",
+            "        more documentation } repositories { dependencies {",
+            "    '''",
+            "    // } line-comment delimiter noise",
+            "    /* } block-comment delimiter noise */",
+            "    repositories {",
+            "        maven { url 'https://maven.minecraftforge.net/' }",
+            "    }",
+            "    dependencies {",
+            "        classpath 'net.minecraftforge.gradle:ForgeGradle:6.0.+'",
+            "    }",
+            "}",
+            "",
+            "apply plugin: 'net.minecraftforge.gradle'",
+            "",
+            "dependencies {",
+            "    implementation \"example:library:1.0\"",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-remove-buildscript" })
+        assertTrue(content.contains("id(\"net.neoforged.moddev\") version \"2.0.140\""), content)
+        assertTrue(content.contains("implementation \"example:library:1.0\""), content)
+        assertFalse(content.contains("buildscript"), content)
+        assertFalse(content.contains("ForgeGradle"), content)
+        assertFalse(content.contains("apply plugin: 'net.minecraftforge.gradle'"), content)
+        assertFalse(content.contains("documentation } repositories"), content)
+    }
+
+    @Test
     fun `replaces Forge Maven repository URL`() {
         val projectDir = tempDir.resolve("p2")
         projectDir.createDirectories()

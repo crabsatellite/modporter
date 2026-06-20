@@ -1101,6 +1101,55 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `build system delimiter scanners ignore comments and literals`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+
+        val closingStart = source.indexOf("fun findClosing")
+        assertTrue(closingStart >= 0, "findClosing is missing")
+        val closingEnd = source.indexOf("fun findJavaStatementEnd", closingStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val closingBody = source.substring(closingStart, closingEnd)
+
+        val statementStart = source.indexOf("fun findJavaStatementEnd")
+        assertTrue(statementStart >= 0, "findJavaStatementEnd is missing")
+        val statementEnd = source.indexOf("fun String.lineNumberAt", statementStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val statementBody = source.substring(statementStart, statementEnd)
+
+        val offenders = listOf(
+            "raw delimiter for-loop" to closingBody.contains("for (i in openIndex until content.length)"),
+            "closing scanner missing line comment skip" to !closingBody.contains("ch == '/' && next == '/'"),
+            "closing scanner missing block comment skip" to !closingBody.contains("ch == '/' && next == '*'"),
+            "closing scanner missing triple double-quoted skip" to
+                !closingBody.contains("content.indexOf(\"\\\"\\\"\\\"\", i + 3)"),
+            "closing scanner missing triple single-quoted skip" to
+                !closingBody.contains("content.indexOf(\"'''\", i + 3)"),
+            "closing scanner missing quoted literal skip" to
+                !closingBody.contains("skipQuotedLiteral(content, i, ch)"),
+            "Java statement scanner missing triple literal state" to
+                !statementBody.contains("var inTripleString = false"),
+            "Java statement scanner missing generic triple delimiter detection" to
+                !statementBody.contains("(ch == '\"' || ch == '\\'') && next == ch && nextTwo == ch"),
+            "Java statement scanner missing comment skip" to
+                !(statementBody.contains("ch == '/' && next == '/'") && statementBody.contains("ch == '/' && next == '*'")),
+            "Java statement scanner missing balanced semicolon rule" to
+                !statementBody.contains("ch == ';' && parenDepth == 0 && braceDepth == 0 && bracketDepth == 0")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Build-system delimiter helpers must parse structure outside comments and literals only: $offenders"
+        )
+    }
+
+    @Test
     fun `resource missing item model collection uses executable registration evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
