@@ -170,6 +170,31 @@ class RealModBenchmarkTest {
     }
 
     @Test
+    fun `runtime log audit allows local connection closed only during client shutdown`(@TempDir tempDir: Path) {
+        val earlyLog = tempDir.resolve("early-closed-channel.log")
+        earlyLog.writeText("""
+            [10:08:22] [Netty Server IO #1/ERROR] [minecraft/Connection]: Exception caught in connection
+            java.nio.channels.ClosedChannelException: null
+        """.trimIndent() + "\n")
+
+        val shutdownLog = tempDir.resolve("shutdown-closed-channel.log")
+        shutdownLog.writeText("""
+            [10:08:22] [Render thread/INFO] [minecraft/Minecraft]: Stopping!
+            [10:08:22] [Netty Server IO #1/ERROR] [minecraft/Connection]: Exception caught in connection
+            java.nio.channels.ClosedChannelException: null
+        """.trimIndent() + "\n")
+
+        assertTrue(
+            auditRuntimeLog(earlyLog, failOnWarnings = false).findings.any { it.contains("fatal") },
+            "Connection errors before client shutdown must remain fatal"
+        )
+        assertTrue(
+            auditRuntimeLog(shutdownLog, failOnWarnings = false).findings.isEmpty(),
+            "Local ClosedChannelException after Minecraft shutdown is benchmark harness noise"
+        )
+    }
+
+    @Test
     fun `runtime log audit allows Mojang profile lookup network timeout`(@TempDir tempDir: Path) {
         val logFile = tempDir.resolve("profile-lookup.log")
         logFile.writeText("""
@@ -428,6 +453,42 @@ class RealModBenchmarkTest {
         assertTrue(
             audit.allowedIssues.any { it.contains("entity 'quark:stoneling' is not the target mod namespace") },
             "Expected machine evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit summarizes repeated allowed issues without hiding evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        val logFile = tempDir.resolve("repeated-external-mob-category.log")
+        logFile.writeText("""
+            [05:06:10] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected external:scout that was registered with CREATURE mob category but was added under MONSTER mob category for example:highlands biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
+            [05:06:11] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected external:burrower that was registered with CREATURE mob category but was added under MONSTER mob category for example:highlands biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
+            [05:06:12] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected external:scout that was registered with CREATURE mob category but was added under MONSTER mob category for example:grove biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
+            [05:06:13] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected external:scout that was registered with CREATURE mob category but was added under MONSTER mob category for example:thicket biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected repeated external dependency warnings to remain allowlisted")
+        assertTrue(
+            audit.allowedIssues.size == 2,
+            "Repeated warnings should be grouped by identical machine evidence, got: ${audit.allowedIssues}"
+        )
+        assertTrue(
+            audit.allowedIssues.any {
+                it.contains("3 occurrences") &&
+                    it.contains("entity 'external:scout' is not the target mod namespace")
+            },
+            "Expected repeated external entity evidence to be summarized with count, got: ${audit.allowedIssues}"
+        )
+        assertTrue(
+            audit.allowedIssues.any {
+                it.startsWith("line ") &&
+                    it.contains("entity 'external:burrower' is not the target mod namespace")
+            },
+            "Single warnings should retain their direct line evidence, got: ${audit.allowedIssues}"
         )
     }
 
@@ -2523,7 +2584,7 @@ class RealModBenchmarkTest {
             if (line.contains("[minecraft/Minecraft]: Stopping!")) {
                 clientShutdownStarted = true
             }
-            if (isAllowedRuntimeLogNoise(line, clientShutdownStarted)) return@forEachIndexed
+            if (isAllowedRuntimeLogNoise(lines, index, clientShutdownStarted)) return@forEachIndexed
             val trimmed = line.trim()
             val fatal = runtimeFatalPatterns.any { it.containsMatchIn(line) }
             val warning = failOnWarnings && runtimeWarningPatterns.any { it.containsMatchIn(line) }
@@ -2538,12 +2599,65 @@ class RealModBenchmarkTest {
             }
         }
 
-        return RuntimeLogAudit(findings.take(12), allowedIssues.distinct())
+        return RuntimeLogAudit(findings.take(12), summarizeAllowedRuntimeIssues(allowedIssues))
     }
 
-    private fun isAllowedRuntimeLogNoise(line: String, clientShutdownStarted: Boolean): Boolean =
-        allowedRuntimeLogFragments.any { line.contains(it) } ||
-            clientShutdownStarted && line.contains("[mojang/OpenAlUtil]: Stop: Invalid name parameter.")
+    private fun summarizeAllowedRuntimeIssues(allowedIssues: List<String>): List<String> {
+        val grouped = linkedMapOf<String, MutableList<Int>>()
+        val unparsed = mutableListOf<String>()
+        val pattern = Regex("""^line\s+(\d+):\s+(.+)$""")
+        allowedIssues.distinct().forEach { issue ->
+            val match = pattern.matchEntire(issue)
+            if (match == null) {
+                unparsed.add(issue)
+            } else {
+                grouped.getOrPut(match.groupValues[2]) { mutableListOf() }
+                    .add(match.groupValues[1].toInt())
+            }
+        }
+
+        return grouped.map { (issue, lines) ->
+            val sortedLines = lines.distinct().sorted()
+            if (sortedLines.size == 1) {
+                "line ${sortedLines.single()}: $issue"
+            } else {
+                "${summarizeLineNumbers(sortedLines)}: $issue"
+            }
+        } + unparsed.distinct()
+    }
+
+    private fun summarizeLineNumbers(lines: List<Int>): String {
+        if (lines.size == 1) return "line ${lines.single()}"
+        val ranges = mutableListOf<String>()
+        var start = lines.first()
+        var previous = start
+        for (line in lines.drop(1)) {
+            if (line == previous + 1) {
+                previous = line
+            } else {
+                ranges.add(if (start == previous) "$start" else "$start-$previous")
+                start = line
+                previous = line
+            }
+        }
+        ranges.add(if (start == previous) "$start" else "$start-$previous")
+
+        val rendered = if (ranges.size <= 6) {
+            ranges.joinToString(", ")
+        } else {
+            ranges.take(3).joinToString(", ") + ", ..., " + ranges.takeLast(2).joinToString(", ")
+        }
+        return "lines $rendered (${lines.size} occurrences)"
+    }
+
+    private fun isAllowedRuntimeLogNoise(lines: List<String>, index: Int, clientShutdownStarted: Boolean): Boolean {
+        val line = lines[index]
+        return allowedRuntimeLogFragments.any { line.contains(it) } ||
+            clientShutdownStarted && line.contains("[mojang/OpenAlUtil]: Stop: Invalid name parameter.") ||
+            clientShutdownStarted &&
+            line.contains("[minecraft/Connection]: Exception caught in connection") &&
+            lines.getOrNull(index + 1)?.contains("java.nio.channels.ClosedChannelException") == true
+    }
 
     private fun allowedKnownUpstreamRuntimeIssue(
         lines: List<String>,
