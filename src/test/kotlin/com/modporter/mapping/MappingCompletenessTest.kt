@@ -509,6 +509,37 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `required access transformer collection uses typed source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun collectRequiredAccessTransformerEntries")
+        assertTrue(start >= 0, "collectRequiredAccessTransformerEntries is missing")
+        val end = source.indexOf("private fun ensureAccessTransformerEntries", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "whole-file StructureTemplatePool templates scan" to """source.contains("StructureTemplatePool") && source.contains(".templates")""",
+            "whole-file StructureTemplatePool rawTemplates scan" to """source.contains("StructureTemplatePool") && source.contains(".rawTemplates")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "required AT collection contains $label" }
+
+        assertTrue(
+            body.contains("containsStructureTemplatePoolFieldAccess(source, \"templates\")") &&
+                body.contains("containsStructureTemplatePoolFieldAccess(source, \"rawTemplates\")") &&
+                body.contains("maskJavaCommentsAndLiterals"),
+            "Required AT collection must use typed field access evidence, not comment/string or whole-file markers"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Required AT collection must not infer StructureTemplatePool field needs from broad contains checks: $offenders"
+        )
+    }
+
+    @Test
     fun `production registry access migrations do not use nearby variable or fallback inference`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(

@@ -3141,10 +3141,10 @@ config="$configName"
                 if (source.contains(".findLightningTargetAround(")) {
                     entries.add("public net.minecraft.server.level.ServerLevel findLightningTargetAround(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/BlockPos;")
                 }
-                if (source.contains("StructureTemplatePool") && source.contains(".templates")) {
+                if (containsStructureTemplatePoolFieldAccess(source, "templates")) {
                     entries.add("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool templates")
                 }
-                if (source.contains("StructureTemplatePool") && source.contains(".rawTemplates")) {
+                if (containsStructureTemplatePoolFieldAccess(source, "rawTemplates")) {
                     entries.add("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates")
                 }
                 if (source.contains(".pendingBlockEntities")) {
@@ -3170,6 +3170,68 @@ config="$configName"
                 }
             }
         return entries
+    }
+
+    private fun containsStructureTemplatePoolFieldAccess(source: String, fieldName: String): Boolean {
+        val code = maskJavaCommentsAndLiterals(source)
+        val poolVariables = Regex(
+            """\b(?:net\.minecraft\.world\.level\.levelgen\.structure\.pools\.)?StructureTemplatePool\s+([A-Za-z_$][\w$]*)\b"""
+        ).findAll(code)
+            .map { it.groupValues[1] }
+            .toSet()
+        return poolVariables.any { variable ->
+            Regex("""\b${Regex.escape(variable)}\s*\.\s*${Regex.escape(fieldName)}\b""").containsMatchIn(code)
+        }
+    }
+
+    private fun maskJavaCommentsAndLiterals(source: String): String {
+        val chars = source.toCharArray()
+        var index = 0
+        while (index < chars.size) {
+            when {
+                index + 1 < chars.size && chars[index] == '/' && chars[index + 1] == '/' -> {
+                    chars[index] = ' '
+                    chars[index + 1] = ' '
+                    index += 2
+                    while (index < chars.size && chars[index] != '\n' && chars[index] != '\r') {
+                        chars[index++] = ' '
+                    }
+                }
+                index + 1 < chars.size && chars[index] == '/' && chars[index + 1] == '*' -> {
+                    chars[index] = ' '
+                    chars[index + 1] = ' '
+                    index += 2
+                    while (index + 1 < chars.size && !(chars[index] == '*' && chars[index + 1] == '/')) {
+                        if (chars[index] != '\n' && chars[index] != '\r') chars[index] = ' '
+                        index++
+                    }
+                    if (index + 1 < chars.size) {
+                        chars[index] = ' '
+                        chars[index + 1] = ' '
+                        index += 2
+                    }
+                }
+                chars[index] == '"' || chars[index] == '\'' -> {
+                    val quote = chars[index]
+                    chars[index++] = ' '
+                    var escaped = false
+                    while (index < chars.size) {
+                        val current = chars[index]
+                        if (current != '\n' && current != '\r') chars[index] = ' '
+                        index++
+                        if (escaped) {
+                            escaped = false
+                        } else if (current == '\\') {
+                            escaped = true
+                        } else if (current == quote) {
+                            break
+                        }
+                    }
+                }
+                else -> index++
+            }
+        }
+        return String(chars)
     }
 
     private fun ensureAccessTransformerEntries(

@@ -482,6 +482,60 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `adds structure pool access transformers only for typed direct field access`() {
+        val projectDir = tempDir.resolve("structure-pool-direct-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PoolAccess.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool;
+
+            public class PoolAccess {
+                void patch(StructureTemplatePool pool) {
+                    Object templates = pool.templates;
+                    pool.rawTemplates = pool.rawTemplates;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool templates"), at)
+        assertTrue(at.contains("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates"), at)
+    }
+
+    @Test
+    fun `structure pool access transformer collection ignores comments and strings`() {
+        val projectDir = tempDir.resolve("structure-pool-comment-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PoolNotes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool;
+
+            public class PoolNotes {
+                String note = "StructureTemplatePool pool.templates pool.rawTemplates";
+
+                void describe() {
+                    // StructureTemplatePool pool; pool.templates; pool.rawTemplates;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertFalse(atFile.exists())
+    }
+
+    @Test
     fun `migrates pending block entity reflection field to access transformer`() {
         val projectDir = tempDir.resolve("pending-be-reflection")
         val srcDir = projectDir.resolve("src/main/java/com/example")
