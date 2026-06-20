@@ -156,6 +156,55 @@ class ModsTomlTransformTest {
     }
 
     @Test
+    fun `dependency migrations are bounded to dependency tables`() {
+        val result = transformToml("""
+            [[mods]]
+            modId="forge"
+            mandatory=false
+            versionRange="[47,)"
+
+            [[dependencies.examplemod]]
+            modId = "forge"
+            mandatory=true
+            versionRange="[47,)"
+
+            [metadata]
+            modId="forge"
+            type="metadata"
+            mandatory=false
+            versionRange="[47,)"
+
+            [[dependencies.examplemod]]
+            modId="minecraft"
+            mandatory=true
+            versionRange="[1.20.1,1.21)"
+        """.trimIndent())
+
+        val modBlock = result.substringAfter("[[mods]]").substringBefore("[[dependencies.examplemod]]")
+        val neoforgeDependencyBlock = result.substringAfter("[[dependencies.examplemod]]").substringBefore("[metadata]")
+        val metadataBlock = result.substringAfter("[metadata]").substringBeforeLast("[[dependencies.examplemod]]")
+        val minecraftDependencyBlock = result.substringAfterLast("[[dependencies.examplemod]]")
+
+        assertTrue(modBlock.contains("""modId="forge""""), modBlock)
+        assertTrue(modBlock.contains("mandatory=false"), modBlock)
+        assertTrue(modBlock.contains("""versionRange="[47,)""""), modBlock)
+
+        assertTrue(neoforgeDependencyBlock.contains("""modId="neoforge""""), neoforgeDependencyBlock)
+        assertTrue(neoforgeDependencyBlock.contains("""type="required""""), neoforgeDependencyBlock)
+        assertTrue(neoforgeDependencyBlock.contains("""versionRange="[21.1,)""""), neoforgeDependencyBlock)
+        assertFalse(neoforgeDependencyBlock.contains("mandatory"), neoforgeDependencyBlock)
+
+        assertTrue(metadataBlock.contains("""modId="forge""""), metadataBlock)
+        assertTrue(metadataBlock.contains("""type="metadata""""), metadataBlock)
+        assertTrue(metadataBlock.contains("mandatory=false"), metadataBlock)
+        assertTrue(metadataBlock.contains("""versionRange="[47,)""""), metadataBlock)
+
+        assertTrue(minecraftDependencyBlock.contains("""type="required""""), minecraftDependencyBlock)
+        assertTrue(minecraftDependencyBlock.contains("""versionRange="[1.21.1,1.22)""""), minecraftDependencyBlock)
+        assertFalse(minecraftDependencyBlock.contains("mandatory"), minecraftDependencyBlock)
+    }
+
+    @Test
     fun `removes displayTest field`() {
         val result = transformToml("""
             [[mods]]

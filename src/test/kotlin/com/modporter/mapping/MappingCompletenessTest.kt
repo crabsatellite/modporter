@@ -1150,6 +1150,54 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `mods toml dependency migrations are bounded to dependency tables`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt")
+            .readText()
+
+        fun bodyBetween(startMarker: String, endMarker: String): String {
+            val start = source.indexOf(startMarker)
+            assertTrue(start >= 0, "$startMarker is missing")
+            val end = source.indexOf(endMarker, start + 1).let { if (it < 0) source.length else it }
+            return source.substring(start, end)
+        }
+
+        val transformBody = bodyBetween("internal fun transformModsToml", "private fun migrateCustomEnchantmentData")
+        val mandatoryBody = bodyBetween("private fun migrateMandatoryFields", "private fun updateDependencyBlocks")
+        val dependencyBody = bodyBetween("private fun updateDependencyBlocks", "private fun isTomlTableHeader")
+        val helperBody = bodyBetween("private fun isTomlTableHeader", "private fun migrateForgeDataDir")
+
+        val offenders = listOf(
+            "global forge modId replacement in transformModsToml" to
+                transformBody.contains("content.replace(\n            Regex(\"\"\"modId\\s*=\\s*\"forge\"\"\""),
+            "mandatory migration not gated to dependency tables" to
+                !(mandatoryBody.contains("blockIsDependency") &&
+                    mandatoryBody.contains("isTomlTableHeader(line)") &&
+                    mandatoryBody.contains("isTomlDependencyArrayHeader(line)")),
+            "dependency migration uses substring table detection" to
+                dependencyBody.contains("line.contains(\"dependencies\")"),
+            "dependency migration not gated to dependency tables" to
+                !(dependencyBody.contains("isTomlTableHeader(line)") &&
+                    dependencyBody.contains("isTomlDependencyArrayHeader(line)") &&
+                    dependencyBody.contains("if (!inDependencyBlock) continue")),
+            "dependency migration still exposes nearby block wording" to
+                dependencyBody.contains("nearby", ignoreCase = true),
+            "TOML helper missing ordinary and array table support" to
+                !(helperBody.contains("\\[\\s*") &&
+                    helperBody.contains("\\[\\[\\s*") &&
+                    helperBody.contains("dependencies\\."))
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "mods.toml dependency migrations must use TOML table boundaries, not whole-file or nearby-field heuristics: $offenders"
+        )
+    }
+
+    @Test
     fun `resource missing item model collection uses executable registration evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

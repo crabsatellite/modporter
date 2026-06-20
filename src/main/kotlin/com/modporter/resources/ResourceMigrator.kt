@@ -431,11 +431,7 @@ class ResourceMigrationPass(
             """loaderVersion="[1,)""""
         )
 
-        // 2. Update Forge dependency modId to NeoForge (multiple spacing variants)
-        content = content.replace(
-            Regex("""modId\s*=\s*"forge""""),
-            """modId="neoforge""""
-        )
+        // 2. Update Forge dependency modId to NeoForge inside dependency tables.
 
         // 3. Replace mandatory=true/false with type="required"/"optional".
         // Some Forge mods already carry a NeoForge-style type field; in that case mandatory
@@ -444,8 +440,7 @@ class ResourceMigrationPass(
 
         // 4. Update NeoForge dependency versionRange
         // 5. Update Minecraft dependency versionRange
-        // Process dependency blocks: find modId lines and update nearby versionRange
-        content = updateDependencyVersionRanges(content)
+        content = updateDependencyBlocks(content)
 
         // 6. Remove displayTest line (removed in NeoForge)
         content = content.replace(
@@ -662,9 +657,15 @@ class ResourceMigrationPass(
     private fun migrateMandatoryFields(content: String): String {
         val output = mutableListOf<String>()
         val block = mutableListOf<String>()
+        var blockIsDependency = false
 
         fun flushBlock() {
             if (block.isEmpty()) return
+            if (!blockIsDependency) {
+                output.addAll(block)
+                block.clear()
+                return
+            }
             val hasType = block.any { Regex("""^\s*type\s*=""").containsMatchIn(it) }
             for (line in block) {
                 val mandatory = Regex("""^(\s*)mandatory\s*=\s*(true|false).*$""").find(line)
@@ -682,8 +683,9 @@ class ResourceMigrationPass(
         }
 
         for (line in content.lines()) {
-            if (line.trimStart().startsWith("[[")) {
+            if (isTomlTableHeader(line)) {
                 flushBlock()
+                blockIsDependency = isTomlDependencyArrayHeader(line)
             }
             block.add(line)
         }
@@ -693,28 +695,31 @@ class ResourceMigrationPass(
     }
 
     /**
-     * Update versionRange in dependency blocks based on modId.
-     * Scans line-by-line to identify which dependency block we're in,
-     * then adjusts versionRange accordingly.
+     * Update dependency metadata from fields in the same TOML dependency table.
      */
-    private fun updateDependencyVersionRanges(content: String): String {
+    private fun updateDependencyBlocks(content: String): String {
         val lines = content.lines().toMutableList()
+        var inDependencyBlock = false
         var currentDepModId: String? = null
 
         for (i in lines.indices) {
             val line = lines[i]
 
-            // Detect dependency modId
-            val modIdMatch = Regex("""modId\s*=\s*"(\w+)"""").find(line)
-            if (modIdMatch != null) {
-                currentDepModId = modIdMatch.groupValues[1]
+            if (isTomlTableHeader(line)) {
+                inDependencyBlock = isTomlDependencyArrayHeader(line)
+                currentDepModId = null
             }
+            if (!inDependencyBlock) continue
 
-            // Reset on new section header
-            if (line.trimStart().startsWith("[[")) {
-                // Reset if entering a new section that isn't a continuation
-                if (!line.contains("dependencies")) {
-                    currentDepModId = null
+            // Detect dependency modId
+            val modIdMatch = Regex("""modId\s*=\s*"([^"]+)"""").find(line)
+            if (modIdMatch != null) {
+                currentDepModId = if (modIdMatch.groupValues[1] == "forge") "neoforge" else modIdMatch.groupValues[1]
+                if (modIdMatch.groupValues[1] == "forge") {
+                    lines[i] = line.replace(
+                        Regex("""modId\s*=\s*"forge""""),
+                        """modId="neoforge""""
+                    )
                 }
             }
 
@@ -752,6 +757,13 @@ class ResourceMigrationPass(
 
         return lines.joinToString("\n")
     }
+
+    private fun isTomlTableHeader(line: String): Boolean {
+        return Regex("""^\s*(?:\[\s*[^]\r\n#]+\]|\[\[\s*[^]\r\n#]+\]\])\s*(?:#.*)?$""").matches(line)
+    }
+
+    private fun isTomlDependencyArrayHeader(line: String): Boolean =
+        Regex("""^\s*\[\[\s*dependencies\.[^]\r\n#]+\]\]\s*(?:#.*)?$""").matches(line)
 
     /**
      * Split data/forge/ into data/c/ (tags) and data/neoforge/ (everything else).
