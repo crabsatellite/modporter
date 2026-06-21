@@ -2572,18 +2572,65 @@ class MappingCompletenessTest {
         val body = source.substring(start, end)
         val offenders = listOf(
             "unconditional condition codec replacement" to """.replace(result, "new LootItemConditionType($1.CODEC)")""",
-            "unconditional function codec replacement" to """.replace(result, "new LootItemFunctionType<>($1.CODEC)")"""
+            "unconditional function codec replacement" to """.replace(result, "new LootItemFunctionType<>($1.CODEC)")""",
+            "raw result function type scan" to """result.contains("new LootItemFunctionType<>(")""",
+            "raw function register replacement" to """"DeferredRegister<LootItemFunctionType> FUNCTIONS""""
         )
             .filter { (_, marker) -> body.contains(marker) }
             .map { (label, _) -> "loot type registry codec migration contains $label" }
 
         assertTrue(
-            body.contains("lootCodecOwnerIsAvailable"),
+            body.contains("lootCodecOwnerIsAvailable") &&
+                body.contains("replaceExecutableRegex(result, conditionTypePattern)") &&
+                body.contains("replaceExecutableRegex(result, functionTypePattern)") &&
+                body.contains("maskJavaCommentsAndLiterals(result).contains(\"new LootItemFunctionType<>(\")") &&
+                body.contains("replaceCommentMaskedRegex(result, functionHolderPattern)"),
             "Loot type registry codec migrations must check project-proven CODEC owners before replacing serializer constructors"
         )
         assertTrue(
             offenders.isEmpty(),
             "Loot type registry codec migrations must not reference CODEC fields unless the owner migration was proven: $offenders"
+        )
+    }
+
+    @Test
+    fun `loot codec migrations use executable structure and comment masked serializers`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLootSerializerCodecs")
+        assertTrue(start >= 0, "migrateLootSerializerCodecs is missing")
+        val end = source.indexOf("private fun migrateNeoForgeConditionSerializerCodecs", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw serializer prefilter" to """source.contains("Serializer<")""",
+            "raw loot condition prefilter" to """source.contains("implements LootItemCondition")""",
+            "raw loot function prefilter" to """source.contains("extends LootItemConditionalFunction")""",
+            "raw class name extraction" to ".find(source)?.groupValues?.get(1)",
+            "raw inner class match" to ".find(source) ?: return null",
+            "raw inner class removal match" to ".find(source) ?: return source",
+            "raw CODEC owner scan" to "containsMatchIn(source)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("private fun lootConditionSerializerName") &&
+                body.contains("val serializerCode = maskJavaComments(serializer)") &&
+                body.contains("find(maskJavaCommentsAndLiterals(source))") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains(".find(executableCode)") &&
+                body.contains("replaceExecutableRegex(result, constructorPattern)") &&
+                body.contains("replaceCommentMaskedRegex(result, functionHolderPattern)"),
+            "Loot codec migrations must locate Java structure in executable code while preserving JSON strings only inside serializer bodies"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Loot codec migrations must not use comments, strings, or raw source as structural evidence: $offenders"
         )
     }
 

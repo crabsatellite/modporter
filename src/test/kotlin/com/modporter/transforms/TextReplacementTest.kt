@@ -3980,6 +3980,90 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `loot condition codec migration ignores commented serializer structure`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CommentOnlyCondition.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+
+            public class CommentOnlyCondition implements LootItemCondition {
+                private static final String DOC = "public static class ConditionSerializer implements Serializer<CommentOnlyCondition>";
+
+                /*
+                public static class ConditionSerializer implements Serializer<CommentOnlyCondition> {
+                    public CommentOnlyCondition deserialize(JsonObject json, JsonDeserializationContext context) {
+                        return new CommentOnlyCondition();
+                    }
+                }
+                */
+
+                public LootItemConditionType getType() {
+                    return null;
+                }
+
+                public boolean test(LootContext context) {
+                    return true;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(tempDir)
+
+        val condition = srcDir.resolve("CommentOnlyCondition.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(condition.contains("MapCodec<CommentOnlyCondition>"), condition)
+        assertTrue(condition.contains("public static class ConditionSerializer implements Serializer<CommentOnlyCondition>"), condition)
+        assertTrue(condition.contains("private static final String DOC"), condition)
+    }
+
+    @Test
+    fun `loot type registry codec migration ignores commented and string serializer constructors`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExistingCondition.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.MapCodec;
+
+            public class ExistingCondition {
+                public static final MapCodec<ExistingCondition> CODEC = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("TestLoot.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemConditionType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class TestLoot {
+                public static final DeferredRegister<LootItemConditionType> CONDITIONS = DeferredRegister.create(Registries.LOOT_CONDITION_TYPE, "example");
+                private static final String DOC = "new LootItemConditionType(new ExistingCondition.Serializer())";
+
+                // CONDITIONS.register("commented", () -> new LootItemConditionType(new ExistingCondition.Serializer()));
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(tempDir)
+
+        val registry = srcDir.resolve("TestLoot.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(registry.contains("new LootItemConditionType(ExistingCondition.CODEC)"), registry)
+        assertTrue(registry.contains("private static final String DOC = \"new LootItemConditionType(new ExistingCondition.Serializer())\";"), registry)
+        assertTrue(registry.contains("// CONDITIONS.register(\"commented\", () -> new LootItemConditionType(new ExistingCondition.Serializer()));"), registry)
+    }
+
+    @Test
     fun `loot function entity and int codec migration rejects local variable member fallbacks`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

@@ -1528,9 +1528,10 @@ private boolean $methodName(Iterable<net.minecraft.core.Holder<Enchantment>> enc
     }
 
     private fun migrateLootSerializerCodecs(source: String, codecOwners: Set<String> = emptySet()): String {
-        if (!source.contains("LootItemConditionType") &&
-            !source.contains("LootItemFunctionType") &&
-            !source.contains("Serializer<")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("LootItemConditionType") &&
+            !executableCode.contains("LootItemFunctionType") &&
+            !executableCode.contains("Serializer<")) {
             return source
         }
 
@@ -1543,19 +1544,14 @@ private boolean $methodName(Iterable<net.minecraft.core.Holder<Enchantment>> enc
     }
 
     private fun migrateLootConditionSerializerCodec(source: String): String {
-        if (!source.contains("implements LootItemCondition") ||
-            !source.contains("Serializer<")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("implements LootItemCondition") ||
+            !executableCode.contains("Serializer<")) {
             return source
         }
 
         val className = javaTopLevelTypeName(source) ?: return source
-        val serializerName = when {
-            Regex("""class\s+ConditionSerializer\s+implements\s+(?:net\.minecraft\.world\.level\.storage\.loot\.)?Serializer<\s*${Regex.escape(className)}\s*>""")
-                .containsMatchIn(source) -> "ConditionSerializer"
-            Regex("""class\s+Serializer\s+implements\s+(?:net\.minecraft\.world\.level\.storage\.loot\.)?Serializer<\s*${Regex.escape(className)}\s*>""")
-                .containsMatchIn(source) -> "Serializer"
-            else -> return source
-        }
+        val serializerName = lootConditionSerializerName(source, className) ?: return source
         val codecField = lootConditionCodecFieldSource(source, className) ?: return source
 
         var result = insertStaticFieldAfterTypeOpen(source, className, codecField)
@@ -1564,34 +1560,40 @@ private boolean $methodName(Iterable<net.minecraft.core.Holder<Enchantment>> enc
     }
 
     private fun lootConditionCodecFieldSource(source: String, className: String): String? {
-        val serializerName = when {
-            Regex("""class\s+ConditionSerializer\s+implements\s+(?:net\.minecraft\.world\.level\.storage\.loot\.)?Serializer<\s*${Regex.escape(className)}\s*>""")
-                .containsMatchIn(source) -> "ConditionSerializer"
-            Regex("""class\s+Serializer\s+implements\s+(?:net\.minecraft\.world\.level\.storage\.loot\.)?Serializer<\s*${Regex.escape(className)}\s*>""")
-                .containsMatchIn(source) -> "Serializer"
-            else -> return null
-        }
+        val serializerName = lootConditionSerializerName(source, className) ?: return null
         val serializer = innerClassText(source, serializerName) ?: return null
         return inferLootConditionCodecField(source, serializer, className)
     }
 
+    private fun lootConditionSerializerName(source: String, className: String): String? {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        return when {
+            Regex("""class\s+ConditionSerializer\s+implements\s+(?:net\.minecraft\.world\.level\.storage\.loot\.)?Serializer<\s*${Regex.escape(className)}\s*>""")
+                .containsMatchIn(executableCode) -> "ConditionSerializer"
+            Regex("""class\s+Serializer\s+implements\s+(?:net\.minecraft\.world\.level\.storage\.loot\.)?Serializer<\s*${Regex.escape(className)}\s*>""")
+                .containsMatchIn(executableCode) -> "Serializer"
+            else -> null
+        }
+    }
+
     private fun inferLootConditionCodecField(source: String, serializer: String, className: String): String? {
+        val serializerCode = maskJavaComments(serializer)
         val deserializeReturn = Regex(
             """return\s+new\s+${Regex.escape(className)}\s*\(([\s\S]*?)\)\s*;"""
-        ).find(serializer) ?: return null
+        ).find(serializerCode) ?: return null
         val constructorArgs = splitTopLevelArguments(deserializeReturn.groupValues[1])
         if (constructorArgs.isEmpty()) {
             val singleton = Regex("""public\s+static\s+final\s+${Regex.escape(className)}\s+INSTANCE\b""")
-                .containsMatchIn(source)
+                .containsMatchIn(maskJavaCommentsAndLiterals(source))
             val value = if (singleton) "INSTANCE" else "new $className()"
             return """
 	public static final MapCodec<$className> CODEC = MapCodec.unit($value);
             """.trimIndent()
         }
 
-        inferWrappedStringLootConditionCodecField(serializer, className, constructorArgs)?.let { return it }
+        inferWrappedStringLootConditionCodecField(serializerCode, className, constructorArgs)?.let { return it }
 
-        val serializedMembers = serializedLootMembersByKey(serializer)
+        val serializedMembers = serializedLootMembersByKey(serializerCode)
         val fields = constructorArgs.mapNotNull { lootConditionCodecField(it, serializedMembers) }
         if (fields.size != constructorArgs.size) return null
 
@@ -1680,8 +1682,9 @@ $fieldLines
     }
 
     private fun migrateLootConditionalFunctionSerializerCodec(source: String): String {
-        if (!source.contains("extends LootItemConditionalFunction") ||
-            !source.contains("LootItemConditionalFunction.Serializer")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("extends LootItemConditionalFunction") ||
+            !executableCode.contains("LootItemConditionalFunction.Serializer")) {
             return source
         }
 
@@ -1689,44 +1692,47 @@ $fieldLines
         val codecField = lootConditionalFunctionCodecFieldSource(source, className) ?: return source
 
         var result = insertStaticFieldAfterTypeOpen(source, className, codecField)
-        result = Regex("""(protected|public|private)\s+${Regex.escape(className)}\s*\(\s*LootItemCondition\[\]\s+([A-Za-z_$][\w$]*)""")
-            .replace(result, "$1 $className(java.util.List<LootItemCondition> $2")
-        result = Regex("""public\s+LootItemFunctionType\s+getType\s*\(\s*\)""")
-            .replace(result, "public LootItemFunctionType<$className> getType()")
+        val constructorPattern = Regex("""(protected|public|private)\s+${Regex.escape(className)}\s*\(\s*LootItemCondition\[\]\s+([A-Za-z_$][\w$]*)""")
+        result = replaceExecutableRegex(result, constructorPattern) { match ->
+            "${match.groupValues[1]} $className(java.util.List<LootItemCondition> ${match.groupValues[2]}"
+        }
+        val typePattern = Regex("""public\s+LootItemFunctionType\s+getType\s*\(\s*\)""")
+        result = replaceExecutableRegex(result, typePattern) { "public LootItemFunctionType<$className> getType()" }
         result = removeInnerClassByName(result, "Serializer")
         return result
     }
 
     private fun lootConditionalFunctionCodecFieldSource(source: String, className: String): String? {
         val serializer = innerClassText(source, "Serializer") ?: return null
-        if (!serializer.contains("extends LootItemConditionalFunction.Serializer<$className>")) return null
+        if (!maskJavaCommentsAndLiterals(serializer).contains("extends LootItemConditionalFunction.Serializer<$className>")) return null
         return inferLootConditionalFunctionCodecField(serializer, className)
     }
 
     private fun inferLootConditionalFunctionCodecField(serializer: String, className: String): String? {
-        if (Regex("""return\s+new\s+${Regex.escape(className)}\s*\(\s*conditions\s*\)\s*;""").containsMatchIn(serializer)) {
+        val serializerCode = maskJavaComments(serializer)
+        if (Regex("""return\s+new\s+${Regex.escape(className)}\s*\(\s*conditions\s*\)\s*;""").containsMatchIn(serializerCode)) {
             return """
 	public static final MapCodec<$className> CODEC = com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec(instance -> commonFields(instance).apply(instance, $className::new));
             """.trimIndent()
         }
 
-        inferEntityTypeAndIntLootFunctionCodecField(serializer, className)?.let { return it }
+        inferEntityTypeAndIntLootFunctionCodecField(serializerCode, className)?.let { return it }
 
-        if (!serializer.contains("GsonHelper.getAsItem") ||
-            !serializer.contains("\"default\"") ||
-            !serializer.contains("success")) {
+        if (!serializerCode.contains("GsonHelper.getAsItem") ||
+            !serializerCode.contains("\"default\"") ||
+            !serializerCode.contains("success")) {
             return null
         }
 
         val itemMember = Regex(
             """\b(?:object|json)\.addProperty\s*\(\s*"item"\s*,\s*BuiltInRegistries\.ITEM\.getKey\s*\(\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\s*\)"""
-        ).find(serializer)?.groupValues?.get(1) ?: return null
+        ).find(serializerCode)?.groupValues?.get(1) ?: return null
         val defaultMembers = Regex(
             """\b(?:object|json)\.addProperty\s*\(\s*"default"\s*,\s*BuiltInRegistries\.ITEM\.getKey\s*\(\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\s*\)"""
-        ).findAll(serializer).map { it.groupValues[1] }.toList()
+        ).findAll(serializerCode).map { it.groupValues[1] }.toList()
         val defaultMember = defaultMembers.lastOrNull() ?: return null
         val successMember = Regex("""if\s*\(\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\s*\)""")
-            .find(serializer)?.groupValues?.get(1) ?: return null
+            .find(serializerCode)?.groupValues?.get(1) ?: return null
 
         return """
 	public static final MapCodec<$className> CODEC = com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec(instance -> commonFields(instance).and(instance.group(
@@ -1737,26 +1743,27 @@ $fieldLines
     }
 
     private fun inferEntityTypeAndIntLootFunctionCodecField(serializer: String, className: String): String? {
+        val serializerCode = maskJavaComments(serializer)
         val deserializeReturn = Regex(
             """return\s+new\s+${Regex.escape(className)}\s*\(([\s\S]*?)\)\s*;"""
-        ).find(serializer) ?: return null
+        ).find(serializerCode) ?: return null
         val constructorArgs = splitTopLevelArguments(deserializeReturn.groupValues[1])
         if (constructorArgs.size < 2 || constructorArgs.first().trim() != "conditions") return null
 
         val entityLocals = Regex(
             """EntityType\s*<\s*\?\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*EntityType\.byString\s*\(\s*GsonHelper\.getAsString\s*\(\s*[^,]+,\s*"([^"]+)"\s*\)\s*\)[^;]*;"""
-        ).findAll(serializer).associate { it.groupValues[1] to it.groupValues[2] }
+        ).findAll(serializerCode).associate { it.groupValues[1] to it.groupValues[2] }
         val intLocals = Regex(
             """int\s+([A-Za-z_$][\w$]*)\s*=\s*GsonHelper\.getAsInt\s*\(\s*[^,]+,\s*"([^"]+)"\s*\)\s*;"""
-        ).findAll(serializer).associate { it.groupValues[1] to it.groupValues[2] }
+        ).findAll(serializerCode).associate { it.groupValues[1] to it.groupValues[2] }
         if (entityLocals.isEmpty() && intLocals.isEmpty()) return null
 
         val entityMembersByKey = Regex(
             """\b(?:object|json)\.addProperty\s*\(\s*"([^"]+)"\s*,\s*EntityType\.getKey\s*\(\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\s*\)\.toString\s*\(\s*\)\s*\)"""
-        ).findAll(serializer).associate { it.groupValues[1] to it.groupValues[2] }
+        ).findAll(serializerCode).associate { it.groupValues[1] to it.groupValues[2] }
         val intMembersByKey = Regex(
             """\b(?:object|json)\.addProperty\s*\(\s*"([^"]+)"\s*,\s*[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\s*\)"""
-        ).findAll(serializer).associate { it.groupValues[1] to it.groupValues[2] }
+        ).findAll(serializerCode).associate { it.groupValues[1] to it.groupValues[2] }
 
         val codecFields = constructorArgs.drop(1).map { argument ->
             val arg = argument.trim()
@@ -1778,10 +1785,11 @@ ${codecFields.joinToString(",\n")}
     }
 
     private fun migrateLootTypeRegistryCodecConstructors(source: String, codecOwners: Set<String>): String {
-        if (!source.contains("LootItemConditionType") && !source.contains("LootItemFunctionType")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("LootItemConditionType") && !executableCode.contains("LootItemFunctionType")) return source
         var result = source
-        result = Regex("""new\s+LootItemConditionType\s*\(\s*new\s+([A-Za-z_$][\w$]*)\.(?:ConditionSerializer|Serializer)\s*\(\s*\)\s*\)""")
-            .replace(result) { match ->
+        val conditionTypePattern = Regex("""new\s+LootItemConditionType\s*\(\s*new\s+([A-Za-z_$][\w$]*)\.(?:ConditionSerializer|Serializer)\s*\(\s*\)\s*\)""")
+        result = replaceExecutableRegex(result, conditionTypePattern) { match ->
                 val owner = match.groupValues[1]
                 if (lootCodecOwnerIsAvailable(result, owner, codecOwners)) {
                     "new LootItemConditionType($owner.CODEC)"
@@ -1789,8 +1797,8 @@ ${codecFields.joinToString(",\n")}
                     match.value
                 }
             }
-        result = Regex("""new\s+LootItemFunctionType\s*\(\s*new\s+([A-Za-z_$][\w$]*)\.Serializer\s*\(\s*\)\s*\)""")
-            .replace(result) { match ->
+        val functionTypePattern = Regex("""new\s+LootItemFunctionType\s*\(\s*new\s+([A-Za-z_$][\w$]*)\.Serializer\s*\(\s*\)\s*\)""")
+        result = replaceExecutableRegex(result, functionTypePattern) { match ->
                 val owner = match.groupValues[1]
                 if (lootCodecOwnerIsAvailable(result, owner, codecOwners)) {
                     "new LootItemFunctionType<>($owner.CODEC)"
@@ -1798,15 +1806,14 @@ ${codecFields.joinToString(",\n")}
                     match.value
                 }
             }
-        if (result.contains("new LootItemFunctionType<>(")) {
-            result = result.replace(
-                "DeferredRegister<LootItemFunctionType> FUNCTIONS",
-                "DeferredRegister<LootItemFunctionType<?>> FUNCTIONS"
-            )
+        if (maskJavaCommentsAndLiterals(result).contains("new LootItemFunctionType<>(")) {
+            val functionRegisterPattern = Regex("""DeferredRegister\s*<\s*LootItemFunctionType\s*>\s+FUNCTIONS""")
+            result = replaceExecutableRegex(result, functionRegisterPattern) { "DeferredRegister<LootItemFunctionType<?>> FUNCTIONS" }
         }
-        result = Regex(
+        val functionHolderPattern = Regex(
             """DeferredHolder<LootItemFunctionType,\s*LootItemFunctionType>\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\.register\s*\(\s*"([^"]+)"\s*,\s*\(\)\s*->\s*new\s+LootItemFunctionType<>\s*\(\s*([A-Za-z_$][\w$]*)\.CODEC\s*\)\s*\)"""
-        ).replace(result) { match ->
+        )
+        result = replaceCommentMaskedRegex(result, functionHolderPattern) { match ->
             "DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<${match.groupValues[4]}>> ${match.groupValues[1]} = ${match.groupValues[2]}.register(\"${match.groupValues[3]}\", () -> new LootItemFunctionType<>(${match.groupValues[4]}.CODEC))"
         }
         return result
@@ -1814,7 +1821,7 @@ ${codecFields.joinToString(",\n")}
 
     private fun lootCodecOwnerIsAvailable(source: String, owner: String, codecOwners: Set<String>): Boolean {
         return owner in codecOwners ||
-            Regex("""MapCodec\s*<\s*${Regex.escape(owner)}\s*>\s+CODEC\b""").containsMatchIn(source)
+            Regex("""MapCodec\s*<\s*${Regex.escape(owner)}\s*>\s+CODEC\b""").containsMatchIn(maskJavaCommentsAndLiterals(source))
     }
 
     private fun removeLegacyLootSerializerImports(source: String): String {
@@ -1837,20 +1844,22 @@ ${codecFields.joinToString(",\n")}
 
     private fun javaTopLevelTypeName(source: String): String? =
         Regex("""(?m)^\s*public\s+(?:final\s+)?(?:class|record)\s+([A-Za-z_$][\w$]*)\b""")
-            .find(source)?.groupValues?.get(1)
+            .find(maskJavaCommentsAndLiterals(source))?.groupValues?.get(1)
 
     private fun insertStaticFieldAfterTypeOpen(source: String, className: String, fieldSource: String): String {
-        if (Regex("""MapCodec<\s*${Regex.escape(className)}\s*>\s+CODEC""").containsMatchIn(source)) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (Regex("""MapCodec<\s*${Regex.escape(className)}\s*>\s+CODEC""").containsMatchIn(executableCode)) return source
         val typeMatch = Regex(
             """public\s+(?:final\s+)?(?:class|record)\s+${Regex.escape(className)}\b[\s\S]*?\{"""
-        ).find(source) ?: return source
+        ).find(executableCode) ?: return source
         val insertAt = typeMatch.range.last + 1
         return source.substring(0, insertAt) + "\n\n" + fieldSource.trimEnd() + "\n" + source.substring(insertAt)
     }
 
     private fun innerClassText(source: String, simpleName: String): String? {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val match = Regex("""(?m)^[ \t]*(?:public|protected|private)?\s*static\s+class\s+${Regex.escape(simpleName)}\b""")
-            .find(source) ?: return null
+            .find(executableCode) ?: return null
         val openBrace = source.indexOf('{', match.range.last)
         if (openBrace < 0) return null
         val closeBrace = findMatchingBrace(source, openBrace)
@@ -1859,8 +1868,9 @@ ${codecFields.joinToString(",\n")}
     }
 
     private fun removeInnerClassByName(source: String, simpleName: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val match = Regex("""(?m)^[ \t]*(?:public|protected|private)?\s*static\s+class\s+${Regex.escape(simpleName)}\b""")
-            .find(source) ?: return source
+            .find(executableCode) ?: return source
         val start = source.lastIndexOf('\n', match.range.first).let { if (it >= 0) it else match.range.first }
         val openBrace = source.indexOf('{', match.range.last)
         if (openBrace < 0) return source
@@ -3733,6 +3743,91 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         return -1
     }
 
+    private fun maskJavaComments(source: String): String {
+        val result = StringBuilder(source.length)
+        var index = 0
+        var inLineComment = false
+        var inBlockComment = false
+        var inString = false
+        var inTextBlock = false
+        var inChar = false
+        var escaped = false
+        while (index < source.length) {
+            val ch = source[index]
+            val next = source.getOrNull(index + 1)
+            val nextTwo = source.getOrNull(index + 2)
+
+            when {
+                inLineComment -> {
+                    if (ch == '\r' || ch == '\n') {
+                        inLineComment = false
+                        result.append(ch)
+                    } else {
+                        result.append(' ')
+                    }
+                }
+                inBlockComment -> {
+                    if (ch == '*' && next == '/') {
+                        result.append("  ")
+                        index++
+                        inBlockComment = false
+                    } else {
+                        result.append(if (ch == '\r' || ch == '\n') ch else ' ')
+                    }
+                }
+                inTextBlock -> {
+                    result.append(ch)
+                    if (ch == '"' && next == '"' && nextTwo == '"') {
+                        result.append("  ")
+                        index += 2
+                        inTextBlock = false
+                    }
+                }
+                inString -> {
+                    result.append(ch)
+                    if (ch == '"' && !escaped) inString = false
+                    escaped = ch == '\\' && !escaped
+                    if (ch != '\\') escaped = false
+                }
+                inChar -> {
+                    result.append(ch)
+                    if (ch == '\'' && !escaped) inChar = false
+                    escaped = ch == '\\' && !escaped
+                    if (ch != '\\') escaped = false
+                }
+                ch == '/' && next == '/' -> {
+                    result.append("  ")
+                    index++
+                    inLineComment = true
+                }
+                ch == '/' && next == '*' -> {
+                    result.append("  ")
+                    index++
+                    inBlockComment = true
+                }
+                ch == '"' && next == '"' && nextTwo == '"' -> {
+                    result.append("\"\"\"")
+                    index += 2
+                    inTextBlock = true
+                    escaped = false
+                }
+                ch == '"' -> {
+                    result.append(ch)
+                    inString = true
+                    escaped = false
+                }
+                ch == '\'' -> {
+                    result.append(ch)
+                    inChar = true
+                    escaped = false
+                }
+                else -> result.append(ch)
+            }
+            index++
+        }
+        return result.toString()
+    }
+
     private fun maskJavaCommentsAndLiterals(source: String): String {
         val result = StringBuilder(source.length)
         var index = 0
@@ -3825,6 +3920,26 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
     ): String {
         val executableCode = maskJavaCommentsAndLiterals(source)
         val matches = pattern.findAll(executableCode).toList()
+        if (matches.isEmpty()) return source
+
+        var result = source
+        for (match in matches.asReversed()) {
+            val originalValue = source.substring(match.range.first, match.range.last + 1)
+            result = result.replaceRange(
+                match.range,
+                replacement(ExecutableRegexMatch(originalValue, match.groupValues))
+            )
+        }
+        return result
+    }
+
+    private fun replaceCommentMaskedRegex(
+        source: String,
+        pattern: Regex,
+        replacement: (ExecutableRegexMatch) -> String
+    ): String {
+        val code = maskJavaComments(source)
+        val matches = pattern.findAll(code).toList()
         if (matches.isEmpty()) return source
 
         var result = source
