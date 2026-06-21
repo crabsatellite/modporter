@@ -7932,12 +7932,17 @@ $registrations
     }
 
     private fun migrateLegacyCapabilityReviveCapsSource(source: String): String {
-        val methodText = javaDeclaredMethodText(source, "reviveCaps") ?: return source
-        if (source.contains("void clearRemoved(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val method = javaMethodRanges(executableCode).singleOrNull { method ->
+            method.name == "reviveCaps" &&
+                Regex("""\bvoid\s+reviveCaps\s*\(\s*\)""").containsMatchIn(method.header)
+        } ?: return source
+        if (executableCode.contains("void clearRemoved(")) return source
+        val methodText = source.substring(method.range)
         val migratedMethod = Regex("""\breviveCaps\s*\(""")
             .replace(methodText, "clearRemoved(")
             .let { Regex("""super\.reviveCaps\(\)\s*;""").replace(it, "super.clearRemoved();") }
-        return source.replace(methodText, migratedMethod)
+        return source.replaceRange(method.range, migratedMethod)
     }
 
     private fun cleanupLegacyCapabilityOverrideImports(source: String): String {
@@ -7982,11 +7987,14 @@ $registrations
         var changed: Boolean
         do {
             changed = false
+            val executableCode = maskJavaCommentsAndLiterals(result)
             for (methodName in methodNames) {
-                val methodText = javaDeclaredMethodText(result, methodName) ?: continue
-                if (fields.none { methodText.contains(it) }) continue
+                val method = javaMethodRanges(executableCode).firstOrNull { it.name == methodName } ?: continue
+                val methodText = result.substring(method.range)
+                val executableMethodText = executableCode.substring(method.range)
+                if (fields.none { Regex("""\b${Regex.escape(it)}\b""").containsMatchIn(executableMethodText) }) continue
                 if (!isLegacyCapabilityCacheOnlyMethod(methodText, fields)) continue
-                result = result.replace(methodText, "")
+                result = result.removeRange(method.range)
                 changed = true
                 break
             }
@@ -8010,37 +8018,39 @@ $registrations
                 .replace(body, "")
         }
         body = Regex("""(?m)^[ \t]*LazyOptional<[^;]+>\s+[A-Za-z_$][\w$]*\s*:\s*[^;]+;\s*\r?$""").replace(body, "")
-        return body.isBlank()
+        val executableBody = maskJavaCommentsAndLiterals(body)
+        return executableBody.isBlank()
     }
 
     private fun removeLegacyCapabilityCacheBlocks(source: String, fields: Set<String>): String {
         var result = source
+        var executableCode = maskJavaCommentsAndLiterals(result)
         var searchStart = 0
         while (searchStart < result.length) {
-            val match = Regex("""\b(?:if|for)\s*\(""").find(result, searchStart) ?: break
-            val openParen = result.indexOf('(', match.range.first)
-            val closeParen = findMatchingParen(result, openParen)
+            val match = Regex("""\b(?:if|for)\s*\(""").find(executableCode, searchStart) ?: break
+            val openParen = executableCode.indexOf('(', match.range.first)
+            val closeParen = findMatchingParen(executableCode, openParen)
             if (closeParen < 0) {
                 searchStart = match.range.last + 1
                 continue
             }
-            val openBrace = result.indexOf('{', closeParen)
+            val openBrace = executableCode.indexOf('{', closeParen)
             if (openBrace < 0) {
                 searchStart = closeParen + 1
                 continue
             }
-            val closeBrace = findMatchingBrace(result, openBrace)
+            val closeBrace = findMatchingBrace(executableCode, openBrace)
             if (closeBrace < 0) {
                 searchStart = openBrace + 1
                 continue
             }
-            val blockText = result.substring(match.range.first, closeBrace + 1)
-            val referencesField = fields.any { Regex("""\b${Regex.escape(it)}\b""").containsMatchIn(blockText) }
+            val executableBlockText = executableCode.substring(match.range.first, closeBrace + 1)
+            val referencesField = fields.any { Regex("""\b${Regex.escape(it)}\b""").containsMatchIn(executableBlockText) }
             val cacheOnly = referencesField &&
-                (blockText.contains("LazyOptional") ||
-                    blockText.contains(".invalidate()") ||
-                    blockText.contains("SidedInvWrapper.create") ||
-                    blockText.contains("= null"))
+                (executableBlockText.contains("LazyOptional") ||
+                    executableBlockText.contains(".invalidate()") ||
+                    executableBlockText.contains("SidedInvWrapper.create") ||
+                    executableBlockText.contains("= null"))
             if (!cacheOnly) {
                 searchStart = closeBrace + 1
                 continue
@@ -8050,6 +8060,7 @@ $registrations
             if (end < result.length && result[end] == '\r') end++
             if (end < result.length && result[end] == '\n') end++
             result = result.removeRange(lineStart, end)
+            executableCode = maskJavaCommentsAndLiterals(result)
             searchStart = lineStart
         }
         return result
@@ -8057,20 +8068,24 @@ $registrations
 
     private fun removeLazyOptionalFieldDeclaration(source: String, fieldName: String): String {
         val lines = source.splitToSequence("\n").toMutableList()
+        val executableLines = maskJavaCommentsAndLiterals(source).splitToSequence("\n").toMutableList()
         var index = 0
         while (index < lines.size) {
-            val line = lines[index]
-            if (!line.contains("LazyOptional") ||
-                !Regex("""\b${Regex.escape(fieldName)}\b""").containsMatchIn(line) ||
-                !line.trimEnd().endsWith(";")) {
+            val executableLine = executableLines[index]
+            if (!executableLine.contains("LazyOptional") ||
+                !Regex("""\b${Regex.escape(fieldName)}\b""").containsMatchIn(executableLine) ||
+                !executableLine.trimEnd().endsWith(";")) {
                 index++
                 continue
             }
             var start = index
-            while (start > 0 && Regex("""^[ \t]*@[A-Za-z0-9_.]+(?:\([^)]*\))?[ \t]*\r?$""").matches(lines[start - 1])) {
+            while (start > 0 && Regex("""^[ \t]*@[A-Za-z0-9_.]+(?:\([^)]*\))?[ \t]*\r?$""").matches(executableLines[start - 1])) {
                 start--
             }
-            repeat(index - start + 1) { lines.removeAt(start) }
+            repeat(index - start + 1) {
+                lines.removeAt(start)
+                executableLines.removeAt(start)
+            }
             index = start
         }
         return lines.joinToString("\n")

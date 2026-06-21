@@ -11190,6 +11190,101 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `block entity capability reviveCaps migration ignores comments and strings`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntityRegistry.BLOCK_ENTITIES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/MachineBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public abstract class MachineBlockEntity extends BlockEntity {
+                public MachineBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/CommentedReviveBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+
+            public class CommentedReviveBlockEntity extends MachineBlockEntity {
+                private LazyOptional<IItemHandler> handler = LazyOptional.of(() -> createHandler());
+                private static final String DOC = "public void reviveCaps() { super.reviveCaps(); }";
+
+                /*
+                public void reviveCaps() {
+                    super.reviveCaps();
+                    handler = LazyOptional.of(() -> createHandler());
+                }
+                */
+
+                public CommentedReviveBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntityRegistry.COMMENTED.get(), pos, state);
+                }
+
+                public <T> LazyOptional<T> getCapability(Capability<T> cap, Direction side) {
+                    if (cap.equals(Capabilities.ItemHandler.BLOCK)) {
+                        return handler.cast();
+                    }
+                    return super.getCapability(cap, side);
+                }
+
+                private IItemHandler createHandler() {
+                    return null;
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockEntityRegistry {
+                public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = null;
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<CommentedReviveBlockEntity>> COMMENTED = null;
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val blockEntity = tempDir.resolve("src/main/java/com/example/CommentedReviveBlockEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(blockEntity.contains("registerCapabilities(RegisterCapabilitiesEvent event)"), blockEntity)
+        assertFalse(blockEntity.contains("getCapability(Capability<T> cap"), blockEntity)
+        assertTrue(blockEntity.contains("private static final String DOC = \"public void reviveCaps() { super.reviveCaps(); }\";"), blockEntity)
+        assertTrue(blockEntity.contains("public void reviveCaps() {\n        super.reviveCaps();"), blockEntity)
+        assertFalse(blockEntity.contains("clearRemoved"), blockEntity)
+    }
+
+    @Test
     fun `migrates lazy initialized block entity item capability from delegating constructor registry`() {
         val projectDir = createFile("ExampleMod.java", """
             package com.example;

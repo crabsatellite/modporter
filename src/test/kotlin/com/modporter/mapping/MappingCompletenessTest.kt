@@ -3634,6 +3634,83 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy reviveCaps migration uses executable method range`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyCapabilityReviveCapsSource")
+        assertTrue(start >= 0, "migrateLegacyCapabilityReviveCapsSource is missing")
+        val end = source.indexOf("private fun cleanupLegacyCapabilityOverrideImports", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw revive method extraction" to """javaDeclaredMethodText(source, "reviveCaps")""",
+            "raw clearRemoved prefilter" to """source.contains("void clearRemoved(")""",
+            "raw method replacement" to "source.replace(methodText"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val method = javaMethodRanges(executableCode).singleOrNull") &&
+                body.contains("val methodText = source.substring(method.range)") &&
+                body.contains("source.replaceRange(method.range, migratedMethod)"),
+            "Legacy reviveCaps migration must locate and replace only executable Java method ranges"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy reviveCaps migration must not use comments, strings, or raw method text as lifecycle evidence: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy capability cache cleanup uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun removeLegacyCapabilityCacheOnlyMethods")
+        assertTrue(start >= 0, "removeLegacyCapabilityCacheOnlyMethods is missing")
+        val end = source.indexOf("private data class LegacyCapabilityFacadeSpec", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw cache method extraction" to "javaDeclaredMethodText(result, methodName)",
+            "raw method field evidence" to "fields.none { methodText.contains(it) }",
+            "raw method removal" to "result.replace(methodText",
+            "raw if for block scan" to ".find(result, searchStart)",
+            "raw paren matching" to "findMatchingParen(result, openParen)",
+            "raw brace matching" to "findMatchingBrace(result, openBrace)",
+            "raw block field evidence" to "containsMatchIn(blockText)",
+            "raw LazyOptional field line evidence" to "line.contains(\"LazyOptional\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("javaMethodRanges(executableCode)") &&
+                body.contains("val executableMethodText = executableCode.substring(method.range)") &&
+                body.contains("result.removeRange(method.range)") &&
+                body.contains("var executableCode = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("find(executableCode, searchStart)") &&
+                body.contains("findMatchingParen(executableCode, openParen)") &&
+                body.contains("findMatchingBrace(executableCode, openBrace)") &&
+                body.contains("val executableBlockText = executableCode.substring") &&
+                body.contains("val executableLines = maskJavaCommentsAndLiterals(source).splitToSequence"),
+            "Legacy capability cache cleanup must delete only executable cache methods, blocks, and fields"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy capability cache cleanup must not delete comments or strings as cache logic: $offenders"
+        )
+    }
+
+    @Test
     fun `painting variant accessor migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
