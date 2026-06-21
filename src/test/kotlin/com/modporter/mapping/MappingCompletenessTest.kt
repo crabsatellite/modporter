@@ -3830,6 +3830,47 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `dimension cloud render signature migration uses executable method ranges`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateDimensionSpecialEffectsCloudSignatureSource")
+        assertTrue(start >= 0, "migrateDimensionSpecialEffectsCloudSignatureSource is missing")
+        val end = source.indexOf("private fun migrateCustomDataComponentsSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw renderClouds prefilter" to """source.contains("renderClouds(")""",
+            "raw signature replacement" to ").replace(source) { match ->",
+            "raw method extraction" to """javaDeclaredMethodText(result, "renderClouds")""",
+            "raw method evidence" to "cloudMethod.contains",
+            "raw method replacement" to "result.replace(cloudMethod"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("signaturePattern.findAll(executableCode)") &&
+                body.contains("applyStringEdits(source, signatureEdits)") &&
+                body.contains("val resultExecutableCode = if (changed) maskJavaCommentsAndLiterals(result) else executableCode") &&
+                body.contains("javaMethodRanges(resultExecutableCode)") &&
+                body.contains(".filter { it.name == \"renderClouds\" }") &&
+                body.contains("val executableMethodText = resultExecutableCode.substring(method.range)") &&
+                body.contains("val methodText = result.substring(method.range)") &&
+                body.contains("poseEdits += (method.range.first + pushPoseMatch.range.first)..") &&
+                body.contains("applyStringEdits(result, poseEdits)"),
+            "Dimension cloud renderer migration must edit only executable renderClouds signatures and method bodies"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Dimension cloud renderer migration must not use comments, strings, or raw method text as renderClouds evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `painting variant accessor migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

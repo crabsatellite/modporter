@@ -28489,6 +28489,50 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `dimension cloud renderer signature migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DocumentedCloudSignatureSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import net.minecraft.client.multiplayer.ClientLevel;
+            import org.joml.Matrix4f;
+
+            public class DocumentedCloudSignatureSurface {
+                private static final String DOC = "renderClouds(ClientLevel level, int ticks, float partialTick, PoseStack poseStack, double camX, double camY, double camZ, Matrix4f projectionMatrix)";
+
+                /*
+                public boolean renderClouds(ClientLevel level, int ticks, float partialTick, PoseStack poseStack, double camX, double camY, double camZ, Matrix4f projectionMatrix) {
+                    poseStack.pushPose();
+                    poseStack.popPose();
+                    return false;
+                }
+                */
+
+                public boolean keep() {
+                    return DOC.length() > 0;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("DocumentedCloudSignatureSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(
+            migrated.contains("private static final String DOC = \"renderClouds(ClientLevel level, int ticks, float partialTick, PoseStack poseStack, double camX, double camY, double camZ, Matrix4f projectionMatrix)\";"),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("renderClouds(ClientLevel level, int ticks, float partialTick, PoseStack poseStack, double camX, double camY, double camZ, Matrix4f projectionMatrix)"),
+            migrated
+        )
+        assertFalse(migrated.contains("Matrix4f modelViewMatrix"), migrated)
+        assertFalse(migrated.contains("mulPose(modelViewMatrix)"), migrated)
+    }
+
+    @Test
     fun `migrates LevelRenderer cloud build invokers to Tesselator`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

@@ -15698,28 +15698,47 @@ ${indent}}
     }
 
     private fun migrateDimensionSpecialEffectsCloudSignatureSource(source: String): String {
-        if (!source.contains("renderClouds(")) return source
-        var changed = false
-        var result = Regex(
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("renderClouds(")) return source
+        val signaturePattern = Regex(
             """renderClouds\s*\(\s*ClientLevel\s+([A-Za-z_$][\w$]*)\s*,\s*int\s+([A-Za-z_$][\w$]*)\s*,\s*float\s+([A-Za-z_$][\w$]*)\s*,\s*PoseStack\s+([A-Za-z_$][\w$]*)\s*,\s*double\s+([A-Za-z_$][\w$]*)\s*,\s*double\s+([A-Za-z_$][\w$]*)\s*,\s*double\s+([A-Za-z_$][\w$]*)\s*,\s*Matrix4f\s+([A-Za-z_$][\w$]*)\s*\)"""
-        ).replace(source) { match ->
-            changed = true
-            "renderClouds(ClientLevel ${match.groupValues[1]}, int ${match.groupValues[2]}, float ${match.groupValues[3]}, PoseStack ${match.groupValues[4]}, double ${match.groupValues[5]}, double ${match.groupValues[6]}, double ${match.groupValues[7]}, Matrix4f modelViewMatrix, Matrix4f ${match.groupValues[8]})"
-        }
-        val cloudMethod = javaDeclaredMethodText(result, "renderClouds")
-        if (cloudMethod != null && cloudMethod.contains("Matrix4f modelViewMatrix") && !cloudMethod.contains(".mulPose(modelViewMatrix);")) {
-            val poseName = Regex("""PoseStack\s+([A-Za-z_$][\w$]*)""")
-                .find(cloudMethod)
-                ?.groupValues
-                ?.get(1)
-            if (poseName != null && cloudMethod.contains("$poseName.pushPose();")) {
-                val migratedMethod = cloudMethod.replaceFirst(
-                    "$poseName.pushPose();",
-                    "$poseName.pushPose();\n                $poseName.mulPose(modelViewMatrix);"
-                )
-                result = result.replace(cloudMethod, migratedMethod)
-                changed = true
+        )
+        val signatureEdits = signaturePattern.findAll(executableCode)
+            .map { match ->
+                match.range to
+                    "renderClouds(ClientLevel ${match.groupValues[1]}, int ${match.groupValues[2]}, float ${match.groupValues[3]}, PoseStack ${match.groupValues[4]}, double ${match.groupValues[5]}, double ${match.groupValues[6]}, double ${match.groupValues[7]}, Matrix4f modelViewMatrix, Matrix4f ${match.groupValues[8]})"
             }
+            .toList()
+        var result = applyStringEdits(source, signatureEdits)
+        var changed = signatureEdits.isNotEmpty()
+        val resultExecutableCode = if (changed) maskJavaCommentsAndLiterals(result) else executableCode
+        val poseEdits = mutableListOf<Pair<IntRange, String>>()
+        javaMethodRanges(resultExecutableCode)
+            .filter { it.name == "renderClouds" }
+            .forEach { method ->
+                val executableMethodText = resultExecutableCode.substring(method.range)
+                if (!executableMethodText.contains("Matrix4f modelViewMatrix") ||
+                    executableMethodText.contains(".mulPose(modelViewMatrix);")) {
+                    return@forEach
+                }
+                val poseName = Regex("""PoseStack\s+([A-Za-z_$][\w$]*)""")
+                    .find(executableMethodText)
+                    ?.groupValues
+                    ?.get(1)
+                    ?: return@forEach
+                val pushPoseMatch = Regex("""(?m)^([ \t]*)${Regex.escape(poseName)}\.pushPose\(\);""")
+                    .find(executableMethodText)
+                    ?: return@forEach
+                val methodText = result.substring(method.range)
+                val newline = if (methodText.contains("\r\n")) "\r\n" else "\n"
+                val pushPoseText = methodText.substring(pushPoseMatch.range)
+                val indent = pushPoseMatch.groupValues[1]
+                poseEdits += (method.range.first + pushPoseMatch.range.first)..(method.range.first + pushPoseMatch.range.last) to
+                    "$pushPoseText$newline$indent$poseName.mulPose(modelViewMatrix);"
+            }
+        if (poseEdits.isNotEmpty()) {
+            result = applyStringEdits(result, poseEdits)
+            changed = true
         }
         return if (changed) result else source
     }
