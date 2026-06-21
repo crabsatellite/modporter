@@ -4824,6 +4824,51 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `tooltip context import migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateTooltipContextImportsSource")
+        assertTrue(start >= 0, "migrateTooltipContextImportsSource is missing")
+        val end = source.indexOf("private fun migrateRemovedJsonReloadDeserializersSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val vanillaFunctionStart = source.indexOf("private fun migrateVanilla121ApiSource")
+        assertTrue(vanillaFunctionStart >= 0, "migrateVanilla121ApiSource is missing")
+        val vanillaStart = source.indexOf("val resultExecutableCode = maskJavaCommentsAndLiterals(result)", vanillaFunctionStart)
+        assertTrue(vanillaStart >= 0, "migrateVanilla121ApiSource final executable import gate is missing")
+        val vanillaEnd = source.indexOf("if (needsOverlayTexture", vanillaStart + 1)
+        assertTrue(vanillaEnd > vanillaStart, "migrateVanilla121ApiSource final import gate boundary is missing")
+        val vanillaImportBody = source.substring(vanillaStart, vanillaEnd)
+        val offenders = listOf(
+            "raw TooltipContext scan" to body.contains("""source.contains("Item.TooltipContext")"""),
+            "raw Item import scan" to body.contains("""source.contains("import net.minecraft.world.item.Item;")"""),
+            "raw import insertion" to body.contains("addImportIfMissing(source, \"net.minecraft.world.item.Item\")"),
+            "raw vanilla TooltipContext import scan" to vanillaImportBody.contains("""result.contains("Item.TooltipContext")"""),
+            "raw vanilla Item import insertion" to vanillaImportBody.contains("addImportIfMissing(result, \"net.minecraft.world.item.Item\")")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("Item.TooltipContext")""") &&
+                body.contains("""executableCode.contains("import net.minecraft.world.item.Item;")""") &&
+                body.contains("addExecutableImportIfMissing(source, \"net.minecraft.world.item.Item\")") &&
+                vanillaImportBody.contains("val resultExecutableCode = maskJavaCommentsAndLiterals(result)") &&
+                vanillaImportBody.contains("""resultExecutableCode.contains("Item.TooltipContext")""") &&
+                vanillaImportBody.contains("addExecutableImportIfMissing(result, \"net.minecraft.world.item.Item\")"),
+            "TooltipContext import migration must derive the need for import from executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "TooltipContext import migration must not treat comments or strings as source evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `mob effect holder migration scopes executable method evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

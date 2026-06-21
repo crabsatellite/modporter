@@ -9413,6 +9413,33 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `tooltip context import migration ignores comments and strings`() {
+        val projectDir = createFile("TooltipDocsOnly.java", """
+            package com.example;
+
+            public class TooltipDocsOnly {
+                private static final String DOC = "Item.TooltipContext";
+
+                /*
+                public void appendHoverText(ItemStack stack, Item.TooltipContext context) {
+                }
+                */
+                public void keep() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/TooltipDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-tooltip-context-import" }, result.changes.toString())
+        assertFalse(migrated.contains("import net.minecraft.world.item.Item;"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "Item.TooltipContext";"""), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("Item.TooltipContext context"), migrated)
+    }
+
+    @Test
     fun `migrates direct deferred effect holders without MobEffect variable declarations`() {
         val projectDir = createFile("DirectEffectUse.java", """
             package com.example;

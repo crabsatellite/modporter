@@ -15288,9 +15288,10 @@ ${entries.joinToString(",\n")}
     }
 
     private fun migrateTooltipContextImportsSource(source: String): String {
-        if (!source.contains("Item.TooltipContext")) return source
-        if (source.contains("import net.minecraft.world.item.Item;")) return source
-        return addImportIfMissing(source, "net.minecraft.world.item.Item")
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("Item.TooltipContext")) return source
+        if (executableCode.contains("import net.minecraft.world.item.Item;")) return source
+        return addExecutableImportIfMissing(source, "net.minecraft.world.item.Item")
     }
 
     private fun migrateRemovedJsonReloadDeserializersSource(source: String): String {
@@ -16771,7 +16772,10 @@ $migratedRecipes
         if (needsItemCost) result = addImportIfMissing(result, "net.minecraft.world.item.trading.ItemCost")
         if (needsDataComponents || result.contains("DataComponents.FOOD")) result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
         if (needsPotionContents) result = addImportIfMissing(result, "net.minecraft.world.item.alchemy.PotionContents")
-        if (needsItemTooltipContext || result.contains("Item.TooltipContext")) result = addImportIfMissing(result, "net.minecraft.world.item.Item")
+        val resultExecutableCode = maskJavaCommentsAndLiterals(result)
+        if (needsItemTooltipContext || resultExecutableCode.contains("Item.TooltipContext")) {
+            result = addExecutableImportIfMissing(result, "net.minecraft.world.item.Item")
+        }
         if (needsOverlayTexture || result.contains("OverlayTexture.")) {
             result = addImportIfMissing(result, "net.minecraft.client.renderer.texture.OverlayTexture")
         }
