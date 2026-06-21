@@ -1800,6 +1800,59 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `legacy enchantment category runtime migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+
+            public class TestMod {
+                private static final String DOC = "EnchantmentHelper.getEnchantments(stack).keySet().toArray(new Enchantment[0])";
+
+                /*
+                 private boolean canApplyFake(Enchantment... enchantments) {
+                     for (Enchantment enchantment : enchantments) {
+                         if (enchantment.category == EnchantmentCategory.WEAPON || enchantment.canEnchant(DUMMY_STACK))
+                             return true;
+                     }
+                     return false;
+                 }
+                 */
+
+                public boolean isBookEnchantable(ItemStack stack, ItemStack book) {
+                    return this.canApplyEnchantment(EnchantmentHelper.getEnchantments(stack).keySet().toArray(new Enchantment[0]));
+                }
+
+                private boolean canApplyEnchantment(Enchantment... enchantments) {
+                    for (Enchantment enchantment : enchantments) {
+                        if (enchantment.category == EnchantmentCategory.DIGGER || enchantment.canEnchant(Items.IRON_AXE.getDefaultInstance()))
+                            return true;
+                    }
+                    return false;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("this.canApplyEnchantment(EnchantmentHelper.getEnchantments(stack).keySet())"), transformed)
+        assertTrue(transformed.contains("Items.IRON_AXE.getDefaultInstance().supportsEnchantment(enchantment)"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"EnchantmentHelper.getEnchantments(stack).keySet().toArray(new Enchantment[0])\";"), transformed)
+        assertTrue(transformed.contains("enchantment.category == EnchantmentCategory.WEAPON"), transformed)
+        assertTrue(transformed.contains("enchantment.canEnchant(DUMMY_STACK)"), transformed)
+        assertFalse(transformed.contains("DOC = \"EnchantmentHelper.getEnchantments(stack).keySet()\""), transformed)
+        assertFalse(transformed.contains("DUMMY_STACK.supportsEnchantment(enchantment)"), transformed)
+    }
+
+    @Test
     fun `jei mobtype and unqualified properties rules migrate common 1_21 APIs`() {
         val projectDir = createTestFile("""
             package com.example;

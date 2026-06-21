@@ -1452,17 +1452,24 @@ $streamFields,
     )
 
     private fun migrateEnchantmentCategoryRuntimeChecks(source: String): String {
-        if (!source.contains("EnchantmentCategory") && !source.contains("new Enchantment[0]")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("EnchantmentCategory") && !executableCode.contains("new Enchantment[0]")) return source
         var result = source
-        result = Regex("""EnchantmentHelper\.getEnchantments\(([^)\r\n]+)\)\.keySet\(\)\.toArray\(new\s+Enchantment\[\s*0\s*]\)""")
-            .replace(result) { match ->
-                "EnchantmentHelper.getEnchantments(${match.groupValues[1]}).keySet()"
-            }
-        result = Regex(
+        val enchantmentArrayPattern =
+            Regex("""EnchantmentHelper\.getEnchantments\(([^)\r\n]+)\)\.keySet\(\)\.toArray\(new\s+Enchantment\[\s*0\s*]\)""")
+        result = replaceExecutableRegex(result, enchantmentArrayPattern) { match ->
+            val originalMatch = enchantmentArrayPattern.matchEntire(match.value)
+                ?: return@replaceExecutableRegex match.value
+            "EnchantmentHelper.getEnchantments(${originalMatch.groupValues[1]}).keySet()"
+        }
+        val categoryHelperPattern = Regex(
             """(?s)private\s+boolean\s+([A-Za-z_$][\w$]*)\s*\(\s*Enchantment\.\.\.\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*for\s*\(\s*Enchantment\s+([A-Za-z_$][\w$]*)\s*:\s*\2\s*\)\s*\{\s*if\s*\(\s*\3\.category\s*==\s*EnchantmentCategory\.[A-Za-z_$][\w$]*\s*\|\|\s*\3\.canEnchant\(([\s\S]*?)\)\s*\)\s*return\s+true;\s*\}\s*return\s+false;\s*\}"""
-        ).replace(result) { match ->
-            val methodName = match.groupValues[1]
-            val itemStackExpression = match.groupValues[4].trim()
+        )
+        result = replaceExecutableRegex(result, categoryHelperPattern) { match ->
+            val originalMatch = categoryHelperPattern.matchEntire(match.value)
+                ?: return@replaceExecutableRegex match.value
+            val methodName = originalMatch.groupValues[1]
+            val itemStackExpression = originalMatch.groupValues[4].trim()
             """
 private boolean $methodName(Iterable<net.minecraft.core.Holder<Enchantment>> enchantments) {
 		for (net.minecraft.core.Holder<Enchantment> enchantment : enchantments) {

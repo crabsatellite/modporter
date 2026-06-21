@@ -4546,6 +4546,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy enchantment category runtime migration uses executable source evidence`() {
+        val textPass = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = textPass.indexOf("private fun migrateEnchantmentCategoryRuntimeChecks")
+        assertTrue(start >= 0, "migrateEnchantmentCategoryRuntimeChecks is missing")
+        val end = textPass.indexOf("private fun migrateLootSerializerCodecs", start + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val body = textPass.substring(start, end)
+        val offenders = listOf(
+            "raw EnchantmentCategory prefilter" to body.contains("""source.contains("EnchantmentCategory")"""),
+            "raw enchantment array prefilter" to body.contains("""source.contains("new Enchantment[0]")"""),
+            "raw enchantment array replacement" to Regex("""Regex\([\s\S]*?EnchantmentHelper[\s\S]*?\)\s*\.\s*replace\(result""").containsMatchIn(body),
+            "raw category helper replacement" to Regex("""Regex\([\s\S]*?EnchantmentCategory[\s\S]*?\)\s*\.\s*replace\(result""").containsMatchIn(body)
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("EnchantmentCategory")""") &&
+                body.contains("""executableCode.contains("new Enchantment[0]")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("match.value") &&
+                body.contains("matchEntire(match.value)"),
+            "Legacy enchantment category runtime migration must use executable Java source and original expression captures"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy enchantment category runtime migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `curative item effect migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
