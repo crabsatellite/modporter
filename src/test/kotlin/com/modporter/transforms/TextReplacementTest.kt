@@ -4573,6 +4573,57 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `dyeable leather instanceof color migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val itemDir = srcDir.resolve("item")
+        val clientDir = srcDir.resolve("client")
+        itemDir.createDirectories()
+        clientDir.createDirectories()
+        itemDir.resolve("LeatherGlovesItem.java").writeText("""
+            package com.example.item;
+
+            import net.minecraft.world.item.DyeableLeatherItem;
+
+            public class LeatherGlovesItem extends GlovesItem implements DyeableLeatherItem {
+                public LeatherGlovesItem(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        clientDir.resolve("ColorResolver.java").writeText("""
+            package com.example.client;
+
+            import com.example.item.LeatherGlovesItem;
+            import net.minecraft.world.item.ItemStack;
+
+            public class ColorResolver {
+                private static final String DOC = "leatherGlovesItem.getColor(stack)";
+
+                public int color(ItemStack stack) {
+                    if (stack.getItem() instanceof LeatherGlovesItem leatherGlovesItem) {
+                        /*
+                         return leatherGlovesItem.getColor(stack);
+                         */
+                        return leatherGlovesItem.getColor(stack);
+                    }
+                    return 0xFFFFFF;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(tempDir)
+
+        val transformed = clientDir.resolve("ColorResolver.java").readText()
+
+        assertTrue(transformed.contains("return DyedItemColor.getOrDefault(stack, DyedItemColor.LEATHER_COLOR);"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"leatherGlovesItem.getColor(stack)\";"), transformed)
+        assertTrue(transformed.contains("return leatherGlovesItem.getColor(stack);"), transformed)
+        assertFalse(transformed.contains("DOC = \"DyedItemColor.getOrDefault"), transformed)
+    }
+
+    @Test
     fun `dyeable leather class collection ignores commented declarations`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val itemDir = srcDir.resolve("item")

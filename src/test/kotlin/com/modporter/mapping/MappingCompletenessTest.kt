@@ -4563,9 +4563,35 @@ class MappingCompletenessTest {
             if (it < 0) textPass.length else it
         }
         val callSiteBody = textPass.substring(callSiteStart, callSiteEnd)
+        val itemColorsStart = textPass.indexOf("private fun migrateDyeableLeatherItemColors")
+        assertTrue(itemColorsStart >= 0, "migrateDyeableLeatherItemColors is missing")
+        val itemColorsEnd = textPass.indexOf("private fun migrateDyeableLeatherGetColorCallSites", itemColorsStart + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val itemColorsBody = textPass.substring(itemColorsStart, itemColorsEnd)
+        val instanceStart = textPass.indexOf("private fun migrateDyeableLeatherInstanceofGetColorCallSites")
+        assertTrue(instanceStart >= 0, "migrateDyeableLeatherInstanceofGetColorCallSites is missing")
+        val instanceEnd = textPass.indexOf("private fun insertDyeableDefaultColor", instanceStart + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val instanceBody = textPass.substring(instanceStart, instanceEnd)
+        val defaultColorStart = textPass.indexOf("private fun insertDyeableDefaultColor")
+        assertTrue(defaultColorStart >= 0, "insertDyeableDefaultColor is missing")
+        val defaultColorEnd = textPass.indexOf("private fun migrateTierSortingRegistryTiers", defaultColorStart + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val defaultColorBody = textPass.substring(defaultColorStart, defaultColorEnd)
         val offenders = listOf(
             "raw legacy class collection" to collectBody.contains(".findAll(source)"),
-            "raw cast call-site replacement" to callSiteBody.contains(".replace(source)")
+            "raw dyeable type prefilter" to itemColorsBody.contains("""source.contains("DyeableLeatherItem")"""),
+            "raw known class prefilter" to itemColorsBody.contains("""source.contains("instanceof ${'$'}className")"""),
+            "raw cast call-site replacement" to callSiteBody.contains(".replace(source)"),
+            "raw instanceof getColor prefilter" to instanceBody.contains("""source.contains(".getColor(")"""),
+            "raw instanceof search" to instanceBody.contains("instanceofPattern.find(result"),
+            "raw instanceof brace search" to instanceBody.contains("result.indexOf('{', match.range.last)"),
+            "raw instanceof body replacement" to instanceBody.contains("colorCallPattern.replace(body)"),
+            "raw default color scan" to defaultColorBody.contains("""source.contains("DEFAULT_COLOR")"""),
+            "raw default color class scan" to defaultColorBody.contains(".find(source)")
         )
             .filter { (_, failed) -> failed }
             .map { (label, _) -> label }
@@ -4573,9 +4599,17 @@ class MappingCompletenessTest {
         assertTrue(
             collectBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
                 collectBody.contains(".findAll(executableCode)") &&
+                itemColorsBody.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                itemColorsBody.contains("""executableSource.contains("DyeableLeatherItem")""") &&
                 callSiteBody.contains("replaceExecutableRegex(") &&
                 callSiteBody.contains("match.value") &&
-                callSiteBody.contains("matchEntire(match.value)"),
+                callSiteBody.contains("matchEntire(match.value)") &&
+                instanceBody.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                instanceBody.contains("maskJavaCommentsAndLiterals(result)") &&
+                instanceBody.contains("maskJavaCommentsAndLiterals(body)") &&
+                instanceBody.contains("replaceRange(") &&
+                defaultColorBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                defaultColorBody.contains(".find(executableCode)"),
             "Dyeable leather external color migration must use executable Java source for class evidence and cast call-sites"
         )
         assertTrue(

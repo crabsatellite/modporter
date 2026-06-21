@@ -996,13 +996,14 @@ $streamFields,
         source: String,
         legacyDyeableLeatherItemClasses: Set<String> = emptySet()
     ): String {
-        val sourceHasLegacyColorMethods = source.contains("DataComponents.CUSTOM_DATA") &&
-            Regex("""\bpublic\s+boolean\s+hasCustomColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(source) &&
-            Regex("""\bpublic\s+void\s+setColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*,\s*int\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(source)
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        val sourceHasLegacyColorMethods = executableSource.contains("DataComponents.CUSTOM_DATA") &&
+            Regex("""\bpublic\s+boolean\s+hasCustomColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(executableSource) &&
+            Regex("""\bpublic\s+void\s+setColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*,\s*int\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(executableSource)
         val sourceHasKnownDyeableColorCallSites = legacyDyeableLeatherItemClasses.any { className ->
-            source.contains("instanceof $className") && source.contains(".getColor(")
+            executableSource.contains("instanceof $className") && executableSource.contains(".getColor(")
         }
-        if (!source.contains("DyeableLeatherItem") && !sourceHasLegacyColorMethods && !sourceHasKnownDyeableColorCallSites) {
+        if (!executableSource.contains("DyeableLeatherItem") && !sourceHasLegacyColorMethods && !sourceHasKnownDyeableColorCallSites) {
             return source
         }
 
@@ -1016,14 +1017,15 @@ $streamFields,
         result = removeImportLine(result, "net.minecraft.nbt.CompoundTag")
         result = removeImportLine(result, "net.minecraft.world.item.DyeableLeatherItem")
 
-        val resultHasLegacyColorMethods = result.contains("DataComponents.CUSTOM_DATA") &&
-            Regex("""\bpublic\s+boolean\s+hasCustomColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(result) &&
-            Regex("""\bpublic\s+void\s+setColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*,\s*int\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(result)
+        val executableResult = maskJavaCommentsAndLiterals(result)
+        val resultHasLegacyColorMethods = executableResult.contains("DataComponents.CUSTOM_DATA") &&
+            Regex("""\bpublic\s+boolean\s+hasCustomColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(executableResult) &&
+            Regex("""\bpublic\s+void\s+setColor\s*\(\s*ItemStack\s+[A-Za-z_$][\w$]*\s*,\s*int\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(executableResult)
         if (!resultHasLegacyColorMethods) {
             return result
         }
 
-        if (!result.contains("DEFAULT_COLOR")) {
+        if (!executableResult.contains("DEFAULT_COLOR")) {
             val withDefaultColor = insertDyeableDefaultColor(result)
             if (withDefaultColor == result) return source
             result = withDefaultColor
@@ -1087,7 +1089,8 @@ $streamFields,
         source: String,
         legacyDyeableLeatherItemClasses: Set<String>
     ): String {
-        if (legacyDyeableLeatherItemClasses.isEmpty() || !source.contains(".getColor(")) return source
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        if (legacyDyeableLeatherItemClasses.isEmpty() || !executableSource.contains(".getColor(")) return source
         var result = source
         legacyDyeableLeatherItemClasses.forEach { className ->
             val instanceofPattern = Regex(
@@ -1095,10 +1098,16 @@ $streamFields,
             )
             var cursor = 0
             while (true) {
-                val match = instanceofPattern.find(result, cursor) ?: break
-                val stackExpression = match.groupValues[1]
-                val itemVariable = match.groupValues[2]
-                val openBrace = result.indexOf('{', match.range.last)
+                val executableResult = maskJavaCommentsAndLiterals(result)
+                val match = instanceofPattern.find(executableResult, cursor) ?: break
+                val originalInstanceof = instanceofPattern.matchEntire(result.substring(match.range.first, match.range.last + 1))
+                if (originalInstanceof == null) {
+                    cursor = match.range.last + 1
+                    continue
+                }
+                val stackExpression = originalInstanceof.groupValues[1]
+                val itemVariable = originalInstanceof.groupValues[2]
+                val openBrace = executableResult.indexOf('{', match.range.last)
                 if (openBrace < 0) {
                     cursor = match.range.last + 1
                     continue
@@ -1110,12 +1119,17 @@ $streamFields,
                 }
                 val body = result.substring(openBrace + 1, closeBrace)
                 val colorCallPattern = Regex("""\b${Regex.escape(itemVariable)}\.getColor\(\s*${Regex.escape(stackExpression)}\s*\)""")
-                val migratedBody = colorCallPattern.replace(body) {
-                    "DyedItemColor.getOrDefault($stackExpression, DyedItemColor.LEATHER_COLOR)"
-                }
-                if (migratedBody == body) {
+                val colorMatches = colorCallPattern.findAll(maskJavaCommentsAndLiterals(body)).toList()
+                if (colorMatches.isEmpty()) {
                     cursor = closeBrace + 1
                     continue
+                }
+                var migratedBody = body
+                for (colorMatch in colorMatches.asReversed()) {
+                    migratedBody = migratedBody.replaceRange(
+                        colorMatch.range,
+                        "DyedItemColor.getOrDefault($stackExpression, DyedItemColor.LEATHER_COLOR)"
+                    )
                 }
                 result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
                 cursor = openBrace + 1 + migratedBody.length
@@ -1125,10 +1139,11 @@ $streamFields,
     }
 
     private fun insertDyeableDefaultColor(source: String): String {
-        if (source.contains("DEFAULT_COLOR")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (executableCode.contains("DEFAULT_COLOR")) return source
         val classMatch = Regex(
             """(?m)^[ \t]*(?:(?:public|protected|private|abstract|final|static)\s+)*class\s+[A-Za-z_$][\w$]*\b[^{;]*\{"""
-        ).find(source) ?: return source
+        ).find(executableCode) ?: return source
         val insertAt = classMatch.range.last + 1
         return source.substring(0, insertAt) +
             "\n\tpublic static final int DEFAULT_COLOR = 0xFFBDCFD9;\n" +
