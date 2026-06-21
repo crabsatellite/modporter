@@ -3327,6 +3327,62 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `player harvest check migration uses executable block state evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val eventHooksStart = source.indexOf("private fun migrateLegacyEventHooks121")
+        assertTrue(eventHooksStart >= 0, "migrateLegacyEventHooks121 is missing")
+        val eventHooksEnd = source.indexOf("private data class HarvestCheckBlockStateAccess", eventHooksStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val eventHooksBody = source.substring(eventHooksStart, eventHooksEnd)
+        val helperStart = source.indexOf("private fun migrateEventHooksDoPlayerHarvestCheck")
+        assertTrue(helperStart >= 0, "migrateEventHooksDoPlayerHarvestCheck is missing")
+        val helperEnd = source.indexOf("private fun removeRemovedBucketUseHookGuard", helperStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val helperBody = source.substring(helperStart, helperEnd)
+        val offenders = listOf(
+            "raw BlockPos file scan" to (eventHooksBody.contains("""\bBlockPos\s+""") || helperBody.contains("""\bBlockPos\s+""")),
+            "file-level this.level fallback" to (
+                eventHooksBody.contains("""result.contains("this.level()")""") ||
+                    helperBody.contains("""result.contains("this.level()")""")
+                ),
+            "raw level variable file scan" to (
+                eventHooksBody.contains("""(?:BlockGetter|Level|LevelAccessor|ServerLevel)""") ||
+                    helperBody.contains("""(?:BlockGetter|Level|LevelAccessor|ServerLevel)""")
+                ),
+            "whole-result harvest rewrite" to (
+                eventHooksBody.contains("""rewriteJavaCall(result, "doPlayerHarvestCheck")""") ||
+                    helperBody.contains("""rewriteJavaCall(result, "doPlayerHarvestCheck")""")
+                ),
+            "raw result scan" to (eventHooksBody.contains(".find(result)") || helperBody.contains(".find(result)"))
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            eventHooksBody.contains("result = migrateEventHooksDoPlayerHarvestCheck(result)"),
+            "EventHooks.doPlayerHarvestCheck migration must be delegated to the evidence-scoped helper"
+        )
+        assertTrue(
+            helperBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                helperBody.contains("javaMethodRangesIncludingDefault(executableCode)") &&
+                helperBody.contains("findExpressionReceiverStart(executableCode, tokenIndex)") &&
+                helperBody.contains("resolveHarvestCheckBlockStateAccess(") &&
+                helperBody.contains("harvestCheckBlockStateAccessFromExpression(") &&
+                helperBody.contains("applyStringEdits(source, edits)"),
+            "EventHooks.doPlayerHarvestCheck migration must bind BlockGetter/BlockPos from executable call-site BlockState evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "EventHooks.doPlayerHarvestCheck migration must not use file-level BlockPos/level fallbacks: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy pack metadata accessors use executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

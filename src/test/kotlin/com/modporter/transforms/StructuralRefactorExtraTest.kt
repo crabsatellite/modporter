@@ -393,6 +393,84 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `player harvest check migration uses call site block state evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("HarvestHooks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.event.EventHooks;
+
+            public class HarvestHooks {
+                private BlockPos misleadingPos;
+                private Level misleadingLevel;
+
+                private Level level() {
+                    return misleadingLevel;
+                }
+
+                boolean direct(Player player, Level world, BlockPos pos) {
+                    return EventHooks.doPlayerHarvestCheck(player, world.getBlockState(pos), false);
+                }
+
+                boolean localState(Player player, Level world, BlockPos pos) {
+                    BlockState state = world.getBlockState(pos);
+                    return EventHooks.doPlayerHarvestCheck(player, state, false);
+                }
+
+                boolean ambiguous(Player player, BlockState supplied) {
+                    BlockPos wrongPos = misleadingPos;
+                    this.level();
+                    return EventHooks.doPlayerHarvestCheck(player, supplied, false);
+                }
+
+                boolean reassigned(Player player, Level world, BlockPos pos, BlockState supplied) {
+                    BlockState state = world.getBlockState(pos);
+                    state = supplied;
+                    return EventHooks.doPlayerHarvestCheck(player, state, false);
+                }
+
+                void docs() {
+                    String sample = "EventHooks.doPlayerHarvestCheck(player, supplied, false);";
+                    // EventHooks.doPlayerHarvestCheck(player, supplied, false);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("HarvestHooks.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(
+            transformed.contains("return EventHooks.doPlayerHarvestCheck(player, world.getBlockState(pos), world, pos);"),
+            transformed
+        )
+        assertTrue(
+            transformed.contains("return EventHooks.doPlayerHarvestCheck(player, state, world, pos);"),
+            transformed
+        )
+        assertTrue(
+            transformed.contains("return EventHooks.doPlayerHarvestCheck(player, supplied, false);"),
+            transformed
+        )
+        assertTrue(
+            transformed.contains("return EventHooks.doPlayerHarvestCheck(player, state, false);"),
+            transformed
+        )
+        assertFalse(transformed.contains("EventHooks.doPlayerHarvestCheck(player, supplied, this.level(), wrongPos)"), transformed)
+        assertFalse(transformed.contains("EventHooks.doPlayerHarvestCheck(player, state, this.level(), wrongPos)"), transformed)
+        assertTrue(
+            transformed.contains("""String sample = "EventHooks.doPlayerHarvestCheck(player, supplied, false);";"""),
+            transformed
+        )
+        assertTrue(transformed.contains("// EventHooks.doPlayerHarvestCheck(player, supplied, false);"), transformed)
+    }
+
+    @Test
     fun `migrates SavedData factory calls with static supplier methods`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

@@ -28086,27 +28086,126 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
                 if (args.size == 6) args.take(5) else args
             }
         }
-        if (result.contains("EventHooks.doPlayerHarvestCheck(")) {
-            val blockPos = Regex("""\bBlockPos\s+([A-Za-z_$][\w$]*)\b""")
-                .find(result)
-                ?.groupValues
-                ?.get(1)
-            val blockGetter = if (result.contains("this.level()")) {
-                "this.level()"
-            } else {
-                Regex("""\b(?:BlockGetter|Level|LevelAccessor|ServerLevel)\s+([A-Za-z_$][\w$]*)\b""")
-                    .find(result)
-                    ?.groupValues
-                    ?.get(1)
-            }
-            if (blockPos != null && blockGetter != null) {
-                result = rewriteJavaCall(result, "doPlayerHarvestCheck") { receiver, args ->
-                    if (receiver != "EventHooks" || args.size != 3) return@rewriteJavaCall null
-                    "$receiver.doPlayerHarvestCheck(${args[0].trim()}, ${args[1].trim()}, $blockGetter, $blockPos)"
-                }
-            }
-        }
+        result = migrateEventHooksDoPlayerHarvestCheck(result)
         return result
+    }
+
+    private data class HarvestCheckBlockStateAccess(val blockGetter: String, val blockPos: String)
+
+    private fun migrateEventHooksDoPlayerHarvestCheck(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("EventHooks.doPlayerHarvestCheck(")) return source
+        val methodRanges = javaMethodRangesIncludingDefault(executableCode)
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        val token = ".doPlayerHarvestCheck("
+        var cursor = 0
+        while (true) {
+            val tokenIndex = executableCode.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + ".doPlayerHarvestCheck".length
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val receiverStart = findExpressionReceiverStart(executableCode, tokenIndex)
+            if (receiverStart < 0 || receiverStart >= tokenIndex) {
+                cursor = closeParen + 1
+                continue
+            }
+            val receiver = source.substring(receiverStart, tokenIndex).trim()
+            if (receiver != "EventHooks") {
+                cursor = closeParen + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (args.size != 3) {
+                cursor = closeParen + 1
+                continue
+            }
+            val method = methodRanges.firstOrNull { tokenIndex in it.range }
+            if (method == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            val access = resolveHarvestCheckBlockStateAccess(
+                stateArgument = args[1].trim(),
+                methodSource = source.substring(method.range),
+                executableMethod = executableCode.substring(method.range),
+                callOffsetInMethod = tokenIndex - method.range.first
+            )
+            if (access != null) {
+                edits += receiverStart..closeParen to
+                    "EventHooks.doPlayerHarvestCheck(${args[0].trim()}, ${args[1].trim()}, ${access.blockGetter}, ${access.blockPos})"
+            }
+            cursor = closeParen + 1
+        }
+        return applyStringEdits(source, edits)
+    }
+
+    private fun resolveHarvestCheckBlockStateAccess(
+        stateArgument: String,
+        methodSource: String,
+        executableMethod: String,
+        callOffsetInMethod: Int
+    ): HarvestCheckBlockStateAccess? {
+        harvestCheckBlockStateAccessFromExpression(stateArgument)?.let { return it }
+        val stateVariable = Regex("""[A-Za-z_$][\w$]*""").matchEntire(stateArgument)?.value ?: return null
+        val escapedState = Regex.escape(stateVariable)
+        val candidates = (
+            Regex("""(?m)\b(?:final\s+)?(?:BlockState|var)\s+$escapedState\s*=\s*""").findAll(executableMethod) +
+                Regex("""(?m)(?<![.\w$])$escapedState\s*=\s*(?!=)""").findAll(executableMethod)
+            )
+            .filter { it.range.first < callOffsetInMethod }
+            .distinctBy { it.range.last }
+            .sortedBy { it.range.first }
+            .toList()
+        val lastAssignment = candidates.lastOrNull() ?: return null
+        val expressionStart = lastAssignment.range.last + 1
+        val expressionEnd = findJavaStatementSemicolon(executableMethod, expressionStart)
+        if (expressionEnd < 0 || expressionEnd > callOffsetInMethod) return null
+        val expression = methodSource.substring(expressionStart, expressionEnd).trim()
+        return harvestCheckBlockStateAccessFromExpression(expression)
+    }
+
+    private fun harvestCheckBlockStateAccessFromExpression(expression: String): HarvestCheckBlockStateAccess? {
+        val trimmed = expression.trim()
+        val token = ".getBlockState("
+        val tokenIndex = trimmed.indexOf(token)
+        if (tokenIndex < 0) return null
+        val openParen = tokenIndex + ".getBlockState".length
+        val closeParen = findMatchingParen(trimmed, openParen)
+        if (closeParen < 0 || trimmed.substring(closeParen + 1).isNotBlank()) return null
+        val receiverStart = findExpressionReceiverStart(trimmed, tokenIndex)
+        if (receiverStart < 0 || receiverStart >= tokenIndex) return null
+        val args = splitTopLevelJavaArgs(trimmed.substring(openParen + 1, closeParen))
+        if (args.size != 1) return null
+        return HarvestCheckBlockStateAccess(
+            blockGetter = trimmed.substring(receiverStart, tokenIndex).trim(),
+            blockPos = args[0].trim()
+        )
+    }
+
+    private fun findJavaStatementSemicolon(source: String, start: Int): Int {
+        var i = start
+        var parenDepth = 0
+        var braceDepth = 0
+        var bracketDepth = 0
+        while (i < source.length) {
+            when (source[i]) {
+                '"' -> i = skipJavaStringLiteral(source, i)
+                '\'' -> i = skipJavaCharLiteral(source, i)
+                '(' -> parenDepth++
+                ')' -> if (parenDepth > 0) parenDepth--
+                '{' -> braceDepth++
+                '}' -> if (braceDepth > 0) braceDepth--
+                '[' -> bracketDepth++
+                ']' -> if (bracketDepth > 0) bracketDepth--
+                ';' -> if (parenDepth == 0 && braceDepth == 0 && bracketDepth == 0) return i
+            }
+            i++
+        }
+        return -1
     }
 
     private fun removeRemovedBucketUseHookGuard(source: String): String {
