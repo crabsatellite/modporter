@@ -95,6 +95,46 @@
     "rationale": "Quark is a public dependency API; any migration must be tied to the API package, not to a benchmark target."
   },
   {
+    "id": "mmlib",
+    "type": "library-api",
+    "packagePrefixes": [
+      "cn.mcmod_mmf.mmlib."
+    ],
+    "coordinatePrefixes": [
+      "cn.mcmod_mmf.mysterious_mountain_lib:"
+    ],
+    "resourceTypeIds": [
+      "mysterious_mountain_lib"
+    ],
+    "ruleIdPrefixes": [
+      "build-relocate-mmlib-",
+      "build-remove-mmlib-",
+      "build-add-local-mmlib-",
+      "struct-mmlib-"
+    ],
+    "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt",
+      "src/main/kotlin/com/modporter/resources/ResourceMigrator.kt"
+    ],
+    "rationale": "MMLib is a published helper library with removed recipe, fluid, render, and datagen APIs; migrations must be API-surface rules."
+  },
+  {
+    "id": "terrablender",
+    "type": "library-api",
+    "packagePrefixes": [
+      "terrablender."
+    ],
+    "resourceTypeIds": [
+      "terrablender"
+    ],
+    "ruleIdPrefixes": [],
+    "allowedFiles": [
+      "src/main/kotlin/com/modporter/resources/ResourceMigrator.kt"
+    ],
+    "rationale": "TerraBlender dependency metadata is migrated by dependency mod id, not by a benchmark mod rule."
+  },
+  {
     "id": "dependency-coordinate-normalization",
     "type": "dependency-coordinate-api",
     "packagePrefixes": [

@@ -365,6 +365,8 @@ class MappingCompletenessTest {
             "src/main/resources/mappings/forge2neo/neoforge-deps.json"
         )
         val thirdPartyRoots = listOf(
+            "cn.mcmod_mmf.mmlib.",
+            "cn.mcmod_mmf.mysterious_mountain_lib:",
             "com.aetherteam.",
             "com.blamejared.crafttweaker",
             "com.simibubi.create",
@@ -382,6 +384,7 @@ class MappingCompletenessTest {
             "squeek.appleskin",
             "top.theillusivec4.",
             "top.theillusivec4:",
+            "terrablender",
             "vazkii.botania"
         )
 
@@ -446,7 +449,7 @@ class MappingCompletenessTest {
                     .findAll(file.readText())
                     .map { it.groupValues[1] }
                     .filter { ruleId ->
-                        listOf("nitrogen", "cumulus", "curios", "farmersdelight", "quark").any { ruleId.contains("-$it-") }
+                        listOf("nitrogen", "cumulus", "curios", "farmersdelight", "quark", "mmlib").any { ruleId.contains("-$it-") }
                     }
                     .flatMap { ruleId ->
                         val declaringSurfaces = ruleIdPrefixes
