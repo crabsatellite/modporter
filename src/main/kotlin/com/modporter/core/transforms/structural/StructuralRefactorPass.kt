@@ -15238,24 +15238,31 @@ ${entries.joinToString(",\n")}
     }
 
     private fun migrateModLoadingContextRegisterConfigSource(source: String): String {
-        if (!source.contains("ModLoadingContext.get().registerConfig(") &&
-            !source.contains("ModLoadingContext.get().getActiveContainer().registerConfig(")
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("ModLoadingContext.get().registerConfig(") &&
+            !executableCode.contains("ModLoadingContext.get().getActiveContainer().registerConfig(")
         ) {
             return source
         }
 
         val containerName = Regex("""\bModContainer\s+([A-Za-z_$][\w$]*)""")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
+            .findAll(executableCode)
+            .map { it.groupValues[1] }
+            .distinct()
+            .singleOrNull()
             ?: return source
 
-        var result = source
-            .replace("ModLoadingContext.get().getActiveContainer().registerConfig(", "$containerName.registerConfig(")
-            .replace("ModLoadingContext.get().registerConfig(", "$containerName.registerConfig(")
+        var result = replaceExecutableRegex(
+            source,
+            Regex("""\bModLoadingContext\.get\(\)\.getActiveContainer\(\)\.registerConfig\(""")
+        ) { "$containerName.registerConfig(" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\bModLoadingContext\.get\(\)\.registerConfig\(""")
+        ) { "$containerName.registerConfig(" }
 
         val withoutImport = removeImport(result, "net.neoforged.fml.ModLoadingContext")
-        if (!withoutImport.contains("ModLoadingContext.")) {
+        if (!maskJavaCommentsAndLiterals(withoutImport).contains("ModLoadingContext.")) {
             result = withoutImport
         }
         return result

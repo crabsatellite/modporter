@@ -10061,6 +10061,43 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `mod loading context config migration ignores comments and string literals`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.ModLoadingContext;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.config.ModConfig;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+                private static final String DOC = "ModLoadingContext.get().registerConfig(";
+
+                /*
+                 ModContainer fakeContainer;
+                 ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.SERVER, FakeConfig.SPEC);
+                 */
+
+                public ExampleMod(ModContainer modContainer) {
+                    ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, ExampleConfig.SPEC);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = tempDir.resolve("src/main/java/com/example/ExampleMod.java").readText()
+
+        assertTrue(migrated.contains("modContainer.registerConfig(ModConfig.Type.COMMON, ExampleConfig.SPEC);"), migrated)
+        assertFalse(migrated.contains("fakeContainer.registerConfig"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "ModLoadingContext.get().registerConfig(";"""), migrated)
+        assertTrue(migrated.contains("ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.SERVER, FakeConfig.SPEC);"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.fml.ModLoadingContext;"), migrated)
+    }
+
+    @Test
     fun `migrates MobEffect helper parameters to Holder without deleting effect logic`() {
         val projectDir = createFile("EffectHelper.java", """
             package com.example;

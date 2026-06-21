@@ -3346,6 +3346,45 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `mod loading context config migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateModLoadingContextRegisterConfigSource")
+        assertTrue(start >= 0, "migrateModLoadingContextRegisterConfigSource is missing")
+        val end = source.indexOf("private fun migrateMobEffectHolderCallsSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw source prefilter" to body.contains("""source.contains("ModLoadingContext.get().registerConfig(")"""),
+            "raw container scan" to body.contains(".find(source)"),
+            "raw active container replacement" to body.contains("replace(\"ModLoadingContext.get().getActiveContainer().registerConfig("),
+            "raw context replacement" to body.contains("replace(\"ModLoadingContext.get().registerConfig("),
+            "raw ModLoadingContext import usage scan" to body.contains("""withoutImport.contains("ModLoadingContext.")""")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("ModLoadingContext.get().registerConfig(")""") &&
+                body.contains(".findAll(executableCode)") &&
+                body.contains(".distinct()") &&
+                body.contains(".singleOrNull()") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("""\bModLoadingContext\.get\(\)\.registerConfig\(""") &&
+                body.contains("maskJavaCommentsAndLiterals(withoutImport).contains(\"ModLoadingContext.\")"),
+            "ModLoadingContext config migration must derive the container and calls from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "ModLoadingContext config migration must not use comments or strings as source evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy game event constructor migration uses executable call and constructor evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
