@@ -17371,7 +17371,7 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
-    fun `attribute modifier namespace does not choose first mod class when multiple mods exist`() {
+    fun `attribute modifier namespace does not use metadata fallback when multiple mods exist`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
         tempDir.resolve("gradle.properties").writeText("mod_id=metadata_mod\n")
@@ -17415,8 +17415,11 @@ class StructuralRefactorExtraTest {
         val result = StructuralRefactorPass().apply(tempDir)
         val transformed = srcDir.resolve("AttributeShapes.java").readText()
 
-        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
-        assertTrue(transformed.contains("ResourceLocation.fromNamespaceAndPath(\"metadata_mod\", \"reach_modifier\")"), transformed)
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, result.changes.joinToString("\n"))
+        assertTrue(transformed.contains("static final UUID REACH_MODIFIER = UUID.fromString"), transformed)
+        assertTrue(transformed.contains("instance.removeModifier(oldId);"), transformed)
+        assertFalse(transformed.contains("ResourceLocation.fromNamespaceAndPath"), transformed)
+        assertFalse(transformed.contains("\"metadata_mod\""), transformed)
         assertFalse(transformed.contains("FirstMod.MOD_ID"), transformed)
         assertFalse(transformed.contains("SecondMod.MOD_ID"), transformed)
     }

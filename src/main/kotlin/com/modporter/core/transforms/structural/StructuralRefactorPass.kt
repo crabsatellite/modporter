@@ -10763,7 +10763,7 @@ $fields
                         mainClass,
                         mainText,
                         packageNameOf(text),
-                        modId
+                        metadataModId = null
                     )
                 )
                 if (vanilla121Migrated != text) {
@@ -16404,7 +16404,7 @@ $migratedRecipes
             attributeModifierMethods,
             genericMethodReturnTypes,
             attributeModifierIdMethodArguments,
-            projectModIdExpression = attributeModifierNamespaceExpression
+            declaredModClassIdExpression = attributeModifierNamespaceExpression
         )
         result = migrateAttributeModifierMultimapHolderTypes(result)
         result = migrateEntityRidingOffsetExpressions(result, javaInheritanceIndex)
@@ -24471,7 +24471,7 @@ ${indent}}"""
         attributeModifierMethods: Map<String, Set<String>> = emptyMap(),
         genericMethodReturnTypes: Map<String, String> = emptyMap(),
         attributeModifierIdMethodArguments: Set<AttributeModifierIdMethodArgument> = emptySet(),
-        projectModIdExpression: String? = null
+        declaredModClassIdExpression: String? = null
     ): String {
         val ownerName = javaTopLevelTypeName(source)
         val hasAttributeModifierIdMethodArguments = ownerName != null &&
@@ -24492,7 +24492,7 @@ ${indent}}"""
         }
 
         val namespace = inferModAccess(source)?.modIdExpression
-            ?: projectModIdExpression
+            ?: declaredModClassIdExpression
 
         val idAliases = mutableMapOf<String, String>()
         var result = source

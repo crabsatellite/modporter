@@ -6593,12 +6593,20 @@ class MappingCompletenessTest {
             if (it < 0) source.length else it
         }
         val body = source.substring(start, end)
+        val namespaceCallStart = source.indexOf("attributeModifierNamespaceExpression = explicitModIdReferenceForGeneratedClass")
+        assertTrue(namespaceCallStart >= 0, "attribute modifier namespace evidence call is missing")
+        val namespaceCall = source.substring(
+            namespaceCallStart,
+            minOf(source.length, namespaceCallStart + 300)
+        )
         val offenders = listOf(
             "raw AttributeModifier constructor rewrite" to """rewriteJavaNew(result, "AttributeModifier")""",
             "raw string-name AttributeModifier regex rewrite" to """new\s+AttributeModifier\(\s*"([^"]+)""",
-            "raw uuid-name AttributeModifier regex rewrite" to """new\s+AttributeModifier\(\s*([^,\r\n]+)\s*,\s*"([^"]+)"""
+            "raw uuid-name AttributeModifier regex rewrite" to """new\s+AttributeModifier\(\s*([^,\r\n]+)\s*,\s*"([^"]+)""",
+            "project mod id namespace fallback parameter" to "projectModIdExpression",
+            "metadata mod id namespace fallback" to "metadataModId = modId"
         )
-            .filter { (_, marker) -> body.contains(marker) }
+            .filter { (_, marker) -> body.contains(marker) || namespaceCall.contains(marker) }
             .map { (label, _) -> label }
 
         assertTrue(
@@ -6606,8 +6614,10 @@ class MappingCompletenessTest {
                 body.contains("args.size == 3") &&
                 body.contains("args.size != 4") &&
                 body.contains("idAliases[legacyId] = id") &&
-                body.contains("legacyName.endsWith(\".toString()\")"),
-            "AttributeModifier constructor id migration must parse executable Java constructors and preserve legacy name/id semantics"
+                body.contains("legacyName.endsWith(\".toString()\")") &&
+                body.contains("declaredModClassIdExpression") &&
+                namespaceCall.contains("metadataModId = null"),
+            "AttributeModifier constructor id migration must parse executable Java constructors and preserve legacy name/id semantics without metadata namespace fallbacks"
         )
         assertTrue(
             offenders.isEmpty(),
