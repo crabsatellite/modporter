@@ -21771,6 +21771,72 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `drop experience block constructor migration ignores comments strings and non executable hints`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CommentedOreBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.util.valueproviders.UniformInt;
+            import net.minecraft.world.level.block.DropExperienceBlock;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class CommentedOreBlock extends DropExperienceBlock {
+                public static final com.mojang.serialization.MapCodec<CommentedOreBlock> CODEC = null;
+
+                /*
+                public CommentedOreBlock(BlockBehaviour.Properties properties, UniformInt xpRange) {
+                    super(properties, xpRange);
+                }
+                */
+                public CommentedOreBlock() {
+                    super(UniformInt.of(1, 2), BlockBehaviour.Properties.of());
+                }
+
+                @Override
+                public com.mojang.serialization.MapCodec<CommentedOreBlock> codec() {
+                    return CODEC;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleBlocks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.DropExperienceBlock;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class ExampleBlocks {
+                /*
+                UniformInt guessedRange;
+                Object commented = new DropExperienceBlock(BlockBehaviour.Properties.of(), UniformInt.of(0, 1));
+                */
+                private static final String DOC = "new DropExperienceBlock(BlockBehaviour.Properties.of(), UniformInt.of(2, 3))";
+
+                public Object ambiguous(Object guessedRange) {
+                    return new DropExperienceBlock(BlockBehaviour.Properties.of(), guessedRange);
+                }
+            }
+        """.trimIndent())
+        val originals = srcDir.toFile()
+            .walkTopDown()
+            .filter { it.isFile && it.extension == "java" }
+            .associate { it.name to it.readText() }
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.toFile()
+            .walkTopDown()
+            .filter { it.isFile && it.extension == "java" }
+            .associate { it.name to it.readText() }
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertEquals(0, result.changeCount, "changes=${result.changes}")
+        assertEquals(originals, migrated)
+        assertFalse(migrated.getValue("CommentedOreBlock.java").contains("public CommentedOreBlock(UniformInt xpRange"), migrated.getValue("CommentedOreBlock.java"))
+        assertFalse(migrated.getValue("ExampleBlocks.java").contains("new DropExperienceBlock(guessedRange, BlockBehaviour.Properties.of())"), migrated.getValue("ExampleBlocks.java"))
+        assertFalse(migrated.getValue("ExampleBlocks.java").contains("new DropExperienceBlock(UniformInt.of(0, 1), BlockBehaviour.Properties.of())"), migrated.getValue("ExampleBlocks.java"))
+    }
+
+    @Test
     fun `migrates stair block subclass constructors from state suppliers to block states`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

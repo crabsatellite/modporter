@@ -3767,6 +3767,51 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `drop experience constructor migration uses executable constructor and call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val subclassStart = source.indexOf("private fun migrateDropExperienceSubclassConstructorSource")
+        assertTrue(subclassStart >= 0, "migrateDropExperienceSubclassConstructorSource is missing")
+        val subclassEnd = source.indexOf("private fun migrateDropExperienceConstructorCallSitesSource", subclassStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val subclassBody = source.substring(subclassStart, subclassEnd)
+        val callStart = source.indexOf("private fun migrateDropExperienceConstructorCallSitesSource")
+        assertTrue(callStart >= 0, "migrateDropExperienceConstructorCallSitesSource is missing")
+        val callEnd = source.indexOf("private fun looksLikeIntProviderExpression", callStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val callBody = source.substring(callStart, callEnd)
+        val offenders = listOf(
+            "raw subclass constructor scan" to "constructorPattern.find(source)",
+            "raw subclass constructor replace" to "constructorPattern.replaceFirst",
+            "raw subclass super replace" to "superPattern.replace(result",
+            "raw callsite prefilter" to """source.contains("new ")""",
+            "raw int provider variable scan" to ".findAll(source)",
+            "raw drop experience callsite rewrite" to "rewriteJavaNew(result, className)"
+        )
+            .filter { (_, marker) -> subclassBody.contains(marker) || callBody.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            subclassBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                subclassBody.contains("constructorPattern.find(executableCode)") &&
+                subclassBody.contains("replaceExecutableJavaRegex(result, superPattern)") &&
+                callBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                callBody.contains("executableCode.contains(\"new \")") &&
+                callBody.contains(".findAll(executableCode)") &&
+                callBody.contains("rewriteExecutableJavaNew(result, className)"),
+            "DropExperienceBlock constructor migration must use executable Java evidence for declarations and calls"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "DropExperienceBlock constructor migration must not use comments or string literals as evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `map codec serialization migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

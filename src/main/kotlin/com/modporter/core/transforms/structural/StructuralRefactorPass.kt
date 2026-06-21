@@ -42104,34 +42104,35 @@ public class ${builder.className} implements RecipeBuilder {
         val constructorPattern = Regex(
             """public\s+${Regex.escape(className)}\s*\(\s*((?:BlockBehaviour\.)?Properties)\s+($id)\s*,\s*((?:UniformInt|IntProvider))\s+($id)\s*\)"""
         )
-        val match = constructorPattern.find(source) ?: return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val match = constructorPattern.find(executableCode) ?: return source
         val propertiesType = match.groupValues[1]
         val propertiesName = match.groupValues[2]
         val xpType = match.groupValues[3]
         val xpName = match.groupValues[4]
-        var result = constructorPattern.replaceFirst(
-            source,
-            "public $className($xpType $xpName, $propertiesType $propertiesName)"
-        )
+        var result = source.substring(0, match.range.first) +
+            "public $className($xpType $xpName, $propertiesType $propertiesName)" +
+            source.substring(match.range.last + 1)
         val superPattern = Regex("""super\(\s*${Regex.escape(propertiesName)}\s*,\s*${Regex.escape(xpName)}\s*\)\s*;""")
-        result = superPattern.replace(result, "super($xpName, $propertiesName);")
+        result = replaceExecutableJavaRegex(result, superPattern) { "super($xpName, $propertiesName);" }
         return result
     }
 
     private fun migrateDropExperienceConstructorCallSitesSource(source: String, constructorClasses: Set<String>): String {
-        if (!source.contains("new ") || (!source.contains("UniformInt") && !source.contains("IntProvider"))) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("new ") || (!executableCode.contains("UniformInt") && !executableCode.contains("IntProvider"))) return source
         val intProviderVariables = Regex("""\b(?:UniformInt|IntProvider)\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(source)
+            .findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
         var result = source
         for (className in constructorClasses) {
-            result = rewriteJavaNew(result, className) { args ->
-                if (args.size != 2) return@rewriteJavaNew null
+            result = rewriteExecutableJavaNew(result, className) { args ->
+                if (args.size != 2) return@rewriteExecutableJavaNew null
                 val properties = args[0].trim()
                 val xpProvider = args[1].trim()
                 if (!looksLikeBlockPropertiesExpression(properties) || !looksLikeIntProviderExpression(xpProvider, intProviderVariables)) {
-                    return@rewriteJavaNew null
+                    return@rewriteExecutableJavaNew null
                 }
                 "new $className($xpProvider, $properties)"
             }
