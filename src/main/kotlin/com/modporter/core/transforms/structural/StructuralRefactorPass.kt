@@ -40832,13 +40832,18 @@ public class ${builder.className} implements RecipeBuilder {
             .toList()
         val recipeConstructors = collectRecipeConstructors(javaFiles)
         val recipeSerializerFactoryHints = collectRecipeSerializerFactoryHints(projectDir)
+        val recipeBuilderFactoryInterfaces = collectRecipeBuilderFactoryInterfaceHints(
+            javaFiles,
+            recipeSerializerFactoryHints
+        )
 
         for (file in javaFiles) {
             val original = file.readText()
             var content = migrateRecipeSerializerFactoryCallSites(original, recipeSerializerFactoryHints)
             content = migrateGenericCookingRecipeOutputBuilderSource(
                 content,
-                recipeSerializerFactoryHints
+                recipeSerializerFactoryHints,
+                recipeBuilderFactoryInterfaces
             )
             if (content != original) {
                 changes.add(Change(
@@ -40991,7 +40996,8 @@ public class ${builder.className} implements RecipeBuilder {
 
     private fun migrateGenericCookingRecipeOutputBuilderSource(
         source: String,
-        recipeSerializerFactoryHints: RecipeSerializerFactoryHints
+        recipeSerializerFactoryHints: RecipeSerializerFactoryHints,
+        recipeBuilderFactoryInterfaces: Map<String, Set<RecipeFactoryInterfaceHint>>
     ): String {
         if (!source.contains("implements RecipeBuilder") ||
             !source.contains("RecipeSerializer<? extends AbstractCookingRecipe>") ||
@@ -41009,7 +41015,7 @@ public class ${builder.className} implements RecipeBuilder {
             ?: return source
         val resultParams = parseJavaParameters(resultConstructor.groupValues[1])
         val factoryHint = referencedRecipeFactoryInterfaces(source, recipeSerializerFactoryHints).singleOrNull()
-            ?: compatibleRecipeFactoryInterfaces(resultParams, recipeSerializerFactoryHints).singleOrNull()
+            ?: recipeBuilderFactoryInterfaces[className]?.singleOrNull()
             ?: return source
         val resultParamTypes = resultParams.associate { it.name to it.type }
         val outputRecipeArgs = factoryHint.params.map { param ->
@@ -41111,14 +41117,39 @@ public class ${builder.className} implements RecipeBuilder {
             }
             .toSet()
 
-    private fun compatibleRecipeFactoryInterfaces(
-        resultParams: List<JavaParameterInfo>,
+    private fun collectRecipeBuilderFactoryInterfaceHints(
+        javaFiles: List<Path>,
         recipeSerializerFactoryHints: RecipeSerializerFactoryHints
-    ): Set<RecipeFactoryInterfaceHint> {
-        val resultParamNames = resultParams.map { it.name }.toSet()
-        return recipeSerializerFactoryHints.fieldToFactoryInterface.values
-            .filter { hint -> hint.params.all { it.name in resultParamNames } }
-            .toSet()
+    ): Map<String, Set<RecipeFactoryInterfaceHint>> {
+        if (recipeSerializerFactoryHints.fieldToFactoryInterface.isEmpty()) return emptyMap()
+        val hintsByBuilder = linkedMapOf<String, MutableSet<RecipeFactoryInterfaceHint>>()
+        val callPattern = Regex("""\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.generic\s*\(""")
+        for (javaFile in javaFiles) {
+            val source = maskJavaCommentsAndLiterals(javaFile.readText())
+            if (!source.contains(".generic(")) continue
+            var cursor = 0
+            while (true) {
+                val match = callPattern.find(source, cursor) ?: break
+                val openParen = source.indexOf('(', match.range.last - 1)
+                val closeParen = if (openParen >= 0) findMatchingParen(source, openParen) else -1
+                if (openParen < 0 || closeParen < 0) {
+                    cursor = match.range.last + 1
+                    continue
+                }
+                val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                val serializerExpression = args.lastOrNull()?.let(::normalizeRecipeSerializerExpression)
+                val hint = serializerExpression
+                    ?.let { recipeSerializerFactoryHints.fieldToFactoryInterface[it] }
+                if (hint != null) {
+                    val builderClass = match.groupValues[1].substringAfterLast('.')
+                    hintsByBuilder.getOrPut(builderClass) { linkedSetOf() }.add(hint)
+                }
+                cursor = closeParen + 1
+            }
+        }
+        return hintsByBuilder.mapValues { it.value.toSet() }
     }
 
     private fun addFactoryParameterToBuilderConstructor(

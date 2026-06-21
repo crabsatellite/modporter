@@ -2798,6 +2798,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `serializer backed cooking builder migration uses serializer holder evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateGenericCookingRecipeOutputBuilderSource")
+        assertTrue(start >= 0, "migrateGenericCookingRecipeOutputBuilderSource is missing")
+        val end = source.indexOf("private data class RecipeFactoryArgument", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val callSiteStart = source.indexOf("private fun collectRecipeBuilderFactoryInterfaceHints")
+        assertTrue(callSiteStart >= 0, "collectRecipeBuilderFactoryInterfaceHints is missing")
+        val callSiteEnd = source.indexOf("private fun addFactoryParameterToBuilderConstructor", callSiteStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val callSiteBody = source.substring(callSiteStart, callSiteEnd)
+
+        assertTrue(
+            body.contains("referencedRecipeFactoryInterfaces(source, recipeSerializerFactoryHints).singleOrNull()") &&
+                body.contains("recipeBuilderFactoryInterfaces[className]?.singleOrNull()"),
+            "Cooking builder factory migration must use direct source references or call-site serializer holder evidence"
+        )
+        assertTrue(
+            callSiteBody.contains("maskJavaCommentsAndLiterals(javaFile.readText())") &&
+                callSiteBody.contains("recipeSerializerFactoryHints.fieldToFactoryInterface[it]"),
+            "Cooking builder call-site factory evidence must come from executable serializer holder calls"
+        )
+        assertTrue(
+            !source.contains("compatibleRecipeFactoryInterfaces") &&
+                !body.contains("resultParamNames"),
+            "Cooking builder factory migration must not bind factories by parameter-name compatibility alone"
+        )
+    }
+
+    @Test
     fun `custom enchantment data migrations do not resolve references by qualified tail fallback`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

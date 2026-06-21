@@ -7184,6 +7184,109 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `serializer backed cooking builder migration requires call site or source serializer evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("SpecialCookingSerializer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class SpecialCookingSerializer<T extends AbstractCookingRecipe> implements RecipeSerializer<T> {
+                public SpecialCookingSerializer(SpecialCookingSerializer.CookieBaker<T> factory) {
+                }
+
+                public interface CookieBaker<T extends AbstractCookingRecipe> {
+                    T create(String group, BookCategory category, Ingredient ingredient, ItemStack result, float experience, int cookingTime);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BookCategory.java").writeText("""
+            package com.example;
+
+            public enum BookCategory {
+                HEATED
+            }
+        """.trimIndent())
+        srcDir.resolve("HeatedRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+
+            public class HeatedRecipe extends AbstractCookingRecipe {
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleSerializers.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleSerializers {
+                public static final DeferredHolder<RecipeSerializer<?>, SpecialCookingSerializer<HeatedRecipe>> HEATED = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("OrphanCookingRecipeBuilder.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.data.recipes.RecipeBuilder;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class OrphanCookingRecipeBuilder implements RecipeBuilder {
+                private final BookCategory category;
+                private final Ingredient ingredient;
+                private final Item result;
+                private final float experience;
+                private final int cookingTime;
+                private final RecipeSerializer<? extends AbstractCookingRecipe> serializer;
+
+                public OrphanCookingRecipeBuilder(BookCategory category, Ingredient ingredient, Item result, float experience, int cookingTime, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
+                    this.category = category;
+                    this.ingredient = ingredient;
+                    this.result = result;
+                    this.experience = experience;
+                    this.cookingTime = cookingTime;
+                    this.serializer = serializer;
+                }
+
+                public void save(RecipeOutput output, ResourceLocation id) {
+                    Advancement.Builder advancement = output.advancement();
+                    output.accept(new OrphanCookingRecipeBuilder.Result(id, "", this.category, this.ingredient, this.result, this.experience, this.cookingTime, advancement, id, this.serializer));
+                }
+
+                static class Result implements RecipeOutput {
+                    public Result(ResourceLocation id, String group, BookCategory category, Ingredient ingredient, Item result, float experience, int cookingTime, Advancement.Builder advancement, ResourceLocation advancementId, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
+                    }
+
+                    public void serializeRecipeData(JsonObject json) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val builder = srcDir.resolve("OrphanCookingRecipeBuilder.java").readText()
+
+        assertTrue(
+            result.changes.none { it.ruleId == "struct-recipe-builder-factory-output" },
+            "Builder must not be migrated from a globally unique compatible serializer factory: ${result.changes}"
+        )
+        assertTrue(builder.contains("private final RecipeSerializer<? extends AbstractCookingRecipe> serializer;"), builder)
+        assertTrue(builder.contains("static class Result implements RecipeOutput"), builder)
+        assertFalse(builder.contains("private final com.example.SpecialCookingSerializer.CookieBaker<?> factory;"), builder)
+    }
+
+    @Test
     fun `factory cooking serializers derive category and result accessors from source`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
