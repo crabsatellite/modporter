@@ -32,6 +32,22 @@ class CliTest {
         return projectDir
     }
 
+    private fun setupBrokenForgeMod(): Path {
+        val projectDir = tempDir.resolve("brokenmod")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("Broken.java").writeText("""
+            package com.example;
+            import net.minecraftforge.common.MinecraftForge;
+            public class Broken {
+                void init( {
+                    MinecraftForge.EVENT_BUS.register(this);
+                }
+            }
+        """.trimIndent())
+        return projectDir
+    }
+
     @Test
     fun `analyze command runs without error`() {
         val projectDir = setupMiniMod()
@@ -47,6 +63,22 @@ class CliTest {
         // Source file should NOT be modified (analyze = dry run)
         val srcContent = projectDir.resolve("src/main/java/com/example/Mini.java").readText()
         assertTrue(srcContent.contains("net.minecraftforge"), "Analyze should not modify files")
+    }
+
+    @Test
+    fun `analyze command rejects skipped source shapes after writing report`() {
+        val projectDir = setupBrokenForgeMod()
+        val reportPath = tempDir.resolve("broken-analyze-report.md")
+
+        val error = assertFailsWith<UsageError> {
+            AnalyzeCommand().parse(listOf("--src", projectDir.toString(), "--report", reportPath.toString()))
+        }
+
+        assertTrue(error.message?.contains("skipped source shapes") == true)
+        assertTrue(reportPath.exists(), "Analyze should still write the blocking report")
+        val content = reportPath.readText()
+        assertTrue(content.contains("**Total skipped**:"), content)
+        assertTrue(content.contains("## Skipped Source Shapes"), content)
     }
 
     @Test
@@ -128,6 +160,25 @@ class CliTest {
         assertFalse(content.contains("MinecraftForge"), "Old references should be gone")
 
         assertTrue(reportPath.exists(), "Report should be generated")
+    }
+
+    @Test
+    fun `port command rejects skipped source shapes after writing report`() {
+        val projectDir = setupBrokenForgeMod()
+        val outDir = tempDir.resolve("brokenmod-neoforge")
+        val reportPath = tempDir.resolve("broken-port-report.md")
+
+        val error = assertFailsWith<UsageError> {
+            PortCommand().parse(listOf(
+                "--src", projectDir.toString(),
+                "--out", outDir.toString(),
+                "--report", reportPath.toString()
+            ))
+        }
+
+        assertTrue(error.message?.contains("skipped source shapes") == true)
+        assertTrue(reportPath.exists(), "Port should still write the blocking report")
+        assertTrue(reportPath.readText().contains("## Skipped Source Shapes"))
     }
 
     @Test

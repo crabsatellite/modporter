@@ -122,6 +122,8 @@ class PortCommand : CliktCommand(
             ReportGenerator().generate(result, reportPath)
             echo("Report written to: $reportPath")
         }
+
+        failOnBlockingMigrationResult(result)
     }
 
     private fun copyProject(src: Path, dest: Path) {
@@ -175,6 +177,8 @@ class AnalyzeCommand : CliktCommand(
             ReportGenerator().generate(result, reportPath)
             echo("Report written to: $reportPath")
         }
+
+        failOnBlockingMigrationResult(result)
     }
 }
 
@@ -242,3 +246,11 @@ private fun resolvePipeline(pipelineId: String, projectDir: Path) =
         PipelineRegistry.get(pipelineId)
             ?: error("Unknown pipeline: $pipelineId. Use 'modporter list' to see available pipelines.")
     }
+
+private fun failOnBlockingMigrationResult(result: PipelineResult) {
+    if (result.totalErrors == 0 && result.totalSkipped == 0) return
+    throw UsageError(
+        "Migration did not complete cleanly: ${result.totalErrors} errors, " +
+            "${result.totalSkipped} skipped source shapes. See the summary/report for details."
+    )
+}
