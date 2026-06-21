@@ -4609,8 +4609,20 @@ $registerLines
         val compatFile: Path,
         val compatPackageName: String,
         val compatClassName: String,
-        val itemClassNames: Set<String>,
         val itemReferences: List<RegisteredItemReference>
+    )
+
+    private data class LegacyCuriosProviderFactory(
+        val file: Path,
+        val packageName: String,
+        val className: String,
+        val methodName: String,
+        val providerExpression: String
+    )
+
+    private data class LegacyCuriosItemHook(
+        val file: Path,
+        val className: String
     )
 
     private fun migrateCuriosItemCapabilities(projectDir: Path, dryRun: Boolean): List<Change> {
@@ -4622,131 +4634,145 @@ $registerLines
             .filter { it.extension == "java" }
             .toList()
 
-        val compatFile = javaFiles.firstOrNull { javaFile ->
-            val text = javaFile.readText()
-            text.contains("CurioItemCapability.createProvider") && text.contains("new ICurio")
-        } ?: return changes
+        val factories = javaFiles.mapNotNull { legacyCuriosProviderFactory(it) }
+        for (factory in factories) {
+            val helperMethodNames = legacyCuriosHelperMethodNames(javaFiles, factory)
+            val itemHooks = legacyCuriosItemHooks(javaFiles, factory, helperMethodNames)
+            if (itemHooks.isEmpty()) continue
 
-        var compatText = compatFile.readText()
-        val originalCompatText = compatText
-        val compatPackageName = packageNameOf(compatText)
-        val compatClassName = classNameOfJavaSource(compatText) ?: return changes
-        val providerExpression = extractCuriosProviderExpression(compatText) ?: return changes
+            val itemClassNames = itemHooks.mapTo(linkedSetOf()) { it.className }
+            val itemReferences = itemClassNames
+                .flatMap { itemClassName -> findRegisteredItemReferences(javaFiles, itemClassName) }
+                .distinctBy { "${it.qualifiedRegistryClass}.${it.fieldName}" }
+                .sortedWith(compareBy({ it.qualifiedRegistryClass }, { it.fieldName }))
+            if (itemReferences.isEmpty()) continue
 
-        compatText = replaceCuriosProviderFactory(compatText, providerExpression)
-        compatText = removeImportIfPresent(compatText, "net.neoforged.neoforge.capabilities.ICapabilityProvider")
-        compatText = removeImportIfPresent(compatText, "top.theillusivec4.curios.common.capability.CurioItemCapability")
-        compatText = addImportIfMissing(compatText, "net.minecraft.world.level.ItemLike")
-        compatText = addImportIfMissing(compatText, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
-        compatText = addImportIfMissing(compatText, "top.theillusivec4.curios.api.CuriosCapability")
-        compatText = removeUnusedImportsBySimpleNamePattern(compatText, Regex("""[A-Za-z_$][\w$]*PacketHandler"""))
+            var compatText = factory.file.readText()
+            val originalCompatText = compatText
+            compatText = replaceCuriosProviderFactory(compatText, factory.methodName, factory.providerExpression)
+            compatText = removeImportIfPresent(compatText, "net.neoforged.neoforge.capabilities.ICapabilityProvider")
+            compatText = removeImportIfPresent(compatText, "top.theillusivec4.curios.common.capability.CurioItemCapability")
+            compatText = addImportIfMissing(compatText, "net.minecraft.world.level.ItemLike")
+            compatText = addImportIfMissing(compatText, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
+            compatText = addImportIfMissing(compatText, "top.theillusivec4.curios.api.CuriosCapability")
+            compatText = removeUnusedImportsBySimpleNamePattern(compatText, Regex("""[A-Za-z_$][\w$]*PacketHandler"""))
 
-        if (compatText != originalCompatText) {
-            if (!dryRun) {
-                compatFile.writeText(compatText)
-            }
-            changes.add(Change(
-                file = compatFile,
-                line = 0,
-                description = "Migrate legacy Curios ICapabilityProvider factory to RegisterCapabilitiesEvent item registration",
-                before = "CurioItemCapability.createProvider(new ICurio() { ... })",
-                after = "event.registerItem(CuriosCapability.ITEM, (stack, context) -> new ICurio() { ... }, items)",
-                confidence = Confidence.HIGH,
-                ruleId = "struct-curios-item-capability"
-            ))
-        }
-
-        val itemClassNames = linkedSetOf<String>()
-        javaFiles.forEach { javaFile ->
-            if (javaFile == compatFile) return@forEach
-            var text = javaFile.readText()
-            if (!text.contains("setupCurio") && !text.contains("setupCuriosCapability")) return@forEach
-            val original = text
-            val className = classNameOfJavaSource(text)
-
-            text = removeMethodByNameContaining(text, "initCapabilities", listOf("setupCurio", "setupCuriosCapability"))
-            text = removeMethodByNameContaining(text, "setupCurio", listOf("setupCuriosCapability"))
-            text = removeUnusedSimpleImports(
-                text,
-                listOf(
-                    "net.minecraft.nbt.CompoundTag",
-                    "net.minecraft.world.item.ItemStack",
-                    "net.neoforged.neoforge.capabilities.ICapabilityProvider",
-                    "net.neoforged.fml.ModList",
-                    "org.jetbrains.annotations.Nullable",
-                    "$compatPackageName.$compatClassName"
-                )
-            )
-
-            if (text != original) {
-                className?.let { itemClassNames.add(it) }
+            if (compatText != originalCompatText) {
                 if (!dryRun) {
-                    javaFile.writeText(text)
+                    factory.file.writeText(compatText)
                 }
                 changes.add(Change(
-                    file = javaFile,
+                    file = factory.file,
                     line = 0,
-                    description = "Remove legacy Item#initCapabilities Curios hook after event registration migration",
-                    before = "initCapabilities(...) -> Curios capability provider",
-                    after = "Registered through RegisterCapabilitiesEvent.registerItem",
+                    description = "Migrate legacy Curios ICapabilityProvider factory to RegisterCapabilitiesEvent item registration",
+                    before = "CurioItemCapability.createProvider(new ICurio() { ... })",
+                    after = "event.registerItem(CuriosCapability.ITEM, (stack, context) -> new ICurio() { ... }, items)",
                     confidence = Confidence.HIGH,
-                    ruleId = "struct-curios-item-initcapabilities"
+                    ruleId = "struct-curios-item-capability"
                 ))
             }
+
+            val removalNeedles = curiosFactoryCallNeedles(factory) + helperMethodNames
+            val itemHookFiles = itemHooks.mapTo(linkedSetOf()) { it.file }
+            javaFiles.filter { it != factory.file }.forEach { javaFile ->
+                var text = javaFile.readText()
+                val original = text
+                if (javaFile in itemHookFiles) {
+                    text = removeMethodByNameContaining(text, "initCapabilities", removalNeedles)
+                }
+                helperMethodNames.forEach { helperMethod ->
+                    text = removeMethodByNameContaining(text, helperMethod, curiosFactoryCallNeedles(factory))
+                }
+                text = removeUnusedSimpleImports(
+                    text,
+                    listOf(
+                        "net.minecraft.nbt.CompoundTag",
+                        "net.minecraft.world.item.ItemStack",
+                        "net.neoforged.neoforge.capabilities.ICapabilityProvider",
+                        "net.neoforged.fml.ModList",
+                        "org.jetbrains.annotations.Nullable",
+                        "${factory.packageName}.${factory.className}"
+                    )
+                )
+
+                if (text != original) {
+                    if (!dryRun) {
+                        javaFile.writeText(text)
+                    }
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Remove legacy Item#initCapabilities Curios hook after event registration migration",
+                        before = "initCapabilities(...) -> Curios capability provider",
+                        after = "Registered through RegisterCapabilitiesEvent.registerItem",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-curios-item-initcapabilities"
+                    ))
+                }
+            }
+
+            changes.addAll(registerCuriosItemCapabilitiesOnModBus(
+                projectDir,
+                CuriosItemCapabilityMigration(
+                    compatFile = factory.file,
+                    compatPackageName = factory.packageName,
+                    compatClassName = factory.className,
+                    itemReferences = itemReferences
+                ),
+                dryRun
+            ))
         }
-
-        if (itemClassNames.isEmpty()) return changes
-        val itemReferences = itemClassNames
-            .flatMap { itemClassName -> findRegisteredItemReferences(javaFiles, itemClassName) }
-            .distinctBy { "${it.qualifiedRegistryClass}.${it.fieldName}" }
-            .sortedWith(compareBy({ it.qualifiedRegistryClass }, { it.fieldName }))
-        if (itemReferences.isEmpty()) return changes
-
-        changes.addAll(registerCuriosItemCapabilitiesOnModBus(
-            projectDir,
-            CuriosItemCapabilityMigration(
-                compatFile = compatFile,
-                compatPackageName = compatPackageName,
-                compatClassName = compatClassName,
-                itemClassNames = itemClassNames,
-                itemReferences = itemReferences
-            ),
-            dryRun
-        ))
 
         return changes
     }
 
-    private fun extractCuriosProviderExpression(source: String): String? {
-        val factoryIndex = source.indexOf("CurioItemCapability.createProvider")
-        if (factoryIndex < 0) return null
-        val newIndex = source.indexOf("new ICurio", factoryIndex)
-        if (newIndex < 0) return null
-        val openBrace = source.indexOf('{', newIndex)
+    private fun legacyCuriosProviderFactory(file: Path): LegacyCuriosProviderFactory? {
+        val source = file.readText()
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("CurioItemCapability.createProvider") || !executableCode.contains("new ICurio")) {
+            return null
+        }
+        val className = classNameOfJavaSource(executableCode) ?: return null
+        val method = javaMethodRangesIncludingDefault(executableCode).firstOrNull { candidate ->
+            val methodText = executableCode.substring(candidate.range)
+            methodText.contains("CurioItemCapability.createProvider") && methodText.contains("new ICurio")
+        } ?: return null
+        val providerExpression = extractCuriosProviderExpression(source, executableCode, method.range) ?: return null
+        return LegacyCuriosProviderFactory(
+            file = file,
+            packageName = packageNameOf(source),
+            className = className,
+            methodName = method.name,
+            providerExpression = providerExpression
+        )
+    }
+
+    private fun extractCuriosProviderExpression(
+        source: String,
+        executableCode: String,
+        methodRange: IntRange
+    ): String? {
+        val methodText = executableCode.substring(methodRange)
+        val factoryOffset = methodText.indexOf("CurioItemCapability.createProvider")
+        if (factoryOffset < 0) return null
+        val newOffset = methodText.indexOf("new ICurio", factoryOffset)
+        if (newOffset < 0) return null
+        val newIndex = methodRange.first + newOffset
+        val openBrace = executableCode.indexOf('{', newIndex)
         if (openBrace < 0) return null
-        val closeBrace = findMatchingBrace(source, openBrace)
-        if (closeBrace < 0) return null
+        val closeBrace = findMatchingBrace(executableCode, openBrace)
+        if (closeBrace < 0 || closeBrace !in methodRange) return null
         return source.substring(newIndex, closeBrace + 1)
     }
 
-    private fun replaceCuriosProviderFactory(source: String, providerExpression: String): String {
-        val methodNameIndex = Regex("""\bsetupCuriosCapability\s*\(""")
-            .find(source)
-            ?.range
-            ?.first
-            ?: return source
-        val openBrace = source.indexOf('{', methodNameIndex)
-        if (openBrace < 0) return source
-        val closeBrace = findMatchingBrace(source, openBrace)
-        if (closeBrace < 0) return source
-        val signatureStart = source.lastIndexOf('\n', methodNameIndex).let { if (it < 0) 0 else it + 1 }
-        val annotationStart = Regex("""(?m)(?:^[ \t]*@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*\r?\n)+[ \t]*$""")
-            .findAll(source.substring(0, signatureStart))
-            .lastOrNull()
-            ?.range
-            ?.first
-            ?: signatureStart
-        var end = closeBrace + 1
+    private fun replaceCuriosProviderFactory(source: String, methodName: String, providerExpression: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val method = javaMethodRangesIncludingDefault(executableCode).firstOrNull { candidate ->
+            candidate.name == methodName &&
+                executableCode.substring(candidate.range).contains("CurioItemCapability.createProvider") &&
+                executableCode.substring(candidate.range).contains("new ICurio")
+        } ?: return source
+        var end = method.range.last + 1
         if (end < source.length && source[end] == '\r') end++
         if (end < source.length && source[end] == '\n') end++
 
@@ -4757,8 +4783,64 @@ $registerLines
 	}
 
 """
-        return source.substring(0, annotationStart) + replacement + source.substring(end)
+        return source.substring(0, method.range.first) + replacement + source.substring(end)
     }
+
+    private fun legacyCuriosHelperMethodNames(
+        javaFiles: List<Path>,
+        factory: LegacyCuriosProviderFactory
+    ): Set<String> =
+        javaFiles
+            .filter { it != factory.file }
+            .flatMap { javaFile ->
+                val executableCode = maskJavaCommentsAndLiterals(javaFile.readText())
+                if (curiosFactoryCallNeedles(factory).none { executableCode.contains(it) }) {
+                    emptyList()
+                } else {
+                    javaMethodRangesIncludingDefault(executableCode)
+                        .filter { method ->
+                            method.name != "initCapabilities" &&
+                                curiosFactoryCallNeedles(factory).any { executableCode.substring(method.range).contains(it) }
+                        }
+                        .map { it.name }
+                }
+            }
+            .toSet()
+
+    private fun legacyCuriosItemHooks(
+        javaFiles: List<Path>,
+        factory: LegacyCuriosProviderFactory,
+        helperMethodNames: Set<String>
+    ): List<LegacyCuriosItemHook> {
+        val factoryNeedles = curiosFactoryCallNeedles(factory)
+        return javaFiles.mapNotNull { javaFile ->
+            if (javaFile == factory.file) return@mapNotNull null
+            val source = javaFile.readText()
+            val executableCode = maskJavaCommentsAndLiterals(source)
+            val hasCapabilityHookEvidence = factoryNeedles.any { executableCode.contains(it) } ||
+                helperMethodNames.any { helperName -> executableCode.contains("$helperName(") }
+            if (!hasCapabilityHookEvidence) return@mapNotNull null
+            val itemClassName = classNameOfJavaSource(executableCode) ?: return@mapNotNull null
+            javaMethodRangesIncludingDefault(executableCode).firstOrNull { method ->
+                method.name == "initCapabilities" &&
+                    curiosItemHookMethodCalls(executableCode.substring(method.range), factory, helperMethodNames)
+            } ?: return@mapNotNull null
+            LegacyCuriosItemHook(javaFile, itemClassName)
+        }
+    }
+
+    private fun curiosItemHookMethodCalls(
+        methodText: String,
+        factory: LegacyCuriosProviderFactory,
+        helperMethodNames: Set<String>
+    ): Boolean =
+        curiosFactoryCallNeedles(factory).any { methodText.contains(it) } ||
+            helperMethodNames.any { helperName ->
+                Regex("""(?:^|[^\w$])(?:this\.)?${Regex.escape(helperName)}\s*\(""").containsMatchIn(methodText)
+            }
+
+    private fun curiosFactoryCallNeedles(factory: LegacyCuriosProviderFactory): List<String> =
+        listOf("${factory.className}.${factory.methodName}")
 
     private fun migrateCuriosProviderExpression(providerExpression: String): String {
         var result = providerExpression
@@ -4873,14 +4955,15 @@ $itemArguments
         var result = source
         var searchStart = 0
         while (searchStart < result.length) {
+            val executableResult = maskJavaCommentsAndLiterals(result)
             val methodNameIndex = Regex("""\b${Regex.escape(methodName)}\s*\(""")
-                .find(result, searchStart)
+                .find(executableResult, searchStart)
                 ?.range
                 ?.first
                 ?: return result
-            val openBrace = result.indexOf('{', methodNameIndex)
+            val openBrace = executableResult.indexOf('{', methodNameIndex)
             if (openBrace < 0) return result
-            val closeBrace = findMatchingBrace(result, openBrace)
+            val closeBrace = findMatchingBrace(executableResult, openBrace)
             if (closeBrace < 0) return result
             val signatureStart = result.lastIndexOf('\n', methodNameIndex).let { if (it < 0) 0 else it + 1 }
             val annotationStart = Regex("""(?m)(?:^[ \t]*@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*\r?\n)+[ \t]*$""")
@@ -4889,8 +4972,8 @@ $itemArguments
                 ?.range
                 ?.first
                 ?: signatureStart
-            val methodText = result.substring(annotationStart, closeBrace + 1)
-            if (requiredNeedles.none { methodText.contains(it) }) {
+            val executableMethodText = executableResult.substring(annotationStart, closeBrace + 1)
+            if (requiredNeedles.none { executableMethodText.contains(it) }) {
                 searchStart = closeBrace + 1
                 continue
             }

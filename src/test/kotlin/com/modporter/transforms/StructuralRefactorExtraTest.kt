@@ -3041,7 +3041,7 @@ class StructuralRefactorExtraTest {
         srcDir.resolve("ExampleMod.java").writeText("""
             package com.example;
 
-            import com.example.compat.curios.CuriosCompat;
+            import com.example.compat.curios.WearableBridge;
             import com.example.init.ItemRegister;
             import net.neoforged.bus.api.IEventBus;
             import net.neoforged.fml.ModContainer;
@@ -3078,7 +3078,7 @@ class StructuralRefactorExtraTest {
             }
         """.trimIndent())
 
-        compatDir.resolve("CuriosCompat.java").writeText("""
+        compatDir.resolve("WearableBridge.java").writeText("""
             package com.example.compat.curios;
 
             import net.minecraft.sounds.SoundEvents;
@@ -3092,8 +3092,8 @@ class StructuralRefactorExtraTest {
             import com.example.network.ExamplePacketHandler;
             import javax.annotation.Nonnull;
 
-            public class CuriosCompat {
-                public static ICapabilityProvider setupCuriosCapability(ItemStack stack) {
+            public class WearableBridge {
+                public static ICapabilityProvider makeLegacyProvider(ItemStack stack) {
                     return CurioItemCapability.createProvider(new ICurio() {
                         @Override
                         public ItemStack getStack() {
@@ -3118,7 +3118,7 @@ class StructuralRefactorExtraTest {
         itemDir.resolve("CurioItem.java").writeText("""
             package com.example.item;
 
-            import com.example.compat.curios.CuriosCompat;
+            import com.example.compat.curios.WearableBridge;
             import net.minecraft.world.item.ItemStack;
             import net.neoforged.fml.ModList;
             import net.neoforged.neoforge.capabilities.ICapabilityProvider;
@@ -3126,9 +3126,9 @@ class StructuralRefactorExtraTest {
 
             public interface CurioItem {
                 @Nullable
-                default ICapabilityProvider setupCurio(ItemStack stack, @Nullable ICapabilityProvider provider) {
+                default ICapabilityProvider bridgeWearableCapability(ItemStack stack, @Nullable ICapabilityProvider provider) {
                     if (ModList.get().isLoaded("curios")) {
-                        return CuriosCompat.setupCuriosCapability(stack);
+                        return WearableBridge.makeLegacyProvider(stack);
                     }
                     return provider;
                 }
@@ -3150,7 +3150,7 @@ class StructuralRefactorExtraTest {
                 @Nullable
                 @Override
                 public ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
-                    return this.setupCurio(stack, super.initCapabilities(stack, nbt));
+                    return this.bridgeWearableCapability(stack, super.initCapabilities(stack, nbt));
                 }
             }
         """.trimIndent())
@@ -3170,14 +3170,14 @@ class StructuralRefactorExtraTest {
                 @Nullable
                 @Override
                 public ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
-                    return this.setupCurio(stack, super.initCapabilities(stack, nbt));
+                    return this.bridgeWearableCapability(stack, super.initCapabilities(stack, nbt));
                 }
             }
         """.trimIndent())
 
         val pass = StructuralRefactorPass()
         val result = pass.apply(tempDir)
-        val compat = compatDir.resolve("CuriosCompat.java").readText()
+        val compat = compatDir.resolve("WearableBridge.java").readText()
         val marker = itemDir.resolve("CurioItem.java").readText()
         val charm = itemDir.resolve("CharmItem.java").readText()
         val head = itemDir.resolve("HeadItem.java").readText()
@@ -3191,15 +3191,15 @@ class StructuralRefactorExtraTest {
         assertTrue(compat.contains("new SoundInfo(SoundEvents.ARMOR_EQUIP_GENERIC.value(), 1.0F, 1.0F)"))
         assertTrue(compat.contains("PacketDistributor.sendToPlayersTrackingEntityAndSelf(context.entity(), new ExamplePacket(context.entity().getId()));"))
         assertTrue(!compat.contains("CurioItemCapability"))
-        assertTrue(!compat.contains("ICapabilityProvider setupCuriosCapability"))
+        assertTrue(!compat.contains("ICapabilityProvider makeLegacyProvider"))
         assertTrue(!compat.contains("CHANNEL.send"))
-        assertTrue(!marker.contains("setupCurio"))
+        assertTrue(!marker.contains("bridgeWearableCapability"))
         assertTrue(!marker.contains("ModList"))
         assertTrue(!charm.contains("initCapabilities"))
         assertTrue(!charm.contains("ICapabilityProvider"))
         assertTrue(!head.contains("initCapabilities"))
         assertTrue(!head.contains("ICapabilityProvider"))
-        assertTrue(mod.contains("modbus.addListener((RegisterCapabilitiesEvent event) -> CuriosCompat.registerCuriosCapabilities(event,"))
+        assertTrue(mod.contains("modbus.addListener((RegisterCapabilitiesEvent event) -> WearableBridge.registerCuriosCapabilities(event,"))
         assertTrue(mod.contains("ItemRegister.CHARM.get()"))
         assertTrue(mod.contains("ItemRegister.HEAD.get()"))
     }

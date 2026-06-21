@@ -3643,6 +3643,43 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `curios item capability migration derives local helper names from source structure`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateCuriosItemCapabilities")
+        assertTrue(start >= 0, "migrateCuriosItemCapabilities is missing")
+        val end = source.indexOf("private fun registerCuriosItemCapabilitiesOnModBus", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "fixed local setupCurio helper" to "setupCurio",
+            "fixed local setupCuriosCapability factory" to "setupCuriosCapability",
+            "raw Curios provider file scan" to "text.contains(\"CurioItemCapability.createProvider\")",
+            "raw ICurio provider file scan" to "text.contains(\"new ICurio\")",
+            "raw Curios provider index lookup" to "source.indexOf(\"CurioItemCapability.createProvider\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "curios item capability migration contains $label" }
+
+        assertTrue(
+            body.contains("legacyCuriosProviderFactory") &&
+                body.contains("legacyCuriosHelperMethodNames") &&
+                body.contains("legacyCuriosItemHooks") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("javaMethodRangesIncludingDefault(executableCode)") &&
+                body.contains("findRegisteredItemReferences(javaFiles, itemClassName)"),
+            "Curios item capability migration must derive provider, helper, and item registrations from executable source structure"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Curios item capability migration must not depend on fixed project-local helper names or raw-source evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `nested simplechannel migration does not depend on fixed networking class names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
