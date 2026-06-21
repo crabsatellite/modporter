@@ -85,11 +85,11 @@ class CliTest {
     fun `validate command detects Forge references`() {
         val projectDir = setupMiniMod()
 
-        // Capture output by running validate
-        val cmd = ValidateCommand()
-        // ValidateCommand uses echo which prints to stdout
-        cmd.parse(listOf("--src", projectDir.toString()))
-        // If it didn't throw, validate ran successfully
+        val error = assertFailsWith<UsageError> {
+            ValidateCommand().parse(listOf("--src", projectDir.toString()))
+        }
+
+        assertTrue(error.message?.contains("Validation failed") == true)
     }
 
     @Test

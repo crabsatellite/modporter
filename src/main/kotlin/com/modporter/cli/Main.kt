@@ -1,15 +1,20 @@
 package com.modporter.cli
 
-import com.modporter.core.pipeline.*
+import com.github.ajalt.clikt.core.CliktCommand
+import com.github.ajalt.clikt.core.UsageError
+import com.github.ajalt.clikt.core.subcommands
+import com.github.ajalt.clikt.parameters.options.default
+import com.github.ajalt.clikt.parameters.options.flag
+import com.github.ajalt.clikt.parameters.options.option
+import com.github.ajalt.clikt.parameters.options.required
+import com.github.ajalt.clikt.parameters.types.path
+import com.modporter.core.pipeline.Confidence
+import com.modporter.core.pipeline.Pipeline
+import com.modporter.core.pipeline.PipelineResult
 import com.modporter.mapping.MappingDatabase
 import com.modporter.registry.PipelineOptions
 import com.modporter.registry.PipelineRegistry
 import com.modporter.report.ReportGenerator
-import com.github.ajalt.clikt.core.CliktCommand
-import com.github.ajalt.clikt.core.UsageError
-import com.github.ajalt.clikt.core.subcommands
-import com.github.ajalt.clikt.parameters.options.*
-import com.github.ajalt.clikt.parameters.types.path
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 
@@ -22,7 +27,7 @@ fun main(args: Array<String>) {
     ).main(args)
 }
 
-// Keep Forge2Neo as alias for backward compatibility in tests
+// Keep Forge2Neo as alias for backward compatibility in tests.
 class Forge2Neo : CliktCommand(
     name = "modporter",
     help = "General-purpose Minecraft Mod Migration Tool"
@@ -48,8 +53,7 @@ class PortCommand : CliktCommand(
     private val out by option("--out", help = "Output directory (default: <src>-neoforge)")
         .path()
 
-    private val pipelineId by option("--pipeline", "-p",
-        help = "Pipeline ID (e.g., forge2neo). Auto-detects if omitted.")
+    private val pipelineId by option("--pipeline", "-p", help = "Pipeline ID (e.g., forge2neo). Auto-detects if omitted.")
         .default("auto")
 
     private val dryRun by option("--dry-run", help = "Preview changes without modifying files")
@@ -64,6 +68,7 @@ class PortCommand : CliktCommand(
     private val report by option("--report", help = "Write detailed report to file")
         .path()
 
+    @Suppress("unused")
     private val verbose by option("--verbose", help = "Show detailed transformation log")
         .flag(default = false)
 
@@ -94,7 +99,7 @@ class PortCommand : CliktCommand(
         val targetDir = if (dryRun) src else projectDir
         val options = PipelineOptions(offline = offline, resolveDeps = resolveDeps)
 
-        echo("═══════════════════════════════════════════")
+        echo("===========================================")
         echo("  ModPorter v0.2.0")
         echo("  Pipeline: ${pipelineDef.displayName}")
         echo("  Source: $src")
@@ -102,7 +107,7 @@ class PortCommand : CliktCommand(
         echo("  Mode: ${if (dryRun) "DRY RUN" else "APPLY"}")
         echo("  Min confidence: $confidence")
         if (resolveDeps) echo("  Dep resolution: ${if (offline) "offline only" else "online + offline"}")
-        echo("═══════════════════════════════════════════")
+        echo("===========================================")
         echo()
 
         val mappingDb = MappingDatabase.load(pipelineDef.mappingsPrefix)
@@ -150,8 +155,7 @@ class AnalyzeCommand : CliktCommand(
         .path(mustExist = true, canBeFile = false)
         .required()
 
-    private val pipelineId by option("--pipeline", "-p",
-        help = "Pipeline ID (e.g., forge2neo). Auto-detects if omitted.")
+    private val pipelineId by option("--pipeline", "-p", help = "Pipeline ID (e.g., forge2neo). Auto-detects if omitted.")
         .default("auto")
 
     private val report by option("--report", help = "Write report to file")
@@ -190,8 +194,7 @@ class ValidateCommand : CliktCommand(
         .path(mustExist = true, canBeFile = false)
         .required()
 
-    private val pipelineId by option("--pipeline", "-p",
-        help = "Pipeline ID (e.g., forge2neo). Auto-detects if omitted.")
+    private val pipelineId by option("--pipeline", "-p", help = "Pipeline ID (e.g., forge2neo). Auto-detects if omitted.")
         .default("auto")
 
     override fun run() {
@@ -214,9 +217,10 @@ class ValidateCommand : CliktCommand(
             }
 
         if (found == 0) {
-            echo("✓ No remaining source framework references found!")
+            echo("No remaining source framework references found.")
         } else {
-            echo("✗ Found $found remaining source framework references")
+            echo("Found $found remaining source framework references")
+            throw UsageError("Validation failed: found $found remaining source framework references")
         }
     }
 }
@@ -230,7 +234,7 @@ class ListCommand : CliktCommand(
         echo()
         for (p in PipelineRegistry.list()) {
             echo("  ${p.id.padEnd(20)} ${p.displayName}")
-            echo("    ${p.sourceFramework.padEnd(20)} → ${p.targetFramework}")
+            echo("    ${p.sourceFramework.padEnd(20)} -> ${p.targetFramework}")
         }
     }
 }
