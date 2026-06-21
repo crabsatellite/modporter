@@ -3603,6 +3603,46 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `fluid item capability migration does not depend on custom fluid class names`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateCustomFluidItemCapabilities")
+        assertTrue(start >= 0, "migrateCustomFluidItemCapabilities is missing")
+        val end = source.indexOf("private data class CuriosItemCapabilityMigration", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "fixed CustomFluidCapabilities name" to "CustomFluidCapabilities",
+            "fixed CustomFluidItems name" to "CustomFluidItems",
+            "fixed CustomFluidContainerHandler name" to "CustomFluidContainerHandler",
+            "fixed CustomFluidContainerProvider name" to "CustomFluidContainerProvider",
+            "fixed bucket field name" to "CUSTOM_FLUID_BUCKET",
+            "fixed bottle field name" to "CUSTOM_FLUID_BOTTLE",
+            "raw initCapabilities prefilter" to "source.contains(\"initCapabilities\")",
+            "raw factory prefilter" to "source.contains(\"\${factory.className}.\")",
+            "raw initCapabilities method extraction" to "javaMethodText(source, \"initCapabilities\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "fluid item capability migration contains $label" }
+
+        assertTrue(
+            body.contains("legacyFluidItemProviderFactory") &&
+                body.contains("legacyFluidItemProviderRegistrations") &&
+                body.contains("findRegisteredItemReferences(javaFiles, itemClassName)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("javaMethodText(executableCode, \"initCapabilities\")"),
+            "Fluid item capability migration must derive provider and item registrations from source structure"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Fluid item capability migration must not depend on fixed custom-fluid class names: $offenders"
+        )
+    }
+
+    @Test
     fun `nested simplechannel migration does not depend on fixed networking class names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

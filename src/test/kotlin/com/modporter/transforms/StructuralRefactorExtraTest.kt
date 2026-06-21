@@ -2784,46 +2784,46 @@ class StructuralRefactorExtraTest {
     @Test
     fun `migrates custom fluid item capabilities to RegisterCapabilitiesEvent`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
-        val customDir = srcDir.resolve("custom_fluid")
+        val customDir = srcDir.resolve("vessel")
         customDir.createDirectories()
 
         srcDir.resolve("ExampleMod.java").writeText("""
             package com.example;
 
-            import com.example.custom_fluid.CustomFluidItems;
+            import com.example.vessel.FluidVesselItems;
             import net.neoforged.bus.api.IEventBus;
             import net.neoforged.fml.common.Mod;
 
             @Mod("example")
             public class ExampleMod {
                 public ExampleMod(IEventBus modEventBus) {
-                    CustomFluidItems.register(modEventBus);
+                    FluidVesselItems.register(modEventBus);
                 }
             }
         """.trimIndent())
 
-        customDir.resolve("CustomFluidItems.java").writeText("""
-            package com.example.custom_fluid;
+        customDir.resolve("FluidVesselItems.java").writeText("""
+            package com.example.vessel;
 
             import net.minecraft.world.item.Item;
             import net.neoforged.bus.api.IEventBus;
             import net.neoforged.neoforge.registries.DeferredHolder;
             import net.neoforged.neoforge.registries.DeferredRegister;
 
-            public class CustomFluidItems {
+            public class FluidVesselItems {
                 public static final DeferredRegister<Item> ITEMS = null;
-                public static final DeferredHolder<Item, CustomFluidBucketItem> CUSTOM_FLUID_BUCKET =
-                        ITEMS.register("custom_fluid_bucket", () -> new CustomFluidBucketItem(new Item.Properties()));
-                public static final DeferredHolder<Item, CustomFluidBottleItem> CUSTOM_FLUID_BOTTLE =
-                        ITEMS.register("custom_fluid_bottle", () -> new CustomFluidBottleItem(new Item.Properties()));
+                public static final DeferredHolder<Item, FluidVesselBucketItem> WOODEN_PAIL =
+                        ITEMS.register("wooden_pail", () -> new FluidVesselBucketItem(new Item.Properties()));
+                public static final DeferredHolder<Item, FluidVesselBottleItem> GLASS_FLASK =
+                        ITEMS.register("glass_flask", () -> new FluidVesselBottleItem(new Item.Properties()));
                 public static void register(IEventBus eventBus) {
                     ITEMS.register(eventBus);
                 }
             }
         """.trimIndent())
 
-        customDir.resolve("CustomFluidCapabilities.java").writeText("""
-            package com.example.custom_fluid;
+        customDir.resolve("FluidVesselCapabilities.java").writeText("""
+            package com.example.vessel;
 
             import com.crabmod.hotbath.HotBath;
             import net.minecraft.core.Direction;
@@ -2843,38 +2843,38 @@ class StructuralRefactorExtraTest {
             import net.neoforged.fml.common.EventBusSubscriber;
 
             @EventBusSubscriber(modid = HotBath.MOD_ID)
-            public final class CustomFluidCapabilities {
-                public static final ResourceLocation CAPABILITY_ID = ResourceLocation.fromNamespaceAndPath(HotBath.MOD_ID, "custom_fluid_container");
+            public final class FluidVesselCapabilities {
+                public static final ResourceLocation CAPABILITY_ID = ResourceLocation.fromNamespaceAndPath(HotBath.MOD_ID, "fluid_vessel");
 
-                private CustomFluidCapabilities() {
+                private FluidVesselCapabilities() {
                 }
 
                 @SubscribeEvent
                 public static void attachCapabilities(AttachCapabilitiesEvent<ItemStack> event) {
                     ItemStack stack = event.getObject();
                     if (stack.is(Items.BUCKET)) {
-                        event.addCapability(CAPABILITY_ID, createProvider(stack, ContainerKind.BUCKET));
+                        event.addCapability(CAPABILITY_ID, createProvider(stack, VesselKind.BUCKET));
                     }
                 }
 
                 public static ICapabilityProvider createProvider(ItemStack stack, boolean bucket) {
-                    return createProvider(stack, bucket ? ContainerKind.BUCKET : ContainerKind.BOTTLE);
+                    return createProvider(stack, bucket ? VesselKind.BUCKET : VesselKind.BOTTLE);
                 }
 
-                private static ICapabilityProvider createProvider(ItemStack stack, ContainerKind kind) {
-                    return new CustomFluidContainerProvider(new CustomFluidContainerHandler(stack, kind));
+                private static ICapabilityProvider createProvider(ItemStack stack, VesselKind kind) {
+                    return new FluidVesselProvider(new FluidVesselHandler(stack, kind));
                 }
 
-                private enum ContainerKind {
+                private enum VesselKind {
                     BUCKET(1000),
                     BOTTLE(250);
                     final int amount;
-                    ContainerKind(int amount) { this.amount = amount; }
+                    VesselKind(int amount) { this.amount = amount; }
                 }
 
-                private static final class CustomFluidContainerProvider implements ICapabilityProvider {
+                private static final class FluidVesselProvider implements ICapabilityProvider {
                     private final LazyOptional<IFluidHandlerItem> handler;
-                    private CustomFluidContainerProvider(IFluidHandlerItem handler) {
+                    private FluidVesselProvider(IFluidHandlerItem handler) {
                         this.handler = LazyOptional.of(() -> handler);
                     }
                     @Nonnull
@@ -2884,10 +2884,10 @@ class StructuralRefactorExtraTest {
                     }
                 }
 
-                private static final class CustomFluidContainerHandler implements IFluidHandlerItem {
+                private static final class FluidVesselHandler implements IFluidHandlerItem {
                     private ItemStack container;
-                    private final ContainerKind kind;
-                    private CustomFluidContainerHandler(ItemStack container, ContainerKind kind) {
+                    private final VesselKind kind;
+                    private FluidVesselHandler(ItemStack container, VesselKind kind) {
                         this.container = container;
                         this.kind = kind;
                     }
@@ -2903,8 +2903,8 @@ class StructuralRefactorExtraTest {
             }
         """.trimIndent())
 
-        customDir.resolve("CustomFluidBucketItem.java").writeText("""
-            package com.example.custom_fluid;
+        customDir.resolve("FluidVesselBucketItem.java").writeText("""
+            package com.example.vessel;
 
             import net.minecraft.nbt.CompoundTag;
             import net.minecraft.world.item.Item;
@@ -2912,18 +2912,18 @@ class StructuralRefactorExtraTest {
             import net.neoforged.neoforge.capabilities.ICapabilityProvider;
             import org.jetbrains.annotations.Nullable;
 
-            public class CustomFluidBucketItem extends Item {
-                public CustomFluidBucketItem(Properties properties) { super(properties); }
+            public class FluidVesselBucketItem extends Item {
+                public FluidVesselBucketItem(Properties properties) { super(properties); }
 
                 @Override
                 public ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
-                    return CustomFluidCapabilities.createProvider(stack, true);
+                    return FluidVesselCapabilities.createProvider(stack, true);
                 }
             }
         """.trimIndent())
 
-        customDir.resolve("CustomFluidBottleItem.java").writeText("""
-            package com.example.custom_fluid;
+        customDir.resolve("FluidVesselBottleItem.java").writeText("""
+            package com.example.vessel;
 
             import net.minecraft.nbt.CompoundTag;
             import net.minecraft.world.item.Item;
@@ -2931,21 +2931,21 @@ class StructuralRefactorExtraTest {
             import net.neoforged.neoforge.capabilities.ICapabilityProvider;
             import org.jetbrains.annotations.Nullable;
 
-            public class CustomFluidBottleItem extends Item {
-                public CustomFluidBottleItem(Properties properties) { super(properties); }
+            public class FluidVesselBottleItem extends Item {
+                public FluidVesselBottleItem(Properties properties) { super(properties); }
 
                 @Override
                 public ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
-                    return CustomFluidCapabilities.createProvider(stack, false);
+                    return FluidVesselCapabilities.createProvider(stack, false);
                 }
             }
         """.trimIndent())
 
         val pass = StructuralRefactorPass()
         val result = pass.apply(tempDir)
-        val capabilities = customDir.resolve("CustomFluidCapabilities.java").readText()
-        val bucket = customDir.resolve("CustomFluidBucketItem.java").readText()
-        val bottle = customDir.resolve("CustomFluidBottleItem.java").readText()
+        val capabilities = customDir.resolve("FluidVesselCapabilities.java").readText()
+        val bucket = customDir.resolve("FluidVesselBucketItem.java").readText()
+        val bottle = customDir.resolve("FluidVesselBottleItem.java").readText()
         val mod = srcDir.resolve("ExampleMod.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-custom-fluid-item-capabilities" })
@@ -2953,14 +2953,79 @@ class StructuralRefactorExtraTest {
         assertTrue(result.changes.any { it.ruleId == "struct-custom-fluid-capability-listener" })
         assertTrue(capabilities.contains("public static void registerCapabilities(RegisterCapabilitiesEvent event)"))
         assertTrue(capabilities.contains("Capabilities.FluidHandler.ITEM"))
-        assertTrue(capabilities.contains("CustomFluidItems.CUSTOM_FLUID_BUCKET.get()"))
-        assertTrue(capabilities.contains("CustomFluidItems.CUSTOM_FLUID_BOTTLE.get()"))
+        assertTrue(capabilities.contains("FluidVesselItems.WOODEN_PAIL.get()"))
+        assertTrue(capabilities.contains("FluidVesselItems.GLASS_FLASK.get()"))
         assertTrue(!capabilities.contains("AttachCapabilitiesEvent"))
         assertTrue(!capabilities.contains("ICapabilityProvider"))
         assertTrue(!capabilities.contains("LazyOptional"))
         assertTrue(!bucket.contains("initCapabilities"))
         assertTrue(!bottle.contains("initCapabilities"))
-        assertTrue(mod.contains("modEventBus.addListener(CustomFluidCapabilities::registerCapabilities);"))
+        assertTrue(mod.contains("modEventBus.addListener(FluidVesselCapabilities::registerCapabilities);"))
+    }
+
+    @Test
+    fun `fluid item capability migration ignores provider calls in comments and strings`() {
+        val customDir = tempDir.resolve("src/main/java/com/example/vessel")
+        customDir.createDirectories()
+
+        customDir.resolve("FluidVesselCapabilities.java").writeText("""
+            package com.example.vessel;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import net.neoforged.neoforge.fluids.capability.IFluidHandlerItem;
+
+            public final class FluidVesselCapabilities {
+                private FluidVesselCapabilities() {}
+
+                public static ICapabilityProvider createProvider(ItemStack stack, boolean bucket) {
+                    return new FluidVesselProvider(new FluidVesselHandler(stack));
+                }
+
+                private static final class FluidVesselProvider implements ICapabilityProvider {
+                }
+
+                private static final class FluidVesselHandler implements IFluidHandlerItem {
+                    private FluidVesselHandler(ItemStack container) {}
+                }
+            }
+        """.trimIndent())
+
+        customDir.resolve("FluidVesselBucketItem.java").writeText("""
+            package com.example.vessel;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import org.jetbrains.annotations.Nullable;
+
+            public class FluidVesselBucketItem extends Item {
+                public FluidVesselBucketItem(Properties properties) { super(properties); }
+
+                @Override
+                public ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
+                    // return FluidVesselCapabilities.createProvider(stack, true);
+                    String ignored = "FluidVesselCapabilities.createProvider(stack, true)";
+                    return super.initCapabilities(stack, nbt);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(tempDir)
+        val capabilities = customDir.resolve("FluidVesselCapabilities.java").readText()
+        val bucket = customDir.resolve("FluidVesselBucketItem.java").readText()
+
+        assertFalse(
+            result.changes.any {
+                it.ruleId == "struct-custom-fluid-item-capabilities" ||
+                    it.ruleId == "struct-custom-fluid-item-initcapabilities"
+            },
+            result.changes.joinToString("\n") { "${it.ruleId}: ${it.description}" }
+        )
+        assertFalse(capabilities.contains("RegisterCapabilitiesEvent"), capabilities)
+        assertTrue(bucket.contains("initCapabilities"))
     }
 
     @Test

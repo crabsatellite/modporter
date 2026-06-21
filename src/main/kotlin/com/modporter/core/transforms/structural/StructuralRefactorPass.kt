@@ -4275,6 +4275,22 @@ $itemArguments
         return null
     }
 
+    private data class LegacyFluidItemProviderFactory(
+        val file: Path,
+        val packageName: String,
+        val className: String,
+        val handlerClassName: String,
+        val providerWrapperClassName: String?,
+        val providerMethodNames: Set<String>
+    )
+
+    private data class LegacyFluidItemProviderRegistration(
+        val itemFile: Path,
+        val itemClassName: String,
+        val itemReferences: List<RegisteredItemReference>,
+        val handlerKindExpression: String?
+    )
+
     private fun migrateCustomFluidItemCapabilities(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
         val srcDir = projectDir.resolve("src/main/java")
@@ -4284,137 +4300,309 @@ $itemArguments
             .filter { it.extension == "java" }
             .toList()
 
-        val capabilityFile = javaFiles.firstOrNull { file ->
-            val text = file.readText()
-            text.contains("class CustomFluidCapabilities") &&
-                text.contains("CustomFluidContainerHandler implements IFluidHandlerItem") &&
-                text.contains("ICapabilityProvider") &&
-                text.contains("createProvider")
-        } ?: return changes
+        val factories = javaFiles.mapNotNull { legacyFluidItemProviderFactory(it) }
+        if (factories.isEmpty()) return changes
 
-        var capabilityText = capabilityFile.readText()
-        val originalCapabilityText = capabilityText
-        if (!capabilityText.contains("registerCapabilities(RegisterCapabilitiesEvent")) {
-            val modAccess = inferModAccess(capabilityText)
-            capabilityText = capabilityText.replace(
-                modAccess?.let {
-                    Regex("""(?m)^[ \t]*@EventBusSubscriber\(modid\s*=\s*${Regex.escape(it.modIdExpression)}\)\s*\r?\n""")
-                } ?: Regex("""(?!)"""),
-                ""
-            )
-            capabilityText = capabilityText.replace(
-                Regex("""(?m)^[ \t]*public\s+static\s+final\s+ResourceLocation\s+CAPABILITY_ID\s*=\s*[^;\r\n]+;\s*\r?\n"""),
-                ""
-            )
-            capabilityText = removeMethodByName(capabilityText, "attachCapabilities")
-            capabilityText = removeMethodByName(capabilityText, "createProvider")
-            capabilityText = removeMethodByName(capabilityText, "createProvider")
-            capabilityText = removeInnerClassByName(capabilityText, "CustomFluidContainerProvider")
-            capabilityText = addCustomFluidRegisterCapabilitiesMethod(capabilityText)
+        for (factory in factories) {
+            val registrations = legacyFluidItemProviderRegistrations(javaFiles, factory)
+            if (registrations.isEmpty()) continue
 
-            listOf(
-                "net.minecraft.core.Direction",
-                "com.modporter.compat.Capability",
-                "net.neoforged.neoforge.capabilities.ICapabilityProvider",
-                "com.modporter.compat.LazyOptional",
-                "net.neoforged.neoforge.event.AttachCapabilitiesEvent",
-                "net.neoforged.bus.api.SubscribeEvent",
-                "net.neoforged.fml.common.Mod",
-                "javax.annotation.Nonnull",
-                "org.jetbrains.annotations.Nullable",
-                "net.neoforged.fml.common.EventBusSubscriber"
-            ).plus(listOfNotNull(modAccess?.modImport)).forEach { importName ->
+            var capabilityText = factory.file.readText()
+            val originalCapabilityText = capabilityText
+            if (!capabilityText.contains("registerCapabilities(RegisterCapabilitiesEvent")) {
+                val modAccess = inferModAccess(capabilityText)
                 capabilityText = capabilityText.replace(
-                    Regex("""(?m)^[ \t]*import\s+${Regex.escape(importName)};\s*\r?\n"""),
+                    modAccess?.let {
+                        Regex("""(?m)^[ \t]*@EventBusSubscriber\(modid\s*=\s*${Regex.escape(it.modIdExpression)}\)\s*\r?\n""")
+                    } ?: Regex("""(?!)"""),
                     ""
                 )
-            }
-            capabilityText = addImportIfMissing(capabilityText, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
-
-            if (capabilityText != originalCapabilityText) {
-                if (!dryRun) {
-                    capabilityFile.writeText(capabilityText)
+                capabilityText = capabilityText.replace(
+                    Regex("""(?m)^[ \t]*public\s+static\s+final\s+ResourceLocation\s+[A-Za-z_$][\w$]*\s*=\s*[^;\r\n]+;\s*\r?\n"""),
+                    ""
+                )
+                capabilityText = removeMethodByName(capabilityText, "attachCapabilities")
+                capabilityText = removeMethodsByNames(capabilityText, factory.providerMethodNames)
+                factory.providerWrapperClassName?.let { wrapperName ->
+                    capabilityText = removeInnerClassByName(capabilityText, wrapperName)
                 }
-                changes.add(Change(
-                    file = capabilityFile,
-                    line = 0,
-                    description = "Migrate CustomFluidCapabilities provider wrapper to RegisterCapabilitiesEvent item registrations",
-                    before = "AttachCapabilitiesEvent + ICapabilityProvider wrapper",
-                    after = "RegisterCapabilitiesEvent.registerItem(Capabilities.FluidHandler.ITEM, ...)",
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-custom-fluid-item-capabilities"
-                ))
-            }
-        }
+                capabilityText = addLegacyFluidItemRegisterCapabilitiesMethod(capabilityText, factory, registrations)
 
-        var removedItemHooks = false
-        javaFiles.forEach { javaFile ->
-            var text = javaFile.readText()
-            if (!text.contains("initCapabilities") || !text.contains("CustomFluidCapabilities.createProvider")) {
-                return@forEach
-            }
-            val original = text
-            text = removeInitCapabilitiesContaining(text, "CustomFluidCapabilities.createProvider")
-            text = text.replace(
-                Regex("""(?m)^[ \t]*import\s+net\.neoforged\.neoforge\.capabilities\.ICapabilityProvider;\s*\r?\n"""),
-                ""
-            )
-            if (!text.contains("CompoundTag")) {
-                text = text.replace(Regex("""(?m)^[ \t]*import\s+net\.minecraft\.nbt\.CompoundTag;\s*\r?\n"""), "")
-            }
-            if (!text.contains("@Nullable")) {
-                text = text.replace(Regex("""(?m)^[ \t]*import\s+org\.jetbrains\.annotations\.Nullable;\s*\r?\n"""), "")
-            }
-            if (text != original) {
-                removedItemHooks = true
-                if (!dryRun) {
-                    javaFile.writeText(text)
+                listOf(
+                    "net.minecraft.core.Direction",
+                    "com.modporter.compat.Capability",
+                    "net.neoforged.neoforge.capabilities.ICapabilityProvider",
+                    "com.modporter.compat.LazyOptional",
+                    "net.neoforged.neoforge.event.AttachCapabilitiesEvent",
+                    "net.neoforged.bus.api.SubscribeEvent",
+                    "net.neoforged.fml.common.Mod",
+                    "javax.annotation.Nonnull",
+                    "org.jetbrains.annotations.Nullable",
+                    "net.neoforged.fml.common.EventBusSubscriber"
+                ).plus(listOfNotNull(modAccess?.modImport)).forEach { importName ->
+                    capabilityText = capabilityText.replace(
+                        Regex("""(?m)^[ \t]*import\s+${Regex.escape(importName)};\s*\r?\n"""),
+                        ""
+                    )
                 }
-                changes.add(Change(
-                    file = javaFile,
-                    line = 0,
-                    description = "Remove legacy initCapabilities hook for custom fluid item",
-                    before = "initCapabilities(...) -> CustomFluidCapabilities.createProvider(...)",
-                    after = "Registered through CustomFluidCapabilities.registerCapabilities",
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-custom-fluid-item-initcapabilities"
-                ))
-            }
-        }
+                capabilityText = addImportIfMissing(capabilityText, "net.neoforged.neoforge.capabilities.Capabilities")
+                capabilityText = addImportIfMissing(capabilityText, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
+                registrations
+                    .flatMap { it.itemReferences }
+                    .map { it.qualifiedRegistryClass }
+                    .distinct()
+                    .filter { it.substringBeforeLast('.', "") != factory.packageName }
+                    .forEach { capabilityText = addImportIfMissing(capabilityText, it) }
+                capabilityText = removeUnusedSimpleImports(
+                    capabilityText,
+                    listOf(
+                        "net.minecraft.resources.ResourceLocation",
+                        "net.minecraft.world.item.Items"
+                    )
+                )
 
-        if (removedItemHooks || capabilityText != originalCapabilityText) {
-            val mainClass = detectModMainClass(projectDir)
-            if (mainClass != null) {
-                var mainText = mainClass.readText()
-                val originalMainText = mainText
-                val mainPackage = packageNameOf(mainText)
-                val capabilityPackage = packageNameOf(capabilityText)
-                val constructorBusName = requireModEventBusName(mainText, "custom fluid capability listener registration")
-
-                if (!mainText.contains("CustomFluidCapabilities::registerCapabilities")) {
-                    if (capabilityPackage != mainPackage) {
-                        mainText = addImportIfMissing(mainText, "$capabilityPackage.CustomFluidCapabilities")
+                if (capabilityText != originalCapabilityText) {
+                    if (!dryRun) {
+                        factory.file.writeText(capabilityText)
                     }
-                    val registration = "        $constructorBusName.addListener(CustomFluidCapabilities::registerCapabilities);"
-                    mainText = insertModBusListener(mainText, constructorBusName, registration, "CustomFluidItems")
                     changes.add(Change(
-                        file = mainClass,
+                        file = factory.file,
                         line = 0,
-                        description = "Register CustomFluidCapabilities on the mod event bus",
-                        before = "(no CustomFluidCapabilities listener)",
-                        after = "modEventBus.addListener(CustomFluidCapabilities::registerCapabilities)",
+                        description = "Migrate legacy fluid item capability provider wrapper to RegisterCapabilitiesEvent item registrations",
+                        before = "AttachCapabilitiesEvent + ICapabilityProvider wrapper",
+                        after = "RegisterCapabilitiesEvent.registerItem(Capabilities.FluidHandler.ITEM, ...)",
                         confidence = Confidence.HIGH,
-                        ruleId = "struct-custom-fluid-capability-listener"
+                        ruleId = "struct-custom-fluid-item-capabilities"
                     ))
                 }
+            }
 
-                if (mainText != originalMainText && !dryRun) {
-                    mainClass.writeText(mainText)
+            var removedItemHooks = false
+            registrations.map { it.itemFile }.distinct().forEach { javaFile ->
+                var text = javaFile.readText()
+                val original = text
+                val requiredCalls = factory.providerMethodNames.map { "${factory.className}.$it" }
+                text = removeMethodByNameContaining(text, "initCapabilities", requiredCalls)
+                text = text.replace(
+                    Regex("""(?m)^[ \t]*import\s+net\.neoforged\.neoforge\.capabilities\.ICapabilityProvider;\s*\r?\n"""),
+                    ""
+                )
+                if (!text.contains("CompoundTag")) {
+                    text = text.replace(Regex("""(?m)^[ \t]*import\s+net\.minecraft\.nbt\.CompoundTag;\s*\r?\n"""), "")
+                }
+                if (!text.contains("@Nullable")) {
+                    text = text.replace(Regex("""(?m)^[ \t]*import\s+org\.jetbrains\.annotations\.Nullable;\s*\r?\n"""), "")
+                }
+                if (text != original) {
+                    removedItemHooks = true
+                    if (!dryRun) {
+                        javaFile.writeText(text)
+                    }
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Remove legacy initCapabilities hook for fluid item capability",
+                        before = "initCapabilities(...) -> legacy fluid provider factory",
+                        after = "Registered through RegisterCapabilitiesEvent.registerItem",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-custom-fluid-item-initcapabilities"
+                    ))
+                }
+            }
+
+            if (removedItemHooks || capabilityText != originalCapabilityText) {
+                val mainClass = detectModMainClass(projectDir)
+                if (mainClass != null) {
+                    var mainText = mainClass.readText()
+                    val originalMainText = mainText
+                    val mainPackage = packageNameOf(mainText)
+                    val constructorBusName = requireModEventBusName(mainText, "fluid item capability listener registration")
+
+                    if (!mainText.contains("${factory.className}::registerCapabilities")) {
+                        if (factory.packageName != mainPackage) {
+                            mainText = addImportIfMissing(mainText, "${factory.packageName}.${factory.className}")
+                        }
+                        val registration = "        $constructorBusName.addListener(${factory.className}::registerCapabilities);"
+                        mainText = insertModBusListener(
+                            mainText,
+                            constructorBusName,
+                            registration,
+                            registrations.first().itemReferences.first().registryClassName
+                        )
+                        changes.add(Change(
+                            file = mainClass,
+                            line = 0,
+                            description = "Register legacy fluid item capabilities on the mod event bus",
+                            before = "(no fluid item capability listener)",
+                            after = "modEventBus.addListener(${factory.className}::registerCapabilities)",
+                            confidence = Confidence.HIGH,
+                            ruleId = "struct-custom-fluid-capability-listener"
+                        ))
+                    }
+
+                    if (mainText != originalMainText && !dryRun) {
+                        mainClass.writeText(mainText)
+                    }
                 }
             }
         }
 
         return changes
+    }
+
+    private fun legacyFluidItemProviderFactory(file: Path): LegacyFluidItemProviderFactory? {
+        val source = file.readText()
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("IFluidHandlerItem") || !executableCode.contains("ICapabilityProvider")) {
+            return null
+        }
+        val className = classNameOfJavaSource(executableCode) ?: return null
+        val handlerClassName = Regex(
+            """(?m)^[ \t]*(?:(?:public|protected|private|static|final|abstract)\s+)*class\s+([A-Za-z_$][\w$]*)\b[^{;\r\n]*\bimplements\s+IFluidHandlerItem\b"""
+        )
+            .find(executableCode)
+            ?.groupValues
+            ?.get(1)
+            ?: return null
+        val providerWrapperClassName = Regex(
+            """(?m)^[ \t]*(?:(?:public|protected|private|static|final|abstract)\s+)*class\s+([A-Za-z_$][\w$]*)\b[^{;\r\n]*\bimplements\s+ICapabilityProvider\b"""
+        )
+            .find(executableCode)
+            ?.groupValues
+            ?.get(1)
+        val providerMethodNames = Regex(
+            """(?m)\b(?:public|protected|private)\s+static\s+ICapabilityProvider\s+([A-Za-z_$][\w$]*)\s*\("""
+        )
+            .findAll(executableCode)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (providerMethodNames.isEmpty()) return null
+        return LegacyFluidItemProviderFactory(
+            file = file,
+            packageName = packageNameOf(source),
+            className = className,
+            handlerClassName = handlerClassName,
+            providerWrapperClassName = providerWrapperClassName,
+            providerMethodNames = providerMethodNames
+        )
+    }
+
+    private fun legacyFluidItemProviderRegistrations(
+        javaFiles: List<Path>,
+        factory: LegacyFluidItemProviderFactory
+    ): List<LegacyFluidItemProviderRegistration> =
+        javaFiles.mapNotNull { javaFile ->
+            if (javaFile == factory.file) return@mapNotNull null
+            val source = javaFile.readText()
+            val executableCode = maskJavaCommentsAndLiterals(source)
+            if (!executableCode.contains("initCapabilities") || !executableCode.contains("${factory.className}.")) {
+                return@mapNotNull null
+            }
+            val itemClassName = classNameOfJavaSource(executableCode) ?: return@mapNotNull null
+            val initCapabilities = javaMethodText(executableCode, "initCapabilities") ?: return@mapNotNull null
+            val call = legacyFluidProviderFactoryCall(initCapabilities, factory) ?: return@mapNotNull null
+            val itemReferences = findRegisteredItemReferences(javaFiles, itemClassName)
+                .distinctBy { "${it.qualifiedRegistryClass}.${it.fieldName}" }
+                .sortedWith(compareBy({ it.qualifiedRegistryClass }, { it.fieldName }))
+            if (itemReferences.isEmpty()) return@mapNotNull null
+            LegacyFluidItemProviderRegistration(
+                itemFile = javaFile,
+                itemClassName = itemClassName,
+                itemReferences = itemReferences,
+                handlerKindExpression = legacyFluidHandlerKindExpression(
+                    maskJavaCommentsAndLiterals(factory.file.readText()),
+                    call.first,
+                    call.second
+                )
+            )
+        }
+
+    private fun legacyFluidProviderFactoryCall(
+        initCapabilitiesMethod: String,
+        factory: LegacyFluidItemProviderFactory
+    ): Pair<String, List<String>>? {
+        val methodAlternatives = factory.providerMethodNames.joinToString("|") { Regex.escape(it) }
+        val callPattern = Regex(
+            """\b${Regex.escape(factory.className)}\.($methodAlternatives)\s*\("""
+        )
+        val match = callPattern.find(initCapabilitiesMethod) ?: return null
+        val openParen = initCapabilitiesMethod.indexOf('(', match.range.last - 1)
+        val closeParen = if (openParen >= 0) findMatchingParen(initCapabilitiesMethod, openParen) else -1
+        if (closeParen < 0) return null
+        val args = splitTopLevelJavaArgs(initCapabilitiesMethod.substring(openParen + 1, closeParen))
+        if (args.isEmpty()) return null
+        return match.groupValues[1] to args
+    }
+
+    private fun legacyFluidHandlerKindExpression(
+        factorySource: String,
+        methodName: String,
+        callArgs: List<String>
+    ): String? {
+        if (callArgs.size < 2) return null
+        val rawKind = callArgs[1].trim()
+        if (rawKind != "true" && rawKind != "false") return rawKind
+
+        val method = javaMethodText(factorySource, methodName) ?: return null
+        val openParen = method.indexOf('(')
+        val closeParen = if (openParen >= 0) findMatchingParen(method, openParen) else -1
+        if (closeParen < 0) return null
+        val parameters = splitTopLevelJavaArgs(method.substring(openParen + 1, closeParen))
+        val selectorName = parameters.getOrNull(1)?.let(::javaParameterName) ?: return null
+        val ternary = Regex(
+            """\b${Regex.escape(selectorName)}\s*\?\s*([^:;]+?)\s*:\s*([^);]+)"""
+        ).find(method) ?: return null
+        return if (rawKind == "true") ternary.groupValues[1].trim() else ternary.groupValues[2].trim()
+    }
+
+    private fun addLegacyFluidItemRegisterCapabilitiesMethod(
+        source: String,
+        factory: LegacyFluidItemProviderFactory,
+        registrations: List<LegacyFluidItemProviderRegistration>
+    ): String {
+        if (source.contains("registerCapabilities(RegisterCapabilitiesEvent")) return source
+        val classMatch = Regex("""\bclass\s+${Regex.escape(factory.className)}\b[^{]*\{""").find(source)
+            ?: return source
+        val classOpen = source.indexOf('{', classMatch.range.last)
+        if (classOpen < 0) return source
+        val registerLines = registrations.flatMap { registration ->
+            registration.itemReferences.map { ref ->
+                val provider = if (registration.handlerKindExpression == null) {
+                    "new ${factory.handlerClassName}(stack)"
+                } else {
+                    "new ${factory.handlerClassName}(stack, ${registration.handlerKindExpression})"
+                }
+                """
+        event.registerItem(
+                Capabilities.FluidHandler.ITEM,
+                (stack, context) -> $provider,
+                ${ref.registryClassName}.${ref.fieldName}.get());
+                """.trimEnd()
+            }
+        }.joinToString("\n")
+        val method = """
+
+    public static void registerCapabilities(RegisterCapabilitiesEvent event) {
+$registerLines
+    }
+"""
+        return source.substring(0, classOpen + 1) + method + source.substring(classOpen + 1)
+    }
+
+    private fun removeMethodsByNames(source: String, methodNames: Set<String>): String {
+        var result = source
+        var changed: Boolean
+        do {
+            changed = false
+            for (methodName in methodNames) {
+                val updated = removeMethodByName(result, methodName)
+                if (updated != result) {
+                    result = updated
+                    changed = true
+                }
+            }
+        } while (changed)
+        return result
     }
 
     private data class CuriosItemCapabilityMigration(
@@ -7017,54 +7205,6 @@ public class DelegatingPackResources extends AbstractPackResources {
         source.lines().joinToString(System.lineSeparator()) { line ->
             if (line.isBlank()) line else indent + line.trimEnd()
         }
-
-    private fun addCustomFluidRegisterCapabilitiesMethod(source: String): String {
-        val constructorMatch = Regex("""private\s+CustomFluidCapabilities\s*\(\s*\)\s*\{\s*\}""")
-            .find(source)
-            ?: return source
-        val method = """
-
-    public static void registerCapabilities(RegisterCapabilitiesEvent event) {
-        event.registerItem(
-                Capabilities.FluidHandler.ITEM,
-                (stack, context) -> new CustomFluidContainerHandler(stack, ContainerKind.BUCKET),
-                Items.BUCKET,
-                CustomFluidItems.CUSTOM_FLUID_BUCKET.get());
-        event.registerItem(
-                Capabilities.FluidHandler.ITEM,
-                (stack, context) -> new CustomFluidContainerHandler(stack, ContainerKind.BOTTLE),
-                Items.GLASS_BOTTLE,
-                CustomFluidItems.CUSTOM_FLUID_BOTTLE.get());
-    }
-"""
-        val insertPos = constructorMatch.range.last + 1
-        return source.substring(0, insertPos) + method + source.substring(insertPos)
-    }
-
-    private fun removeInitCapabilitiesContaining(source: String, requiredText: String): String {
-        var result = source
-        while (true) {
-            val methodNameIndex = result.indexOf("initCapabilities")
-            if (methodNameIndex < 0) return result
-            val openBrace = result.indexOf('{', methodNameIndex)
-            if (openBrace < 0) return result
-            val closeBrace = findMatchingBrace(result, openBrace)
-            if (closeBrace < 0) return result
-            val signatureStart = result.lastIndexOf('\n', methodNameIndex).let { if (it < 0) 0 else it + 1 }
-            val annotationStart = Regex("""(?m)[ \t]*@Override\s*\r?\n\s*$""")
-                .findAll(result.substring(0, signatureStart))
-                .lastOrNull()
-                ?.range
-                ?.first
-                ?: signatureStart
-            val methodText = result.substring(annotationStart, closeBrace + 1)
-            if (!methodText.contains(requiredText)) return result
-            var end = closeBrace + 1
-            if (end < result.length && result[end] == '\r') end++
-            if (end < result.length && result[end] == '\n') end++
-            result = result.removeRange(annotationStart, end)
-        }
-    }
 
     private fun removeMethodByName(source: String, methodName: String): String {
         val methodNameIndex = Regex("""\b${Regex.escape(methodName)}\s*\(""")
