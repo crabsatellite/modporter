@@ -136,45 +136,21 @@ class TextReplacementPass(
         }
 
         for (rule in rules) {
-            val pattern = if (rule.isRegex) Regex(rule.pattern) else null
-            val lines = content.lines()
-
-            for ((lineIdx, line) in lines.withIndex()) {
-                val matches = if (rule.isRegex) {
-                    pattern!!.containsMatchIn(line)
-                } else {
-                    line.contains(rule.pattern)
-                }
-
-                if (matches) {
-                    val newLine = if (rule.isRegex) {
-                        pattern!!.replace(line, rule.replacement)
-                    } else {
-                        line.replace(rule.pattern, rule.replacement)
-                    }
-
-                    if (newLine != line) {
-                        changes.add(
-                            Change(
-                                file = file,
-                                line = lineIdx + 1,
-                                description = rule.description,
-                                before = line.trim(),
-                                after = newLine.trim(),
-                                confidence = Confidence.HIGH,
-                                ruleId = rule.id
-                            )
-                        )
-                    }
-                }
+            val replacement = replaceTextRuleInExecutableJava(content, rule)
+            replacement.changes.forEach { change ->
+                changes.add(
+                    Change(
+                        file = file,
+                        line = content.lineNumberAt(change.range.first),
+                        description = rule.description,
+                        before = content.lineAt(change.range.first).trim(),
+                        after = change.replacement.trim(),
+                        confidence = Confidence.HIGH,
+                        ruleId = rule.id
+                    )
+                )
             }
-
-            // Apply replacement to full content
-            content = if (rule.isRegex) {
-                pattern!!.replace(content, rule.replacement)
-            } else {
-                content.replace(rule.pattern, rule.replacement)
-            }
+            content = replacement.content
         }
 
         val beforeRemainingRegistryObjectWildcards = content
@@ -3828,6 +3804,91 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         return result.toString()
     }
 
+    private fun maskJavaCommentsAndTextBlocks(source: String): String {
+        val result = StringBuilder(source.length)
+        var index = 0
+        var inLineComment = false
+        var inBlockComment = false
+        var inString = false
+        var inTextBlock = false
+        var inChar = false
+        var escaped = false
+        while (index < source.length) {
+            val ch = source[index]
+            val next = source.getOrNull(index + 1)
+            val nextTwo = source.getOrNull(index + 2)
+
+            when {
+                inLineComment -> {
+                    if (ch == '\r' || ch == '\n') {
+                        inLineComment = false
+                        result.append(ch)
+                    } else {
+                        result.append(' ')
+                    }
+                }
+                inBlockComment -> {
+                    if (ch == '*' && next == '/') {
+                        result.append("  ")
+                        index++
+                        inBlockComment = false
+                    } else {
+                        result.append(if (ch == '\r' || ch == '\n') ch else ' ')
+                    }
+                }
+                inTextBlock -> {
+                    result.append(if (ch == '\r' || ch == '\n') ch else ' ')
+                    if (ch == '"' && next == '"' && nextTwo == '"') {
+                        result.append("  ")
+                        index += 2
+                        inTextBlock = false
+                    }
+                }
+                inString -> {
+                    result.append(ch)
+                    if (ch == '"' && !escaped) inString = false
+                    escaped = ch == '\\' && !escaped
+                    if (ch != '\\') escaped = false
+                }
+                inChar -> {
+                    result.append(ch)
+                    if (ch == '\'' && !escaped) inChar = false
+                    escaped = ch == '\\' && !escaped
+                    if (ch != '\\') escaped = false
+                }
+                ch == '/' && next == '/' -> {
+                    result.append("  ")
+                    index++
+                    inLineComment = true
+                }
+                ch == '/' && next == '*' -> {
+                    result.append("  ")
+                    index++
+                    inBlockComment = true
+                }
+                ch == '"' && next == '"' && nextTwo == '"' -> {
+                    result.append("   ")
+                    index += 2
+                    inTextBlock = true
+                    escaped = false
+                }
+                ch == '"' -> {
+                    result.append(ch)
+                    inString = true
+                    escaped = false
+                }
+                ch == '\'' -> {
+                    result.append(ch)
+                    inChar = true
+                    escaped = false
+                }
+                else -> result.append(ch)
+            }
+            index++
+        }
+        return result.toString()
+    }
+
     private fun maskJavaCommentsAndLiterals(source: String): String {
         val result = StringBuilder(source.length)
         var index = 0
@@ -3958,6 +4019,76 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         val groupValues: List<String>
     )
 
+    private data class TextRuleReplacement(
+        val range: IntRange,
+        val replacement: String
+    )
+
+    private data class TextRuleResult(
+        val content: String,
+        val changes: List<TextRuleReplacement>
+    )
+
+    private fun replaceTextRuleInExecutableJava(source: String, rule: TextReplacement): TextRuleResult {
+        val executableOnlyCode = maskJavaCommentsAndLiterals(source)
+        val executableCode = if (rule.matchesJavaStringLiteralArguments()) {
+            maskJavaCommentsAndTextBlocks(source)
+        } else {
+            executableOnlyCode
+        }
+        fun startsInExecutableCode(range: IntRange): Boolean {
+            val start = firstNonWhitespaceInRange(executableCode, range) ?: return false
+            return executableOnlyCode.getOrNull(start)?.isWhitespace() == false
+        }
+        val replacements = if (rule.isRegex) {
+            val pattern = Regex(rule.pattern)
+            pattern.findAll(executableCode)
+                .filter { startsInExecutableCode(it.range) }
+                .mapNotNull { match ->
+                    val original = source.substring(match.range.first, match.range.last + 1)
+                    val migrated = pattern.replace(original, rule.replacement)
+                    if (migrated == original) null else TextRuleReplacement(match.range, migrated)
+                }
+                .toList()
+        } else {
+            val found = mutableListOf<TextRuleReplacement>()
+            var index = executableCode.indexOf(rule.pattern)
+            while (index >= 0) {
+                val end = index + rule.pattern.length
+                val range = index until end
+                if (startsInExecutableCode(range)) {
+                    val original = source.substring(index, end)
+                    val migrated = original.replace(rule.pattern, rule.replacement)
+                    if (migrated != original) {
+                        found += TextRuleReplacement(range, migrated)
+                    }
+                }
+                index = executableCode.indexOf(rule.pattern, end)
+            }
+            found
+        }
+        if (replacements.isEmpty()) return TextRuleResult(source, emptyList())
+
+        var result = source
+        for (replacement in replacements.asReversed()) {
+            result = result.replaceRange(replacement.range, replacement.replacement)
+        }
+        return TextRuleResult(result, replacements)
+    }
+
+    private fun TextReplacement.matchesJavaStringLiteralArguments(): Boolean =
+        isRegex && pattern.contains('"')
+
+    private fun firstNonWhitespaceInRange(source: String, range: IntRange): Int? {
+        val start = range.first.coerceAtLeast(0)
+        val end = range.last.coerceAtMost(source.lastIndex)
+        if (start > end) return null
+        for (index in start..end) {
+            if (!source[index].isWhitespace()) return index
+        }
+        return null
+    }
+
     private data class ParticleField(
         val type: String,
         val name: String
@@ -3975,6 +4106,13 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
 
     private fun String.lineNumberAt(offset: Int): Int =
         take(offset.coerceIn(0, length)).count { it == '\n' } + 1
+
+    private fun String.lineAt(offset: Int): String {
+        val bounded = offset.coerceIn(0, length)
+        val start = lastIndexOf('\n', (bounded - 1).coerceAtLeast(0)).let { if (it < 0) 0 else it + 1 }
+        val end = indexOf('\n', bounded).let { if (it < 0) length else it }
+        return substring(start, end).removeSuffix("\r")
+    }
 
     /**
      * Build the complete rule list by combining explicit text-replacements.json rules

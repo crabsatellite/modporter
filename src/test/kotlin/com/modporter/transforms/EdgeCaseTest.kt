@@ -167,23 +167,28 @@ class EdgeCaseTest {
 
     @Test
     fun `does not corrupt string literals containing Forge names`() {
-        val projectDir = createFile("Strings.java", """
+        val original = """
             package com.example;
             public class Strings {
                 String desc = "This mod uses MinecraftForge API";
                 String url = "https://files.minecraftforge.net/something";
+                String docs = ""${'"'}
+                    import net.minecraftforge.common.MinecraftForge;
+                    ForgeHooks.onLivingJump(entity);
+                ""${'"'};
+                String guiSample = "event.registerAbove(VanillaGuiLayers.HOTBAR, \"cooldown_hud\", new CooldownHudOverlay())";
+                String lootSample = "CopyNbtFunction.copyData(ContextNbtProvider.BLOCK_ENTITY).copy(\"SkullOwner\", \"SkullOwner\")";
+                // MinecraftForge and net.minecraftforge in documentation must stay untouched.
             }
-        """.trimIndent())
+        """.trimIndent()
+        val projectDir = createFile("Strings.java", original)
         val db = MappingDatabase.loadDefault()
 
-        // Text replacement WILL replace inside strings — this is a known limitation
-        // The test documents this behavior
         val result = TextReplacementPass(db).apply(projectDir)
         val content = tempDir.resolve("src/main/java/com/example/Strings.java").readText()
 
-        // Text replacement operates on raw text, so strings will be affected
-        // This is expected behavior — document it as a known limitation
-        assertTrue(result.changeCount > 0, "Text pass replaces even inside strings (known limitation)")
+        assertEquals(original, content, "Text replacement must not rewrite comments, strings, or text blocks")
+        assertEquals(0, result.changeCount, "No executable Forge reference exists in this source")
     }
 
     // ─── Multiple Forge patterns in single line ───
