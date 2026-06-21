@@ -1971,7 +1971,8 @@ class MappingCompletenessTest {
                 body.contains("isKnownModBusEventParameterType(eventType, imports)") &&
                 body.contains("private fun isKnownModBusEventParameterType") &&
                 body.contains("modBusEventTypeOwners.any") &&
-                body.contains("imports[normalized] ?: return false"),
+                body.contains("resolveJavaTypeReferenceFromImportsOrFqn(rawType, imports) ?: return false") &&
+                body.contains("return imports[normalized]"),
             "Empty event-bus registration removal must resolve event parameter owners through Java-visible imports/FQNs and fail closed"
         )
         assertTrue(
@@ -2016,6 +2017,53 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty(),
             "Mod event bus listener migrations must use declared Java types, not Java file-name owner guesses: $offenders"
+        )
+    }
+
+    @Test
+    fun `mod bus event extraction and registration resolve event parameter owners`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        fun functionBody(name: String): String {
+            val start = source.indexOf("private fun $name")
+            assertTrue(start >= 0, "$name is missing")
+            val end = source.indexOf("\n    private fun ", start + 1).let {
+                if (it < 0) source.length else it
+            }
+            return source.substring(start, end)
+        }
+
+        val extraction = functionBody("extractClientOnlyEventMethods")
+        val listenerRefs = functionBody("collectModBusListenerRefs")
+        val staticSubscribers = functionBody("migrateStaticModBusSubscribers")
+        val forbidden = listOf(
+            "extract modBusEventTypes simple scan" to extraction.contains("modBusEventTypes.any"),
+            "extract method declaration contains scan" to Regex("""methodDecl\.contains\(""").containsMatchIn(extraction),
+            "listener refs modBusEventTypes simple scan" to listenerRefs.contains("modBusEventTypes.any"),
+            "listener refs parameter contains scan" to Regex("""parameterType\.contains\(""").containsMatchIn(listenerRefs),
+            "static subscriber modBusEventTypes simple scan" to staticSubscribers.contains("modBusEventTypes.any"),
+            "static subscriber event contains scan" to Regex("""handler\.eventType\.contains\(""").containsMatchIn(staticSubscribers),
+            "static subscriber client-only simple scan" to staticSubscribers.contains("clientOnlyEventNames.any")
+        )
+            .filter { (_, present) -> present }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            extraction.contains("val imports = javaNonStaticImports(code)") &&
+                extraction.contains("isKnownModBusEventParameterType(it, imports)") &&
+                extraction.contains("isKnownClientOnlyModBusEventParameterType(it, imports)") &&
+                listenerRefs.contains("val imports = javaNonStaticImports(code)") &&
+                listenerRefs.contains("isKnownModBusEventParameterType(parameterType, imports)") &&
+                staticSubscribers.contains("val imports = javaNonStaticImports(code)") &&
+                staticSubscribers.contains("isKnownClientOnlyModBusEventParameterType(eventType, imports)") &&
+                staticSubscribers.contains("isKnownModBusEventParameterType(handler.eventType, imports)"),
+            "Mod-bus event extraction/registration must resolve parameter owners through Java-visible imports/FQNs"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "Mod-bus event extraction/registration must not infer event identity from simple names: $forbidden"
         )
     }
 

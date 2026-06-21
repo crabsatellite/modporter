@@ -658,6 +658,47 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `mod bus event extraction rejects local event simple names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RegisterColorHandlersEvent.java").writeText("""
+            package com.example;
+
+            public final class RegisterColorHandlersEvent {
+                public static final class Item {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                    modEventBus.register(this);
+                }
+
+                @SubscribeEvent
+                public void colors(RegisterColorHandlersEvent.Item event) {
+                    event.toString();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.none { it.ruleId == "struct-extract-mod-bus-events" })
+        assertTrue(migrated.contains("modEventBus.register(this);"), migrated)
+        assertTrue(migrated.contains("public void colors(RegisterColorHandlersEvent.Item event)"), migrated)
+        assertFalse(migrated.contains("EventBusSubscriber.Bus.MOD"), migrated)
+    }
+
+    @Test
     fun `event bus subscriber methods become static for automatic registration`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -860,6 +901,56 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `static mod bus subscriber registration rejects local event simple names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FMLCommonSetupEvent.java").writeText("""
+            package com.example;
+
+            public class FMLCommonSetupEvent {
+            }
+        """.trimIndent())
+        srcDir.resolve("LocalEvents.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+
+            @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+            class LocalEvents {
+                @SubscribeEvent
+                public static void setup(FMLCommonSetupEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+        val data = srcDir.resolve("LocalEvents.java").readText()
+
+        assertTrue(result.changes.none { it.ruleId == "struct-static-modbus-subscriber-registration" })
+        assertFalse(main.contains("LocalEvents::setup"), main)
+        assertTrue(data.contains("@EventBusSubscriber"), data)
+        assertTrue(data.contains("@SubscribeEvent"), data)
+    }
+
+    @Test
     fun `empty subscriber cleanup ignores braces inside literals and comments`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -937,6 +1028,51 @@ class StructuralRefactorExtraTest {
         assertTrue(main.contains("modEventBus.addListener(ActualData::gatherData);"), main)
         assertFalse(main.contains("NeoForge.EVENT_BUS.addListener(ActualData::gatherData);"), main)
         assertFalse(main.contains("ModData::gatherData"), main)
+    }
+
+    @Test
+    fun `common bus mod event listener migration rejects local event simple names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.common.NeoForge;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    NeoForge.EVENT_BUS.addListener(LocalData::gatherData);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("GatherDataEvent.java").writeText("""
+            package com.example;
+
+            public class GatherDataEvent {
+            }
+        """.trimIndent())
+        srcDir.resolve("LocalData.java").writeText("""
+            package com.example;
+
+            class LocalData {
+                public static void gatherData(GatherDataEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.none { it.ruleId == "struct-modbus-listener-registration" })
+        assertTrue(main.contains("NeoForge.EVENT_BUS.addListener(LocalData::gatherData);"), main)
+        assertFalse(main.contains("modEventBus.addListener(LocalData::gatherData);"), main)
     }
 
     @Test

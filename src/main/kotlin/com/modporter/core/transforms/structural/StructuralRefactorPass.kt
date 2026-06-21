@@ -3350,6 +3350,23 @@ ${registrations.distinct().joinToString("\n")}
         "net.minecraftforge.fml.event.lifecycle.InterModProcessEvent"
     )
 
+    private val clientOnlyModBusEventTypeOwners = setOf(
+        "net.neoforged.neoforge.client.event.EntityRenderersEvent",
+        "net.minecraftforge.client.event.EntityRenderersEvent",
+        "net.neoforged.neoforge.client.event.RegisterColorHandlersEvent",
+        "net.minecraftforge.client.event.RegisterColorHandlersEvent",
+        "net.neoforged.neoforge.client.event.RegisterParticleProvidersEvent",
+        "net.minecraftforge.client.event.RegisterParticleProvidersEvent",
+        "net.neoforged.neoforge.client.event.ModelEvent",
+        "net.minecraftforge.client.event.ModelEvent",
+        "net.neoforged.neoforge.client.event.TextureAtlasStitchedEvent",
+        "net.minecraftforge.client.event.TextureAtlasStitchedEvent",
+        "net.neoforged.neoforge.client.event.RegisterShadersEvent",
+        "net.minecraftforge.client.event.RegisterShadersEvent",
+        "net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent",
+        "net.minecraftforge.client.event.RegisterKeyMappingsEvent"
+    )
+
     private fun removeEmptyEventBusRegistration(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
         val srcDir = projectDir.resolve("src/main/java")
@@ -3410,14 +3427,23 @@ ${registrations.distinct().joinToString("\n")}
     }
 
     private fun isKnownModBusEventParameterType(rawType: String, imports: Map<String, String>): Boolean {
-        val normalized = normalizeJavaTypeReference(rawType) ?: return false
-        val resolved = if (normalized.contains(".")) {
-            val firstSegment = normalized.substringBefore('.')
-            imports[firstSegment]?.let { imported -> "$imported.${normalized.substringAfter('.')}" } ?: normalized
-        } else {
-            imports[normalized] ?: return false
-        }
+        val resolved = resolveJavaTypeReferenceFromImportsOrFqn(rawType, imports) ?: return false
         return modBusEventTypeOwners.any { owner -> resolved == owner || resolved.startsWith("$owner.") }
+    }
+
+    private fun isKnownClientOnlyModBusEventParameterType(rawType: String, imports: Map<String, String>): Boolean {
+        val resolved = resolveJavaTypeReferenceFromImportsOrFqn(rawType, imports) ?: return false
+        return clientOnlyModBusEventTypeOwners.any { owner -> resolved == owner || resolved.startsWith("$owner.") }
+    }
+
+    private fun resolveJavaTypeReferenceFromImportsOrFqn(rawType: String, imports: Map<String, String>): String? {
+        val normalized = normalizeJavaTypeReference(rawType) ?: return null
+        if (normalized.contains(".")) {
+            val firstSegment = normalized.substringBefore('.')
+            imports[firstSegment]?.let { imported -> return "$imported.${normalized.substringAfter('.')}" }
+            return normalized
+        }
+        return imports[normalized]
     }
 
     /**
@@ -41822,19 +41848,9 @@ public class ${builder.className} implements RecipeBuilder {
      * 2. Separates them into client-only vs common mod-bus events
      * 3. Creates inner classes with @EventBusSubscriber(bus=MOD) / @EventBusSubscriber(bus=MOD, value=Dist.CLIENT)
      * 4. Removes modEventBus.register(this) since inner classes auto-register
-     */
+    */
     private fun extractClientOnlyEventMethods(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
-        val clientOnlyEvents = setOf(
-            "EntityRenderersEvent",
-            "RegisterColorHandlersEvent",
-            "RegisterParticleProvidersEvent",
-            "ModelEvent",
-            "TextureAtlasStitchedEvent",
-            "RegisterShadersEvent",
-            "RegisterKeyMappingsEvent"
-        )
-
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return changes
 
@@ -41845,6 +41861,8 @@ public class ${builder.className} implements RecipeBuilder {
                 val content = file.readText()
                 if (!content.contains("@Mod(") && !content.contains("@Mod\"")) return@forEach
                 if (!content.contains("@SubscribeEvent")) return@forEach
+                val code = maskJavaComments(content)
+                val imports = javaNonStaticImports(code)
 
                 val lines = content.lines().toMutableList()
                 val separator = if (content.contains("\r\n")) "\r\n" else "\n"
@@ -41865,14 +41883,14 @@ public class ${builder.className} implements RecipeBuilder {
                         val methodDecl = lines[methodLine]
 
                         // Determine if this is a mod-bus event
-                        val isModBusEvent = modBusEventTypes.any { eventName ->
-                            methodDecl.contains("$eventName.") || methodDecl.contains("$eventName ")
-                        }
+                        val eventType = Regex("""\(\s*(?:final\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\b""")
+                            .find(methodDecl)
+                            ?.groupValues
+                            ?.get(1)
+                        val isModBusEvent = eventType?.let { isKnownModBusEventParameterType(it, imports) } == true
 
                         if (isModBusEvent) {
-                            val isClientOnly = clientOnlyEvents.any { eventName ->
-                                methodDecl.contains("$eventName.") || methodDecl.contains("$eventName ")
-                            }
+                            val isClientOnly = eventType?.let { isKnownClientOnlyModBusEventParameterType(it, imports) } == true
 
                             val openBraceIdx = (methodLine until lines.size).firstOrNull { lines[it].contains("{") }
                             if (openBraceIdx != null) {
@@ -42075,7 +42093,9 @@ public class ${builder.className} implements RecipeBuilder {
             .toList()
             .forEach { file ->
                 val text = file.readText()
-                val packageName = packageNameOf(text)
+                val code = maskJavaComments(text)
+                val packageName = packageNameOf(code)
+                val imports = javaNonStaticImports(code)
                 val executableCode = maskJavaCommentsAndLiterals(text)
                 val typeBlocks = javaTypeBlocks(text, executableCode)
                 val methodPattern = Regex(
@@ -42084,11 +42104,7 @@ public class ${builder.className} implements RecipeBuilder {
                 methodPattern.findAll(executableCode).forEach { match ->
                     val methodName = match.groupValues[1]
                     val parameterType = match.groupValues[2]
-                    val isModBusEvent = modBusEventTypes.any { eventName ->
-                        parameterType == eventName ||
-                            parameterType.endsWith(".$eventName") ||
-                            parameterType.contains("$eventName.")
-                    }
+                    val isModBusEvent = isKnownModBusEventParameterType(parameterType, imports)
                     if (isModBusEvent) {
                         val owner = javaTypeBlockContainingOffset(match.range.first, typeBlocks)
                         if (owner != null) {
@@ -42111,15 +42127,6 @@ public class ${builder.className} implements RecipeBuilder {
         var mainText = mainFile.readText()
         val modBusVar = detectModBusVariable(mainText) ?: return changes
 
-        val clientOnlyEventNames = setOf(
-            "EntityRenderersEvent",
-            "RegisterColorHandlersEvent",
-            "RegisterParticleProvidersEvent",
-            "ModelEvent",
-            "TextureAtlasStitchedEvent",
-            "RegisterShadersEvent",
-            "RegisterKeyMappingsEvent"
-        )
         data class StaticHandler(val methodName: String, val eventType: String, val isClientOnly: Boolean)
 
         Files.walk(srcDir)
@@ -42129,6 +42136,8 @@ public class ${builder.className} implements RecipeBuilder {
             .forEach { file ->
                 var text = file.readText()
                 val original = text
+                val code = maskJavaComments(text)
+                val imports = javaNonStaticImports(code)
                 val annotationPattern = Regex(
                     """(?m)^[ \t]*@EventBusSubscriber\((?=[^\r\n)]*\bBus\.MOD\b)(?![^\r\n)]*\bvalue\s*=)[^\r\n)]*\)\s*\r?\n"""
                 )
@@ -42145,16 +42154,12 @@ public class ${builder.className} implements RecipeBuilder {
                         StaticHandler(
                             methodName = match.groupValues[1],
                             eventType = eventType,
-                            isClientOnly = clientOnlyEventNames.any { eventType.contains(it) } ||
+                            isClientOnly = isKnownClientOnlyModBusEventParameterType(eventType, imports) ||
                                 (methodPrefix.contains("@OnlyIn") && methodPrefix.contains("Dist.CLIENT"))
                         )
                     }
                     .filter { handler ->
-                        modBusEventTypes.any { eventName ->
-                            handler.eventType == eventName ||
-                                handler.eventType.endsWith(".$eventName") ||
-                                handler.eventType.contains("$eventName.")
-                        }
+                        isKnownModBusEventParameterType(handler.eventType, imports)
                     }
                     .toList()
                 if (handlers.isEmpty()) return@forEach
