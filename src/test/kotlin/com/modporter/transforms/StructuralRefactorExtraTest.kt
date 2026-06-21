@@ -20032,6 +20032,31 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy FollowOwnerGoal constructor migration ignores comments and string literals`() {
+        val projectDir = createFile("FollowOwnerGoalDocs.java", """
+            package com.example;
+
+            public class FollowOwnerGoalDocs {
+                // this.goalSelector.addGoal(5, new FollowOwnerGoal(this, 1.0D, 10.0F, 2.0F, true));
+                private static final String DOC = "new FollowOwnerGoal(this, 1.0D, 10.0F, 2.0F, true)";
+
+                public int keep() {
+                    return DOC.length();
+                }
+            }
+        """.trimIndent())
+        val sourceFile = tempDir.resolve("src/main/java/com/example/FollowOwnerGoalDocs.java")
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = sourceFile.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("new FollowOwnerGoal(this, 1.0D, 10.0F, 2.0F)"), migrated)
+    }
+
+    @Test
     fun `does not synthesize event bus cancellation checks for unused post results`() {
         val projectDir = createFile("EventBusPostSurface.java", """
             package com.example;

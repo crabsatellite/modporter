@@ -19501,8 +19501,9 @@ $body
     }
 
     private fun migrateLegacyFollowOwnerGoalConstructors(source: String): String {
-        if (!source.contains("new FollowOwnerGoal(")) return source
-        return rewriteJavaNew(source, "FollowOwnerGoal") { args ->
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("new FollowOwnerGoal(")) return source
+        return rewriteExecutableJavaNew(source, "FollowOwnerGoal") { args ->
             if (args.size == 5) "new FollowOwnerGoal(${args.take(4).joinToString(", ")})" else null
         }
     }
