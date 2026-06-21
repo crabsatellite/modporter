@@ -2968,6 +2968,83 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `custom particle options migration preserves commented legacy samples beside real code`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.core.particles.ParticleOptions;
+            import net.minecraft.core.particles.ParticleType;
+            import net.minecraft.network.FriendlyByteBuf;
+
+            public class ParticleDocs {
+                /*
+                legacy sample:
+                public class LeafParticleData implements ParticleOptions {
+                    public final int r;
+                    public LeafParticleData(int r) {
+                        this.r = r;
+                    }
+                    public static Codec<LeafParticleData> codecLeaf() {
+                        return RecordCodecBuilder.create((instance) -> instance.group(
+                                Codec.INT.fieldOf("r").forGetter((obj) -> obj.r))
+                                .apply(instance, LeafParticleData::new));
+                    }
+                    @Override
+                    public void writeToNetwork(FriendlyByteBuf buf) {
+                        buf.writeVarInt(r);
+                    }
+                    public static class Deserializer implements ParticleOptions.Deserializer<LeafParticleData> {
+                    }
+                }
+                */
+            }
+
+            public class LeafParticleData implements ParticleOptions {
+                public final int r;
+
+                public LeafParticleData(int r) {
+                    this.r = r;
+                }
+
+                public static Codec<LeafParticleData> codecLeaf() {
+                    return RecordCodecBuilder.create((instance) -> instance.group(
+                            Codec.INT.fieldOf("r").forGetter((obj) -> obj.r))
+                            .apply(instance, LeafParticleData::new));
+                }
+
+                @Override
+                public ParticleType<?> getType() {
+                    return null;
+                }
+
+                @Override
+                public void writeToNetwork(FriendlyByteBuf buf) {
+                    buf.writeVarInt(r);
+                }
+
+                public static class Deserializer implements ParticleOptions.Deserializer<LeafParticleData> {
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "particle-options-codec-streamcodec" }, result.changes.joinToString("\n"))
+        assertTrue(transformed.contains("public record LeafParticleData(int r) implements ParticleOptions"), transformed)
+        assertTrue(transformed.contains("public static MapCodec<LeafParticleData> CODEC = RecordCodecBuilder.mapCodec"), transformed)
+        assertTrue(transformed.contains("legacy sample:"), transformed)
+        assertTrue(transformed.contains("public class LeafParticleData implements ParticleOptions"), transformed)
+        assertTrue(transformed.contains("public final int r;"), transformed)
+        assertTrue(transformed.contains("public static class Deserializer implements ParticleOptions.Deserializer<LeafParticleData>"), transformed)
+    }
+
+    @Test
     fun `custom particle type registration migration ignores comments and string literals`() {
         val projectDir = createTestFile("""
             package com.example;

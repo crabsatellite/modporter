@@ -1045,7 +1045,9 @@ class MappingCompletenessTest {
             "raw implements prefilter" to """source.contains("implements ParticleOptions")""",
             "raw writeToNetwork prefilter" to """source.contains("writeToNetwork")""",
             "raw class scan" to ".find(source)",
-            "raw field scan" to ".findAll(source)"
+            "raw field scan" to ".findAll(source)",
+            "raw class replacement" to "result.replace(",
+            "raw regex replacement" to ".replace(result,"
         )
             .filter { (_, marker) -> body.contains(marker) }
             .map { (label, _) -> label }
@@ -1054,12 +1056,44 @@ class MappingCompletenessTest {
             body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
                 body.contains("""!executableCode.contains("ParticleOptions.Deserializer")""") &&
                 body.contains(".find(executableCode)") &&
-                body.contains(".findAll(executableCode)"),
-            "ParticleOptions codec migration must prove class and fields from executable Java"
+                body.contains(".findAll(executableCode)") &&
+                body.contains("replaceExecutableRegex("),
+            "ParticleOptions codec migration must prove and rewrite class, fields, and methods from executable Java"
         )
         assertTrue(
             offenders.isEmpty(),
             "ParticleOptions codec migration must not treat comments or string literals as source evidence: $offenders"
+        )
+    }
+
+    @Test
+    fun `particle deserializer class removal uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun removeParticleDeserializerClass")
+        assertTrue(start >= 0, "removeParticleDeserializerClass is missing")
+        val end = source.indexOf("private fun migrateParticleTypeRegistrations", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw marker lookup" to "source.indexOf(marker)",
+            "raw open brace lookup" to "source.indexOf('{', markerIndex)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("executableCode.indexOf(marker)") &&
+                body.contains("executableCode.indexOf('{', markerIndex)"),
+            "Particle deserializer removal must locate the inner class in executable Java, not comments"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Particle deserializer removal must not delete commented sample classes: $offenders"
         )
     }
 

@@ -684,34 +684,47 @@ class TextReplacementPass(
 
         var result = source
         val recordParams = fields.joinToString(", ") { "${it.type} ${it.name}" }
-        result = result.replace(
+        result = replaceExecutableRegex(
+            result,
             Regex("""public\s+class\s+${Regex.escape(className)}\s+implements\s+ParticleOptions\s*\{"""),
-            "public record $className($recordParams) implements ParticleOptions {"
-        )
-        result = Regex("""(?m)^[ \t]*public\s+final\s+int\s+[A-Za-z_$][\w$]*;\s*\r?\n""").replace(result, "")
+        ) { "public record $className($recordParams) implements ParticleOptions {" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(?m)^[ \t]*public\s+final\s+int\s+[A-Za-z_$][\w$]*;\s*\r?\n""")
+        ) { "" }
 
         val constructorParams = fields.joinToString("""\s*,\s*""") { """${Regex.escape(it.type)}\s+${Regex.escape(it.name)}""" }
         val constructorAssignments = fields.joinToString("""\s*""") {
             """this\.${Regex.escape(it.name)}\s*=\s*${Regex.escape(it.name)}\s*;"""
         }
-        result = Regex(
+        result = replaceExecutableRegex(
+            result,
             """\r?\n\s*public\s+${Regex.escape(className)}\s*\(\s*$constructorParams\s*\)\s*\{\s*$constructorAssignments\s*\}\s*"""
-        ).replace(result, "\n")
+                .toRegex()
+        ) { "\n" }
 
         val codecSource = particleCodecSource(className, fields)
-        result = Regex(
+        result = replaceExecutableRegex(
+            result,
             """(?s)\r?\n\s*public\s+static\s+Codec<${Regex.escape(className)}>\s+[A-Za-z_$][\w$]*\s*\(\s*\)\s*\{\s*return\s+RecordCodecBuilder\.create\s*\(\s*\(?\s*instance\s*\)?\s*->\s*instance\.group\s*\([\s\S]*?\.apply\s*\(\s*instance\s*,\s*${Regex.escape(className)}::new\s*\)\s*\)\s*;\s*\}\s*"""
-        ).replace(result, "\n\n$codecSource\n")
+                .toRegex()
+        ) { "\n\n$codecSource\n" }
 
-        result = Regex(
+        result = replaceExecutableRegex(
+            result,
             """(?s)\r?\n\s*@Override\s*\r?\n\s*public\s+void\s+writeToNetwork\s*\([^)]*\)\s*\{.*?\n\s*\}\s*"""
-        ).replace(result, "\n")
-        result = Regex(
+                .toRegex()
+        ) { "\n" }
+        result = replaceExecutableRegex(
+            result,
             """(?s)\r?\n\s*@Nonnull\s*\r?\n\s*@Override\s*\r?\n\s*public\s+String\s+writeToString\s*\(\s*\)\s*\{.*?\n\s*\}\s*"""
-        ).replace(result, "\n")
-        result = Regex(
+                .toRegex()
+        ) { "\n" }
+        result = replaceExecutableRegex(
+            result,
             """(?s)\r?\n\s*@Override\s*\r?\n\s*public\s+String\s+writeToString\s*\(\s*\)\s*\{.*?\n\s*\}\s*"""
-        ).replace(result, "\n")
+                .toRegex()
+        ) { "\n" }
         result = removeParticleDeserializerClass(result, className)
 
         result = removeImportLine(result, "com.mojang.brigadier.StringReader")
@@ -741,10 +754,11 @@ $streamFields,
 
     private fun removeParticleDeserializerClass(source: String, className: String): String {
         val marker = "public static class Deserializer implements ParticleOptions.Deserializer<$className>"
-        val markerIndex = source.indexOf(marker)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val markerIndex = executableCode.indexOf(marker)
         if (markerIndex < 0) return source
         val start = source.lastIndexOf('\n', markerIndex).let { if (it >= 0) it else markerIndex }
-        val openBrace = source.indexOf('{', markerIndex)
+        val openBrace = executableCode.indexOf('{', markerIndex)
         if (openBrace < 0) return source
         val closeBrace = findMatchingBrace(source, openBrace)
         if (closeBrace < 0) return source
