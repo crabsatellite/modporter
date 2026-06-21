@@ -1869,6 +1869,33 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `qualified Java invocation helper scans executable code only`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun rewriteJavaInvocation(")
+        assertTrue(start >= 0, "rewriteJavaInvocation is missing")
+        val end = source.indexOf("private fun removeJavaStatementsMatching", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+
+        val offenders = listOf(
+            "missing executable mask" to !body.contains("val executableCode = maskJavaCommentsAndLiterals(result)"),
+            "raw qualified invocation index" to body.contains("result.indexOf(\"${'$'}qualifiedName(\", cursor)"),
+            "raw parenthesis matcher" to body.contains("findMatchingParen(result, openParen)")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Qualified invocation migrations must locate calls and argument structure in executable Java only: $offenders"
+        )
+    }
+
+    @Test
     fun `structural brace matching ignores Java comments and literals`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

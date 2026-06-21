@@ -2924,7 +2924,7 @@ ${registrations.distinct().joinToString("\n")}
             .toList()
             .forEach { file ->
                 val original = file.readText()
-                if (!original.contains("PacketRelay.")) return@forEach
+                if (!maskJavaCommentsAndLiterals(original).contains("PacketRelay.")) return@forEach
                 var modified = original
                 modified = rewriteJavaInvocation(modified, "PacketRelay.sendToServer") { args ->
                     if (args.size == 2) "PacketDistributor.sendToServer(${args[1].trim()})" else null
@@ -2966,10 +2966,11 @@ ${registrations.distinct().joinToString("\n")}
         var result = source
         var cursor = 0
         while (true) {
-            val index = result.indexOf("$qualifiedName(", cursor)
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val index = executableCode.indexOf("$qualifiedName(", cursor)
             if (index < 0) break
             val openParen = index + qualifiedName.length
-            val closeParen = findMatchingParen(result, openParen)
+            val closeParen = findMatchingParen(executableCode, openParen)
             if (closeParen <= openParen) {
                 cursor = index + qualifiedName.length
                 continue

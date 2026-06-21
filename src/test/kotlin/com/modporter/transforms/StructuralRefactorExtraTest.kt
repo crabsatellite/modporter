@@ -2913,7 +2913,13 @@ class StructuralRefactorExtraTest {
             import net.minecraft.server.level.ServerPlayer;
 
             public class RelayUse {
+                private static final String RELAY_DOC = "PacketRelay.sendToServer(ExamplePacketHandler.INSTANCE, new ServerActionPacket(99));";
+                private static final String RELAY_TEXT_BLOCK = ""${'"'}
+                    PacketRelay.sendToAll(ExamplePacketHandler.INSTANCE, new ClientNoticePacket(100));
+                ""${'"'};
+
                 public void send(ServerLevel level, ServerPlayer player) {
+                    // PacketRelay.sendToPlayer(ExamplePacketHandler.INSTANCE, new ClientNoticePacket(101), player);
                     PacketRelay.sendToPlayer(ExamplePacketHandler.INSTANCE, new ClientNoticePacket(1), player);
                     PacketRelay.sendToServer(ExamplePacketHandler.INSTANCE, new ServerActionPacket(2));
                     PacketRelay.sendToAll(ExamplePacketHandler.INSTANCE, new ClientNoticePacket(3));
@@ -2956,8 +2962,12 @@ class StructuralRefactorExtraTest {
         assertTrue(relay.contains("PacketDistributor.sendToServer(new ServerActionPacket(2));"), relay)
         assertTrue(relay.contains("PacketDistributor.sendToAllPlayers(new ClientNoticePacket(3));"), relay)
         assertTrue(relay.contains("PacketDistributor.sendToPlayersNear(level, null, player.getX(), player.getY(), player.getZ(), 8.0, new ClientNoticePacket(4));"), relay)
-        assertFalse(relay.contains("PacketRelay"), relay)
-        assertFalse(relay.contains("ExamplePacketHandler"), relay)
+        assertTrue(relay.contains("""private static final String RELAY_DOC = "PacketRelay.sendToServer(ExamplePacketHandler.INSTANCE, new ServerActionPacket(99));";"""), relay)
+        assertTrue(relay.contains("PacketRelay.sendToAll(ExamplePacketHandler.INSTANCE, new ClientNoticePacket(100));"), relay)
+        assertTrue(relay.contains("// PacketRelay.sendToPlayer(ExamplePacketHandler.INSTANCE, new ClientNoticePacket(101), player);"), relay)
+        assertFalse(relay.contains("import com.aetherteam.nitrogen.network.PacketRelay;"), relay)
+        assertFalse(relay.contains("import com.example.network.ExamplePacketHandler;"), relay)
+        assertFalse(relay.contains("PacketRelay.sendToPlayer(ExamplePacketHandler.INSTANCE, new ClientNoticePacket(1), player);"), relay)
     }
 
     @Test
