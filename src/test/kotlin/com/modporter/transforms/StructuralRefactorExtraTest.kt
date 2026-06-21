@@ -2721,7 +2721,9 @@ class StructuralRefactorExtraTest {
             @Mod("example")
             public class ExampleMod {
                 public ExampleMod(ModContainer modContainer) {
-                    FMLJavaModLoadingContext.get().getModEventBus().addListener(this::setup);
+                    FMLJavaModLoadingContext
+                        .get()
+                        .getModEventBus().addListener(this::setup);
                     ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.SERVER, ExampleConfig.SPEC);
                 }
 
@@ -2740,6 +2742,100 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("modContainer.registerConfig(ModConfig.Type.SERVER, ExampleConfig.SPEC);"))
         assertTrue(!migrated.contains("FMLJavaModLoadingContext"))
         assertTrue(!migrated.contains("ModLoadingContext"))
+    }
+
+    @Test
+    fun `FMLJavaModLoadingContext constructor migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ExampleMod.java")
+        file.writeText("""
+            package com.example;
+
+            // import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.ModLoadingContext;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.config.ModConfig;
+            import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;
+
+            @Mod("example")
+            public class ExampleMod {
+                private static final String DOC = "FMLJavaModLoadingContext.get().getModEventBus()";
+
+                /*
+                 public ExampleMod(FMLJavaModLoadingContext fakeContext) {
+                     fakeContext.registerConfig(ModConfig.Type.CLIENT, FakeConfig.SPEC);
+                     ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.SERVER, FakeConfig.SPEC);
+                 }
+                 */
+
+                public ExampleMod(FMLJavaModLoadingContext context) {
+                    context.getModEventBus().addListener(this::setup);
+                    context.registerConfig(ModConfig.Type.COMMON, ExampleConfig.SPEC);
+                }
+
+                private void setup(Object event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-fml-context-to-eventbus" })
+        assertTrue(migrated.contains("import net.neoforged.bus.api.IEventBus;"), migrated)
+        assertTrue(migrated.contains("import net.neoforged.fml.ModContainer;"), migrated)
+        assertTrue(migrated.contains("public ExampleMod(IEventBus modEventBus, ModContainer modContainer)"), migrated)
+        assertTrue(migrated.contains("modEventBus.addListener(this::setup);"), migrated)
+        assertTrue(migrated.contains("modContainer.registerConfig(ModConfig.Type.COMMON, ExampleConfig.SPEC);"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "FMLJavaModLoadingContext.get().getModEventBus()";"""), migrated)
+        assertTrue(migrated.contains("public ExampleMod(FMLJavaModLoadingContext fakeContext)"), migrated)
+        assertTrue(migrated.contains("fakeContext.registerConfig(ModConfig.Type.CLIENT, FakeConfig.SPEC);"), migrated)
+        assertTrue(migrated.contains("ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.SERVER, FakeConfig.SPEC);"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;"), migrated)
+    }
+
+    @Test
+    fun `legacy static FML mod event bus migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ExampleMod.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+                private static final String DOC = "FMLJavaModLoadingContext.get().getModEventBus()";
+
+                /*
+                 FMLJavaModLoadingContext.get().getModEventBus().addListener(ExampleMod::fakeSetup);
+                 */
+
+                public void init() {
+                    FMLJavaModLoadingContext.get().getModEventBus().addListener(this::setup);
+                }
+
+                private void setup(Object event) {
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(
+            migrated.contains(
+                "net.neoforged.fml.ModList.get().getModContainerById(ExampleMod.MODID).orElseThrow().getEventBus().addListener(this::setup);"
+            ),
+            migrated
+        )
+        assertTrue(migrated.contains("""private static final String DOC = "FMLJavaModLoadingContext.get().getModEventBus()";"""), migrated)
+        assertTrue(migrated.contains("FMLJavaModLoadingContext.get().getModEventBus().addListener(ExampleMod::fakeSetup);"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;"), migrated)
     }
 
     @Test

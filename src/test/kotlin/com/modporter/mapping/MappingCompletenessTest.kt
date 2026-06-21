@@ -2625,6 +2625,88 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `FMLJavaModLoadingContext migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateFMLJavaModLoadingContext")
+        assertTrue(start >= 0, "migrateFMLJavaModLoadingContext is missing")
+        val end = source.indexOf("private data class FluidBucketCapabilityMigration", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "raw @Mod prefilter" to "text.contains(\"@Mod(\")",
+            "raw FML prefilter" to "text.contains(\"FMLJavaModLoadingContext\")",
+            "raw class scan" to """).find(text)?.groupValues""",
+            "raw context event-bus replacement" to """.replace("${'$'}{contextVarName}.getModEventBus()""",
+            "raw context config replacement" to """.replace("${'$'}{contextVarName}.registerConfig(""",
+            "exact static getter scan" to """executableCode.contains("FMLJavaModLoadingContext.get().getModEventBus()")""",
+            "raw active-container config replacement" to "\"ModLoadingContext.get().getActiveContainer().registerConfig(\"",
+            "raw direct config replacement" to "\"ModLoadingContext.get().registerConfig(\"",
+            "raw ModLoadingContext import scan" to """!text.contains("ModLoadingContext.")""",
+            "raw regex import removal" to "text.replace(Regex("
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("var executableCode = maskJavaCommentsAndLiterals(text)") &&
+                body.contains("Regex(\"\"\"@\\s*Mod") &&
+                body.contains("staticFmlModEventBusPattern.containsMatchIn(executableCode)") &&
+                body.contains(".findAll(executableCode)") &&
+                body.contains(".singleOrNull()") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("removeExecutableImport(text, \"net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext\")") &&
+                body.contains("maskJavaCommentsAndLiterals(text).contains(\"ModLoadingContext.\")") &&
+                body.contains("addExecutableImportIfMissing(text, \"net.neoforged.fml.ModContainer\")") &&
+                body.contains("addExecutableImportIfMissing(text, \"net.neoforged.bus.api.IEventBus\")"),
+            "FMLJavaModLoadingContext migration must derive constructor, calls, and imports from executable Java"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "FMLJavaModLoadingContext migration must not use comments or strings as source evidence: $forbidden"
+        )
+    }
+
+    @Test
+    fun `legacy static FML mod event bus migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyStaticFmlModEventBusAccess")
+        assertTrue(start >= 0, "migrateLegacyStaticFmlModEventBusAccess is missing")
+        val end = source.indexOf("private fun migrateLegacyEntityStepHeightOverrides", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "raw static getter prefilter" to """source.contains("FMLJavaModLoadingContext.get().getModEventBus()")""",
+            "raw annotation scan" to ".find(source)",
+            "raw static getter replacement" to "source.replace(",
+            "raw FML import removal" to "removeImport(result, \"net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("staticGetterPattern.containsMatchIn(executableCode)") &&
+                body.contains(".find(executableCode)") &&
+                body.contains("source.substring(it).trim()") &&
+                body.contains("replaceExecutableRegex(source, staticGetterPattern)") &&
+                body.contains("removeExecutableImport(result, \"net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext\")"),
+            "Legacy static FML mod event-bus migration must use executable calls and source-ranged annotation arguments"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "Legacy static FML mod event-bus migration must not use comments or strings as source evidence: $forbidden"
+        )
+    }
+
+    @Test
     fun `production mod event bus listener migrations do not infer owners from java file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

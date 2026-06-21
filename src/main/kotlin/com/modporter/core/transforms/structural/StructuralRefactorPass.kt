@@ -3644,88 +3644,111 @@ ${registrations.distinct().joinToString("\n")}
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 var text = javaFile.toFile().readText()
-                if (!text.contains("@Mod(") && !text.contains("@Mod\n")) return@forEach
-                if (!text.contains("FMLJavaModLoadingContext")) return@forEach
+                var executableCode = maskJavaCommentsAndLiterals(text)
+                if (!Regex("""@\s*Mod(?:\s*\(|\b)""").containsMatchIn(executableCode)) return@forEach
+                if (!executableCode.contains("FMLJavaModLoadingContext")) return@forEach
 
                 val original = text
-                val className = Regex("""public\s+class\s+(\w+)""").find(text)?.groupValues?.get(1)
+                val className = Regex("""public\s+class\s+(\w+)""").find(executableCode)?.groupValues?.get(1)
+                val staticFmlModEventBusPattern = Regex(
+                    """\bFMLJavaModLoadingContext\s*\.\s*get\s*\(\s*\)\s*\.\s*getModEventBus\s*\(\s*\)"""
+                )
 
                 // Replace constructor parameter: FMLJavaModLoadingContext <name> -> IEventBus modEventBus
-                val ctorParamPattern = Regex("""FMLJavaModLoadingContext\s+(\w+)""")
-                val ctorMatch = ctorParamPattern.find(text)
+                val ctorMatch = className?.let { name ->
+                    Regex("""public\s+${Regex.escape(name)}\s*\(([^)]*)\)""")
+                        .findAll(executableCode)
+                        .filter { it.groupValues[1].contains("FMLJavaModLoadingContext") }
+                        .singleOrNull()
+                }
                 if (ctorMatch != null) {
-                    val contextVarName = ctorMatch.groupValues[1]
+                    val concreteClassName = className
+                    val parameterListRange = ctorMatch.groups[1]?.range ?: return@forEach
+                    val ctorParamPattern = Regex("""FMLJavaModLoadingContext\s+(\w+)""")
+                    val ctorParamMatches = ctorParamPattern.findAll(executableCode, parameterListRange.first)
+                        .takeWhile { it.range.last <= parameterListRange.last }
+                        .toList()
+                    val ctorParamMatch = ctorParamMatches.singleOrNull() ?: return@forEach
+                    val contextVarName = ctorParamMatch.groupValues[1]
+                    val hadModContainerParameter = Regex("""\bModContainer\b""")
+                        .containsMatchIn(executableCode.substring(parameterListRange))
 
                     // Replace the parameter type
-                    text = text.replace(ctorMatch.value, "IEventBus modEventBus")
-                    if (className != null) {
-                        val constructorPattern = Regex("""public\s+${Regex.escape(className)}\s*\(([^)]*\bIEventBus\s+modEventBus[^)]*)\)""")
-                        val constructorMatch = constructorPattern.find(text)
-                        if (constructorMatch != null && !constructorMatch.groupValues[1].contains("ModContainer")) {
-                            val params = constructorMatch.groupValues[1].trim()
-                            text = text.replaceRange(
-                                constructorMatch.range,
-                                "public $className($params, ModContainer modContainer)"
-                            )
-                        }
+                    text = text.replaceRange(ctorParamMatch.range, "IEventBus modEventBus")
+                    executableCode = maskJavaCommentsAndLiterals(text)
+                    val constructorPattern = Regex("""public\s+${Regex.escape(concreteClassName)}\s*\(([^)]*\bIEventBus\s+modEventBus[^)]*)\)""")
+                    val constructorMatch = constructorPattern.find(executableCode)
+                    if (constructorMatch != null && !hadModContainerParameter) {
+                        val params = constructorMatch.groupValues[1].trim()
+                        text = text.replaceRange(
+                            constructorMatch.range,
+                            "public $concreteClassName($params, ModContainer modContainer)"
+                        )
                     }
 
                     // Replace context.getModEventBus() -> modEventBus
-                    text = text.replace("${contextVarName}.getModEventBus()", "modEventBus")
+                    text = replaceExecutableRegex(
+                        text,
+                        Regex("""\b${Regex.escape(contextVarName)}\s*\.\s*getModEventBus\s*\(\s*\)""")
+                    ) { "modEventBus" }
 
                     // Replace context.registerConfig -> modContainer.registerConfig
-                    text = text.replace("${contextVarName}.registerConfig(", "modContainer.registerConfig(")
-                    text = text.replace(
-                        "ModLoadingContext.get().getActiveContainer().registerConfig(",
-                        "modContainer.registerConfig("
-                    )
-                    text = text.replace(
-                        "ModLoadingContext.get().registerConfig(",
-                        "modContainer.registerConfig("
-                    )
+                    text = replaceExecutableRegex(
+                        text,
+                        Regex("""\b${Regex.escape(contextVarName)}\s*\.\s*registerConfig\s*\(""")
+                    ) { "modContainer.registerConfig(" }
+                    text = replaceExecutableRegex(
+                        text,
+                        Regex("""\bModLoadingContext\s*\.\s*get\s*\(\s*\)\s*\.\s*getActiveContainer\s*\(\s*\)\s*\.\s*registerConfig\s*\(""")
+                    ) { "modContainer.registerConfig(" }
+                    text = replaceExecutableRegex(
+                        text,
+                        Regex("""\bModLoadingContext\s*\.\s*get\s*\(\s*\)\s*\.\s*registerConfig\s*\(""")
+                    ) { "modContainer.registerConfig(" }
 
                     // Replace IEventBus <varName> = context.getModEventBus() assignment with modEventBus
                     val busAssignPattern = Regex("""IEventBus\s+(\w+)\s*=\s*modEventBus;\s*\r?\n""")
-                    val busAssignMatch = busAssignPattern.find(text)
+                    executableCode = maskJavaCommentsAndLiterals(text)
+                    val busAssignMatch = busAssignPattern.find(executableCode)
                     if (busAssignMatch != null) {
                         val busVarName = busAssignMatch.groupValues[1]
                         // Remove the redundant assignment and replace usages
-                        text = text.replace(busAssignMatch.value, "")
-                        text = Regex("\\b${Regex.escape(busVarName)}\\b").replace(text, "modEventBus")
+                        text = text.removeRange(busAssignMatch.range)
+                        text = replaceExecutableRegex(text, Regex("""\b${Regex.escape(busVarName)}\b""")) {
+                            "modEventBus"
+                        }
                     }
-                    text = Regex("""\s*IEventBus\s+modEventBus\s*=\s*this\.modEventBus;\s*\r?\n""")
-                        .replace(text, "\n")
+                    text = replaceExecutableRegex(
+                        text,
+                        Regex("""\s*IEventBus\s+modEventBus\s*=\s*this\.modEventBus;\s*\r?\n""")
+                    ) { "\n" }
 
-                    if (className != null) {
-                        val delegatedCtorPattern = Regex(
-                            """(?s)\s*(?:@SuppressWarnings\("removal"\)\s*)?public\s+${Regex.escape(className)}\s*\(\s*(?:ModContainer\s+\w+)?\s*\)\s*\{\s*this\s*\(\s*FMLJavaModLoadingContext\.get\(\)\s*\)\s*;\s*\}\s*"""
-                        )
-                        text = delegatedCtorPattern.replace(text, "\n")
-                    }
+                    val delegatedCtorPattern = Regex(
+                        """(?s)\s*(?:@SuppressWarnings\("removal"\)\s*)?public\s+${Regex.escape(concreteClassName)}\s*\(\s*(?:ModContainer\s+\w+)?\s*\)\s*\{\s*this\s*\(\s*FMLJavaModLoadingContext\.get\(\)\s*\)\s*;\s*\}\s*"""
+                    )
+                    text = replaceExecutableRegex(text, delegatedCtorPattern) { "\n" }
 
                     // Remove FMLJavaModLoadingContext import
-                    text = text.replace(Regex("""import\s+net\.neoforged\.fml\.javafmlmod\.FMLJavaModLoadingContext;\s*\r?\n"""), "")
+                    text = removeExecutableImport(text, "net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext")
 
                     // Remove ModLoadingContext import if present and unused
-                    if (!text.contains("ModLoadingContext.")) {
-                        text = text.replace(Regex("""import\s+net\.neoforged\.fml\.ModLoadingContext;\s*\r?\n"""), "")
+                    if (!maskJavaCommentsAndLiterals(text).contains("ModLoadingContext.")) {
+                        text = removeExecutableImport(text, "net.neoforged.fml.ModLoadingContext")
                     }
 
                     // Ensure ModContainer import exists
-                    if (!text.contains("import net.neoforged.fml.ModContainer;")) {
-                        text = text.replace(
-                            "import net.neoforged.fml.common.Mod;",
-                            "import net.neoforged.fml.ModContainer;\nimport net.neoforged.fml.common.Mod;"
-                        )
+                    if (!maskJavaCommentsAndLiterals(text).contains("import net.neoforged.fml.ModContainer;")) {
+                        text = addExecutableImportIfMissing(text, "net.neoforged.fml.ModContainer")
                     }
                 }
 
-                if (ctorMatch == null && text.contains("modContainer")) {
-                    if (className != null && text.contains("FMLJavaModLoadingContext.get().getModEventBus()")) {
+                executableCode = maskJavaCommentsAndLiterals(text)
+                if (ctorMatch == null && executableCode.contains("modContainer")) {
+                    if (className != null && staticFmlModEventBusPattern.containsMatchIn(executableCode)) {
                         val constructorPattern = Regex(
                             """public\s+${Regex.escape(className)}\s*\(([^)]*)\)"""
                         )
-                        val constructorMatch = constructorPattern.find(text)
+                        val constructorMatch = constructorPattern.find(executableCode)
                         if (constructorMatch != null) {
                             val params = constructorMatch.groupValues[1].trim()
                             val replacement = if (Regex("""\bIEventBus\b""").containsMatchIn(params)) {
@@ -3741,43 +3764,34 @@ ${registrations.distinct().joinToString("\n")}
                             text = text.replaceRange(constructorMatch.range, replacement)
                         }
                     }
-                    text = text.replace(
-                        "FMLJavaModLoadingContext.get().getModEventBus()",
-                        "modEventBus"
-                    )
-                    text = text.replace(
-                        "ModLoadingContext.get().getActiveContainer().registerConfig(",
-                        "modContainer.registerConfig("
-                    )
-                    text = text.replace(
-                        "ModLoadingContext.get().registerConfig(",
-                        "modContainer.registerConfig("
-                    )
+                    text = replaceExecutableRegex(
+                        text,
+                        staticFmlModEventBusPattern
+                    ) { "modEventBus" }
+                    text = replaceExecutableRegex(
+                        text,
+                        Regex("""\bModLoadingContext\s*\.\s*get\s*\(\s*\)\s*\.\s*getActiveContainer\s*\(\s*\)\s*\.\s*registerConfig\s*\(""")
+                    ) { "modContainer.registerConfig(" }
+                    text = replaceExecutableRegex(
+                        text,
+                        Regex("""\bModLoadingContext\s*\.\s*get\s*\(\s*\)\s*\.\s*registerConfig\s*\(""")
+                    ) { "modContainer.registerConfig(" }
 
-                    text = text.replace(Regex("""import\s+net\.neoforged\.fml\.javafmlmod\.FMLJavaModLoadingContext;\s*\r?\n"""), "")
-                    if (!text.contains("ModLoadingContext.")) {
-                        text = text.replace(Regex("""import\s+net\.neoforged\.fml\.ModLoadingContext;\s*\r?\n"""), "")
+                    text = removeExecutableImport(text, "net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext")
+                    if (!maskJavaCommentsAndLiterals(text).contains("ModLoadingContext.")) {
+                        text = removeExecutableImport(text, "net.neoforged.fml.ModLoadingContext")
                     }
                 }
 
-                if (text.contains("ModContainer modContainer") && !text.contains("import net.neoforged.fml.ModContainer;")) {
-                    text = text.replace(
-                        "import net.neoforged.fml.common.Mod;",
-                        "import net.neoforged.fml.ModContainer;\nimport net.neoforged.fml.common.Mod;"
-                    )
+                executableCode = maskJavaCommentsAndLiterals(text)
+                if (executableCode.contains("ModContainer modContainer") &&
+                    !executableCode.contains("import net.neoforged.fml.ModContainer;")) {
+                    text = addExecutableImportIfMissing(text, "net.neoforged.fml.ModContainer")
                 }
-                if (text.contains("IEventBus modEventBus") && !text.contains("import net.neoforged.bus.api.IEventBus;")) {
-                    text = if (text.contains("import net.neoforged.fml.ModContainer;")) {
-                        text.replace(
-                            "import net.neoforged.fml.ModContainer;",
-                            "import net.neoforged.bus.api.IEventBus;\nimport net.neoforged.fml.ModContainer;"
-                        )
-                    } else {
-                        text.replace(
-                            "import net.neoforged.fml.common.Mod;",
-                            "import net.neoforged.bus.api.IEventBus;\nimport net.neoforged.fml.common.Mod;"
-                        )
-                    }
+                executableCode = maskJavaCommentsAndLiterals(text)
+                if (executableCode.contains("IEventBus modEventBus") &&
+                    !executableCode.contains("import net.neoforged.bus.api.IEventBus;")) {
+                    text = addExecutableImportIfMissing(text, "net.neoforged.bus.api.IEventBus")
                 }
 
                 if (text != original) {
@@ -24510,23 +24524,28 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
     }
 
     private fun migrateLegacyStaticFmlModEventBusAccess(source: String): String {
-        if (!source.contains("FMLJavaModLoadingContext.get().getModEventBus()")) return source
-        val modId = Regex("""@EventBusSubscriber\s*\([^)]*\bmodid\s*=\s*([^,\)]+)""")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
-            ?.trim()
-            ?: Regex("""@Mod\s*\(\s*([^)]+?)\s*\)""")
-                .find(source)
-                ?.groupValues
-                ?.get(1)
-                ?.trim()
-            ?: return source
-        var result = source.replace(
-            "FMLJavaModLoadingContext.get().getModEventBus()",
-            "net.neoforged.fml.ModList.get().getModContainerById($modId).orElseThrow().getEventBus()"
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val staticGetterPattern = Regex(
+            """\bFMLJavaModLoadingContext\s*\.\s*get\s*\(\s*\)\s*\.\s*getModEventBus\s*\(\s*\)"""
         )
-        result = removeImport(result, "net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext")
+        if (!staticGetterPattern.containsMatchIn(executableCode)) return source
+        val modId = Regex("""@EventBusSubscriber\s*\([^)]*\bmodid\s*=\s*([^,\)]+)""")
+            .find(executableCode)
+            ?.groups
+            ?.get(1)
+            ?.range
+            ?.let { source.substring(it).trim() }
+            ?: Regex("""@Mod\s*\(\s*([^)]+?)\s*\)""")
+                .find(executableCode)
+                ?.groups
+                ?.get(1)
+                ?.range
+                ?.let { source.substring(it).trim() }
+            ?: return source
+        var result = replaceExecutableRegex(source, staticGetterPattern) {
+            "net.neoforged.fml.ModList.get().getModContainerById($modId).orElseThrow().getEventBus()"
+        }
+        result = removeExecutableImport(result, "net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext")
         return result
     }
 
@@ -42684,6 +42703,33 @@ public class ${builder.className} implements RecipeBuilder {
                 result.substring(match.range.last + 1)
         }
         return result
+    }
+
+    private fun removeExecutableImport(source: String, importName: String): String =
+        replaceExecutableRegex(
+            source,
+            Regex("""(?m)^[ \t]*import\s+${Regex.escape(importName)};\s*\r?\n""")
+        ) { "" }
+
+    private fun addExecutableImportIfMissing(source: String, importName: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (executableCode.contains("import $importName;")) return source
+        val importLine = "import $importName;\n"
+        val lastImport = Regex("""^import\s+[^;]+;""", RegexOption.MULTILINE)
+            .findAll(executableCode)
+            .lastOrNull()
+        if (lastImport != null) {
+            val insertPos = lastImport.range.last + 1
+            return source.substring(0, insertPos) + "\n" + importLine + source.substring(insertPos)
+        }
+
+        val packageDecl = Regex("""^package\s+[^;]+;""", RegexOption.MULTILINE).find(executableCode)
+        if (packageDecl != null) {
+            val insertPos = packageDecl.range.last + 1
+            return source.substring(0, insertPos) + "\n\n" + importLine + source.substring(insertPos)
+        }
+
+        return importLine + source
     }
 
     private fun migrateMenuScreensRegistration(projectDir: Path, dryRun: Boolean): List<Change> {
