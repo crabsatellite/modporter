@@ -39996,36 +39996,8 @@ $encodeLines
         source: String,
         methodName: String,
         transform: (args: List<String>) -> List<String>?
-    ): String {
-        var result = source
-        var cursor = 0
-        val token = "$methodName("
-        while (true) {
-            val tokenIndex = result.indexOf(token, cursor)
-            if (tokenIndex < 0) break
-            if (tokenIndex > 0 && (result[tokenIndex - 1].isLetterOrDigit() || result[tokenIndex - 1] == '_' || result[tokenIndex - 1] == '$')) {
-                cursor = tokenIndex + token.length
-                continue
-            }
-            val openParen = tokenIndex + methodName.length
-            val closeParen = findMatchingParen(result, openParen)
-            if (closeParen < 0) {
-                cursor = tokenIndex + token.length
-                continue
-            }
-            val originalArgsSource = result.substring(openParen + 1, closeParen)
-            val args = splitTopLevelJavaArgs(originalArgsSource)
-            val migratedArgs = transform(args)
-            if (migratedArgs == null || migratedArgs == args) {
-                cursor = closeParen + 1
-                continue
-            }
-            val replacementArgs = migratedArgs.joinToString(", ") { it.trim() }
-            result = result.substring(0, openParen + 1) + replacementArgs + result.substring(closeParen)
-            cursor = openParen + 1 + replacementArgs.length
-        }
-        return result
-    }
+    ): String =
+        rewriteExecutableJavaInvocationArguments(source, methodName, transform)
 
     private fun rewriteExecutableJavaInvocationArguments(
         source: String,
