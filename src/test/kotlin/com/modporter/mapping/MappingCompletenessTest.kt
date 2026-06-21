@@ -4509,6 +4509,43 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `single item recipe result migration uses executable source evidence`() {
+        val textPass = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = textPass.indexOf("private fun migrateSingleItemRecipeBuilderResults")
+        assertTrue(start >= 0, "migrateSingleItemRecipeBuilderResults is missing")
+        val end = textPass.indexOf("private fun collectLegacyDyeableLeatherItemClasses", start + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val body = textPass.substring(start, end)
+        val offenders = listOf(
+            "raw single item prefilter" to body.contains("""source.contains("SingleItemRecipeBuilder.Result")"""),
+            "raw stonecutting accept prefilter" to body.contains("""source.contains(".accept(stonecutting(")"""),
+            "raw regex replacement" to Regex("""Regex\([\s\S]*?stonecutting[\s\S]*?\)\s*\.\s*replace\(result""").containsMatchIn(body),
+            "raw string replacement" to body.contains("result.replace("),
+            "raw wrapper marker lookup" to body.contains("source.indexOf(classMarker)")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("SingleItemRecipeBuilder.Result")""") &&
+                body.contains("""executableCode.contains(".accept(stonecutting(")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("executableCode.indexOf(classMarker)") &&
+                body.contains("maskJavaCommentsAndLiterals(result).contains"),
+            "SingleItemRecipeBuilder.Result migration must inspect and rewrite executable Java source only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "SingleItemRecipeBuilder.Result migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `curative item effect migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

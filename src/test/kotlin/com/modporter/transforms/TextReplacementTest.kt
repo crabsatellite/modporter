@@ -4236,6 +4236,85 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `single item recipe result migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.data.recipes.SingleItemRecipeBuilder;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.level.ItemLike;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import org.jetbrains.annotations.Nullable;
+
+            public class TestMod {
+                private static final String DOC = "consumer.accept(stonecutting(Blocks.DIRT, ModBlocks.DOC.get()));";
+
+                /*
+                 consumer.accept(stonecutting(Blocks.DIRT, ModBlocks.DOC.get()));
+
+                 private static ResourceLocation getIdFor(Item input, Item output) {
+                     String path = String.format("stonecutting/%s/%s", BuiltInRegistries.ITEM.getKey(input).getPath(), BuiltInRegistries.ITEM.getKey(output).getPath());
+                     return prefix(path);
+                 }
+
+                 public static class Wrapper extends SingleItemRecipeBuilder.Result {
+                 }
+                 */
+
+                protected static void buildRecipes(RecipeOutput consumer) {
+                    consumer.accept(stonecutting(Blocks.STONE, ModBlocks.CUT_STONE.get()));
+                }
+
+                private static Wrapper stonecutting(ItemLike input, ItemLike output) {
+                    return stonecutting(input, output, 1);
+                }
+
+                private static Wrapper stonecutting(ItemLike input, ItemLike output, int count) {
+                    return new Wrapper(getIdFor(input.asItem(), output.asItem()), Ingredient.of(input), output.asItem(), count);
+                }
+
+                private static ResourceLocation getIdFor(Item input, Item output) {
+                    String path = String.format("stonecutting/%s/%s", BuiltInRegistries.ITEM.getKey(input).getPath(), BuiltInRegistries.ITEM.getKey(output).getPath());
+                    return prefix(path);
+                }
+
+                public static class Wrapper extends SingleItemRecipeBuilder.Result {
+                    public Wrapper(ResourceLocation id, Ingredient input, Item output, int count) {
+                        super(id, RecipeSerializer.STONECUTTER, "", input, output, count, null, null);
+                    }
+
+                    @Nullable
+                    @Override
+                    public JsonObject serializeAdvancement() {
+                        return null;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("stonecutting(consumer, Blocks.STONE, ModBlocks.CUT_STONE.get());"), transformed)
+        assertTrue(transformed.contains("private static ResourceLocation getIdFor(ItemLike input, ItemLike output)"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"consumer.accept(stonecutting(Blocks.DIRT, ModBlocks.DOC.get()));\";"), transformed)
+        assertTrue(transformed.contains("consumer.accept(stonecutting(Blocks.DIRT, ModBlocks.DOC.get()));"), transformed)
+        assertTrue(transformed.contains("private static ResourceLocation getIdFor(Item input, Item output)"), transformed)
+        assertTrue(transformed.contains("public static class Wrapper extends SingleItemRecipeBuilder.Result"), transformed)
+        assertFalse(transformed.contains("stonecutting(consumer, Blocks.DIRT, ModBlocks.DOC.get());"), transformed)
+        assertFalse(transformed.contains("DOC = \"stonecutting("), transformed)
+        assertFalse(transformed.contains("RecipeSerializer.STONECUTTER"), transformed)
+    }
+
+    @Test
     fun `dyeable leather item implementations migrate to dyed item color components`() {
         val projectDir = createTestFile("""
             package com.example;

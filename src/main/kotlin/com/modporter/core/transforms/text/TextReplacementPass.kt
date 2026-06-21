@@ -881,20 +881,26 @@ $streamFields,
     }
 
     private fun migrateSingleItemRecipeBuilderResults(source: String): String {
-        if (!source.contains("SingleItemRecipeBuilder.Result") ||
-            !source.contains(".accept(stonecutting(")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("SingleItemRecipeBuilder.Result") ||
+            !executableCode.contains(".accept(stonecutting(")) {
             return source
         }
 
         var result = source
-        result = Regex("""(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.accept\(\s*stonecutting\(([^;\r\n]+)\)\s*\);\s*$""")
-            .replace(result) { match ->
-                "${match.groupValues[1]}stonecutting(${match.groupValues[2]}, ${match.groupValues[3].trim()});"
-            }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.accept\(\s*stonecutting\(([^;\r\n]+)\)\s*\);\s*$""")
+        ) { match ->
+            "${match.groupValues[1]}stonecutting(${match.groupValues[2]}, ${match.groupValues[3].trim()});"
+        }
 
-        result = Regex(
-            """(?s)\r?\n\s*private\s+static\s+Wrapper\s+stonecutting\s*\(\s*ItemLike\s+input\s*,\s*ItemLike\s+output\s*\)\s*\{\s*return\s+stonecutting\s*\(\s*input\s*,\s*output\s*,\s*1\s*\)\s*;\s*\}\s*\r?\n\s*private\s+static\s+Wrapper\s+stonecutting\s*\(\s*ItemLike\s+input\s*,\s*ItemLike\s+output\s*,\s*int\s+count\s*\)\s*\{\s*return\s+new\s+Wrapper\s*\(\s*getIdFor\s*\(\s*input\.asItem\s*\(\s*\)\s*,\s*output\.asItem\s*\(\s*\)\s*\)\s*,\s*Ingredient\.of\s*\(\s*input\s*\)\s*,\s*output\.asItem\s*\(\s*\)\s*,\s*count\s*\)\s*;\s*\}\s*"""
-        ).replace(result, """
+        result = replaceExecutableRegex(
+            result,
+            Regex(
+                """(?s)\r?\n\s*private\s+static\s+Wrapper\s+stonecutting\s*\(\s*ItemLike\s+input\s*,\s*ItemLike\s+output\s*\)\s*\{\s*return\s+stonecutting\s*\(\s*input\s*,\s*output\s*,\s*1\s*\)\s*;\s*\}\s*\r?\n\s*private\s+static\s+Wrapper\s+stonecutting\s*\(\s*ItemLike\s+input\s*,\s*ItemLike\s+output\s*,\s*int\s+count\s*\)\s*\{\s*return\s+new\s+Wrapper\s*\(\s*getIdFor\s*\(\s*input\.asItem\s*\(\s*\)\s*,\s*output\.asItem\s*\(\s*\)\s*\)\s*,\s*Ingredient\.of\s*\(\s*input\s*\)\s*,\s*output\.asItem\s*\(\s*\)\s*,\s*count\s*\)\s*;\s*\}\s*"""
+            )
+        ) { """
 
 	private static void stonecutting(RecipeOutput recipe, ItemLike input, ItemLike output) {
 		stonecutting(recipe, input, output, 1);
@@ -903,17 +909,29 @@ $streamFields,
 	private static void stonecutting(RecipeOutput recipe, ItemLike input, ItemLike output, int count) {
 		SingleItemRecipeBuilder.stonecutting(Ingredient.of(input), RecipeCategory.BUILDING_BLOCKS, output.asItem(), count).unlockedBy("has_block", has(input)).save(recipe, getIdFor(input, output));
 	}
-""")
+""" }
 
-        result = result.replace(
-            "private static ResourceLocation getIdFor(Item input, Item output)",
+        result = replaceExecutableRegex(
+            result,
+            Regex("""private\s+static\s+ResourceLocation\s+getIdFor\s*\(\s*Item\s+input\s*,\s*Item\s+output\s*\)""")
+        ) {
             "private static ResourceLocation getIdFor(ItemLike input, ItemLike output)"
-        )
-        result = result.replace("BuiltInRegistries.ITEM.getKey(input).getPath()", "BuiltInRegistries.ITEM.getKey(input.asItem()).getPath()")
-        result = result.replace("BuiltInRegistries.ITEM.getKey(output).getPath()", "BuiltInRegistries.ITEM.getKey(output.asItem()).getPath()")
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""BuiltInRegistries\.ITEM\.getKey\s*\(\s*input\s*\)\.getPath\s*\(\s*\)""")
+        ) {
+            "BuiltInRegistries.ITEM.getKey(input.asItem()).getPath()"
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""BuiltInRegistries\.ITEM\.getKey\s*\(\s*output\s*\)\.getPath\s*\(\s*\)""")
+        ) {
+            "BuiltInRegistries.ITEM.getKey(output.asItem()).getPath()"
+        }
         result = removeSingleItemRecipeWrapper(result)
 
-        if (!result.contains("Criterion<InventoryChangeTrigger.TriggerInstance> has(ItemLike item)")) {
+        if (!maskJavaCommentsAndLiterals(result).contains("Criterion<InventoryChangeTrigger.TriggerInstance> has(ItemLike item)")) {
             val insertAt = result.lastIndexOf("\n}")
             if (insertAt >= 0) {
                 val hasMethod = """
@@ -940,12 +958,23 @@ $streamFields,
 
     private fun removeSingleItemRecipeWrapper(source: String): String {
         val classMarker = "public static class Wrapper extends SingleItemRecipeBuilder.Result"
-        val markerIndex = source.indexOf(classMarker)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val markerIndex = executableCode.indexOf(classMarker)
         if (markerIndex < 0) return source
-        val commentStart = source.lastIndexOf("// Wrapper", markerIndex)
-        val lineStart = source.lastIndexOf('\n', if (commentStart >= 0) commentStart else markerIndex).let {
-            if (it >= 0) it else if (commentStart >= 0) commentStart else markerIndex
+        val classLineStart = source.lastIndexOf('\n', markerIndex).let { if (it >= 0) it + 1 else 0 }
+        val previousLineEnd = classLineStart - 1
+        val previousLineStart = if (previousLineEnd > 0) {
+            source.lastIndexOf('\n', previousLineEnd - 1).let { if (it >= 0) it + 1 else 0 }
+        } else {
+            -1
         }
+        val wrapperCommentStart = if (previousLineStart >= 0) {
+            val previousLine = source.substring(previousLineStart, previousLineEnd).trim()
+            if (previousLine.startsWith("// Wrapper")) previousLineStart else null
+        } else {
+            null
+        }
+        val lineStart = wrapperCommentStart ?: classLineStart
         val openBrace = source.indexOf('{', markerIndex)
         if (openBrace < 0) return source
         val closeBrace = findMatchingBrace(source, openBrace)
