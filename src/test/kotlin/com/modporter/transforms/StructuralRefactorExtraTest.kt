@@ -22285,6 +22285,9 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.level.gameevent.GameEvent;
 
             public class GameEventCalls {
+                // level.gameEvent(null, ModGameEvents.CUSTOM.get(), pos);
+                private static final String DOC = "level.gameEvent(ModGameEvents.CUSTOM.get(), pos, GameEvent.Context.of(state));";
+
                 public void emit(Level level, BlockPos pos, BlockState state) {
                     level.gameEvent(null, ModGameEvents.CUSTOM.get(), pos);
                     level.gameEvent(ModGameEvents.CUSTOM.get(), pos, GameEvent.Context.of(state));
@@ -22300,6 +22303,8 @@ class StructuralRefactorExtraTest {
         assertTrue(transformed.contains("level.gameEvent(null, ModGameEvents.CUSTOM, pos);"), transformed)
         assertTrue(transformed.contains("level.gameEvent(ModGameEvents.CUSTOM, pos, GameEvent.Context.of(state));"), transformed)
         assertTrue(transformed.contains("level.gameEvent(null, OtherEvents.NOT_GAME.get(), pos);"), transformed)
+        assertTrue(transformed.contains("// level.gameEvent(null, ModGameEvents.CUSTOM.get(), pos);"), transformed)
+        assertTrue(transformed.contains("""private static final String DOC = "level.gameEvent(ModGameEvents.CUSTOM.get(), pos, GameEvent.Context.of(state));";"""), transformed)
     }
 
     @Test

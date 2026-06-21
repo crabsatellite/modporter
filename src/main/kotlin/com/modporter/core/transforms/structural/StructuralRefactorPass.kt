@@ -26183,7 +26183,8 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         source: String,
         gameEventHolderFields: Set<String>
     ): String {
-        if (!source.contains(".gameEvent(") || !source.contains(".get()") || gameEventHolderFields.isEmpty()) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".gameEvent(") || !executableCode.contains(".get()") || gameEventHolderFields.isEmpty()) {
             return source
         }
         val localOwner = classNameOfJavaSource(source)
@@ -26201,8 +26202,8 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         }
 
         var anyChanged = false
-        val migrated = rewriteJavaCall(source, "gameEvent") { receiver, args ->
-            if (args.isEmpty()) return@rewriteJavaCall null
+        val migrated = rewriteExecutableJavaCall(source, "gameEvent") { receiver, args ->
+            if (args.isEmpty()) return@rewriteExecutableJavaCall null
             var callChanged = false
             val rewrittenArgs = args.map { arg ->
                 val trimmed = arg.trim()
@@ -26218,7 +26219,7 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                     arg
                 }
             }
-            if (!callChanged) return@rewriteJavaCall null
+            if (!callChanged) return@rewriteExecutableJavaCall null
             "$receiver.gameEvent(${rewrittenArgs.joinToString(", ") { it.trim() }})"
         }
         return if (anyChanged) migrated else source

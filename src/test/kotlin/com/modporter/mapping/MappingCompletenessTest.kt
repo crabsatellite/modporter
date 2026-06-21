@@ -2855,6 +2855,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `deferred holder game event arguments use executable call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateDeferredHolderGameEventArguments")
+        assertTrue(start >= 0, "migrateDeferredHolderGameEventArguments is missing")
+        val end = source.indexOf("private fun migrateLegacyCommonHooksToolChecks", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw gameEvent prefilter" to """source.contains(".gameEvent(")""",
+            "raw get prefilter" to """source.contains(".get()")""",
+            "raw gameEvent rewrite" to """rewriteJavaCall(source, "gameEvent")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".gameEvent(")""") &&
+                body.contains("""executableCode.contains(".get()")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "gameEvent")""") &&
+                body.contains("provenHolderExpression(holderExpression)"),
+            "DeferredHolder GameEvent migration must use executable call evidence and proven holder fields"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "DeferredHolder GameEvent migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `data result getOrThrow migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
