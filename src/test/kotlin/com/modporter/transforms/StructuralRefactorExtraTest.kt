@@ -13101,6 +13101,76 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `obsolete entity method cleanup ignores comments strings and text blocks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LegacyEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.protocol.Packet;
+            import net.minecraft.network.protocol.game.ClientGamePacketListener;
+            import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
+            import net.minecraft.world.entity.Entity;
+
+            public class LegacyEntity extends Entity {
+                private static final String DOC = "super.onAddedToWorld(); this.onRemovedFromWorld(); getAddEntityPacket";
+                private static final String SAMPLE = ""${'"'}
+                    public void onAddedToWorld() {
+                        super.onAddedToWorld();
+                    }
+
+                    public Packet<ClientGamePacketListener> getAddEntityPacket() {
+                        return new ClientboundAddEntityPacket(this);
+                    }
+                ""${'"'};
+
+                /*
+                public void onRemovedFromWorld() {
+                    super.onRemovedFromWorld();
+                }
+
+                public Packet<ClientGamePacketListener> getAddEntityPacket() {
+                    return new ClientboundAddEntityPacket(this);
+                }
+                */
+
+                @Override
+                public void onAddedToWorld() {
+                    super.onAddedToWorld();
+                    this.onRemovedFromWorld();
+                }
+
+                @Override
+                public void onRemovedFromWorld() {
+                    super.onRemovedFromWorld();
+                }
+
+                @Override
+                public Packet<ClientGamePacketListener> getAddEntityPacket() {
+                    return new ClientboundAddEntityPacket(this);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val entity = srcDir.resolve("LegacyEntity.java").readText().replace("\r\n", "\n")
+
+        assertTrue(result.changes.any { it.ruleId == "struct-rename-lifecycle-method" })
+        assertTrue(result.changes.any { it.ruleId == "struct-remove-legacy-entity-spawn-packet" })
+        assertTrue(entity.contains("public void onAddedToLevel()"), entity)
+        assertTrue(entity.contains("super.onAddedToLevel();"), entity)
+        assertTrue(entity.contains("this.onRemovedFromLevel();"), entity)
+        assertTrue(entity.contains("public void onRemovedFromLevel()"), entity)
+        assertFalse(Regex("""(?s)@Override\s+public Packet<ClientGamePacketListener> getAddEntityPacket\(""").containsMatchIn(entity), entity)
+        assertTrue(entity.contains("private static final String DOC = \"super.onAddedToWorld(); this.onRemovedFromWorld(); getAddEntityPacket\";"), entity)
+        assertTrue(Regex("""(?s)public void onAddedToWorld\(\)\s*\{\s*super\.onAddedToWorld\(\);""").containsMatchIn(entity), entity)
+        assertTrue(Regex("""(?s)public void onRemovedFromWorld\(\)\s*\{\s*super\.onRemovedFromWorld\(\);""").containsMatchIn(entity), entity)
+        assertFalse(entity.contains("import net.minecraft.network.protocol.Packet;"), entity)
+        assertFalse(entity.contains("import net.minecraft.network.protocol.game.ClientGamePacketListener;"), entity)
+        assertFalse(entity.contains("import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;"), entity)
+    }
+
+    @Test
     fun `migrates vertex helper matrix normal pair back to pose when source pose is available`() {
         val projectDir = createFile("ShojiRenderer.java", """
             package com.example;

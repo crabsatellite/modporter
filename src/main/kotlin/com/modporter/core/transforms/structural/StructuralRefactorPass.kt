@@ -7329,12 +7329,13 @@ public class DelegatingPackResources extends AbstractPackResources {
         }
 
     private fun removeMethodByName(source: String, methodName: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val methodNameIndex = Regex("""\b${Regex.escape(methodName)}\s*\(""")
-            .find(source)
+            .find(executableCode)
             ?.range
             ?.first
             ?: return source
-        val openBrace = source.indexOf('{', methodNameIndex)
+        val openBrace = executableCode.indexOf('{', methodNameIndex)
         if (openBrace < 0) return source
         val closeBrace = findMatchingBrace(source, openBrace)
         if (closeBrace < 0) return source
@@ -42088,22 +42089,29 @@ $writeLines
 
         for (file in javaFiles) {
             var content = file.readText()
-            if (methodRenames.keys.none { content.contains(it) } && !content.contains("getAddEntityPacket")) continue
+            var executableContent = maskJavaCommentsAndLiterals(content)
+            if (methodRenames.keys.none { executableContent.contains(it) } && !executableContent.contains("getAddEntityPacket")) continue
 
             var modified = false
             for ((oldName, newName) in methodRenames) {
-                if (!content.contains(oldName)) continue
+                executableContent = maskJavaCommentsAndLiterals(content)
+                if (!executableContent.contains(oldName)) continue
 
                 // Replace method declarations: void onAddedToWorld( → void onAddedToLevel(
                 val declPattern = Regex("""(void\s+)${Regex.escape(oldName)}(\s*\()""")
-                if (declPattern.containsMatchIn(content)) {
-                    content = declPattern.replace(content) { match ->
-                        "${match.groupValues[1]}$newName${match.groupValues[2]}"
-                    }
+                val beforeRename = content
+                content = replaceExecutableRegex(content, declPattern) { match ->
+                    "${match.groupValues[1]}$newName${match.groupValues[2]}"
+                }
+                if (content != beforeRename) {
                     // Also replace super.onAddedToWorld() → super.onAddedToLevel()
-                    content = content.replace("super.$oldName(", "super.$newName(")
+                    content = replaceExecutableRegex(content, Regex("""\bsuper\.${Regex.escape(oldName)}\(""")) {
+                        "super.$newName("
+                    }
                     // Replace any this.onAddedToWorld() calls
-                    content = content.replace("this.$oldName(", "this.$newName(")
+                    content = replaceExecutableRegex(content, Regex("""\bthis\.${Regex.escape(oldName)}\(""")) {
+                        "this.$newName("
+                    }
 
                     modified = true
                     changes.add(Change(
@@ -42118,17 +42126,18 @@ $writeLines
                 }
             }
 
-            if (content.contains("getAddEntityPacket")) {
+            executableContent = maskJavaCommentsAndLiterals(content)
+            if (executableContent.contains("getAddEntityPacket")) {
                 val beforeRemoval = content
                 content = removeMethodByName(content, "getAddEntityPacket")
                 if (content != beforeRemoval) {
-                    if (!Regex("""\bPacket<""").containsMatchIn(removeImport(content, "net.minecraft.network.protocol.Packet"))) {
+                    if (!Regex("""\bPacket<""").containsMatchIn(maskJavaCommentsAndLiterals(removeImport(content, "net.minecraft.network.protocol.Packet")))) {
                         content = removeImport(content, "net.minecraft.network.protocol.Packet")
                     }
-                    if (!Regex("""\bClientGamePacketListener\b""").containsMatchIn(removeImport(content, "net.minecraft.network.protocol.game.ClientGamePacketListener"))) {
+                    if (!Regex("""\bClientGamePacketListener\b""").containsMatchIn(maskJavaCommentsAndLiterals(removeImport(content, "net.minecraft.network.protocol.game.ClientGamePacketListener")))) {
                         content = removeImport(content, "net.minecraft.network.protocol.game.ClientGamePacketListener")
                     }
-                    if (!Regex("""\bClientboundAddEntityPacket\b""").containsMatchIn(removeImport(content, "net.minecraft.network.protocol.game.ClientboundAddEntityPacket"))) {
+                    if (!Regex("""\bClientboundAddEntityPacket\b""").containsMatchIn(maskJavaCommentsAndLiterals(removeImport(content, "net.minecraft.network.protocol.game.ClientboundAddEntityPacket")))) {
                         content = removeImport(content, "net.minecraft.network.protocol.game.ClientboundAddEntityPacket")
                     }
                     content = removeImport(content, "net.neoforged.neoforge.network.NetworkHooks")
