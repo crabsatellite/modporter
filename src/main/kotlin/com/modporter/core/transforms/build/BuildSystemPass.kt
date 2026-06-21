@@ -4908,8 +4908,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
     private data class LegacyTreeGrower(
         val className: String,
-        val path: Path,
-        val returnExpressions: List<String>
+        val path: Path
     )
 
     private data class LegacyArmorMaterial(
@@ -5957,42 +5956,6 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
     private fun splitTopLevelArgs(value: String): List<String> =
         splitTopLevel(value, ',').map { it.trim() }.filter { it.isNotBlank() }
 
-    private fun treeGrowerExpression(grower: LegacyTreeGrower, args: List<String>): String {
-        val registryName = grower.className
-            .removeSuffix("TreeGrower")
-            .removeSuffix("Grower")
-            .ifBlank { grower.className }
-            .let(::camelOrConstantToRegistryPath)
-        val configuredFeature = grower.returnExpressions.firstOrNull()
-            ?.let { "Optional.of($it)" }
-            ?: "Optional.empty()"
-        return "new TreeGrower(\"$registryName\", $configuredFeature, Optional.empty(), Optional.empty())"
-    }
-
-    private fun legacyTreeGrowerHelperSource(source: String, grower: LegacyTreeGrower): String {
-        val classPattern = Regex(
-            """(?ms)(public\s+)?class\s+${Regex.escape(grower.className)}\s+extends\s+AbstractTreeGrower\b[^{]*\{.*\}\s*$"""
-        )
-        if (!classPattern.containsMatchIn(source)) return source
-
-        var result = source
-        result = removeJavaImport(result, "net.minecraft.world.level.block.grower.AbstractTreeGrower")
-        result = removeJavaImport(result, "net.minecraft.util.RandomSource")
-        result = ensureJavaImport(result, "java.util.Optional")
-        result = ensureJavaImport(result, "net.minecraft.world.level.block.grower.TreeGrower")
-
-        val expression = treeGrowerExpression(grower, emptyList())
-        val replacement = """
-public final class ${grower.className} {
-    public static final TreeGrower GROWER = $expression;
-
-    private ${grower.className}() {
-    }
-}
-""".trimEnd()
-        return classPattern.replace(result, replacement)
-    }
-
     private fun migrateLegacyTreeGrowerSubclass(source: String, compatPackage: String): String {
         if (!source.contains("getConfiguredFeature(") && !source.contains("getConfiguredMegaFeature(")) return source
         val classPattern = Regex("""\bclass\s+(\w+)\s+extends\s+(AbstractMegaTreeGrower|AbstractTreeGrower|TreeGrower)\b""")
@@ -6427,17 +6390,8 @@ public abstract class ModPorterAbstractTreeGrower extends TreeGrower {
                     .find(text)
                     ?: return@forEach
                 if (!text.contains("getConfiguredFeature(") && !text.contains("getConfiguredMegaFeature(")) return@forEach
-                val className = classMatch
-                    ?.groupValues
-                    ?.get(1)
-                    ?: return@forEach
-                val returns = Regex("""return\s+([^;]+);""")
-                    .findAll(text)
-                    .map { it.groupValues[1].trim() }
-                    .filterNot { it == "super.growTree(level, generator, pos, state, random)" }
-                    .distinct()
-                    .toList()
-                growers.add(LegacyTreeGrower(className, javaFile, returns))
+                val className = classMatch.groupValues[1]
+                growers.add(LegacyTreeGrower(className, javaFile))
             }
 
         if (growers.isEmpty()) return changes

@@ -848,6 +848,33 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy tree grower migration preserves subclass override logic`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val forbidden = listOf(
+            "dead helper source generator" to "legacyTreeGrowerHelperSource",
+            "flattening TreeGrower expression helper" to "treeGrowerExpression",
+            "first return expression fallback" to "returnExpressions.firstOrNull()",
+            "collected unused return expressions" to "val returnExpressions: List<String>"
+        )
+            .filter { (_, marker) -> source.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            source.contains("migrateLegacyTreeGrowerSubclass") &&
+                source.contains("ModPorterAbstractTreeGrower") &&
+                source.contains("public-f net.minecraft.world.level.block.grower.TreeGrower"),
+            "Legacy tree grower migration must keep subclass overrides through a generated TreeGrower compatibility base"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "Legacy tree grower migration must not collapse override semantics into a first-return TreeGrower constant: $forbidden"
+        )
+    }
+
+    @Test
     fun `production cleanup rules do not depend on legacy forge2neo comment markers`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(
