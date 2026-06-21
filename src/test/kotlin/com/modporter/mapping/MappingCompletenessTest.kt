@@ -1952,6 +1952,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `offset invocation argument helper delegates to executable scanner`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun rewriteJavaInvocationArgumentsWithOffset(")
+        assertTrue(start >= 0, "rewriteJavaInvocationArgumentsWithOffset is missing")
+        val executableStart = source.indexOf("private fun rewriteExecutableJavaInvocationArgumentsWithOffset", start + 1)
+        assertTrue(executableStart > start, "rewriteExecutableJavaInvocationArgumentsWithOffset must follow the delegating helper")
+        val delegatingBody = source.substring(start, executableStart)
+        val end = source.indexOf("private fun rewriteJavaNew", executableStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val executableBody = source.substring(executableStart, end)
+
+        val offenders = listOf(
+            "missing executable offset delegate" to !delegatingBody.contains("rewriteExecutableJavaInvocationArgumentsWithOffset(source, methodName, transform)"),
+            "raw token scan in delegate" to delegatingBody.contains("result.indexOf(token, cursor)"),
+            "missing executable mask" to !executableBody.contains("val executableCode = maskJavaCommentsAndLiterals(result)"),
+            "raw token scan in executable helper" to executableBody.contains("result.indexOf(token, cursor)"),
+            "raw parenthesis matcher" to executableBody.contains("findMatchingParen(result, openParen)"),
+            "raw token boundary" to executableBody.contains("result[tokenIndex - 1]")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Offset invocation argument rewrites must use executable Java for call and argument structure: $offenders"
+        )
+    }
+
+    @Test
     fun `structural brace matching ignores Java comments and literals`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

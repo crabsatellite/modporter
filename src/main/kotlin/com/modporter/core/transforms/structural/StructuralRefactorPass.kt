@@ -40039,19 +40039,27 @@ $encodeLines
         source: String,
         methodName: String,
         transform: (args: List<String>, offset: Int) -> List<String>?
+    ): String =
+        rewriteExecutableJavaInvocationArgumentsWithOffset(source, methodName, transform)
+
+    private fun rewriteExecutableJavaInvocationArgumentsWithOffset(
+        source: String,
+        methodName: String,
+        transform: (args: List<String>, offset: Int) -> List<String>?
     ): String {
         var result = source
         var cursor = 0
         val token = "$methodName("
         while (true) {
-            val tokenIndex = result.indexOf(token, cursor)
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenIndex = executableCode.indexOf(token, cursor)
             if (tokenIndex < 0) break
-            if (tokenIndex > 0 && (result[tokenIndex - 1].isLetterOrDigit() || result[tokenIndex - 1] == '_' || result[tokenIndex - 1] == '$')) {
+            if (tokenIndex > 0 && (executableCode[tokenIndex - 1].isLetterOrDigit() || executableCode[tokenIndex - 1] == '_' || executableCode[tokenIndex - 1] == '$')) {
                 cursor = tokenIndex + token.length
                 continue
             }
             val openParen = tokenIndex + methodName.length
-            val closeParen = findMatchingParen(result, openParen)
+            val closeParen = findMatchingParen(executableCode, openParen)
             if (closeParen < 0) {
                 cursor = tokenIndex + token.length
                 continue

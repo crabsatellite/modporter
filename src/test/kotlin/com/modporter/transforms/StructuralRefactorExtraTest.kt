@@ -9381,6 +9381,8 @@ class StructuralRefactorExtraTest {
                 protected void saveAdditional(@NotNull CompoundTag tag) {
                     super.saveAdditional(tag, registries);
                     ContainerHelper.saveAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);
+                    String serializerDoc = "Component.Serializer.toJson(this.name)";
+                    // Component.Serializer.toJson(this.name);
                     tag.putString("Name", Component.Serializer.toJson(this.name));
                 }
 
@@ -9388,6 +9390,8 @@ class StructuralRefactorExtraTest {
                 public void load(@NotNull CompoundTag tag) {
                     super.loadAdditional(tag, registries);
                     ContainerHelper.loadAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);
+                    String parserDoc = "Component.Serializer.fromJson(tag.getString(\"Name\"))";
+                    // Component.Serializer.fromJson(tag.getString("Name"));
                     this.name = Component.Serializer.fromJson(tag.getString("Name"));
                 }
 
@@ -9429,6 +9433,10 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("ContainerHelper.loadAllItems(tag, this.items, registries);"))
         assertTrue(migrated.contains("Component.Serializer.toJson(this.name, registries)"))
         assertTrue(migrated.contains("Component.Serializer.fromJson(tag.getString(\"Name\"), registries)"))
+        assertTrue(migrated.contains("""String serializerDoc = "Component.Serializer.toJson(this.name)";"""), migrated)
+        assertTrue(migrated.contains("// Component.Serializer.toJson(this.name);"), migrated)
+        assertTrue(migrated.contains("""String parserDoc = "Component.Serializer.fromJson(tag.getString(\"Name\"))";"""), migrated)
+        assertTrue(migrated.contains("// Component.Serializer.fromJson(tag.getString(\"Name\"));"), migrated)
         assertTrue(migrated.contains("this.loadAdditional(tag, lookupProvider);"))
         assertTrue(migrated.contains("this.handleUpdateTag(tag, lookupProvider);"))
         assertFalse(migrated.contains("RegistryAccess.EMPTY"))
