@@ -25704,11 +25704,14 @@ public $className(Properties $propertiesName, WoodType $typeName) {
     }
 
     private fun migrateTextColorParseColorLiteralSource(source: String): String {
-        if (!source.contains("TextColor.parseColor(")) return source
-        return Regex("""TextColor\.parseColor\(\s*"#([0-9A-Fa-f]{6})"\s*\)""")
-            .replace(source) { match ->
-                "TextColor.fromRgb(0x${match.groupValues[1].uppercase()})"
-            }
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("TextColor.parseColor(")) return source
+        val literalColor = Regex(""""#([0-9A-Fa-f]{6})"""")
+        return rewriteExecutableJavaCall(source, "parseColor") { receiver, args ->
+            if (receiver != "TextColor" || args.size != 1) return@rewriteExecutableJavaCall null
+            val color = literalColor.matchEntire(args[0].trim()) ?: return@rewriteExecutableJavaCall null
+            "TextColor.fromRgb(0x${color.groupValues[1].uppercase()})"
+        }
     }
 
     private fun migrateGameProfileDisplayNameComponents(source: String): String {

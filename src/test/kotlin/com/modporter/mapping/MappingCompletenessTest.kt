@@ -2718,6 +2718,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `text color literal migration uses executable call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateTextColorParseColorLiteralSource")
+        assertTrue(start >= 0, "migrateTextColorParseColorLiteralSource is missing")
+        val end = source.indexOf("private fun migrateGameProfileDisplayNameComponents", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw TextColor prefilter" to """source.contains("TextColor.parseColor(")""",
+            "raw regex replacement" to ".replace(source)",
+            "raw parseColor regex over whole source" to """TextColor\.parseColor\("""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("TextColor.parseColor(")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "parseColor")""") &&
+                body.contains("""receiver != "TextColor"""") &&
+                body.contains("literalColor.matchEntire(args[0].trim())"),
+            "TextColor literal migration must inspect executable calls and validate the real string literal argument"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "TextColor literal migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `resource mod id detection does not infer constant owners from file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot

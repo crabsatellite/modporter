@@ -20135,6 +20135,8 @@ class StructuralRefactorExtraTest {
 
             public class TooltipColors {
                 public static final Style BRONZE = Style.EMPTY.withColor(TextColor.parseColor("#D9AB7E"));
+                // TextColor.parseColor("#BADBAD");
+                private static final String DOC = "TextColor.parseColor(\"#ABCDEF\")";
 
                 public Style dynamic(String color) {
                     return Style.EMPTY.withColor(TextColor.parseColor(color).getOrThrow());
@@ -20147,6 +20149,8 @@ class StructuralRefactorExtraTest {
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
         assertTrue(migrated.contains("Style.EMPTY.withColor(TextColor.fromRgb(0xD9AB7E))"))
+        assertTrue(migrated.contains("""// TextColor.parseColor("#BADBAD");"""))
+        assertTrue(migrated.contains("""private static final String DOC = "TextColor.parseColor(\"#ABCDEF\")";"""))
         assertTrue(migrated.contains("TextColor.parseColor(color).getOrThrow()"))
     }
 
