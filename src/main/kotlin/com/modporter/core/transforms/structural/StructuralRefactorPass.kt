@@ -37269,19 +37269,20 @@ ${indent}}
     }
 
     private fun migrateRecipeBookCategoryFinderRecipeHolders(source: String): String {
-        if (!source.contains("registerRecipeCategoryFinder(") || !source.contains(" instanceof ")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("registerRecipeCategoryFinder(") || !executableCode.contains(" instanceof ")) return source
         val id = """[A-Za-z_$][\w$]*"""
         var changed = false
-        val result = rewriteJavaCall(source, "registerRecipeCategoryFinder") { receiver, args ->
-            if (args.size < 2) return@rewriteJavaCall null
+        val result = rewriteExecutableJavaCall(source, "registerRecipeCategoryFinder") { receiver, args ->
+            if (args.size < 2) return@rewriteExecutableJavaCall null
             val lambda = args[1]
             val lambdaMatch = Regex(
                 """(?s)^\s*(?:\(\s*(?:[\w$.\s?<>]+\s+)?($id)\s*\)|($id))\s*->\s*\{(.*)}\s*$"""
-            ).find(lambda) ?: return@rewriteJavaCall null
+            ).find(lambda) ?: return@rewriteExecutableJavaCall null
             val recipeParam = (lambdaMatch.groupValues[1].ifBlank { lambdaMatch.groupValues[2] }).trim()
             val body = lambdaMatch.groupValues[3]
             val instanceOfPattern = Regex("""\b${Regex.escape(recipeParam)}\s+instanceof\b""")
-            if (!instanceOfPattern.containsMatchIn(body)) return@rewriteJavaCall null
+            if (!instanceOfPattern.containsMatchIn(body)) return@rewriteExecutableJavaCall null
             val valueVarBase = "${recipeParam}Value"
             var valueVar = valueVarBase
             var suffix = 2

@@ -19398,6 +19398,9 @@ class StructuralRefactorExtraTest {
             package com.example;
 
             public class RecipeCategorySurface {
+                // event.registerRecipeCategoryFinder(ExampleRecipeTypes.DOCS.get(), doc -> { if (doc instanceof DocRecipe documented) { return ExampleCategories.MISC.get(); } return ExampleCategories.MISC.get(); });
+                private static final String DOC = "event.registerRecipeCategoryFinder(ExampleRecipeTypes.DOCS.get(), doc -> { if (doc instanceof DocRecipe documented) { return ExampleCategories.MISC.get(); } return ExampleCategories.MISC.get(); });";
+
                 public static void register(RegisterRecipeBookCategoriesEvent event) {
                     event.registerRecipeCategoryFinder(ExampleRecipeTypes.ENCHANTING.get(), recipe -> {
                         if (recipe instanceof AltarRepairRecipe || (recipe instanceof AbstractCookingRecipe cooking && cooking.category() == Category.REPAIR)) {
@@ -19426,6 +19429,8 @@ class StructuralRefactorExtraTest {
         assertTrue(surface.contains("recipeValue instanceof AbstractCookingRecipe cooking"), surface)
         assertTrue(surface.contains("var holderValue = holder.value();"), surface)
         assertTrue(surface.contains("holderValue instanceof AbstractCookingRecipe cooking"), surface)
+        assertTrue(surface.contains("// event.registerRecipeCategoryFinder(ExampleRecipeTypes.DOCS.get(), doc -> { if (doc instanceof DocRecipe documented) { return ExampleCategories.MISC.get(); } return ExampleCategories.MISC.get(); });"), surface)
+        assertTrue(surface.contains("""private static final String DOC = "event.registerRecipeCategoryFinder(ExampleRecipeTypes.DOCS.get(), doc -> { if (doc instanceof DocRecipe documented) { return ExampleCategories.MISC.get(); } return ExampleCategories.MISC.get(); });";"""), surface)
         assertFalse(surface.contains("recipe instanceof AltarRepairRecipe"), surface)
         assertFalse(surface.contains("holder instanceof AbstractCookingRecipe"), surface)
     }

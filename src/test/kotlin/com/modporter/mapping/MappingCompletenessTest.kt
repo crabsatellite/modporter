@@ -1760,6 +1760,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `recipe book category finder migration uses executable call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateRecipeBookCategoryFinderRecipeHolders")
+        assertTrue(start >= 0, "migrateRecipeBookCategoryFinderRecipeHolders is missing")
+        val end = source.indexOf("private fun migrateRecipeManagerCraftingInputSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw registerRecipeCategoryFinder prefilter" to """source.contains("registerRecipeCategoryFinder(")""",
+            "raw instanceof prefilter" to """source.contains(" instanceof ")""",
+            "raw registerRecipeCategoryFinder rewrite" to """rewriteJavaCall(source, "registerRecipeCategoryFinder")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("registerRecipeCategoryFinder(")""") &&
+                body.contains("""executableCode.contains(" instanceof ")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "registerRecipeCategoryFinder")""") &&
+                body.contains("val lambda = args[1]"),
+            "Recipe book category finder holder migration must inspect executable calls and lambda shape"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Recipe book category finder migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `production registry access migrations do not use nearby variable or fallback inference`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(
