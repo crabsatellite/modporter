@@ -7729,6 +7729,55 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `recipe serializer factory generic call migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("HeatedRecipe.java").writeText("""
+            package com.example;
+
+            public class HeatedRecipe {
+            }
+        """.trimIndent())
+        srcDir.resolve("SpecialCookingSerializer.java").writeText("""
+            package com.example;
+
+            public class SpecialCookingSerializer<T> {
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleSerializers.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleSerializers {
+                public static final DeferredHolder<RecipeSerializer<?>, SpecialCookingSerializer<HeatedRecipe>> HEATED = null;
+            }
+        """.trimIndent())
+        val docs = srcDir.resolve("RecipeBuilderDocs.java")
+        docs.writeText("""
+            package com.example;
+
+            public class RecipeBuilderDocs {
+                // SpecialCookingRecipeBuilder.generic(ingredient, category, result, 0.3F, 200, ExampleSerializers.HEATED.get());
+                private static final String DOC = "SpecialCookingRecipeBuilder.generic(ingredient, category, result, 0.3F, 200, ExampleSerializers.HEATED.get());";
+
+                public String keep() {
+                    return DOC;
+                }
+            }
+        """.trimIndent())
+        val original = docs.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = docs.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("com.example.HeatedRecipe::new"), migrated)
+    }
+
+    @Test
     fun `serializer backed cooking builder migration requires call site or source serializer evidence`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

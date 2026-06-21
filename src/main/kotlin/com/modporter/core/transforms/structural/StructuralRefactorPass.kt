@@ -41447,14 +41447,15 @@ public class ${builder.className} implements RecipeBuilder {
         source: String,
         recipeSerializerFactoryHints: RecipeSerializerFactoryHints
     ): String {
-        if (recipeSerializerFactoryHints.fieldToFactory.isEmpty() || !source.contains(".generic(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (recipeSerializerFactoryHints.fieldToFactory.isEmpty() || !executableCode.contains(".generic(")) return source
         var changed = false
-        val result = rewriteJavaCall(source, "generic") { receiver, args ->
+        val result = rewriteExecutableJavaCall(source, "generic") { receiver, args ->
             if (receiver.isBlank() || receiver == "SimpleCookingRecipeBuilder" || args.size < 2) {
-                return@rewriteJavaCall null
+                return@rewriteExecutableJavaCall null
             }
             val serializerExpression = normalizeRecipeSerializerExpression(args.last())
-            val factory = recipeSerializerFactoryHints.fieldToFactory[serializerExpression] ?: return@rewriteJavaCall null
+            val factory = recipeSerializerFactoryHints.fieldToFactory[serializerExpression] ?: return@rewriteExecutableJavaCall null
             changed = true
             "$receiver.generic(${args.joinToString(", ") { it.trim() }}, $factory)"
         }

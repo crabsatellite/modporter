@@ -3836,6 +3836,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `recipe serializer factory generic call migration uses executable call evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateRecipeSerializerFactoryCallSites")
+        assertTrue(start >= 0, "migrateRecipeSerializerFactoryCallSites is missing")
+        val end = source.indexOf("private fun migrateGenericCookingRecipeOutputBuilderSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw generic prefilter" to """source.contains(".generic(")""",
+            "raw generic rewrite" to """rewriteJavaCall(source, "generic")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".generic(")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "generic")""") &&
+                body.contains("""receiver == "SimpleCookingRecipeBuilder"""") &&
+                body.contains("normalizeRecipeSerializerExpression(args.last())") &&
+                body.contains("recipeSerializerFactoryHints.fieldToFactory[serializerExpression]"),
+            "Recipe serializer factory generic call migration must derive call sites from executable Java and keep serializer hint binding"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Recipe serializer factory generic call migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `custom enchantment data migrations do not resolve references by qualified tail fallback`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
