@@ -4941,6 +4941,11 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         val pathName: String
     )
 
+    private data class JavaTopLevelTypeOpening(
+        val name: String,
+        val range: IntRange
+    )
+
     private fun rewriteLegacyArmorMaterials(
         projectDir: Path,
         dryRun: Boolean,
@@ -5380,11 +5385,25 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                     } else {
                         CustomStatDeclaration(match.groupValues[1], modIdExpr, pathName)
                     }
-                }
+            }
                 .toList()
             if (declarations.isEmpty()) continue
+            val customStatNamespaces = declarations.map { it.modIdExpr }.distinct()
+            if (customStatNamespaces.size != 1) {
+                throw IllegalStateException(
+                    "Cannot migrate custom stat registration in " +
+                        projectDir.relativize(javaFile).toString().replace('\\', '/') +
+                        ": mixed custom stat namespaces ${customStatNamespaces.joinToString(", ")}"
+                )
+            }
+            val customStatNamespace = customStatNamespaces.single()
+            val declaredStatOwner = javaTopLevelTypeOpening(original)?.name
+                ?: throw IllegalStateException(
+                    "Cannot migrate custom stat registration in " +
+                        projectDir.relativize(javaFile).toString().replace('\\', '/') +
+                        ": missing top-level Java type declaration"
+                )
 
-            val className = javaFile.fileName.toString().removeSuffix(".java")
             var modified = original
             val oldImports = listOf(
                 "net.minecraft.core.Registry",
@@ -5403,14 +5422,17 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
             modified = ensureJavaImport(modified, "net.neoforged.neoforge.registries.DeferredRegister")
 
             if (!modified.contains("DeferredRegister<ResourceLocation> CUSTOM_STATS")) {
-                val classMatch = Regex("""\bclass\s+${Regex.escape(className)}\b[^{]*\{""").find(modified)
-                if (classMatch != null) {
-                    val declaration = "\n    private static final DeferredRegister<ResourceLocation> CUSTOM_STATS =\n" +
-                        "            DeferredRegister.create(Registries.CUSTOM_STAT, ${declarations.first().modIdExpr});\n"
-                    modified = modified.substring(0, classMatch.range.last + 1) +
-                        declaration +
-                        modified.substring(classMatch.range.last + 1)
-                }
+                val classMatch = javaTopLevelTypeOpening(modified)
+                    ?: throw IllegalStateException(
+                        "Cannot migrate custom stat registration in " +
+                            projectDir.relativize(javaFile).toString().replace('\\', '/') +
+                            ": missing top-level Java type declaration"
+                    )
+                val declaration = "\n    private static final DeferredRegister<ResourceLocation> CUSTOM_STATS =\n" +
+                    "            DeferredRegister.create(Registries.CUSTOM_STAT, $customStatNamespace);\n"
+                modified = modified.substring(0, classMatch.range.last + 1) +
+                    declaration +
+                    modified.substring(classMatch.range.last + 1)
             }
 
             val missingRegistrations = declarations.filterNot {
@@ -5444,7 +5466,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
             ).replace(modified, "")
 
             if (modified != original) {
-                migratedStatClasses.add(className)
+                migratedStatClasses.add(declaredStatOwner)
                 changes.add(Change(
                     file = javaFile,
                     line = 1,
@@ -5506,6 +5528,14 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         }
 
         return changes
+    }
+
+    private fun javaTopLevelTypeOpening(source: String): JavaTopLevelTypeOpening? {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val match = Regex(
+            """(?m)^[ \t]*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b[^{]*\{"""
+        ).find(executableCode) ?: return null
+        return JavaTopLevelTypeOpening(match.groupValues[1], match.range)
     }
 
     private fun migrateRegisterEventResourceLocations(projectDir: Path, dryRun: Boolean): List<Change> {

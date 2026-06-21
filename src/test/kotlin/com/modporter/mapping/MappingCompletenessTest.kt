@@ -9549,6 +9549,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `custom stat migration does not infer owner or namespace from first matches`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateCustomStatRegistration")
+        assertTrue(start >= 0, "migrateCustomStatRegistration is missing")
+        val end = source.indexOf("private fun migrateRegisterEventResourceLocations", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "java file-name owner fallback" to Regex("""fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "first custom stat namespace fallback" to Regex("""declarations\.first\(\)\.modIdExpr"""),
+            "first custom stat declaration fallback" to Regex("""declarations\.first\(\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val customStatNamespaces = declarations.map { it.modIdExpr }.distinct()") &&
+                body.contains("customStatNamespaces.size != 1") &&
+                body.contains("mixed custom stat namespaces") &&
+                body.contains("val declaredStatOwner = javaTopLevelTypeOpening(original)?.name") &&
+                body.contains("migratedStatClasses.add(declaredStatOwner)") &&
+                body.contains("DeferredRegister.create(Registries.CUSTOM_STAT, ${'$'}customStatNamespace)"),
+            "Custom stat migration must bind namespace and owner from executable source evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Custom stat migration must not use file-name owners or first declaration namespace fallbacks: $offenders"
+        )
+    }
+
+    @Test
     fun `build mod id helpers use executable Java evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

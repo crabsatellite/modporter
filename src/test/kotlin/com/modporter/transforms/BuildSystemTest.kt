@@ -5056,6 +5056,102 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `custom stat migration uses declared Java owner not file name`() {
+        val projectDir = tempDir.resolve("p19-custom-stats-declared-owner")
+        val rootDir = projectDir.resolve("src/main/java/com/example/basics")
+        rootDir.createDirectories()
+        rootDir.resolve("ExampleMod.java").writeText("""
+            package com.example.basics;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(IEventBus modEventBus) {
+                    ModItems.ITEMS.register(modEventBus);
+                    ActualStats.register();
+                }
+            }
+        """.trimIndent())
+        rootDir.resolve("LegacyStatsContainer.java").writeText("""
+            package com.example.basics;
+
+            import net.minecraft.core.Registry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.stats.StatFormatter;
+            import net.minecraft.stats.Stats;
+
+            class ActualStats {
+                public static final ResourceLocation USE_WAND = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "use_wand");
+
+                public static void register() {
+                    registerStat(USE_WAND);
+                }
+
+                private static void registerStat(ResourceLocation registryName) {
+                    Registry.register(BuiltInRegistries.CUSTOM_STAT, registryName.getPath(), registryName);
+                    Stats.CUSTOM.get(registryName, StatFormatter.DEFAULT);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val stats = rootDir.resolve("LegacyStatsContainer.java").readText()
+        val mod = rootDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "build-custom-stat-deferred-register" })
+        assertTrue(stats.contains("class ActualStats {\n    private static final DeferredRegister<ResourceLocation> CUSTOM_STATS"), stats)
+        assertTrue(mod.contains("ActualStats.register(modEventBus);"), mod)
+        assertFalse(mod.contains("LegacyStatsContainer.register(modEventBus);"), mod)
+    }
+
+    @Test
+    fun `custom stat migration rejects mixed namespaces instead of choosing first declaration`() {
+        val projectDir = tempDir.resolve("p19-custom-stats-mixed-namespaces")
+        val rootDir = projectDir.resolve("src/main/java/com/example")
+        rootDir.createDirectories()
+        rootDir.resolve("ModStats.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.Registry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.stats.StatFormatter;
+            import net.minecraft.stats.Stats;
+
+            public class ModStats {
+                public static final ResourceLocation USE_WAND = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "use_wand");
+                public static final ResourceLocation FOREIGN = ResourceLocation.fromNamespaceAndPath(OtherMod.MODID, "foreign");
+
+                public static void register() {
+                    registerStat(USE_WAND);
+                    registerStat(FOREIGN);
+                }
+
+                private static void registerStat(ResourceLocation registryName) {
+                    Registry.register(BuiltInRegistries.CUSTOM_STAT, registryName.getPath(), registryName);
+                    Stats.CUSTOM.get(registryName, StatFormatter.DEFAULT);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val stats = rootDir.resolve("ModStats.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("mixed custom stat namespaces") },
+            "Expected mixed namespace hard gate, got: ${result.errors}"
+        )
+        assertFalse(stats.contains("DeferredRegister.create(Registries.CUSTOM_STAT, ExampleMod.MODID)"), stats)
+        assertTrue(stats.contains("Registry.register(BuiltInRegistries.CUSTOM_STAT"), stats)
+    }
+
+    @Test
     fun `namespaces register event resource locations with mod id`() {
         val projectDir = tempDir.resolve("p19-registerevent-location")
         val itemDir = projectDir.resolve("src/main/java/com/example/items")
