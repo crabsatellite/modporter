@@ -17263,6 +17263,46 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy entity type AABB migration ignores comments strings and wrong arity`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AabbEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+
+            public class AabbEntity {
+                private static final String DOC = "type.getAABB(x, y, z)";
+
+                /*
+                 type.getAABB(x, y, z);
+                 */
+
+                public boolean collides(EntityType<?> type, double x, double y, double z) {
+                    return level.noCollision(type
+                        .getAABB(x, y, z));
+                }
+
+                public Object unsupported(EntityType<?> type, double x, double y) {
+                    return type.getAABB(x, y);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val entity = srcDir.resolve("AabbEntity.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(entity.contains("type.getDimensions().makeBoundingBox(x, y, z)"), entity)
+        assertTrue(entity.contains("""private static final String DOC = "type.getAABB(x, y, z)";"""), entity)
+        assertTrue(
+            Regex("""/\*\s*type\.getAABB\(x, y, z\);""", RegexOption.DOT_MATCHES_ALL).containsMatchIn(entity),
+            entity
+        )
+        assertTrue(entity.contains("return type.getAABB(x, y);"), entity)
+    }
+
+    @Test
     fun `migrates strict runtime compile API surfaces without mod-specific rules`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

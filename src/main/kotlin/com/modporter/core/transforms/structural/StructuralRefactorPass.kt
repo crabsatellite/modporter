@@ -24596,33 +24596,32 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
     }
 
     private fun migrateLegacyEntityTypeAabbCalls(source: String): String {
-        if (!source.contains(".getAABB(")) return source
-        val migrated = StringBuilder()
-        var cursor = 0
-        var changed = false
-        val token = ".getAABB("
-        while (cursor < source.length) {
-            val tokenIndex = source.indexOf(token, cursor)
-            if (tokenIndex < 0) break
-            val openParen = tokenIndex + ".getAABB".length
-            val closeParen = findMatchingParen(source, openParen)
-            if (closeParen < 0) break
-            val receiverStart = findExpressionReceiverStart(source, tokenIndex)
-            val receiver = source.substring(receiverStart, tokenIndex).trim()
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val callPattern = Regex("""\.\s*getAABB\s*\(""")
+        if (!callPattern.containsMatchIn(executableCode)) return source
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        callPattern.findAll(executableCode).forEach { match ->
+            val tokenIndex = match.range.first
+            val openParen = executableCode.indexOf('(', tokenIndex)
+            val closeParen = if (openParen >= 0) findMatchingParen(executableCode, openParen) else -1
+            if (openParen < 0 || closeParen < 0) return@forEach
+            val receiverEnd = previousNonWhitespaceEnd(executableCode, tokenIndex)
+            val receiverStart = findExpressionReceiverStart(executableCode, receiverEnd)
+            if (receiverStart < 0 || receiverStart >= receiverEnd) return@forEach
+            val receiver = source.substring(receiverStart, receiverEnd).trim()
             val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
             if (receiver.isNotEmpty() && args.size == 3) {
-                migrated.append(source, cursor, receiverStart)
-                migrated.append("${receiver}.getDimensions().makeBoundingBox(${args[0].trim()}, ${args[1].trim()}, ${args[2].trim()})")
-                cursor = closeParen + 1
-                changed = true
-                continue
+                edits += receiverStart..closeParen to
+                    "${receiver}.getDimensions().makeBoundingBox(${args[0].trim()}, ${args[1].trim()}, ${args[2].trim()})"
             }
-            migrated.append(source, cursor, closeParen + 1)
-            cursor = closeParen + 1
         }
-        if (!changed) return source
-        migrated.append(source, cursor, source.length)
-        return migrated.toString()
+        return applyStringEdits(source, edits)
+    }
+
+    private fun previousNonWhitespaceEnd(source: String, offset: Int): Int {
+        var index = offset
+        while (index > 0 && source[index - 1].isWhitespace()) index--
+        return index
     }
 
     private fun findExpressionReceiverStart(source: String, tokenIndex: Int): Int {

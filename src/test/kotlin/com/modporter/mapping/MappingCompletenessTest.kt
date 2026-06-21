@@ -2780,6 +2780,45 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy entity type AABB migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyEntityTypeAabbCalls")
+        assertTrue(start >= 0, "migrateLegacyEntityTypeAabbCalls is missing")
+        val end = source.indexOf("private fun findExpressionReceiverStart", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getAABB prefilter" to """source.contains(".getAABB(")""",
+            "raw token scan" to "source.indexOf(token, cursor)",
+            "raw StringBuilder migration" to "StringBuilder()",
+            "manual changed flag" to "var changed = false"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""val callPattern = Regex(""" + "\"\"\"" + """\.\s*getAABB\s*\(""") &&
+                body.contains("callPattern.findAll(executableCode)") &&
+                body.contains("findMatchingParen(executableCode, openParen)") &&
+                body.contains("val receiverEnd = previousNonWhitespaceEnd(executableCode, tokenIndex)") &&
+                body.contains("findExpressionReceiverStart(executableCode, receiverEnd)") &&
+                body.contains("edits += receiverStart..closeParen") &&
+                body.contains("private fun previousNonWhitespaceEnd(source: String, offset: Int)") &&
+                body.contains("return applyStringEdits(source, edits)"),
+            "Legacy EntityType.getAABB migration must derive call ranges from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy EntityType.getAABB migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `production mod event bus listener migrations do not infer owners from java file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
