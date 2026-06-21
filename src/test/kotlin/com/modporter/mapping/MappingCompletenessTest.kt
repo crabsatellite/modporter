@@ -6176,6 +6176,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy tesselator end migration requires active buffer evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateTesselatorVariableEndCalls")
+        assertTrue(start >= 0, "migrateTesselatorVariableEndCalls is missing")
+        val end = source.indexOf("private fun migrateTesselatorEndHelperMethods", start + 1)
+        assertTrue(end > start, "migrateTesselatorVariableEndCalls boundary is missing")
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "first buffer fallback" to """bufferVariables.first()"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
+                body.contains("val endingTesselator = endingTesselators.singleOrNull()") &&
+                body.contains("activeTesselatorBufferVariable(executableBody, bufferVariables, endingTesselator)") &&
+                body.contains("Cannot derive active Tesselator BufferBuilder") &&
+                body.contains("replaceExecutableRegex(body, Regex(") &&
+                source.contains("private fun activeTesselatorBufferVariable") &&
+                source.contains("return activeBuffers.singleOrNull()"),
+            "Legacy Tesselator.end migration must derive a unique active BufferBuilder from executable begin(...) assignments"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy Tesselator.end migration must not choose an arbitrary BufferBuilder: $offenders"
+        )
+    }
+
+    @Test
     fun `data result getOrThrow migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

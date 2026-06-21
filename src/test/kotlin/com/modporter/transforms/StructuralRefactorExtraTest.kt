@@ -27418,6 +27418,72 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `Tesselator variable end migration rejects ambiguous active buffer evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AmbiguousTesselatorSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+            import com.mojang.blaze3d.vertex.Tesselator;
+
+            public class AmbiguousTesselatorSurface {
+                private void render() {
+                    Tesselator tesselator = Tesselator.getInstance();
+                    BufferBuilder first = tesselator.getBuilder();
+                    BufferBuilder second = tesselator.getBuilder();
+                    tesselator.end();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("AmbiguousTesselatorSurface.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive active Tesselator BufferBuilder") },
+            "Expected active buffer hard gate, got: ${result.errors}"
+        )
+        assertTrue(source.contains("BufferBuilder first = tesselator.getBuilder();"), source)
+        assertTrue(source.contains("BufferBuilder second = tesselator.getBuilder();"), source)
+        assertFalse(source.contains("BufferUploader.drawWithShader(first.buildOrThrow())"), source)
+    }
+
+    @Test
+    fun `Tesselator variable end migration binds active buffer to end receiver`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("MismatchedTesselatorSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+            import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+            import com.mojang.blaze3d.vertex.Tesselator;
+            import com.mojang.blaze3d.vertex.VertexFormat;
+
+            public class MismatchedTesselatorSurface {
+                private void render() {
+                    Tesselator drawing = Tesselator.getInstance();
+                    Tesselator ending = Tesselator.getInstance();
+                    BufferBuilder builder = drawing.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION);
+                    ending.end();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("MismatchedTesselatorSurface.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive active Tesselator BufferBuilder") },
+            "Expected receiver-bound active buffer hard gate, got: ${result.errors}"
+        )
+        assertTrue(source.contains("BufferBuilder builder = drawing.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION);"), source)
+        assertTrue(source.contains("ending.end();"), source)
+        assertFalse(source.contains("BufferUploader.drawWithShader(builder.buildOrThrow())"), source)
+    }
+
+    @Test
     fun `migrates legacy tooltip entity data loot and enchantment APIs by source shape`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

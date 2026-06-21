@@ -18200,25 +18200,33 @@ $migratedRecipes
             }
             var body = result.substring(openBrace + 1, closeBrace)
             val originalBody = body
-            val bufferVariables = Regex("""\bBufferBuilder\s+([A-Za-z_$][\w$]*)\b""")
-                .findAll(body)
-                .map { it.groupValues[1] }
-                .toList()
-            if (bufferVariables.isEmpty()) {
-                cursor = closeBrace + 1
-                continue
-            }
             val tesselatorVariables = Regex("""\bTesselator\s+([A-Za-z_$][\w$]*)\b""")
                 .findAll(body)
                 .map { it.groupValues[1] }
                 .toSet()
-            val activeBuffer = bufferVariables.firstOrNull { variable ->
-                Regex("""\b${Regex.escape(variable)}\s*=\s*Tesselator\.getInstance\(\)\.begin\(""").containsMatchIn(body) ||
-                    Regex("""\b${Regex.escape(variable)}\s*=\s*[A-Za-z_$][\w$]*\.begin\(""").containsMatchIn(body)
-            } ?: bufferVariables.first()
-            tesselatorVariables.forEach { tesselator ->
-                body = Regex("""\b${Regex.escape(tesselator)}\.end\(\)\s*;""")
-                    .replace(body, "BufferUploader.drawWithShader($activeBuffer.buildOrThrow());")
+            val executableBody = maskJavaCommentsAndLiterals(body)
+            val endingTesselators = tesselatorVariables
+                .filter { tesselator ->
+                    Regex("""\b${Regex.escape(tesselator)}\.end\(\)\s*;""").containsMatchIn(executableBody)
+                }
+                .toSet()
+            if (endingTesselators.isEmpty()) {
+                cursor = closeBrace + 1
+                continue
+            }
+            val endingTesselator = endingTesselators.singleOrNull()
+                ?: error("Cannot derive active Tesselator BufferBuilder: method must contain exactly one Tesselator end receiver")
+            val bufferVariables = Regex("""\bBufferBuilder\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(executableBody)
+                .map { it.groupValues[1] }
+                .distinct()
+                .toList()
+            val activeBuffer = activeTesselatorBufferVariable(executableBody, bufferVariables, endingTesselator)
+                ?: error("Cannot derive active Tesselator BufferBuilder: tessellator.end() must have exactly one BufferBuilder assigned from begin(...) in the same method")
+            endingTesselators.forEach { tesselator ->
+                body = replaceExecutableRegex(body, Regex("""\b${Regex.escape(tesselator)}\.end\(\)\s*;""")) {
+                    "BufferUploader.drawWithShader($activeBuffer.buildOrThrow());"
+                }
             }
             if (body != originalBody) {
                 result = result.substring(0, openBrace + 1) + body + result.substring(closeBrace)
@@ -18228,6 +18236,20 @@ $migratedRecipes
             }
         }
         return result
+    }
+
+    private fun activeTesselatorBufferVariable(
+        executableBody: String,
+        bufferVariables: List<String>,
+        endingTesselator: String
+    ): String? {
+        val activeBuffers = bufferVariables
+            .filter { variable ->
+                Regex("""\b(?:BufferBuilder\s+)?${Regex.escape(variable)}\s*=\s*Tesselator\.getInstance\(\)\.begin\(""").containsMatchIn(executableBody) ||
+                    Regex("""\b(?:BufferBuilder\s+)?${Regex.escape(variable)}\s*=\s*${Regex.escape(endingTesselator)}\.begin\(""").containsMatchIn(executableBody)
+            }
+            .distinct()
+        return activeBuffers.singleOrNull()
     }
 
     private fun migrateTesselatorEndHelperMethods(source: String): String {
