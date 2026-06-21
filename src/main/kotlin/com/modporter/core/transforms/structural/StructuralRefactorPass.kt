@@ -24984,7 +24984,7 @@ $signatureIndent}"""
 
     private fun migrateLegacyBannerPatternConstructors(source: String): String {
         if (!source.contains("BannerPattern") || !source.contains("new BannerPattern(")) return source
-        val namespaceExpression = inferBannerPatternNamespaceExpression(source) ?: return source
+        val namespaceExpression = bannerPatternDeferredRegisterNamespaceExpression(source) ?: return source
         var changed = false
         val result = rewriteJavaNew(source, "BannerPattern") { args ->
             if (args.size != 1) return@rewriteJavaNew null
@@ -24996,13 +24996,12 @@ $signatureIndent}"""
         return if (changed) addImportIfMissing(result, "net.minecraft.resources.ResourceLocation") else source
     }
 
-    private fun inferBannerPatternNamespaceExpression(source: String): String? =
-        inferModAccess(source)?.modIdExpression
-            ?: Regex("""DeferredRegister\.create\(\s*Registries\.BANNER_PATTERN\s*,\s*([^)]+?)\s*\)""")
-                .find(source)
-                ?.groupValues
-                ?.get(1)
-                ?.trim()
+    private fun bannerPatternDeferredRegisterNamespaceExpression(source: String): String? =
+        Regex("""DeferredRegister\.create\(\s*Registries\.BANNER_PATTERN\s*,\s*([^)]+?)\s*\)""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
 
     private fun migrateLegacyWallSignBlockCodecSource(source: String): String {
         if (!source.contains("extends WallSignBlock") || !source.contains("WoodType")) return source

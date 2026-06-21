@@ -21510,6 +21510,50 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy banner pattern constructors require deferred register namespace evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BannerSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.entity.BannerPattern;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            @Mod("main_mod")
+            public class BannerSurface {
+                public static final DeferredRegister<BannerPattern> BANNER_PATTERNS =
+                        DeferredRegister.create(Registries.BANNER_PATTERN, "registry_namespace");
+
+                public static final Object EXAMPLE =
+                        BANNER_PATTERNS.register("example", () -> new BannerPattern("ex"));
+            }
+        """.trimIndent())
+        srcDir.resolve("UnregisteredBannerSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BannerPattern;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("main_mod")
+            public class UnregisteredBannerSurface {
+                public static final Object EXAMPLE = new BannerPattern("ex");
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val registered = srcDir.resolve("BannerSurface.java").readText()
+        val unregistered = srcDir.resolve("UnregisteredBannerSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(registered.contains("new BannerPattern(ResourceLocation.fromNamespaceAndPath(\"registry_namespace\", \"ex\"), \"ex\")"), registered)
+        assertFalse(registered.contains("ResourceLocation.fromNamespaceAndPath(\"main_mod\""), registered)
+        assertTrue(unregistered.contains("new BannerPattern(\"ex\")"), unregistered)
+        assertFalse(unregistered.contains("ResourceLocation.fromNamespaceAndPath"), unregistered)
+    }
+
+    @Test
     fun `migrates legacy game event constructors only inside matching deferred registers`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

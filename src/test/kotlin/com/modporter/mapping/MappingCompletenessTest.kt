@@ -3015,6 +3015,30 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy banner pattern constructors require deferred register namespace evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyBannerPatternConstructors")
+        assertTrue(start >= 0, "migrateLegacyBannerPatternConstructors is missing")
+        val end = source.indexOf("private fun migrateLegacyWallSignBlockCodecSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+
+        assertTrue(
+            body.contains("bannerPatternDeferredRegisterNamespaceExpression(source)") &&
+                body.contains("DeferredRegister\\.create\\(\\s*Registries\\.BANNER_PATTERN"),
+            "Legacy BannerPattern constructor migration must read namespace from the BANNER_PATTERN DeferredRegister"
+        )
+        assertTrue(
+            !body.contains("inferModAccess"),
+            "Legacy BannerPattern constructor migration must not use @Mod/mod access as a namespace fallback"
+        )
+    }
+
+    @Test
     fun `deferred register and holder collectors do not infer owners from java file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
