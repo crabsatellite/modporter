@@ -22730,6 +22730,52 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy creative enchantment instance migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val sourceFile = srcDir.resolve("CreativeEnchantmentDocs.java")
+        sourceFile.writeText("""
+            package com.example;
+
+            public class CreativeEnchantmentDocs {
+                /*
+                public static CreativeModeTab tab() {
+                    return CreativeModeTab.builder()
+                            .displayItems((parameters, output) -> {
+                                output.accept(EnchantedBookItem.createForEnchantment(new EnchantmentInstance(Enchantments.ALL_DAMAGE_PROTECTION, 1)));
+                                custom(output, CreativeModeTab.TabVisibility.PARENT_TAB_ONLY);
+                            })
+                            .build();
+                }
+
+                private static void custom(CreativeModeTab.Output output, CreativeModeTab.TabVisibility visibility) {
+                    for (DeferredHolder<Enchantment, ? extends Enchantment> enchantment : CustomEnchantments.ENCHANTMENTS.getEntries()) {
+                        output.accept(EnchantedBookItem.createForEnchantment(new EnchantmentInstance(enchantment.get(), enchantment.get().getMaxLevel())), visibility);
+                    }
+                }
+                */
+                private static final String VANILLA_DOC = "new EnchantmentInstance(Enchantments.ALL_DAMAGE_PROTECTION, 1)";
+                private static final String LOOP_DOC = "for (DeferredHolder<Enchantment, ? extends Enchantment> enchantment : CustomEnchantments.ENCHANTMENTS.getEntries()) { new EnchantmentInstance(enchantment.get(), enchantment.get().getMaxLevel()); }";
+
+                public int keep() {
+                    return VANILLA_DOC.length() + LOOP_DOC.length();
+                }
+            }
+        """.trimIndent())
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = sourceFile.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertEquals(0, result.changeCount)
+        assertEquals(original, transformed)
+        assertFalse(transformed.contains("lookupOrThrow(Registries.ENCHANTMENT)"), transformed)
+        assertFalse(transformed.contains("Holder<Enchantment> enchantment ="), transformed)
+        assertFalse(transformed.contains("ResourceKey<Enchantment>"), transformed)
+    }
+
+    @Test
     fun `legacy vanilla block constructor migration ignores comments and string literals`() {
         val projectDir = createFile("BlockConstructorDocs.java", """
             package com.example;

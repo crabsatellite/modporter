@@ -3605,6 +3605,76 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy creative enchantment instance migration uses executable constructor and loop evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyCreativeTabEnchantmentInstances")
+        assertTrue(start >= 0, "migrateLegacyCreativeTabEnchantmentInstances is missing")
+        val end = source.indexOf("private fun migrateLegacyHolderAccessors", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw EnchantmentInstance source prefilter" to """source.contains("EnchantmentInstance(")""",
+            "raw ENCHANTMENTS source prefilter" to """source.contains(".ENCHANTMENTS.getEntries()")""",
+            "raw EnchantmentInstance constructor prefilter" to """result.contains("new EnchantmentInstance(Enchantments.")""",
+            "raw EnchantmentInstance constructor rewrite" to """rewriteJavaNew(result, "EnchantmentInstance")""",
+            "raw helper invocation rewrite" to """rewriteJavaInvocationArguments(result, helperName)"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableSource.contains("EnchantmentInstance(")""") &&
+                body.contains("val initialExecutableCode = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("""rewriteExecutableJavaNew(result, "EnchantmentInstance")""") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("findMatchingBrace(executableCode, openBrace)") &&
+                body.contains("rewriteExecutableJavaInvocationArguments(result, helperName)") &&
+                body.contains("replaceExecutableJavaRegex(result, loopPattern)") &&
+                body.contains("replaceExecutableJavaRegex(result, Regex(\"\"\"new\\s+EnchantmentInstance"),
+            "Legacy creative tab EnchantmentInstance migration must locate constructors, helper calls, and enchantment loops in executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy creative tab EnchantmentInstance migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy enchantment constant rename migration uses executable references`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyEnchantmentConstantNames")
+        assertTrue(start >= 0, "migrateLegacyEnchantmentConstantNames is missing")
+        val end = source.indexOf("private fun migrateLegacyEnchantmentLevelHelperCall", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw Enchantments prefilter" to """source.contains("Enchantments.")""",
+            "raw Enchantments constant replacement" to "result.replace(\"Enchantments.${'$'}oldName\", \"Enchantments.${'$'}newName\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("maskJavaCommentsAndLiterals(source).contains(\"Enchantments.\")") &&
+                body.contains("replaceExecutableJavaRegex(result, Regex(\"\"\"\\bEnchantments\\."),
+            "Legacy enchantment constant rename migration must rewrite only executable Enchantments references"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy enchantment constant rename migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `map codec serialization migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

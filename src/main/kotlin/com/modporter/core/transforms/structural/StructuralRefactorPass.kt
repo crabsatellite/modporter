@@ -22637,7 +22637,7 @@ ${indent}}"""
     }
 
     private fun migrateLegacyEnchantmentConstantNames(source: String): String {
-        if (!source.contains("Enchantments.")) return source
+        if (!maskJavaCommentsAndLiterals(source).contains("Enchantments.")) return source
         val renamedEnchantments = mapOf(
             "ALL_DAMAGE_PROTECTION" to "PROTECTION",
             "FALL_PROTECTION" to "FEATHER_FALLING",
@@ -22680,7 +22680,9 @@ ${indent}}"""
         var result = source
         for ((oldName, newName) in renamedEnchantments) {
             if (oldName != newName) {
-                result = result.replace("Enchantments.$oldName", "Enchantments.$newName")
+                result = replaceExecutableJavaRegex(result, Regex("""\bEnchantments\.${Regex.escape(oldName)}\b""")) {
+                    "Enchantments.$newName"
+                }
             }
         }
         return result
@@ -27999,9 +28001,10 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
     }
 
     private fun migrateLegacyCreativeTabEnchantmentInstances(source: String): String {
-        if (!source.contains("EnchantmentInstance(") &&
-            !source.contains(".ENCHANTMENTS.getEntries()") &&
-            !source.contains("Enchantments.")
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        if (!executableSource.contains("EnchantmentInstance(") &&
+            !executableSource.contains(".ENCHANTMENTS.getEntries()") &&
+            !executableSource.contains("Enchantments.")
         ) {
             return source
         }
@@ -28009,21 +28012,22 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         var result = migrateLegacyEnchantmentConstantNames(source)
         var changed = false
 
+        val initialExecutableCode = maskJavaCommentsAndLiterals(result)
         val displayParametersName = Regex("""displayItems\s*\(\s*\(\s*([A-Za-z_$][\w$]*)\s*,""")
-            .find(result)
+            .find(initialExecutableCode)
             ?.groupValues
             ?.get(1)
             ?: Regex("""CreativeModeTab\.ItemDisplayParameters\s+([A-Za-z_$][\w$]*)""")
-                .find(result)
+                .find(initialExecutableCode)
                 ?.groupValues
                 ?.get(1)
             ?: "parameters"
 
-        if (result.contains("new EnchantmentInstance(Enchantments.")) {
-            result = rewriteJavaNew(result, "EnchantmentInstance") { args ->
-                if (args.size < 2) return@rewriteJavaNew null
+        if (maskJavaCommentsAndLiterals(result).contains("new EnchantmentInstance(Enchantments.")) {
+            result = rewriteExecutableJavaNew(result, "EnchantmentInstance") { args ->
+                if (args.size < 2) return@rewriteExecutableJavaNew null
                 val enchantment = args[0].trim()
-                if (!Regex("""^Enchantments\.[A-Z0-9_]+$""").matches(enchantment)) return@rewriteJavaNew null
+                if (!Regex("""^Enchantments\.[A-Z0-9_]+$""").matches(enchantment)) return@rewriteExecutableJavaNew null
                 val migratedArgs = args.toMutableList()
                 migratedArgs[0] = "$displayParametersName.holders().lookupOrThrow(Registries.ENCHANTMENT).getOrThrow($enchantment)"
                 changed = true
@@ -28037,14 +28041,15 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         )
         var cursor = 0
         while (true) {
-            val match = helperPattern.find(result, cursor) ?: break
-            val openBrace = result.indexOf('{', match.range.last + 1)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val match = helperPattern.find(executableCode, cursor) ?: break
+            val openBrace = executableCode.indexOf('{', match.range.last + 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
             if (openBrace < 0 || closeBrace < 0) {
                 cursor = match.range.last + 1
                 continue
             }
-            val methodBody = result.substring(openBrace + 1, closeBrace)
+            val methodBody = executableCode.substring(openBrace + 1, closeBrace)
             if (methodBody.contains(".ENCHANTMENTS.getEntries()")) {
                 val replacement = "${match.groupValues[1]} ${match.groupValues[2]}void ${match.groupValues[3]}(CreativeModeTab.ItemDisplayParameters parameters, CreativeModeTab.Output ${match.groupValues[4]}, CreativeModeTab.TabVisibility ${match.groupValues[5]})"
                 result = result.substring(0, match.range.first) + replacement + result.substring(match.range.last + 1)
@@ -28057,21 +28062,22 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         }
 
         for (helperName in helperNames) {
-            result = rewriteJavaInvocationArguments(result, helperName) { args ->
-                if (args.size != 2) return@rewriteJavaInvocationArguments null
+            result = rewriteExecutableJavaInvocationArguments(result, helperName) { args ->
+                if (args.size != 2) return@rewriteExecutableJavaInvocationArguments null
                 if (args[0].contains("ItemDisplayParameters") || args[0] == displayParametersName) {
-                    return@rewriteJavaInvocationArguments null
+                    return@rewriteExecutableJavaInvocationArguments null
                 }
                 changed = true
                 listOf(displayParametersName, args[0], args[1])
             }
         }
 
-        if (result.contains(".ENCHANTMENTS.getEntries()")) {
+        if (maskJavaCommentsAndLiterals(result).contains(".ENCHANTMENTS.getEntries()")) {
             val loopVariables = mutableSetOf<String>()
-            result = Regex(
+            val loopPattern = Regex(
                 """(?m)^([ \t]*)for\s*\(\s*[^:\r\n]+?\s+([A-Za-z_$][\w$]*)\s*:\s*((?:[A-Za-z_$][\w$]*\.)*ENCHANTMENTS)\.getEntries\(\)\s*\)\s*\{"""
-            ).replace(result) { match ->
+            )
+            result = replaceExecutableJavaRegex(result, loopPattern) { match ->
                 val indent = match.groupValues[1]
                 val variable = match.groupValues[2]
                 val entriesOwner = match.groupValues[3]
@@ -28082,12 +28088,15 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
                     "${indent}    Holder<Enchantment> $variable = parameters.holders().lookupOrThrow(Registries.ENCHANTMENT).getOrThrow($keyVariable);"
             }
             for (variable in loopVariables) {
-                result = Regex("""\b${Regex.escape(variable)}\.get\(\)\.(get(?:Max|Min)Level)\(\)""")
-                    .replace(result) { match -> "$variable.value().${match.groupValues[1]}()" }
-                result = Regex("""new\s+EnchantmentInstance\(\s*${Regex.escape(variable)}\.get\(\)\s*,""")
-                    .replace(result, "new EnchantmentInstance($variable,")
-                result = Regex("""\b${Regex.escape(variable)}\.get\(\)""")
-                    .replace(result, variable)
+                result = replaceExecutableJavaRegex(result, Regex("""\b${Regex.escape(variable)}\.get\(\)\.(get(?:Max|Min)Level)\(\)""")) { match ->
+                    "$variable.value().${match.groupValues[1]}()"
+                }
+                result = replaceExecutableJavaRegex(result, Regex("""new\s+EnchantmentInstance\(\s*${Regex.escape(variable)}\.get\(\)\s*,""")) {
+                    "new EnchantmentInstance($variable,"
+                }
+                result = replaceExecutableJavaRegex(result, Regex("""\b${Regex.escape(variable)}\.get\(\)""")) {
+                    variable
+                }
             }
         }
 
@@ -38512,6 +38521,42 @@ $encodeLines
             }
             val openParen = tokenIndex + methodName.length
             val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val originalArgsSource = result.substring(openParen + 1, closeParen)
+            val args = splitTopLevelJavaArgs(originalArgsSource)
+            val migratedArgs = transform(args)
+            if (migratedArgs == null || migratedArgs == args) {
+                cursor = closeParen + 1
+                continue
+            }
+            val replacementArgs = migratedArgs.joinToString(", ") { it.trim() }
+            result = result.substring(0, openParen + 1) + replacementArgs + result.substring(closeParen)
+            cursor = openParen + 1 + replacementArgs.length
+        }
+        return result
+    }
+
+    private fun rewriteExecutableJavaInvocationArguments(
+        source: String,
+        methodName: String,
+        transform: (args: List<String>) -> List<String>?
+    ): String {
+        var result = source
+        var cursor = 0
+        val token = "$methodName("
+        while (true) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenIndex = executableCode.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            if (tokenIndex > 0 && (executableCode[tokenIndex - 1].isLetterOrDigit() || executableCode[tokenIndex - 1] == '_' || executableCode[tokenIndex - 1] == '$')) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val openParen = tokenIndex + methodName.length
+            val closeParen = findMatchingParen(executableCode, openParen)
             if (closeParen < 0) {
                 cursor = tokenIndex + token.length
                 continue
