@@ -619,7 +619,15 @@ class StructuralRefactorExtraTest {
             import net.neoforged.neoforge.resource.PathPackResources;
 
             public class PackSetup {
+                private static final String LEGACY_DOC = "Pack.Info metadata.getDescription() metadata.getPackFormat(PackType.SERVER_DATA)";
+
                 public void add(AddPackFindersEvent event, Path sourcePath) {
+                    String textBlock = ${"\"\"\""}
+                        Pack.Info
+                        metadata.getDescription()
+                        metadata.getPackFormat(PackType.SERVER_DATA)
+                        ${"\"\"\""};
+                    // Pack.Info and metadata.getPackFormat(PackType.CLIENT_RESOURCES) documentation
                     PathPackResources pack = new PathPackResources("example:" + sourcePath, true, sourcePath);
                     Pack.ResourcesSupplier resourcesSupplier = (string) -> pack;
                     Pack.Info info = Pack.readPackInfo("builtin/example", resourcesSupplier);
@@ -665,10 +673,12 @@ class StructuralRefactorExtraTest {
         assertTrue(setup.contains("metadata.description()"))
         assertTrue(setup.contains("metadata.packFormat()"))
         assertFalse(setup.contains("Pack.create("))
-        assertFalse(setup.contains("Pack.Info"))
+        assertFalse(setup.contains("Pack.Info info ="))
         assertFalse(setup.contains("readPackInfo"))
-        assertFalse(setup.contains("getDescription()"))
-        assertFalse(setup.contains("getPackFormat("))
+        assertFalse(setup.contains("metadata.getDescription(), metadata.getPackFormat(PackType.SERVER_DATA)"))
+        assertTrue(setup.contains("private static final String LEGACY_DOC = \"Pack.Info metadata.getDescription() metadata.getPackFormat(PackType.SERVER_DATA)\";"))
+        assertTrue(setup.contains("Pack.Info\n            metadata.getDescription()\n            metadata.getPackFormat(PackType.SERVER_DATA)"), setup)
+        assertTrue(setup.contains("// Pack.Info and metadata.getPackFormat(PackType.CLIENT_RESOURCES) documentation"), setup)
         assertTrue(combined.contains("import com.modporter.generated.examplemod.compat.DelegatingPackResources;"))
         assertTrue(compatDir.resolve("PathPackResources.java").exists())
         assertTrue(compatDir.resolve("DelegatingPackResources.java").readText().contains("extends AbstractPackResources"))

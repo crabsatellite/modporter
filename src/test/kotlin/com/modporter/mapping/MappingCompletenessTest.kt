@@ -3290,6 +3290,46 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy pack metadata accessors use executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val migrationStart = source.indexOf("private fun migrateLegacyPackResourceApis")
+        assertTrue(migrationStart >= 0, "migrateLegacyPackResourceApis is missing")
+        val accessorStart = source.indexOf("private fun migratePackMetadataSectionAccessors")
+        assertTrue(accessorStart >= 0, "migratePackMetadataSectionAccessors is missing")
+        val accessorEnd = source.indexOf("private fun rewriteLegacyPackResourcesSupplierAssignments", accessorStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val packResourceBody = source.substring(migrationStart, accessorStart)
+        val accessorBody = source.substring(accessorStart, accessorEnd)
+        val executableAccessorReplacementCount = Regex("""replaceExecutableRegex\(""").findAll(accessorBody).count()
+        val offenders = listOf(
+            "raw Pack.Info replacement" to packResourceBody.contains("Regex(\"\"\"\\bPack\\.Info\\b(?!\\s*\\()\"\"\").replace(modified"),
+            "raw metadata variable scan" to (
+                accessorBody.contains(".findAll(source)") || accessorBody.contains(".findAll(result)")
+                ),
+            "raw description replacement" to accessorBody.contains("result.replace(\"${'$'}name.getDescription()\""),
+            "raw pack format replacement" to accessorBody.contains(".replace(result, \"${'$'}name.packFormat()\")")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            packResourceBody.contains("replaceExecutableRegex(\n                    modified,\n                    Regex(\"\"\"\\bPack\\.Info\\b(?!\\s*\\()\"\"\")") &&
+                accessorBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                accessorBody.contains(".findAll(executableCode)") &&
+                executableAccessorReplacementCount >= 2,
+            "Legacy pack metadata migration must rewrite Pack.Info and metadata accessors in executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy pack metadata migration must not use comments or strings as source evidence or replacement targets: $offenders"
+        )
+    }
+
+    @Test
     fun `command source stack level migration uses executable scoped evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

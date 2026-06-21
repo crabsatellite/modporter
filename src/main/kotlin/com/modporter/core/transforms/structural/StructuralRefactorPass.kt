@@ -6760,7 +6760,10 @@ $helpers
             modified = readInfoRewrite
 
             if (modified.contains("Pack.Info")) {
-                modified = Regex("""\bPack\.Info\b(?!\s*\()""").replace(modified, "Pack.Metadata")
+                modified = replaceExecutableRegex(
+                    modified,
+                    Regex("""\bPack\.Info\b(?!\s*\()""")
+                ) { "Pack.Metadata" }
             }
 
             modified = addLegacyPackApiImports(modified)
@@ -6843,16 +6846,22 @@ $helpers
 
     private fun migratePackMetadataSectionAccessors(source: String): String {
         if (!source.contains("PackMetadataSection")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val metadataNames = Regex("""\bPackMetadataSection\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(source)
+            .findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
         if (metadataNames.isEmpty()) return source
         var result = source
         for (name in metadataNames) {
-            result = result.replace("$name.getDescription()", "$name.description()")
-            result = Regex("""\b${Regex.escape(name)}\.getPackFormat\s*\(\s*PackType\.[A-Z_]+\s*\)""")
-                .replace(result, "$name.packFormat()")
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b${Regex.escape(name)}\.getDescription\(\)""")
+            ) { "$name.description()" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b${Regex.escape(name)}\.getPackFormat\s*\(\s*PackType\.[A-Z_]+\s*\)""")
+            ) { "$name.packFormat()" }
         }
         return result
     }
