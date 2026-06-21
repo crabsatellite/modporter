@@ -40130,34 +40130,8 @@ $encodeLines
     private fun rewriteSuperConstructorCalls(
         source: String,
         transform: (args: List<String>) -> String?
-    ): String {
-        var result = source
-        var cursor = 0
-        val token = "super("
-        while (true) {
-            val tokenIndex = result.indexOf(token, cursor)
-            if (tokenIndex < 0) break
-            if (tokenIndex > 0 && (result[tokenIndex - 1].isLetterOrDigit() || result[tokenIndex - 1] == '_' || result[tokenIndex - 1] == '.')) {
-                cursor = tokenIndex + token.length
-                continue
-            }
-            val openParen = tokenIndex + token.length - 1
-            val closeParen = findMatchingParen(result, openParen)
-            if (closeParen < 0) {
-                cursor = tokenIndex + token.length
-                continue
-            }
-            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
-            val replacement = transform(args)
-            if (replacement == null) {
-                cursor = closeParen + 1
-                continue
-            }
-            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
-            cursor = tokenIndex + replacement.length
-        }
-        return result
-    }
+    ): String =
+        rewriteExecutableSuperConstructorCalls(source, transform)
 
     private fun rewriteExecutableSuperConstructorCalls(
         source: String,

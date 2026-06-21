@@ -2012,6 +2012,34 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `super constructor helper delegates to executable scanner`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun rewriteSuperConstructorCalls(")
+        assertTrue(start >= 0, "rewriteSuperConstructorCalls is missing")
+        val end = source.indexOf("private fun rewriteExecutableSuperConstructorCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+
+        val offenders = listOf(
+            "missing executable delegate" to !body.contains("rewriteExecutableSuperConstructorCalls(source, transform)"),
+            "raw super token scan" to body.contains("result.indexOf(token, cursor)"),
+            "raw parenthesis matcher" to body.contains("findMatchingParen(result, openParen)"),
+            "raw token boundary" to body.contains("result[tokenIndex - 1]")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Super constructor rewrites must reuse the executable-code scanner instead of raw source traversal: $offenders"
+        )
+    }
+
+    @Test
     fun `structural brace matching ignores Java comments and literals`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
