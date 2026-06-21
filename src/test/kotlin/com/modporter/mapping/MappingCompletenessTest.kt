@@ -3183,6 +3183,55 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `pickup block player parameter migrations use method local executable evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val notNullStart = source.indexOf("private fun migrateNotNullPickupBlockOverridePlayerParameterSource")
+        assertTrue(notNullStart >= 0, "migrateNotNullPickupBlockOverridePlayerParameterSource is missing")
+        val notNullEnd = source.indexOf("private fun collectSuperPickupBlockEdits", notNullStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val notNullBody = source.substring(notNullStart, notNullEnd)
+        val fluidStart = source.indexOf("private fun migrateLegacyFluidInterfacePlayerParametersSource")
+        assertTrue(fluidStart >= 0, "migrateLegacyFluidInterfacePlayerParametersSource is missing")
+        val fluidEnd = source.indexOf("private fun migrateLegacyBucketPickupCallSites", fluidStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val fluidBody = source.substring(fluidStart, fluidEnd)
+        val offenders = listOf(
+            "whole-file pickupBlock super replacement" to """result.replace("super.pickupBlock(level, pos, state)")""",
+            "broad pickupBlock super replacement after any signature change" to "if (result != beforeLiquidInterfaces)",
+            "broad super pickupBlock regex" to """super\.pickupBlock\(\s*([^,\r\n]+)"""
+        )
+            .filter { (_, marker) -> source.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            notNullBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                notNullBody.contains("findMatchingBrace(executableCode, openBrace)") &&
+                notNullBody.contains("source.substring(match.range) != match.value") &&
+                notNullBody.contains("collectSuperPickupBlockEdits(source, executableCode, method") &&
+                notNullBody.contains("return applyStringEdits(source, edits) to edits.isNotEmpty()"),
+            "@NotNull pickupBlock override migration must bind the added player parameter to the executable method being migrated"
+        )
+        assertTrue(
+            fluidBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                fluidBody.contains("javaMethodRangesIncludingDefault(executableCode)") &&
+                fluidBody.contains("method.name == \"pickupBlock\"") &&
+                fluidBody.contains("method.name == \"canPlaceLiquid\"") &&
+                fluidBody.contains("source.substring(absoluteRange) == pickupMatch.value") &&
+                fluidBody.contains("collectSuperPickupBlockEdits(source, executableCode, method"),
+            "Fluid interface player parameter migration must use executable method headers and method-local super call edits"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "pickupBlock player parameter migrations must not use raw or whole-file replacements: $offenders"
+        )
+    }
+
+    @Test
     fun `holder value accessor migration uses executable typed variables`() {
         val source = Path.of("")
             .toAbsolutePath()

@@ -11083,6 +11083,100 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `pickup block player parameter migration uses method local executable evidence`() {
+        val projectDir = createFile("PickupOverrideSurface.java", """
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.LevelAccessor;
+            import net.minecraft.world.level.block.state.BlockState;
+            import org.jetbrains.annotations.NotNull;
+
+            public class PickupOverrideSurface {
+                private static final String DOC = "super.pickupBlock(level, pos, state)";
+
+                /*
+                public @NotNull ItemStack pickupBlock(@NotNull LevelAccessor level, @NotNull BlockPos pos, @NotNull BlockState state) {
+                    return super.pickupBlock(level, pos, state);
+                }
+                */
+                public @NotNull ItemStack pickupBlock(@NotNull LevelAccessor world, @NotNull BlockPos target, @NotNull BlockState blockState) {
+                    return super.pickupBlock(world, target, blockState);
+                }
+
+                public ItemStack unrelated(LevelAccessor level, BlockPos pos, BlockState state) {
+                    return super.pickupBlock(level, pos, state);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = projectDir.resolve("src/main/java/com/example/PickupOverrideSurface.java").readText()
+        assertTrue(
+            migrated.contains("public @NotNull ItemStack pickupBlock(@Nullable Player player, @NotNull LevelAccessor world, @NotNull BlockPos target, @NotNull BlockState blockState)"),
+            migrated
+        )
+        assertTrue(migrated.contains("return super.pickupBlock(player, world, target, blockState);"), migrated)
+        assertTrue(migrated.contains("public ItemStack unrelated(LevelAccessor level, BlockPos pos, BlockState state) {\n        return super.pickupBlock(level, pos, state);"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "super.pickupBlock(level, pos, state)";"""), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.entity.player.Player;"), migrated)
+        assertTrue(migrated.contains("import javax.annotation.Nullable;"), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("return super.pickupBlock(level, pos, state);"), migrated)
+        assertFalse(commentBlock.contains("super.pickupBlock(player"), migrated)
+    }
+
+    @Test
+    fun `fluid interface player parameter migration uses method local executable evidence`() {
+        val projectDir = createFile("FluidInterfaceSurface.java", """
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.LevelAccessor;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.material.Fluid;
+
+            public class FluidInterfaceSurface {
+                private static final String DOC = "pickupBlock(LevelAccessor level, BlockPos pos, BlockState state)";
+
+                /*
+                public ItemStack pickupBlock(LevelAccessor level, BlockPos pos, BlockState state) {
+                    return super.pickupBlock(level, pos, state);
+                }
+                */
+                public ItemStack pickupBlock(LevelAccessor world, BlockPos target, BlockState blockState) {
+                    return super.pickupBlock(world, target, blockState);
+                }
+
+                public boolean canPlaceLiquid(BlockGetter getter, BlockPos target, BlockState blockState, Fluid fluid) {
+                    return true;
+                }
+
+                public ItemStack unrelated(LevelAccessor level, BlockPos pos, BlockState state) {
+                    return super.pickupBlock(level, pos, state);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = projectDir.resolve("src/main/java/com/example/FluidInterfaceSurface.java").readText()
+        assertTrue(migrated.contains("public ItemStack pickupBlock(Player player, LevelAccessor world, BlockPos target, BlockState blockState)"), migrated)
+        assertTrue(migrated.contains("return super.pickupBlock(player, world, target, blockState);"), migrated)
+        assertTrue(migrated.contains("public boolean canPlaceLiquid(Player player, BlockGetter getter, BlockPos target, BlockState blockState, Fluid fluid)"), migrated)
+        assertTrue(migrated.contains("public ItemStack unrelated(LevelAccessor level, BlockPos pos, BlockState state) {\n        return super.pickupBlock(level, pos, state);"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "pickupBlock(LevelAccessor level, BlockPos pos, BlockState state)";"""), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.entity.player.Player;"), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("return super.pickupBlock(level, pos, state);"), migrated)
+        assertFalse(commentBlock.contains("super.pickupBlock(player"), migrated)
+    }
+
+    @Test
     fun `migrates block entity fluid capability override to RegisterCapabilitiesEvent`() {
         val projectDir = createFile("ExampleMod.java", """
             package com.example;

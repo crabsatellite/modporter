@@ -15943,7 +15943,6 @@ ${indent}}
         var needsFastColor = false
         var needsPlayerSkin = false
         var needsItemCost = false
-        var needsNullable = false
         var needsDataComponents = false
         var needsPotionContents = false
         var needsItemTooltipContext = false
@@ -16654,14 +16653,9 @@ ${indent}}
         result = migrateThisStackUseDurationCalls(result)
         result = replaceExecutableRegex(result, Regex("""\.restore\(\s*true\s*,\s*false\s*\)""")) { ".restore()" }
 
-        result = Regex(
-            """public\s+@NotNull\s+ItemStack\s+pickupBlock\(@NotNull\s+LevelAccessor\s+level,\s*@NotNull\s+BlockPos\s+pos,\s*@NotNull\s+BlockState\s+state\)"""
-        ).replace(result) {
-            needsNullable = true
-            "public @NotNull ItemStack pickupBlock(@Nullable Player player, @NotNull LevelAccessor level, @NotNull BlockPos pos, @NotNull BlockState state)"
-        }
-        result = result.replace("super.pickupBlock(level, pos, state)", "super.pickupBlock(player, level, pos, state)")
-        if (needsNullable) {
+        val migratedPickupOverride = migrateNotNullPickupBlockOverridePlayerParameterSource(result)
+        result = migratedPickupOverride.first
+        if (migratedPickupOverride.second) {
             if (!result.contains("import org.jetbrains.annotations.Nullable;")) {
                 result = addImportIfMissing(result, "javax.annotation.Nullable")
             }
@@ -16797,6 +16791,48 @@ ${indent}}
             }
         }
         return applyStringEdits(source, edits)
+    }
+
+    private fun migrateNotNullPickupBlockOverridePlayerParameterSource(source: String): Pair<String, Boolean> {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("pickupBlock(") || !executableCode.contains("@NotNull")) return source to false
+        val signaturePattern = Regex(
+            """public\s+@NotNull\s+ItemStack\s+pickupBlock\(\s*@NotNull\s+LevelAccessor\s+([A-Za-z_$][\w$]*)\s*,\s*@NotNull\s+BlockPos\s+([A-Za-z_$][\w$]*)\s*,\s*@NotNull\s+BlockState\s+([A-Za-z_$][\w$]*)\s*\)"""
+        )
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        for (match in signaturePattern.findAll(executableCode)) {
+            val openBrace = executableCode.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) continue
+            val method = JavaMethodRange("pickupBlock", source.substring(match.range.first..openBrace), match.range.first..closeBrace)
+            if (source.substring(match.range) != match.value) continue
+            val level = match.groupValues[1]
+            val pos = match.groupValues[2]
+            val state = match.groupValues[3]
+            edits += match.range to "public @NotNull ItemStack pickupBlock(@Nullable Player player, @NotNull LevelAccessor $level, @NotNull BlockPos $pos, @NotNull BlockState $state)"
+            collectSuperPickupBlockEdits(source, executableCode, method, level, pos, state, edits)
+        }
+        return applyStringEdits(source, edits) to edits.isNotEmpty()
+    }
+
+    private fun collectSuperPickupBlockEdits(
+        source: String,
+        executableCode: String,
+        method: JavaMethodRange,
+        level: String,
+        pos: String,
+        state: String,
+        edits: MutableList<Pair<IntRange, String>>
+    ) {
+        val methodText = executableCode.substring(method.range)
+        val superPattern = Regex(
+            """super\.pickupBlock\(\s*${Regex.escape(level)}\s*,\s*${Regex.escape(pos)}\s*,\s*${Regex.escape(state)}\s*\)"""
+        )
+        superPattern.findAll(methodText).forEach { superMatch ->
+            val absoluteRange = (method.range.first + superMatch.range.first)..(method.range.first + superMatch.range.last)
+            if (source.substring(absoluteRange) != superMatch.value) return@forEach
+            edits += absoluteRange to "super.pickupBlock(player, $level, $pos, $state)"
+        }
     }
 
     private fun migrateLegacyAddLayersSkinNameLoopsSource(source: String): String {
@@ -31847,24 +31883,10 @@ ${indent}}
         result = migrateAabbBlockPosPairConstructors(result)
         result = migrateAabbVec3EncapsulatingFullBlocks(result)
         if (result.contains("BucketPickup") || result.contains("LiquidBlockContainer") || result.contains("pickupBlock(") || result.contains("canPlaceLiquid(")) {
-            val beforeLiquidInterfaces = result
-            result = Regex(
-                """pickupBlock\s*\(\s*LevelAccessor\s+([A-Za-z_$][\w$]*)\s*,\s*BlockPos\s+([A-Za-z_$][\w$]*)\s*,\s*BlockState\s+([A-Za-z_$][\w$]*)\s*\)"""
-            ).replace(result) { match ->
+            val migratedFluidInterfaces = migrateLegacyFluidInterfacePlayerParametersSource(result)
+            result = migratedFluidInterfaces.first
+            if (migratedFluidInterfaces.second) {
                 needsPlayer = true
-                "pickupBlock(Player player, LevelAccessor ${match.groupValues[1]}, BlockPos ${match.groupValues[2]}, BlockState ${match.groupValues[3]})"
-            }
-            result = Regex(
-                """canPlaceLiquid\s*\(\s*BlockGetter\s+([A-Za-z_$][\w$]*)\s*,\s*BlockPos\s+([A-Za-z_$][\w$]*)\s*,\s*BlockState\s+([A-Za-z_$][\w$]*)\s*,\s*Fluid\s+([A-Za-z_$][\w$]*)\s*\)"""
-            ).replace(result) { match ->
-                needsPlayer = true
-                "canPlaceLiquid(Player player, BlockGetter ${match.groupValues[1]}, BlockPos ${match.groupValues[2]}, BlockState ${match.groupValues[3]}, Fluid ${match.groupValues[4]})"
-            }
-            if (result != beforeLiquidInterfaces) {
-                result = Regex("""super\.pickupBlock\(\s*([^,\r\n]+)\s*,\s*([^,\r\n]+)\s*,\s*([^)]+)\)""")
-                    .replace(result) { match ->
-                        "super.pickupBlock(player, ${match.groupValues[1].trim()}, ${match.groupValues[2].trim()}, ${match.groupValues[3].trim()})"
-                    }
             }
             result = migrateLegacyBucketPickupCallSites(result)
         }
@@ -31934,6 +31956,36 @@ ${indent}}
             result = withoutBuiltInRegistriesImport
         }
         return result
+    }
+
+    private fun migrateLegacyFluidInterfacePlayerParametersSource(source: String): Pair<String, Boolean> {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("pickupBlock(") && !executableCode.contains("canPlaceLiquid(")) return source to false
+        val id = """[A-Za-z_$][\w$]*"""
+        val pickupSignature = Regex("""pickupBlock\s*\(\s*LevelAccessor\s+($id)\s*,\s*BlockPos\s+($id)\s*,\s*BlockState\s+($id)\s*\)""")
+        val canPlaceLiquidSignature = Regex("""canPlaceLiquid\s*\(\s*BlockGetter\s+($id)\s*,\s*BlockPos\s+($id)\s*,\s*BlockState\s+($id)\s*,\s*Fluid\s+($id)\s*\)""")
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        for (method in javaMethodRangesIncludingDefault(executableCode)) {
+            val pickupMatch = pickupSignature.find(method.header)
+            if (method.name == "pickupBlock" && pickupMatch != null) {
+                val absoluteRange = (method.range.first + pickupMatch.range.first)..(method.range.first + pickupMatch.range.last)
+                if (source.substring(absoluteRange) == pickupMatch.value) {
+                    val level = pickupMatch.groupValues[1]
+                    val pos = pickupMatch.groupValues[2]
+                    val state = pickupMatch.groupValues[3]
+                    edits += absoluteRange to "pickupBlock(Player player, LevelAccessor $level, BlockPos $pos, BlockState $state)"
+                    collectSuperPickupBlockEdits(source, executableCode, method, level, pos, state, edits)
+                }
+            }
+            val canPlaceMatch = canPlaceLiquidSignature.find(method.header)
+            if (method.name == "canPlaceLiquid" && canPlaceMatch != null) {
+                val absoluteRange = (method.range.first + canPlaceMatch.range.first)..(method.range.first + canPlaceMatch.range.last)
+                if (source.substring(absoluteRange) == canPlaceMatch.value) {
+                    edits += absoluteRange to "canPlaceLiquid(Player player, BlockGetter ${canPlaceMatch.groupValues[1]}, BlockPos ${canPlaceMatch.groupValues[2]}, BlockState ${canPlaceMatch.groupValues[3]}, Fluid ${canPlaceMatch.groupValues[4]})"
+                }
+            }
+        }
+        return applyStringEdits(source, edits) to edits.isNotEmpty()
     }
 
     private fun migrateLegacyBucketPickupCallSites(source: String): String {
