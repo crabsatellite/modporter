@@ -2821,6 +2821,71 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `data result getOrThrow migration uses executable call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyDataResultGetOrThrowCalls")
+        assertTrue(start >= 0, "migrateLegacyDataResultGetOrThrowCalls is missing")
+        val end = source.indexOf("private fun migrateKnownVanillaCodecCodecCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getOrThrow prefilter" to """source.contains(".getOrThrow(")""",
+            "raw getOrThrow rewrite" to """rewriteJavaCall(source, "getOrThrow")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".getOrThrow(")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "getOrThrow")""") &&
+                body.contains("args.size != 2") &&
+                body.contains("""args[0].trim() != "true""""),
+            "DataResult getOrThrow migration must inspect executable calls and preserve argument-shape checks"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "DataResult getOrThrow migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `map codec serialization migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateMapCodecSerializationCalls")
+        assertTrue(start >= 0, "migrateMapCodecSerializationCalls is missing")
+        val end = source.indexOf("private fun migrateLegacyDataResultGetOrThrowCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw CODEC prefilter" to """source.contains(".CODEC.")""",
+            "raw CODEC replacement" to ".replace(result)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".CODEC.")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("""\.CODEC)\.(parse|encodeStart)"""),
+            "MapCodec serialization migration must rewrite only executable CODEC parse/encodeStart calls"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "MapCodec serialization migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `resource mod id detection does not infer constant owners from file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot

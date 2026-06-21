@@ -26711,6 +26711,8 @@ class StructuralRefactorExtraTest {
 
             public class MapCodecOptionalSurface {
                 private static final Logger LOGGER = new Logger();
+                // Properties.CODEC.parse(new Dynamic<Tag>(NbtOps.INSTANCE, tag.get("Properties"))).getOrThrow(true, LOGGER::error);
+                private static final String DOC = "Properties.CODEC.encodeStart(NbtOps.INSTANCE, parsed).getOrThrow(true, LOGGER::error)";
 
                 public void migrate(CompoundTag tag, Optional<BlockState> state) {
                     Properties parsed = Properties.CODEC.parse(new Dynamic<Tag>(NbtOps.INSTANCE, tag.get("Properties"))).getOrThrow(true, LOGGER::error);
@@ -26739,8 +26741,11 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("Properties.CODEC.codec().encodeStart(NbtOps.INSTANCE, parsed).promotePartial(LOGGER::error).getOrThrow(IllegalStateException::new)"), migrated)
         assertTrue(migrated.contains("if (state.get().isAir())"), migrated)
         assertTrue(migrated.contains("BlockState next = state.get();"), migrated)
+        assertTrue(migrated.contains("""// Properties.CODEC.parse(new Dynamic<Tag>(NbtOps.INSTANCE, tag.get("Properties"))).getOrThrow(true, LOGGER::error);"""), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "Properties.CODEC.encodeStart(NbtOps.INSTANCE, parsed).getOrThrow(true, LOGGER::error)";"""), migrated)
         assertFalse(migrated.contains("state.getValue()"), migrated)
-        assertFalse(migrated.contains("getOrThrow(true"), migrated)
+        assertFalse(migrated.contains("""Properties parsed = Properties.CODEC.parse(new Dynamic<Tag>(NbtOps.INSTANCE, tag.get("Properties"))).getOrThrow(true, LOGGER::error);"""), migrated)
+        assertFalse(migrated.contains("Properties.CODEC.encodeStart(NbtOps.INSTANCE, parsed).getOrThrow(true, LOGGER::error);"), migrated)
     }
 
     @Test

@@ -26036,19 +26036,23 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         source: String,
         mapCodecConstantOwners: Set<String>
     ): String {
-        if (mapCodecConstantOwners.isEmpty() || !source.contains(".CODEC.")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (mapCodecConstantOwners.isEmpty() || !executableCode.contains(".CODEC.")) return source
         var result = source
         for (owner in mapCodecConstantOwners) {
-            result = Regex("""\b((?:[A-Za-z_$][\w$]*\.)*${Regex.escape(owner)}\.CODEC)\.(parse|encodeStart)\s*\(""")
-                .replace(result) { match -> "${match.groupValues[1]}.codec().${match.groupValues[2]}(" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b((?:[A-Za-z_$][\w$]*\.)*${Regex.escape(owner)}\.CODEC)\.(parse|encodeStart)\s*\(""")
+            ) { match -> "${match.groupValues[1]}.codec().${match.groupValues[2]}(" }
         }
         return result
     }
 
     private fun migrateLegacyDataResultGetOrThrowCalls(source: String): String {
-        if (!source.contains(".getOrThrow(")) return source
-        return rewriteJavaCall(source, "getOrThrow") { receiver, args ->
-            if (args.size != 2 || args[0].trim() != "true") return@rewriteJavaCall null
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".getOrThrow(")) return source
+        return rewriteExecutableJavaCall(source, "getOrThrow") { receiver, args ->
+            if (args.size != 2 || args[0].trim() != "true") return@rewriteExecutableJavaCall null
             val onError = args[1].trim()
             "$receiver.promotePartial($onError).getOrThrow(IllegalStateException::new)"
         }
