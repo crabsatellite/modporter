@@ -31,7 +31,12 @@ class ReportGeneratorTest {
         return PipelineResult(
             passResults = listOf(
                 PassResult("Text Replacement", listOf(highChange)),
-                PassResult("Structural Refactor", listOf(medChange, lowChange), errors = listOf("Parse error in Broken.java"))
+                PassResult(
+                    "Structural Refactor",
+                    listOf(medChange, lowChange),
+                    errors = listOf("Parse error in Broken.java"),
+                    skipped = listOf("Could not parse src/Broken.java")
+                )
             ),
             dryRun = dryRun
         )
@@ -48,6 +53,7 @@ class ReportGeneratorTest {
         assertTrue(content.contains("Migration Report"))
         assertTrue(content.contains("**Mode**: APPLIED"))
         assertTrue(content.contains("**Total changes**: 3"))
+        assertTrue(content.contains("**Total skipped**: 1"))
         assertTrue(content.contains("**Total errors**: 1"))
     }
 
@@ -60,7 +66,8 @@ class ReportGeneratorTest {
         assertTrue(content.contains("## Summary by Pass"))
         assertTrue(content.contains("Text Replacement"))
         assertTrue(content.contains("Structural Refactor"))
-        assertTrue(content.contains("| Pass | Changes |"))
+        assertTrue(content.contains("| Pass | Changes | High | Medium | Low | Skipped | Errors |"))
+        assertTrue(content.contains("| Structural Refactor | 2 | 0 | 1 | 1 | 1 | 1 |"))
     }
 
     @Test
@@ -106,14 +113,27 @@ class ReportGeneratorTest {
     }
 
     @Test
+    fun `report contains skipped source shapes section`() {
+        val reportPath = tempDir.resolve("report.md")
+        ReportGenerator().generate(sampleResult(), reportPath)
+        val content = reportPath.readText()
+
+        assertTrue(content.contains("## Skipped Source Shapes"))
+        assertTrue(content.contains("Could not parse src/Broken.java"))
+        assertTrue(content.contains("incomplete migrations"))
+    }
+
+    @Test
     fun `report contains blocking migration work section`() {
         val reportPath = tempDir.resolve("report.md")
         ReportGenerator().generate(sampleResult(), reportPath)
         val content = reportPath.readText()
 
         assertTrue(content.contains("## Blocking Migration Work"))
-        assertTrue(content.contains("DataComponents"))
-        assertTrue(content.contains("build.gradle"))
+        assertTrue(content.contains("LOW confidence changes"))
+        assertTrue(content.contains("Skipped source shapes"))
+        assertTrue(content.contains("Reported errors"))
+        assertTrue(content.contains("Final gates"))
         assertTrue(!content.contains("TODO"))
     }
 
@@ -141,7 +161,9 @@ class ReportGeneratorTest {
         val content = reportPath.readText()
 
         // Errors section header may still appear but should be empty
+        assertTrue(content.contains("**Total skipped**: 0"))
         assertTrue(content.contains("**Total errors**: 0"))
+        assertTrue(!content.contains("## Blocking Migration Work"))
     }
 
     @Test

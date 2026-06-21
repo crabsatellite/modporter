@@ -11,27 +11,29 @@ import kotlin.io.path.writeText
 class ReportGenerator {
 
     fun generate(result: PipelineResult, outputPath: Path) {
+        val lowChangeCount = result.passResults.sumOf { it.lowConfidence }
         val report = buildString {
             appendLine("# ${result.pipelineName} Migration Report")
             appendLine()
             appendLine("**Mode**: ${if (result.dryRun) "DRY RUN (no changes applied)" else "APPLIED"}")
             appendLine("**Total changes**: ${result.totalChanges}")
+            appendLine("**Total skipped**: ${result.totalSkipped}")
             appendLine("**Total errors**: ${result.totalErrors}")
             appendLine()
 
-            // Summary table
             appendLine("## Summary by Pass")
             appendLine()
-            appendLine("| Pass | Changes | High | Medium | Low | Errors |")
-            appendLine("|------|---------|------|--------|-----|--------|")
+            appendLine("| Pass | Changes | High | Medium | Low | Skipped | Errors |")
+            appendLine("|------|---------|------|--------|-----|---------|--------|")
             for (passResult in result.passResults) {
-                appendLine("| ${passResult.passName} | ${passResult.changeCount} | " +
-                    "${passResult.highConfidence} | ${passResult.mediumConfidence} | " +
-                    "${passResult.lowConfidence} | ${passResult.errors.size} |")
+                appendLine(
+                    "| ${passResult.passName} | ${passResult.changeCount} | " +
+                        "${passResult.highConfidence} | ${passResult.mediumConfidence} | " +
+                        "${passResult.lowConfidence} | ${passResult.skipped.size} | ${passResult.errors.size} |"
+                )
             }
             appendLine()
 
-            // Detailed changes by confidence
             appendLine("## Changes Requiring Automated Validation")
             appendLine()
             appendLine("### MEDIUM Confidence (expected to validate under strict gates)")
@@ -41,7 +43,7 @@ class ReportGenerator {
                 if (mediumChanges.isNotEmpty()) {
                     appendLine("#### ${passResult.passName}")
                     for (change in mediumChanges) {
-                        appendLine("- **${change.file}:${change.line}** â€?${change.description}")
+                        appendLine("- **${change.file}:${change.line}** - ${change.description}")
                         appendLine("  - Before: `${change.before}`")
                         appendLine("  - After: `${change.after}`")
                     }
@@ -56,7 +58,7 @@ class ReportGenerator {
                 if (lowChanges.isNotEmpty()) {
                     appendLine("#### ${passResult.passName}")
                     for (change in lowChanges) {
-                        appendLine("- **${change.file}:${change.line}** â€?${change.description}")
+                        appendLine("- **${change.file}:${change.line}** - ${change.description}")
                         appendLine("  - Before: `${change.before}`")
                         appendLine("  - After: `${change.after}`")
                     }
@@ -64,7 +66,25 @@ class ReportGenerator {
                 }
             }
 
-            // Errors
+            if (result.totalSkipped > 0) {
+                appendLine("## Skipped Source Shapes")
+                appendLine()
+                appendLine(
+                    "Skipped source shapes are incomplete migrations and must be closed by parser support " +
+                        "or explicit automated rules before a hands-off port is accepted."
+                )
+                appendLine()
+                for (passResult in result.passResults) {
+                    if (passResult.skipped.isNotEmpty()) {
+                        appendLine("### ${passResult.passName}")
+                        for (skipped in passResult.skipped) {
+                            appendLine("- $skipped")
+                        }
+                        appendLine()
+                    }
+                }
+            }
+
             if (result.totalErrors > 0) {
                 appendLine("## Errors")
                 appendLine()
@@ -79,18 +99,25 @@ class ReportGenerator {
                 }
             }
 
-            // Blocking migration areas still require concrete automated rules before a hands-off port is valid.
-            appendLine("## Blocking Migration Work")
-            appendLine()
-            appendLine("The following areas are not accepted as completed until automated migrations and tests cover them:")
-            appendLine()
-            appendLine("- **NBT/DataComponents**: Convert all `stack.getTag()`/`setTag()` to typed `DataComponentType` access")
-            appendLine("- **Enchantment system**: Convert code-defined enchantments to data-driven JSON in `data/<modid>/enchantment/`")
-            appendLine("- **Recipe system**: Update `Recipe<Container>` to `Recipe<RecipeInput>` with new input types")
-            appendLine("- **build.gradle**: Update to NeoGradle plugin and Java 21 toolchain")
-            appendLine("- **Rendering pipeline**: Verify vertex rendering changes, including color format and buffer builder APIs")
-            appendLine("- **Compilation**: `./gradlew build` must pass without suppressed source logic")
-            appendLine("- **Runtime**: Client, server, GameTest, and world-load runs must pass with clean logs")
+            if (result.totalErrors > 0 || result.totalSkipped > 0 || lowChangeCount > 0) {
+                appendLine("## Blocking Migration Work")
+                appendLine()
+                appendLine("Hands-off success is blocked by the concrete signals in this report:")
+                appendLine()
+                if (lowChangeCount > 0) {
+                    appendLine("- **LOW confidence changes**: add automated coverage or replace with deterministic rules.")
+                }
+                if (result.totalSkipped > 0) {
+                    appendLine("- **Skipped source shapes**: add parser support or explicit source-shape migrations.")
+                }
+                if (result.totalErrors > 0) {
+                    appendLine("- **Reported errors**: fix the failed migration rules or source-derived hard gates.")
+                }
+                appendLine(
+                    "- **Final gates**: compile, client, server, GameTest, world-load, " +
+                        "creative-tab browsing, and clean runtime logs must pass."
+                )
+            }
         }
 
         outputPath.writeText(report)
