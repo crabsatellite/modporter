@@ -3755,6 +3755,43 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy skull owner verify migration uses executable method range`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacySkullOwnerVerifyComponentsSource")
+        assertTrue(start >= 0, "migrateLegacySkullOwnerVerifyComponentsSource is missing")
+        val end = source.indexOf("private fun migrateLegacyItemStackTagWrites", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw verifyTagAfterLoad prefilter" to """source.contains("verifyTagAfterLoad")""",
+            "raw SkullOwner prefilter" to """source.contains("SkullOwner")""",
+            "raw method extraction" to """javaDeclaredMethodText(source, "verifyTagAfterLoad")""",
+            "raw method evidence" to """methodText.contains("SkullOwner")""",
+            "raw method replacement" to "source.replace(methodText"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val code = maskJavaComments(source)") &&
+                body.contains("val method = javaMethodRanges(executableCode).singleOrNull") &&
+                body.contains("val methodText = source.substring(method.range)") &&
+                body.contains("val methodCode = maskJavaComments(methodText)") &&
+                body.contains("source.replaceRange(method.range, replacement)"),
+            "Legacy SkullOwner verify migration must locate verifyTagAfterLoad from executable Java method ranges while preserving executable NBT string-key evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy SkullOwner verify migration must not use comments, strings, or raw method text as method evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `painting variant accessor migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

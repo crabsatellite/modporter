@@ -22379,9 +22379,16 @@ ${indent}}"""
     }
 
     private fun migrateLegacySkullOwnerVerifyComponentsSource(source: String): String {
-        if (!source.contains("verifyTagAfterLoad") || !source.contains("SkullOwner")) return source
-        val methodText = javaDeclaredMethodText(source, "verifyTagAfterLoad") ?: return source
-        if (!methodText.contains("CompoundTag") || !methodText.contains("SkullOwner")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val code = maskJavaComments(source)
+        if (!executableCode.contains("verifyTagAfterLoad") || !code.contains("SkullOwner")) return source
+        val method = javaMethodRanges(executableCode).singleOrNull { method ->
+            method.name == "verifyTagAfterLoad" &&
+                Regex("""\bvoid\s+verifyTagAfterLoad\s*\(""").containsMatchIn(method.header)
+        } ?: return source
+        val methodText = source.substring(method.range)
+        val methodCode = maskJavaComments(methodText)
+        if (!methodCode.contains("CompoundTag") || !methodCode.contains("SkullOwner")) return source
 
         val indent = methodText.lineSequence()
             .firstOrNull { it.contains("verifyTagAfterLoad") }
@@ -22415,7 +22422,7 @@ ${bodyIndent}}
 ${indent}}
         """.trimIndent()
 
-        var result = source.replace(methodText, replacement)
+        var result = source.replaceRange(method.range, replacement)
         result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
         result = addImportIfMissing(result, "net.minecraft.world.item.ItemStack")
         result = addImportIfMissing(result, "net.minecraft.world.item.component.CustomData")

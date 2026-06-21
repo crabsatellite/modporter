@@ -25833,6 +25833,45 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy skull owner verify migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DocumentedSkullItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.Item;
+
+            public class DocumentedSkullItem extends Item {
+                private static final String DOC = "verifyTagAfterLoad SkullOwner";
+
+                /*
+                public void verifyTagAfterLoad(CompoundTag tag) {
+                    super.verifyTagAfterLoad(tag);
+                    if (tag.contains("SkullOwner")) {
+                        tag.getString("SkullOwner");
+                    }
+                }
+                */
+
+                public DocumentedSkullItem(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val item = srcDir.resolve("DocumentedSkullItem.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(item.contains("verifyComponentsAfterLoad(ItemStack stack)"), item)
+        assertFalse(item.contains("DataComponents.PROFILE"), item)
+        assertTrue(item.contains("private static final String DOC = \"verifyTagAfterLoad SkullOwner\";"), item)
+        assertTrue(item.contains("public void verifyTagAfterLoad(CompoundTag tag) {"), item)
+        assertTrue(item.contains("super.verifyTagAfterLoad(tag);"), item)
+    }
+
+    @Test
     fun `migrates legacy capability painting biome holder and itemstack APIs by source shape`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
