@@ -1896,6 +1896,34 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `Java call helper delegates to executable scanner`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun rewriteJavaCall(")
+        assertTrue(start >= 0, "rewriteJavaCall is missing")
+        val end = source.indexOf("private fun rewriteExecutableJavaCall", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+
+        val offenders = listOf(
+            "missing executable delegate" to !body.contains("rewriteExecutableJavaCall(source, methodName, transform)"),
+            "raw call token scan" to body.contains("result.indexOf(token, cursor)"),
+            "raw parenthesis matcher" to body.contains("findMatchingParen(result, openParen)"),
+            "raw receiver scanner" to body.contains("findExpressionReceiverStart(result, tokenIndex)")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Java call rewrites must reuse the executable-code scanner instead of raw source traversal: $offenders"
+        )
+    }
+
+    @Test
     fun `offset Java call helper delegates to executable scanner`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
