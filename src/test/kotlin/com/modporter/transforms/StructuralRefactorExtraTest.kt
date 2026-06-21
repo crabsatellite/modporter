@@ -3100,6 +3100,14 @@ class StructuralRefactorExtraTest {
                 }
 
                 public static void handle(TeleportPacket packet, IPayloadContext contextSupplier) {
+                    String contextDoc = "NetworkEvent.Context context = contextSupplier.get(); context.getSender(); context.setPacketHandled(true);";
+                    String contextBlock = ${"\"\"\""}
+                        NetworkEvent.Context context = contextSupplier.get();
+                        context.getSender();
+                        context.setPacketHandled(true);
+                        ${"\"\"\""};
+                    // context.getSender();
+                    // context.setPacketHandled(true);
                     NetworkEvent.Context context = contextSupplier.get();
                     context.enqueueWork(() -> {
                         ServerPlayer serverPlayer = context.getSender();
@@ -3145,8 +3153,12 @@ class StructuralRefactorExtraTest {
         val packet = networkDir.resolve("TeleportPacket.java").readText()
 
         assertTrue(packet.contains("if (context.player() instanceof ServerPlayer serverPlayer) {"))
-        assertTrue(!packet.contains("getSender()"))
-        assertTrue(!packet.contains("setPacketHandled"))
+        assertFalse(packet.contains("ServerPlayer serverPlayer = context.getSender();"), packet)
+        assertFalse(packet.contains("context.setPacketHandled(true);\n    }"), packet)
+        assertTrue(packet.contains("String contextDoc = \"NetworkEvent.Context context = contextSupplier.get(); context.getSender(); context.setPacketHandled(true);\";"), packet)
+        assertTrue(packet.contains("NetworkEvent.Context context = contextSupplier.get();\n            context.getSender();\n            context.setPacketHandled(true);"), packet)
+        assertTrue(packet.contains("// context.getSender();"), packet)
+        assertTrue(packet.contains("// context.setPacketHandled(true);"), packet)
     }
 
     @Test

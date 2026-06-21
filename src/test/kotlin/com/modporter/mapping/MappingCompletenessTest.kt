@@ -3365,6 +3365,44 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy packet payload context migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyPayloadHandlerContext")
+        assertTrue(start >= 0, "migrateLegacyPayloadHandlerContext is missing")
+        val end = source.indexOf("private fun migrateKnownNestedSimpleChannelNetworking", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val executableReplacementCount = Regex("""replaceExecutableRegex\(""").findAll(body).count()
+        val offenders = listOf(
+            "raw handler replacement" to body.contains("handlerContextPattern.replace(content)"),
+            "raw context var replacement" to body.contains("result.replace(\"${'$'}{contextVar}.getSender()\""),
+            "raw result regex replacement" to body.contains(".replace(result"),
+            "raw cleanup scan" to body.contains(".find(content)")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            executableReplacementCount >= 5 &&
+                body.contains("handlerContextPattern.find(executableCode, cursor)") &&
+                body.contains("val contextDeclaration = Regex(") &&
+                body.contains(".find(executableCode, openBrace + 1)") &&
+                body.contains("findMatchingBrace(result, openBrace)") &&
+                body.contains("maskJavaCommentsAndLiterals(content)") &&
+                body.contains("removeImportIfPresent(result, \"java.util.function.Supplier\")"),
+            "Legacy packet payload context migration must locate and rewrite context calls in executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy packet payload context migration must not use comments or strings as source evidence or replacement targets: $offenders"
+        )
+    }
+
+    @Test
     fun `command source stack level migration uses executable scoped evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

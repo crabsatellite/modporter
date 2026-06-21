@@ -1542,34 +1542,70 @@ ${indent}}
         info: PacketClassInfo,
         changes: MutableList<Change>
     ): String {
+        val id = """[A-Za-z_$][\w$]*"""
         val contextVars = mutableSetOf<String>()
         val handlerContextPattern = Regex(
-            """(public\s+static\s+void\s+handle\s*\(\s*${Regex.escape(info.className)}\s+\w+\s*,\s*)(?:IPayloadContext|Supplier\s*<\s*NetworkEvent\.Context\s*>)\s+(\w+)(\s*\)\s*\{\s*)\r?\n[ \t]*NetworkEvent\.Context\s+(\w+)\s*=\s*\2\.get\(\);\s*\r?\n"""
+            """public\s+static\s+void\s+handle\s*\(\s*${Regex.escape(info.className)}\s+$id\s*,\s*(?:IPayloadContext|Supplier\s*<\s*NetworkEvent\.Context\s*>)\s+($id)\s*\)\s*\{"""
         )
 
-        val migrated = handlerContextPattern.replace(content) { match ->
-            val contextVar = match.groupValues[4]
-            contextVars.add(contextVar)
-            "${match.groupValues[1]}IPayloadContext $contextVar${match.groupValues[3]}\n"
-        }
-        if (migrated == content) return content
+        var result = content
+        var firstChangeLine: Int? = null
+        var cursor = 0
+        while (true) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val methodMatch = handlerContextPattern.find(executableCode, cursor) ?: break
+            val supplierName = methodMatch.groupValues[1]
+            val openBrace = result.indexOf('{', methodMatch.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = methodMatch.range.last + 1
+                continue
+            }
+            val contextDeclaration = Regex(
+                """(?m)^[ \t]*NetworkEvent\.Context\s+($id)\s*=\s*${Regex.escape(supplierName)}\.get\(\);\s*\r?\n"""
+            )
+                .find(executableCode, openBrace + 1)
+                ?.takeIf { it.range.last < closeBrace }
+            if (contextDeclaration == null) {
+                cursor = closeBrace + 1
+                continue
+            }
 
-        var result = migrated
+            val contextVar = contextDeclaration.groupValues[1]
+            contextVars.add(contextVar)
+            firstChangeLine = firstChangeLine ?: lineNumberAt(result, methodMatch.range.first)
+
+            val originalHeader = result.substring(methodMatch.range)
+            val migratedHeader = Regex(
+                """(?:IPayloadContext|Supplier\s*<\s*NetworkEvent\.Context\s*>)\s+${Regex.escape(supplierName)}(?=\s*\))"""
+            ).replace(originalHeader, "IPayloadContext $contextVar")
+            result = result.substring(0, contextDeclaration.range.first) +
+                result.substring(contextDeclaration.range.last + 1)
+            result = result.substring(0, methodMatch.range.first) +
+                migratedHeader +
+                result.substring(methodMatch.range.last + 1)
+            cursor = methodMatch.range.first + migratedHeader.length
+        }
+        if (result == content) return content
+
         contextVars.forEach { contextVar ->
-            result = result.replace(
+            result = replaceExecutableRegex(
+                result,
                 Regex("""(?m)^([ \t]*)ServerPlayer\s+(\w+)\s*=\s*${Regex.escape(contextVar)}\.getSender\(\);\s*\r?\n\1if\s*\(\s*\2\s*!=\s*null\s*\)\s*\{"""),
-                "$1if ($contextVar.player() instanceof ServerPlayer $2) {"
-            )
-            result = result.replace("${contextVar}.getSender()", "${contextVar}.player()")
-            result = result.replace(
-                Regex("""(?m)^[ \t]*${Regex.escape(contextVar)}\.setPacketHandled\(true\);\s*\r?\n"""),
-                ""
-            )
+            ) { match -> "${match.groupValues[1]}if ($contextVar.player() instanceof ServerPlayer ${match.groupValues[2]}) {" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b${Regex.escape(contextVar)}\.getSender\(\)""")
+            ) { "$contextVar.player()" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(?m)^[ \t]*${Regex.escape(contextVar)}\.setPacketHandled\(true\);\s*\r?\n""")
+            ) { "" }
         }
 
         changes.add(Change(
             file = info.file,
-            line = handlerContextPattern.find(content)?.let { lineNumberAt(content, it.range.first) } ?: 1,
+            line = firstChangeLine ?: 1,
             description = "Migrate ${info.className} packet handler from NetworkEvent.Context to IPayloadContext",
             before = "NetworkEvent.Context context = contextSupplier.get(); ... context.setPacketHandled(true);",
             after = "handle(${info.className} packet, IPayloadContext context) { context.enqueueWork(...); }",
@@ -1587,15 +1623,20 @@ ${indent}}
         var result = content
         val original = result
         val firstMatch = Regex("""\b\w+\.get\(\)\.(?:getDirection|getSender|setPacketHandled)\b""")
-            .find(content)
+            .find(maskJavaCommentsAndLiterals(content))
 
-        result = Regex(
-            """(?m)^[ \t]*if\s*\(\s*!\s*\w+\.get\(\)\.getDirection\(\)\.getReceptionSide\(\)\.is(?:Server|Client)\(\)\s*\)\s*return;\s*\r?\n"""
-        ).replace(result, "")
-        result = Regex("""\b(\w+)\.get\(\)\.getSender\(\)""")
-            .replace(result) { match -> "${match.groupValues[1]}.player()" }
-        result = Regex("""(?m)^[ \t]*\w+\.get\(\)\.setPacketHandled\(true\);\s*\r?\n""")
-            .replace(result, "")
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(?m)^[ \t]*if\s*\(\s*!\s*\w+\.get\(\)\.getDirection\(\)\.getReceptionSide\(\)\.is(?:Server|Client)\(\)\s*\)\s*return;\s*\r?\n""")
+        ) { "" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\b(\w+)\.get\(\)\.getSender\(\)""")
+        ) { match -> "${match.groupValues[1]}.player()" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(?m)^[ \t]*\w+\.get\(\)\.setPacketHandled\(true\);\s*\r?\n""")
+        ) { "" }
         result = removeImportIfPresent(result, "java.util.function.Supplier")
 
         if (result != original) {
