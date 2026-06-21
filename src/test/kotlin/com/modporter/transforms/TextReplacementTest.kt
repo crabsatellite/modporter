@@ -1694,6 +1694,54 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `custom enchantment data rejects invisible supplier classes by simple name`() {
+        val exampleDir = tempDir.resolve("src/main/java/com/example")
+        val otherDir = tempDir.resolve("src/main/java/com/other")
+        exampleDir.createDirectories()
+        otherDir.createDirectories()
+        exampleDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        exampleDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> GHOST = ENCHANTMENTS.register("ghost", GhostEnchantment::new);
+            }
+        """.trimIndent())
+        otherDir.resolve("GhostEnchantment.java").writeText("""
+            package com.other;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+
+            public class GhostEnchantment extends Enchantment {
+                public GhostEnchantment() {
+                    super(Rarity.COMMON, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.CHEST});
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
+
+        assertTrue(
+            result.errors.any { it.contains("class reference 'GhostEnchantment' is unresolved") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/ghost.json").exists())
+    }
+
+    @Test
     fun `legacy enchantment category runtime checks migrate to holder item support`() {
         val projectDir = createTestFile("""
             package com.example;

@@ -2516,6 +2516,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `custom enchantment class sources do not use global simple name fallback`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun resolveLegacyClassReference")
+        assertTrue(start >= 0, "resolveLegacyClassReference is missing")
+        val end = source.indexOf("private fun resolveLegacyModIdExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "unresolved simple class fallback" to Regex("""\?:\s*trimmed"""),
+            "package-scoped class indexed by raw simple name" to Regex("""result\.getOrPut\(className\)""")
+        )
+        val offenders = forbidden
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "legacy class source resolution contains $label" }
+
+        assertTrue(
+            body.contains("context.typeImports[trimmed]") &&
+                body.contains("val samePackage = \"\${context.packageName}.\$trimmed\"") &&
+                body.contains("return wildcardMatches.singleOrNull()") &&
+                body.contains("val key = if (packageName.isBlank()) className else \"\$packageName.\$className\"") &&
+                body.contains("resolvedClassName == null"),
+            "Legacy custom enchantment class references must resolve through Java-visible imports, package, or wildcard imports"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy custom enchantment class sources must not resolve invisible classes by project-global simple-name uniqueness: $offenders"
+        )
+    }
+
+    @Test
     fun `custom enchantment data migrations do not infer declaration owners from java file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

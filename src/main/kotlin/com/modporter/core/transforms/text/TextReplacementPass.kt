@@ -2140,7 +2140,7 @@ ${codecFields.joinToString(",\n")}
         typeName: String,
         source: String,
         classSources: Map<String, List<Pair<Path, String>>>
-    ): String {
+    ): String? {
         val trimmed = typeName.trim()
         if (trimmed.contains('.')) return trimmed
         val context = legacyJavaContext(source)
@@ -2150,12 +2150,14 @@ ${codecFields.joinToString(",\n")}
         if (context.packageName.isNotBlank()) {
             val samePackage = "${context.packageName}.$trimmed"
             if (classSources.containsKey(samePackage)) return samePackage
+        } else if (classSources.containsKey(trimmed)) {
+            return trimmed
         }
         val wildcardMatches = context.wildcardImports
             .map { packageName -> "$packageName.$trimmed" }
             .filter { classSources.containsKey(it) }
             .distinct()
-        return wildcardMatches.singleOrNull() ?: trimmed
+        return wildcardMatches.singleOrNull()
     }
 
     private fun detectLegacyJavaModIds(javaSources: List<Pair<Path, String>>): Map<String, String> {
@@ -2205,10 +2207,8 @@ ${codecFields.joinToString(",\n")}
             val packageName = legacyJavaPackageName(source)
             classPattern.findAll(source).forEach { match ->
                 val className = match.groupValues[1]
-                result.getOrPut(className) { mutableListOf() }.add(file to source)
-                if (packageName.isNotBlank()) {
-                    result.getOrPut("$packageName.$className") { mutableListOf() }.add(file to source)
-                }
+                val key = if (packageName.isBlank()) className else "$packageName.$className"
+                result.getOrPut(key) { mutableListOf() }.add(file to source)
             }
         }
         return result
@@ -2284,6 +2284,11 @@ ${codecFields.joinToString(",\n")}
                         errors.add("Cannot derive custom enchantment data for ${entryMatch.groupValues[1]}: unsupported supplier '$supplier'")
                         continue
                     }
+                    val resolvedClassName = resolveLegacyClassReference(className, source, classSources)
+                    if (resolvedClassName == null) {
+                        errors.add("Cannot derive custom enchantment data for ${entryMatch.groupValues[1]}: class reference '$className' is unresolved")
+                        continue
+                    }
                     val constructorArgs = newMatch?.groupValues?.get(2)?.let { splitTopLevelArguments(it) }.orEmpty()
                     results.add(LegacyCustomEnchantmentRegistration(
                         file = file,
@@ -2292,7 +2297,7 @@ ${codecFields.joinToString(",\n")}
                         modId = modId,
                         fieldName = entryMatch.groupValues[1],
                         registryName = entryMatch.groupValues[2],
-                        className = resolveLegacyClassReference(className, source, classSources),
+                        className = resolvedClassName,
                         constructorArgs = constructorArgs
                     ))
                 }
@@ -2726,7 +2731,7 @@ ${codecFields.joinToString(",\n")}
                 ?.groupValues
                 ?.get(1)
                 ?: return false
-            return walk(resolveLegacyClassReference(base, source, classSources))
+            return walk(resolveLegacyClassReference(base, source, classSources) ?: return false)
         }
         return walk(className)
     }
@@ -2753,7 +2758,7 @@ ${codecFields.joinToString(",\n")}
                 ?.groupValues
                 ?.get(1)
                 ?: return null
-            return walk(resolveLegacyClassReference(base, source, classSources))
+            return walk(resolveLegacyClassReference(base, source, classSources) ?: return null)
         }
         return walk(className)
     }
