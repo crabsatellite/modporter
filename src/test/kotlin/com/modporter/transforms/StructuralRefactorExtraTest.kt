@@ -1367,6 +1367,73 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `event bus subscriber cleanup ignores commented and text block subscribe events`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("CommentOnlySubscriber.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+
+            @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+            public class CommentOnlySubscriber {
+                /*
+                @SubscribeEvent
+                public static void commented(Object event) {
+                }
+                */
+                private static final String DOC = ""${'"'}
+                    @SubscribeEvent
+                    public static void documented(Object event) {
+                    }
+                ""${'"'};
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-cleanup-eventbus-subscriber" })
+        assertFalse(migrated.contains("@EventBusSubscriber(bus"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.fml.common.EventBusSubscriber;"), migrated)
+        assertTrue(migrated.contains("@SubscribeEvent"), migrated)
+        assertTrue(migrated.contains("public static void documented(Object event)"), migrated)
+    }
+
+    @Test
+    fun `event bus subscriber bus cleanup preserves comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ActualSubscriber.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+
+            @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+            public class ActualSubscriber {
+                private static final String DOC = "@EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)";
+                // @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+
+                @SubscribeEvent
+                public static void setup(Object event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-cleanup-eventbus-subscriber" })
+        assertTrue(migrated.contains("@EventBusSubscriber\npublic class ActualSubscriber"), migrated)
+        assertTrue(migrated.contains("private static final String DOC = \"@EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)\";"), migrated)
+        assertTrue(migrated.contains("// @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)"), migrated)
+    }
+
+    @Test
     fun `empty subscriber cleanup ignores braces inside literals and comments`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

@@ -41879,27 +41879,22 @@ $writeLines
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 var text = javaFile.toFile().readText()
-                if (!text.contains("@EventBusSubscriber")) return@forEach
+                val executableText = maskJavaCommentsAndLiterals(text)
+                if (!executableText.contains("@EventBusSubscriber") &&
+                    !executableText.contains("@Mod.EventBusSubscriber")) return@forEach
 
                 val original = text
-                // Check for uncommented @SubscribeEvent (not in // comments)
-                val hasSubscribeEvent = text.lines().any { line ->
-                    val trimmed = line.trim()
-                    trimmed.contains("@SubscribeEvent") && !trimmed.startsWith("//")
-                }
+                val hasSubscribeEvent = Regex("""@\s*SubscribeEvent\b""").containsMatchIn(executableText)
 
                 if (!hasSubscribeEvent) {
-                    // Remove @EventBusSubscriber annotation entirely (including parameters)
-                    text = text.replace(Regex("""@EventBusSubscriber\([^)]*\)\s*\r?\n"""), "")
-                    text = text.replace(Regex("""@EventBusSubscriber\s*\r?\n"""), "")
-                    // Remove the import
-                    text = text.replace(Regex("""import\s+net\.neoforged\.fml\.common\.EventBusSubscriber;\s*\r?\n"""), "")
+                    text = replaceExecutableRegex(
+                        text,
+                        Regex("""(?m)^[ \t]*@(?:Mod\.)?EventBusSubscriber\b(?:\([^)]*\))?\s*\r?\n""")
+                    ) { "" }
+                    text = removeExecutableImport(text, "net.neoforged.fml.common.EventBusSubscriber")
+                    text = removeExecutableImport(text, "net.neoforged.fml.common.Mod.EventBusSubscriber")
                 } else {
-                    // Remove deprecated bus= parameter but keep annotation
-                    // Handle: bus = EventBusSubscriber.Bus.MOD, (leading)
-                    text = text.replace(Regex("""bus\s*=\s*EventBusSubscriber\.Bus\.MOD,\s*"""), "")
-                    // Handle: , bus = EventBusSubscriber.Bus.MOD (trailing)
-                    text = text.replace(Regex(""",\s*bus\s*=\s*EventBusSubscriber\.Bus\.MOD"""), "")
+                    text = removeExecutableEventBusSubscriberModBusParameter(text)
                 }
 
                 if (text != original) {
@@ -41922,6 +41917,22 @@ $writeLines
             }
 
         return changes
+    }
+
+    private fun removeExecutableEventBusSubscriberModBusParameter(source: String): String {
+        val busExpression = """(?:EventBusSubscriber|Mod\.EventBusSubscriber)\.Bus\.MOD"""
+        var result = replaceExecutableRegex(
+            source,
+            Regex("""bus\s*=\s*$busExpression\s*,\s*""")
+        ) { "" }
+        result = replaceExecutableRegex(
+            result,
+            Regex(""",\s*bus\s*=\s*$busExpression""")
+        ) { "" }
+        return replaceExecutableRegex(
+            result,
+            Regex("""\(\s*bus\s*=\s*$busExpression\s*\)""")
+        ) { "" }
     }
 
     /**
