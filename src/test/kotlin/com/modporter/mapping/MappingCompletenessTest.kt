@@ -3239,6 +3239,67 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `creative tab entries and bytebuf map migrations use executable call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+
+        fun bodyBetween(startMarker: String, endMarker: String): String {
+            val start = source.indexOf(startMarker)
+            assertTrue(start >= 0, "$startMarker is missing")
+            val end = source.indexOf(endMarker, start + 1).let { if (it < 0) source.length else it }
+            return source.substring(start, end)
+        }
+
+        val creativeBody = bodyBetween(
+            "private fun migrateCreativeTabEntriesAccessSource",
+            "private fun migrateItemStackHoverNameSource"
+        )
+        val networkBody = bodyBetween(
+            "private fun migrateFriendlyByteBufAmbiguousMethodReferencesSource",
+            "private fun streamEncoderMethodReferenceLambda"
+        )
+        val offenders = listOf(
+            "raw putAfter prefilter" to creativeBody.contains("""source.contains(".getEntries().putAfter(")"""),
+            "raw putAfter rewrite" to creativeBody.contains("""rewriteJavaCall(source, "putAfter")"""),
+            "raw writeMap prefilter" to networkBody.contains("""source.contains(".writeMap(")"""),
+            "raw readMap prefilter" to networkBody.contains("""source.contains(".readMap(")"""),
+            "raw writeUUID prefilter" to networkBody.contains("""source.contains("FriendlyByteBuf::writeUUID")"""),
+            "raw readUUID prefilter" to networkBody.contains("""source.contains("FriendlyByteBuf::readUUID")"""),
+            "raw writeMap rewrite" to networkBody.contains("""rewriteJavaCall(source, "writeMap")"""),
+            "raw readMap rewrite" to networkBody.contains("""rewriteJavaCall(result, "readMap")""")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            creativeBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                creativeBody.contains("""executableCode.contains(".getEntries().putAfter(")""") &&
+                creativeBody.contains("""rewriteExecutableJavaCall(source, "putAfter")""") &&
+                creativeBody.contains("""receiver.endsWith(".getEntries()")""") &&
+                creativeBody.contains("""receiver.removeSuffix(".getEntries()")"""),
+            "Creative tab entry insertion migration must derive calls from executable Java and preserve receiver shape"
+        )
+        assertTrue(
+            networkBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                networkBody.contains("""executableCode.contains(".writeMap(")""") &&
+                networkBody.contains("""executableCode.contains(".readMap(")""") &&
+                networkBody.contains("""executableCode.contains("FriendlyByteBuf::writeUUID")""") &&
+                networkBody.contains("""executableCode.contains("FriendlyByteBuf::readUUID")""") &&
+                networkBody.contains("""rewriteExecutableJavaCall(source, "writeMap")""") &&
+                networkBody.contains("""rewriteExecutableJavaCall(result, "readMap")""") &&
+                networkBody.contains("streamEncoderMethodReferenceLambda") &&
+                networkBody.contains("streamDecoderMethodReferenceLambda"),
+            "FriendlyByteBuf map migration must derive calls and method-reference evidence from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Creative tab and FriendlyByteBuf map migrations must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `curative item effect migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

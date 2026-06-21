@@ -35546,9 +35546,10 @@ ${indent}}
     }
 
     private fun migrateCreativeTabEntriesAccessSource(source: String): String {
-        if (!source.contains(".getEntries().putAfter(")) return source
-        return rewriteJavaCall(source, "putAfter") { receiver, args ->
-            if (args.size != 3 || !receiver.endsWith(".getEntries()")) return@rewriteJavaCall null
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".getEntries().putAfter(")) return source
+        return rewriteExecutableJavaCall(source, "putAfter") { receiver, args ->
+            if (args.size != 3 || !receiver.endsWith(".getEntries()")) return@rewriteExecutableJavaCall null
             val eventReceiver = receiver.removeSuffix(".getEntries()")
             "$eventReceiver.insertAfter(${args.joinToString(", ") { it.trim() }})"
         }
@@ -35583,14 +35584,15 @@ ${indent}}
     }
 
     private fun migrateFriendlyByteBufAmbiguousMethodReferencesSource(source: String): String {
-        if (!source.contains(".writeMap(") &&
-            !source.contains(".readMap(") &&
-            !source.contains("FriendlyByteBuf::writeUUID") &&
-            !source.contains("FriendlyByteBuf::readUUID")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".writeMap(") &&
+            !executableCode.contains(".readMap(") &&
+            !executableCode.contains("FriendlyByteBuf::writeUUID") &&
+            !executableCode.contains("FriendlyByteBuf::readUUID")) {
             return source
         }
-        var result = rewriteJavaCall(source, "writeMap") { receiver, args ->
-            if (args.size != 3) return@rewriteJavaCall null
+        var result = rewriteExecutableJavaCall(source, "writeMap") { receiver, args ->
+            if (args.size != 3) return@rewriteExecutableJavaCall null
             val keyWriter = streamEncoderMethodReferenceLambda(args[1].trim()) ?: args[1].trim()
             val valueWriter = streamEncoderMethodReferenceLambda(args[2].trim()) ?: args[2].trim()
             if (keyWriter == args[1].trim() && valueWriter == args[2].trim()) {
@@ -35599,8 +35601,8 @@ ${indent}}
                 "$receiver.writeMap(${args[0].trim()}, $keyWriter, $valueWriter)"
             }
         }
-        result = rewriteJavaCall(result, "readMap") { receiver, args ->
-            if (args.size != 2) return@rewriteJavaCall null
+        result = rewriteExecutableJavaCall(result, "readMap") { receiver, args ->
+            if (args.size != 2) return@rewriteExecutableJavaCall null
             val keyReader = streamDecoderMethodReferenceLambda(args[0].trim()) ?: args[0].trim()
             val valueReader = streamDecoderMethodReferenceLambda(args[1].trim()) ?: args[1].trim()
             if (keyReader == args[0].trim() && valueReader == args[1].trim()) {

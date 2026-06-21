@@ -21886,6 +21886,42 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `creative tab entries and bytebuf map migrations ignore comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val sourceFile = srcDir.resolve("CreativeAndNetworkDocs.java")
+        sourceFile.writeText("""
+            package com.example;
+
+            public class CreativeAndNetworkDocs {
+                // event.getEntries().putAfter(new ItemStack(Items.LEATHER_BOOTS), new ItemStack(Items.DIAMOND_BOOTS), CreativeModeTab.TabVisibility.PARENT_AND_SEARCH_TABS);
+                private static final String CREATIVE_DOC = "event.getEntries().putAfter(new ItemStack(Items.LEATHER_BOOTS), new ItemStack(Items.DIAMOND_BOOTS), CreativeModeTab.TabVisibility.PARENT_AND_SEARCH_TABS);";
+
+                /*
+                 * buf.writeMap(glows, FriendlyByteBuf::writeUUID, DeveloperGlow::write);
+                 * return buf.readMap(FriendlyByteBuf::readUUID, DeveloperGlow::read);
+                 */
+                private static final String WRITE_DOC = "buf.writeMap(glows, FriendlyByteBuf::writeUUID, DeveloperGlow::write);";
+                private static final String READ_DOC = "return buf.readMap(FriendlyByteBuf::readUUID, DeveloperGlow::read);";
+
+                public void keep() {
+                    System.out.println(CREATIVE_DOC + WRITE_DOC + READ_DOC);
+                }
+            }
+        """.trimIndent())
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("insertAfter("), migrated)
+        assertFalse(migrated.contains("buffer.writeUUID(value)"), migrated)
+        assertFalse(migrated.contains("buffer.readUUID()"), migrated)
+    }
+
+    @Test
     fun `migrates legacy vanilla block registry codec banner and near packet APIs by source shape`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
