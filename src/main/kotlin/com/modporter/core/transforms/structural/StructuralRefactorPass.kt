@@ -5947,7 +5947,7 @@ $helpers
             } else {
                 null
             }
-            val idExpression = nitrogenSyncIdExpression(args, ownerEntityId, receiverEntityId)
+            val idExpression = nitrogenSyncIdExpression(args, receiverName, ownerEntityId, receiverEntityId)
             if (idExpression == null) {
                 cursor = closeParen + 1
                 continue
@@ -5963,7 +5963,12 @@ $helpers
         return result
     }
 
-    private fun nitrogenSyncIdExpression(args: List<String>, ownerEntityId: String?, receiverEntityId: String?): String? {
+    private fun nitrogenSyncIdExpression(
+        args: List<String>,
+        receiverName: String,
+        ownerEntityId: String?,
+        receiverEntityId: String?
+    ): String? {
         val direction = args.firstOrNull() ?: return null
         return when {
             direction.contains("Direction.DIMENSION") -> "-1"
@@ -5971,8 +5976,16 @@ $helpers
                 val target = args.last().trim()
                 if (target.isBlank()) null else "${stripDimensionAccessor(target)}.getId()"
             }
-            else -> receiverEntityId ?: ownerEntityId
+            direction.contains("Direction.CLIENT") -> nitrogenCallSiteEntityId(receiverName, ownerEntityId, receiverEntityId)
+            else -> null
         }
+    }
+
+    private fun nitrogenCallSiteEntityId(receiverName: String, ownerEntityId: String?, receiverEntityId: String?): String? {
+        if (receiverName.isNotBlank() && receiverName != "this") {
+            return receiverEntityId
+        }
+        return ownerEntityId
     }
 
     private fun stripDimensionAccessor(expression: String): String =

@@ -4155,6 +4155,65 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `nitrogen sync client receiver does not borrow owner entity id from enclosing class`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ForeignData.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.capability.INBTSynchable;
+            import net.minecraft.nbt.CompoundTag;
+            import net.neoforged.neoforge.common.util.INBTSerializable;
+            import java.util.Map;
+
+            public class ForeignData implements INBTSynchable<CompoundTag> {
+                @Override
+                public Map<String, ?> getSynchableFunctions() {
+                    return Map.of();
+                }
+
+                @Override
+                public CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider) {
+                    return new CompoundTag();
+                }
+
+                @Override
+                public void deserializeNBT(net.minecraft.core.HolderLookup.Provider provider, CompoundTag tag) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SyncOwner.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.capability.INBTSynchable;
+            import net.minecraft.world.entity.player.Player;
+
+            public class SyncOwner {
+                private final Player player;
+
+                public SyncOwner(Player player) {
+                    this.player = player;
+                }
+
+                public Player getPlayer() {
+                    return this.player;
+                }
+
+                public void push(ForeignData data, boolean value) {
+                    data.setSynched(INBTSynchable.Direction.CLIENT, "setValue", value);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val owner = srcDir.resolve("SyncOwner.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-attachment-api" })
+        assertTrue(owner.contains("data.setSynched(INBTSynchable.Direction.CLIENT, \"setValue\", value);"), owner)
+        assertFalse(owner.contains("data.setSynched(this.getPlayer().getId(),"), owner)
+    }
+
+    @Test
     fun `wraps attachment getData returns for legacy lazy optional getters`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

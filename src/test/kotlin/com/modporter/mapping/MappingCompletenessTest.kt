@@ -520,6 +520,48 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `nitrogen sync call migration does not borrow owner entity ids for receiver calls`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun rewriteNitrogenSyncCalls")
+        assertTrue(start >= 0, "rewriteNitrogenSyncCalls is missing")
+        val end = source.indexOf("private fun stripDimensionAccessor", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "receiver owner elvis fallback" to "receiverEntityId ?: ownerEntityId",
+            "unknown direction owner fallback" to Regex("""else\s*->\s*(?:receiverEntityId|ownerEntityId)""")
+        )
+        val offenders = forbidden
+            .filter { (_, marker) ->
+                when (marker) {
+                    is String -> body.contains(marker)
+                    is Regex -> marker.containsMatchIn(body)
+                    else -> false
+                }
+            }
+            .map { (label, _) -> "Nitrogen sync migration contains $label" }
+
+        assertTrue(
+            body.contains("nitrogenSyncIdExpression(args, receiverName, ownerEntityId, receiverEntityId)") &&
+                body.contains("direction.contains(\"Direction.CLIENT\")") &&
+                body.contains("nitrogenCallSiteEntityId(receiverName, ownerEntityId, receiverEntityId)") &&
+                body.contains("receiverName.isNotBlank() && receiverName != \"this\"") &&
+                body.contains("return receiverEntityId") &&
+                body.contains("return ownerEntityId") &&
+                body.contains("else -> null"),
+            "Nitrogen sync migration must bind entity ids to the actual call receiver and fail closed for unknown directions"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Nitrogen sync migration must not fall back from unresolved receiver owners to the enclosing owner: $offenders"
+        )
+    }
+
+    @Test
     fun `backpack container API migration binds inventory wrapper to slot constructor`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
