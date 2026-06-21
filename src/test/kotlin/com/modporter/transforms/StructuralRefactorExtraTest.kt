@@ -11337,6 +11337,85 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `common vanilla 121 rewrites ignore comments and strings`() {
+        val projectDir = createFile("CommonVanillaApiSurface.java", """
+            package com.example;
+
+            public class CommonVanillaApiSurface extends Mob {
+                private static final String DOC = "player.getBlockReach() EventHooks.canCreateFluidSource(level, neighborPos, neighborState, true) ResourceLocation.CODEC.codec(). pose.mulPoseMatrix(matrix) Tags.Items.TOOLS_BOWS EquipmentSlot.Type.ARMOR CauldronInteraction.EMPTY.put(item, interaction) shield.disableShield(false) wolf.setTame(true); Items.GRASS properties.defaultDurability(10) Mob.getEquipmentSlotForItem(stack)";
+
+                /*
+                void docs(Player player, Level level, BlockPos neighborPos, BlockState neighborState, PoseStack pose, Matrix4f matrix, Item.Properties properties, ItemStack stack, Wolf wolf, ShieldItem shield, Item item, CauldronInteraction.Interaction interaction) {
+                    player.getBlockReach();
+                    EventHooks.canCreateFluidSource(level, neighborPos, neighborState, true);
+                    ResourceLocation.CODEC.codec().fieldOf("id");
+                    pose.mulPoseMatrix(matrix);
+                    Object bow = Tags.Items.TOOLS_BOWS;
+                    Object armor = EquipmentSlot.Type.ARMOR;
+                    CauldronInteraction.EMPTY.put(item, interaction);
+                    shield.disableShield(false);
+                    wolf.setTame(true);
+                    Object grass = Items.GRASS;
+                    properties.defaultDurability(10);
+                    Mob.getEquipmentSlotForItem(stack);
+                }
+                */
+                void real(Player player, Level level, BlockPos neighborPos, BlockState neighborState, PoseStack pose, Matrix4f matrix, Item.Properties properties, ItemStack stack, Wolf wolf, ShieldItem shield, Item item, CauldronInteraction.Interaction interaction) {
+                    player.getBlockReach();
+                    EventHooks.canCreateFluidSource(level, neighborPos, neighborState, true);
+                    ResourceLocation.CODEC.codec().fieldOf("id");
+                    pose.mulPoseMatrix(matrix);
+                    Object bow = Tags.Items.TOOLS_BOWS;
+                    Object crossbow = Tags.Items.TOOLS_CROSSBOWS;
+                    Object fishingRod = Tags.Items.TOOLS_FISHING_RODS;
+                    Object armor = EquipmentSlot.Type.ARMOR;
+                    CauldronInteraction.EMPTY.put(item, interaction);
+                    shield.disableShield(false);
+                    wolf.setTame(true);
+                    Object grass = Items.GRASS;
+                    properties.defaultDurability(10);
+                    Mob.getEquipmentSlotForItem(stack);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = projectDir.resolve("src/main/java/com/example/CommonVanillaApiSurface.java").readText()
+        assertTrue(migrated.contains("player.blockInteractionRange();"), migrated)
+        assertTrue(migrated.contains("EventHooks.canCreateFluidSource(level, neighborPos, neighborState);"), migrated)
+        assertTrue(migrated.contains("ResourceLocation.CODEC.fieldOf(\"id\");"), migrated)
+        assertTrue(migrated.contains("pose.mulPose(matrix);"), migrated)
+        assertTrue(migrated.contains("Object bow = Tags.Items.TOOLS_BOW;"), migrated)
+        assertTrue(migrated.contains("Object crossbow = Tags.Items.TOOLS_CROSSBOW;"), migrated)
+        assertTrue(migrated.contains("Object fishingRod = Tags.Items.TOOLS_FISHING_ROD;"), migrated)
+        assertTrue(migrated.contains("Object armor = EquipmentSlot.Type.HUMANOID_ARMOR;"), migrated)
+        assertTrue(migrated.contains("CauldronInteraction.EMPTY.map().put(item, interaction);"), migrated)
+        assertTrue(migrated.contains("shield.disableShield();"), migrated)
+        assertTrue(migrated.contains("wolf.setTame(true, true);"), migrated)
+        assertTrue(migrated.contains("Object grass = Items.SHORT_GRASS;"), migrated)
+        assertTrue(migrated.contains("properties.durability(10);"), migrated)
+        assertTrue(migrated.contains("player.getEquipmentSlotForItem(stack);"), migrated)
+        assertTrue(migrated.contains("player.getBlockReach() EventHooks.canCreateFluidSource(level, neighborPos, neighborState, true) ResourceLocation.CODEC.codec()."), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("player.getBlockReach();"), migrated)
+        assertTrue(commentBlock.contains("EventHooks.canCreateFluidSource(level, neighborPos, neighborState, true);"), migrated)
+        assertTrue(commentBlock.contains("ResourceLocation.CODEC.codec().fieldOf(\"id\");"), migrated)
+        assertTrue(commentBlock.contains("pose.mulPoseMatrix(matrix);"), migrated)
+        assertTrue(commentBlock.contains("Object bow = Tags.Items.TOOLS_BOWS;"), migrated)
+        assertTrue(commentBlock.contains("Object armor = EquipmentSlot.Type.ARMOR;"), migrated)
+        assertTrue(commentBlock.contains("CauldronInteraction.EMPTY.put(item, interaction);"), migrated)
+        assertTrue(commentBlock.contains("shield.disableShield(false);"), migrated)
+        assertTrue(commentBlock.contains("wolf.setTame(true);"), migrated)
+        assertTrue(commentBlock.contains("Object grass = Items.GRASS;"), migrated)
+        assertTrue(commentBlock.contains("properties.defaultDurability(10);"), migrated)
+        assertTrue(commentBlock.contains("Mob.getEquipmentSlotForItem(stack);"), migrated)
+        assertFalse(commentBlock.contains("blockInteractionRange"), migrated)
+        assertFalse(commentBlock.contains("HUMANOID_ARMOR"), migrated)
+        assertFalse(commentBlock.contains("SHORT_GRASS"), migrated)
+    }
+
+    @Test
     fun `migrates block entity fluid capability override to RegisterCapabilitiesEvent`() {
         val projectDir = createFile("ExampleMod.java", """
             package com.example;

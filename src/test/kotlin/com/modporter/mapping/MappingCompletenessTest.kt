@@ -3295,6 +3295,49 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `common vanilla 121 API rewrites use executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateVanilla121ApiSource")
+        assertTrue(start >= 0, "migrateVanilla121ApiSource is missing")
+        val end = source.indexOf("result = migrateEntityDimensionsRecordAccessors", start + 1)
+        assertTrue(end > start, "common vanilla 1.21 API rewrite block boundary is missing")
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getBlockReach replacement" to "result.replace(\".getBlockReach()\"",
+            "raw canCreateFluidSource fixed variable replacement" to "EventHooks.canCreateFluidSource(level, neighborPos, neighborState, true)",
+            "raw ResourceLocation codec replacement" to "result.replace(\"ResourceLocation.CODEC.codec().\"",
+            "raw mulPoseMatrix replacement" to "result.replace(\".mulPoseMatrix(\"",
+            "raw bow tag replacement" to "result.replace(\"Tags.Items.TOOLS_BOWS\"",
+            "raw crossbow tag replacement" to "result.replace(\"Tags.Items.TOOLS_CROSSBOWS\"",
+            "raw fishing rod tag replacement" to "result.replace(\"Tags.Items.TOOLS_FISHING_RODS\"",
+            "raw armor slot replacement" to "result.replace(\"EquipmentSlot.Type.ARMOR\"",
+            "raw cauldron interaction regex replacement" to ".replace(result, \"$1.map().put(\")",
+            "raw setTame replacement" to "result.replace(\".setTame(true);\"",
+            "raw disableShield regex replacement" to ".replace(result, \".disableShield()\")",
+            "raw grass item replacement" to "result.replace(\"Items.GRASS\"",
+            "raw default durability replacement" to "result.replace(\".defaultDurability(\"",
+            "raw mob equipment slot replacement" to "result.replace(\"Mob.getEquipmentSlotForItem(\""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("replaceExecutableRegex(result, Regex") &&
+                body.contains("rewriteExecutableJavaInvocationArguments(result, \"EventHooks.canCreateFluidSource\")") &&
+                body.contains("val executableEquipmentSlotSource = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("executableEquipmentSlotSource.contains(\"Mob.getEquipmentSlotForItem(\")"),
+            "Common vanilla 1.21 API rewrites must use executable source evidence and invocation parsing"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Common vanilla 1.21 API rewrites must not use raw replacements or fixed local variable call shapes: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy registry utility migrations use executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
@@ -5100,6 +5143,38 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty(),
             "DataResult getOrThrow migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `known vanilla codec codec migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateKnownVanillaCodecCodecCalls")
+        assertTrue(start >= 0, "migrateKnownVanillaCodecCodecCalls is missing")
+        val end = source.indexOf("private fun migrateMapCodecFeatureConstructorArguments", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw CODEC.codec prefilter" to """source.contains(".CODEC.codec()")""",
+            "raw CODEC.codec regex replacement" to """.replace(result) { match -> match.groupValues[1] }"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".CODEC.codec()")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("match.groupValues[1]"),
+            "Known vanilla CODEC.codec() migration must rewrite executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Known vanilla CODEC.codec() migration must not rewrite comments or string literals: $offenders"
         )
     }
 

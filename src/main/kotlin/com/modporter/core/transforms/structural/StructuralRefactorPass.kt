@@ -15956,24 +15956,28 @@ ${indent}}
         var needsRegistryFriendlyByteBuf = false
         var needsEntityWithComplexSpawn = false
 
-        result = result.replace(".getBlockReach()", ".blockInteractionRange()")
-        result = result.replace("EventHooks.canCreateFluidSource(level, neighborPos, neighborState, true)", "EventHooks.canCreateFluidSource(level, neighborPos, neighborState)")
-        result = result.replace("ResourceLocation.CODEC.codec().", "ResourceLocation.CODEC.")
+        result = replaceExecutableRegex(result, Regex("""\.getBlockReach\(\)""")) { ".blockInteractionRange()" }
+        result = rewriteExecutableJavaInvocationArguments(result, "EventHooks.canCreateFluidSource") { args ->
+            if (args.size == 4 && args[3].trim() == "true") args.take(3) else null
+        }
+        result = replaceExecutableRegex(result, Regex("""\bResourceLocation\.CODEC\.codec\(\)\.""")) { "ResourceLocation.CODEC." }
         result = migrateLegacyResourceLocationValidationSource(result)
-        result = result.replace(".mulPoseMatrix(", ".mulPose(")
-        result = result.replace("Tags.Items.TOOLS_BOWS", "Tags.Items.TOOLS_BOW")
-        result = result.replace("Tags.Items.TOOLS_CROSSBOWS", "Tags.Items.TOOLS_CROSSBOW")
-        result = result.replace("Tags.Items.TOOLS_FISHING_RODS", "Tags.Items.TOOLS_FISHING_ROD")
-        result = result.replace("EquipmentSlot.Type.ARMOR", "EquipmentSlot.Type.HUMANOID_ARMOR")
-        result = Regex("""\b(CauldronInteraction\.(?:EMPTY|WATER|LAVA|POWDER_SNOW))\.put\(""")
-            .replace(result, "$1.map().put(")
+        result = replaceExecutableRegex(result, Regex("""\.mulPoseMatrix\(""")) { ".mulPose(" }
+        result = replaceExecutableRegex(result, Regex("""\bTags\.Items\.TOOLS_BOWS\b""")) { "Tags.Items.TOOLS_BOW" }
+        result = replaceExecutableRegex(result, Regex("""\bTags\.Items\.TOOLS_CROSSBOWS\b""")) { "Tags.Items.TOOLS_CROSSBOW" }
+        result = replaceExecutableRegex(result, Regex("""\bTags\.Items\.TOOLS_FISHING_RODS\b""")) { "Tags.Items.TOOLS_FISHING_ROD" }
+        result = replaceExecutableRegex(result, Regex("""\bEquipmentSlot\.Type\.ARMOR\b""")) { "EquipmentSlot.Type.HUMANOID_ARMOR" }
+        result = replaceExecutableRegex(result, Regex("""\b(CauldronInteraction\.(?:EMPTY|WATER|LAVA|POWDER_SNOW))\.put\(""")) { match ->
+            "${match.groupValues[1]}.map().put("
+        }
         result = migrateLegacyCauldronInteractionResults(result)
-        result = result.replace(".setTame(true);", ".setTame(true, true);")
-        result = Regex("""\.disableShield\(\s*(?:true|false)\s*\)""").replace(result, ".disableShield()")
-        result = result.replace("Items.GRASS", "Items.SHORT_GRASS")
-        result = result.replace(".defaultDurability(", ".durability(")
-        if (result.contains("Mob.getEquipmentSlotForItem(") && result.contains("extends ")) {
-            result = result.replace("Mob.getEquipmentSlotForItem(", "this.getEquipmentSlotForItem(")
+        result = replaceExecutableRegex(result, Regex("""\.setTame\(\s*true\s*\);""")) { ".setTame(true, true);" }
+        result = replaceExecutableRegex(result, Regex("""\.disableShield\(\s*(?:true|false)\s*\)""")) { ".disableShield()" }
+        result = replaceExecutableRegex(result, Regex("""(?<![\w$])Items\.GRASS\b""")) { "Items.SHORT_GRASS" }
+        result = replaceExecutableRegex(result, Regex("""\.defaultDurability\(""")) { ".durability(" }
+        val executableEquipmentSlotSource = maskJavaCommentsAndLiterals(result)
+        if (executableEquipmentSlotSource.contains("Mob.getEquipmentSlotForItem(") && executableEquipmentSlotSource.contains("extends ")) {
+            result = replaceExecutableRegex(result, Regex("""\bMob\.getEquipmentSlotForItem\(""")) { "this.getEquipmentSlotForItem(" }
         }
         result = migrateEntityDimensionsRecordAccessors(result)
         result = migrateFinalLivingEntityDimensionsOverrides(result, javaInheritanceIndex)
@@ -26694,7 +26698,8 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         mapCodecConstantOwners: Set<String>,
         codecConstantOwners: Set<String>
     ): String {
-        if (!source.contains(".CODEC.codec()")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".CODEC.codec()")) return source
         val knownCodecOwners = setOf(
             "BlockState",
             "BoundingBox",
@@ -26706,8 +26711,12 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         var result = source
         for (owner in knownCodecOwners + codecConstantOwners) {
             if (owner in mapCodecConstantOwners) continue
-            result = Regex("""\b((?:[A-Za-z_$][\w$]*\.)*${Regex.escape(owner)}\.CODEC)\.codec\(\)""")
-                .replace(result) { match -> match.groupValues[1] }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b((?:[A-Za-z_$][\w$]*\.)*${Regex.escape(owner)}\.CODEC)\.codec\(\)""")
+            ) { match ->
+                match.groupValues[1]
+            }
         }
         return result
     }
