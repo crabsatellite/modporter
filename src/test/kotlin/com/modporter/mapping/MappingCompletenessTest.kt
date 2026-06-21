@@ -2532,6 +2532,51 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy custom portal block migration uses executable method ranges`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyCustomPortalBlockProtocol")
+        assertTrue(start >= 0, "migrateLegacyCustomPortalBlockProtocol is missing")
+        val end = source.indexOf("private fun migrateLegacyConcretePowderConcreteAccessor", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val destinationStart = source.indexOf("private fun legacyPortalDestinationMethod")
+        assertTrue(destinationStart >= 0, "legacyPortalDestinationMethod is missing")
+        val destinationEnd = source.indexOf("private fun extractFirstMethodCallArgument", destinationStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val destinationBody = source.substring(destinationStart, destinationEnd)
+        val offenders = listOf(
+            "raw portal prefilter" to """source.contains("getPortalEntrancePos")""",
+            "raw block class check" to "containsMatchIn(source)",
+            "raw entityInside extraction" to """javaMethodText(source, "entityInside")""",
+            "raw entityInside replacement" to "result.replace(entityInside",
+            "raw handleTeleportation extraction" to """javaMethodText(source, "handleTeleportation")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) || destinationBody.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val methods = javaMethodRanges(executableCode)") &&
+                body.contains("val entityInside = source.substring(entityInsideMethod.range)") &&
+                body.contains("val executableEntityInside = executableCode.substring(entityInsideMethod.range)") &&
+                body.contains("source.replaceRange(entityInsideMethod.range, migratedEntityInside)") &&
+                destinationBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                destinationBody.contains("javaMethodRanges(executableCode).singleOrNull") &&
+                destinationBody.contains("val handleTeleportationCode = maskJavaCommentsAndLiterals(handleTeleportation)"),
+            "Legacy custom portal migration must locate portal methods in executable Java method ranges"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy custom portal migration must not use comments, strings, or raw methods as portal evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `loot condition codec migrations do not synthesize member names from json keys`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

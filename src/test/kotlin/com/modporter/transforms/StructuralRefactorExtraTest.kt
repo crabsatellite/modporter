@@ -20267,6 +20267,57 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy custom portal block migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DocsPortalBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class DocsPortalBlock extends Block {
+                private static final String DOC = "setPortalEntrancePos getPortalEntrancePos handleTeleportation";
+
+                /*
+                public void entityInside(BlockState state, Level level, BlockPos pos, Entity entity) {
+                    accessor.setPortalEntrancePos(pos);
+                    this.handleTeleportation(entity);
+                }
+
+                private void handleTeleportation(Entity entity) {
+                    ResourceKey<Level> destinationKey = Level.NETHER;
+                    entity.changeDimension(new DemoTeleporter(destinationKey).getPortalInfo(entity, destinationKey));
+                }
+                */
+
+                @Override
+                public void entityInside(BlockState state, Level level, BlockPos pos, Entity entity) {
+                    String marker = "getPortalEntrancePos";
+                    if (marker.isEmpty()) {
+                        entity.setPortalCooldown();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("DocsPortalBlock.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(block.contains("implements Portal"), block)
+        assertFalse(block.contains("setAsInsidePortal"), block)
+        assertFalse(block.contains("getPortalDestination"), block)
+        assertTrue(block.contains("public void entityInside(BlockState state, Level level, BlockPos pos, Entity entity)"), block)
+        assertTrue(block.contains("private static final String DOC = \"setPortalEntrancePos getPortalEntrancePos handleTeleportation\";"), block)
+    }
+
+    @Test
     fun `migrates legacy concrete powder concrete accessor to block return`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val mixinDir = srcDir.resolve("mixin")

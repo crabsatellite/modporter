@@ -22001,9 +22001,14 @@ ${indent}}"""
         var index = 0
         var inLineComment = false
         var inBlockComment = false
+        var inString = false
+        var inTextBlock = false
+        var inChar = false
+        var escaped = false
         while (index < source.length) {
             val ch = source[index]
             val next = source.getOrNull(index + 1)
+            val nextTwo = source.getOrNull(index + 2)
 
             when {
                 inLineComment -> {
@@ -22023,6 +22028,26 @@ ${indent}}"""
                         result.append(if (ch == '\r' || ch == '\n') ch else ' ')
                     }
                 }
+                inTextBlock -> {
+                    result.append(ch)
+                    if (ch == '"' && next == '"' && nextTwo == '"') {
+                        result.append("  ")
+                        index += 2
+                        inTextBlock = false
+                    }
+                }
+                inString -> {
+                    result.append(ch)
+                    if (ch == '"' && !escaped) inString = false
+                    escaped = ch == '\\' && !escaped
+                    if (ch != '\\') escaped = false
+                }
+                inChar -> {
+                    result.append(ch)
+                    if (ch == '\'' && !escaped) inChar = false
+                    escaped = ch == '\\' && !escaped
+                    if (ch != '\\') escaped = false
+                }
                 ch == '/' && next == '/' -> {
                     result.append("  ")
                     index++
@@ -22032,6 +22057,22 @@ ${indent}}"""
                     result.append("  ")
                     index++
                     inBlockComment = true
+                }
+                ch == '"' && next == '"' && nextTwo == '"' -> {
+                    result.append("\"\"\"")
+                    index += 2
+                    inTextBlock = true
+                    escaped = false
+                }
+                ch == '"' -> {
+                    result.append(ch)
+                    inString = true
+                    escaped = false
+                }
+                ch == '\'' -> {
+                    result.append(ch)
+                    inChar = true
+                    escaped = false
                 }
                 else -> result.append(ch)
             }
@@ -24956,44 +24997,49 @@ ${indent}if ($handlerVar != null) $statement"""
     }
 
     private fun migrateLegacyCustomPortalBlockProtocol(source: String): String {
-        if (!source.contains("getPortalEntrancePos") &&
-            !source.contains("setPortalEntrancePos") &&
-            !source.contains("portalEntrancePos")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("getPortalEntrancePos") &&
+            !executableCode.contains("setPortalEntrancePos") &&
+            !executableCode.contains("portalEntrancePos")) {
             return source
         }
-        if (!Regex("""\bclass\s+[A-Za-z_$][\w$]*[^{;\r\n]*\bextends\s+Block\b""").containsMatchIn(source)) {
+        if (!Regex("""\bclass\s+[A-Za-z_$][\w$]*[^{;\r\n]*\bextends\s+Block\b""").containsMatchIn(executableCode)) {
             return source
         }
 
-        val entityInside = javaMethodText(source, "entityInside") ?: return source
-        if (!entityInside.contains("setPortalEntrancePos") && !entityInside.contains("getPortalEntrancePos")) {
+        val methods = javaMethodRanges(executableCode)
+        val entityInsideMethod = methods.singleOrNull { method ->
+            method.name == "entityInside" &&
+                Regex("""\bvoid\s+entityInside\s*\(""").containsMatchIn(method.header)
+        } ?: return source
+        val entityInside = source.substring(entityInsideMethod.range)
+        val executableEntityInside = executableCode.substring(entityInsideMethod.range)
+        if (!executableEntityInside.contains("setPortalEntrancePos") &&
+            !executableEntityInside.contains("getPortalEntrancePos")) {
             return source
         }
         val params = Regex(
             """entityInside\s*\(\s*(?:net\.minecraft\.world\.level\.block\.state\.)?BlockState\s+([A-Za-z_$][\w$]*)\s*,\s*(?:net\.minecraft\.world\.level\.)?Level\s+([A-Za-z_$][\w$]*)\s*,\s*(?:net\.minecraft\.core\.)?BlockPos\s+([A-Za-z_$][\w$]*)\s*,\s*(?:net\.minecraft\.world\.entity\.)?Entity\s+([A-Za-z_$][\w$]*)\s*\)"""
-        ).find(entityInside) ?: return source
+        ).find(executableEntityInside) ?: return source
         val posName = params.groupValues[3]
         val entityName = params.groupValues[4]
 
-        var result = source
-        result = addPortalInterfaceToBlockClass(result)
-        result = addImportIfMissing(result, "net.minecraft.world.level.block.Portal")
-
         val openBrace = entityInside.indexOf('{')
-        if (openBrace > 0) {
-            val prefix = entityInside.substring(0, openBrace).trimEnd()
-            val signatureIndent = Regex("""(?m)^([ \t]*)(?:public|protected|private)\s+void\s+entityInside""")
-                .find(prefix)
-                ?.groupValues
-                ?.get(1)
-                ?: "    "
-            val migratedEntityInside = """$prefix {
+        if (openBrace <= 0) return source
+        val prefix = entityInside.substring(0, openBrace).trimEnd()
+        val signatureIndent = Regex("""(?m)^([ \t]*)(?:public|protected|private)\s+void\s+entityInside""")
+            .find(prefix)
+            ?.groupValues
+            ?.get(1)
+            ?: "    "
+        val migratedEntityInside = """$prefix {
 $signatureIndent    if ($entityName.canUsePortal(false)) {
 $signatureIndent        $entityName.setAsInsidePortal(this, $posName);
 $signatureIndent    }
 $signatureIndent}"""
-            result = result.replace(entityInside, migratedEntityInside)
-        }
+        var result = source.replaceRange(entityInsideMethod.range, migratedEntityInside)
+        result = addPortalInterfaceToBlockClass(result)
+        result = addImportIfMissing(result, "net.minecraft.world.level.block.Portal")
 
         if (!Regex("""\bgetPortalTransitionTime\s*\(""").containsMatchIn(result)) {
             val transitionTimeMethod = """
@@ -25063,9 +25109,10 @@ $signatureIndent}"""
     }
 
     private fun addPortalInterfaceToBlockClass(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val classPattern = Regex("""\bclass\s+([A-Za-z_$][\w$]*)([^{;\r\n]*?)\bextends\s+Block\b([^{;\r\n]*)""")
-        val match = classPattern.find(source) ?: return source
-        val declaration = match.value
+        val match = classPattern.find(executableCode) ?: return source
+        val declaration = source.substring(match.range)
         if (Regex("""\bimplements\b[^{;\r\n]*\bPortal\b""").containsMatchIn(declaration)) return source
         val replacement = if (declaration.contains("implements")) {
             declaration.replace(Regex("""\bimplements\s+"""), "implements Portal, ").trimEnd() + " "
@@ -25076,10 +25123,20 @@ $signatureIndent}"""
     }
 
     private fun legacyPortalDestinationMethod(source: String): String? {
-        val handleTeleportation = javaMethodText(source, "handleTeleportation") ?: return null
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val handleTeleportationMethod = javaMethodRanges(executableCode).singleOrNull { method ->
+            method.name == "handleTeleportation"
+        } ?: return null
+        val handleTeleportation = source.substring(handleTeleportationMethod.range)
+        val handleTeleportationCode = maskJavaCommentsAndLiterals(handleTeleportation)
         val destinationKeyExpression = Regex(
             """ResourceKey\s*<\s*Level\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]+);"""
-        ).find(handleTeleportation)?.groupValues?.get(2)?.trim() ?: return null
+        ).find(handleTeleportationCode)
+            ?.groups
+            ?.get(2)
+            ?.range
+            ?.let { handleTeleportation.substring(it.first, it.last + 1).trim() }
+            ?: return null
         val changeDimensionExpression = extractFirstMethodCallArgument(handleTeleportation, "changeDimension") ?: return null
         val transitionExpression = changeDimensionExpression
             .replace(Regex("""\b[a-zA-Z_$][\w$]*\.getLevel\(\s*destinationKey\s*\)"""), "level.getServer().getLevel(destinationKey)")
@@ -25100,10 +25157,11 @@ $signatureIndent}"""
     }
 
     private fun extractFirstMethodCallArgument(source: String, methodName: String): String? {
-        val call = Regex("""\.${Regex.escape(methodName)}\s*\(""").find(source) ?: return null
-        val openParen = source.indexOf('(', call.range.last)
+        val code = maskJavaCommentsAndLiterals(source)
+        val call = Regex("""\.${Regex.escape(methodName)}\s*\(""").find(code) ?: return null
+        val openParen = code.indexOf('(', call.range.last)
         if (openParen < 0) return null
-        val closeParen = findMatchingParen(source, openParen)
+        val closeParen = findMatchingParen(code, openParen)
         if (closeParen < 0) return null
         return source.substring(openParen + 1, closeParen).trim()
     }
