@@ -4987,6 +4987,39 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `attachment LazyOptional getData return migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AttachmentDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.Level;
+
+            public class AttachmentDocs {
+                /*
+                static LazyOptional<TimeData> get(Level world) {
+                    return world.getData(ExampleCapabilities.TIME_DATA.get());
+                }
+                */
+                private static final String SAMPLE = "static LazyOptional<TimeData> get(Level world) { return world.getData(ExampleCapabilities.TIME_DATA.get()); }";
+
+                static Object real(Level world) {
+                    return world.getData(ExampleCapabilities.TIME_DATA.get());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("AttachmentDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(source.contains("return world.getData(ExampleCapabilities.TIME_DATA.get());"), source)
+        assertTrue(source.contains("static LazyOptional<TimeData> get(Level world)"), source)
+        assertFalse(source.contains("LazyOptional.ofNullable"), source)
+    }
+
+    @Test
     fun `legacy jump from ground overrides keep target public visibility`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

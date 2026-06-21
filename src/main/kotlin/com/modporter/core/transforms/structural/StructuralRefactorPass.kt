@@ -33365,17 +33365,35 @@ ${indent}}
     }
 
     private fun migrateLegacyAttachmentGetDataLazyOptionalReturns(source: String): String {
-        if (!source.contains("LazyOptional<") || !source.contains(".getData(")) return source
-        return Regex(
-            """(?s)(\b(?:public|protected|private)?\s*static\s+LazyOptional\s*<[^>\r\n]+>\s+[A-Za-z_$][\w$]*\s*\([^)]*\)\s*\{(?:(?!\n\s*\}).)*?)return\s+([^;\r\n{}]+?\.getData\([^;\r\n{}]+?\))\s*;"""
-        ).replace(source) { match ->
-            val expression = match.groupValues[2].trim()
-            if (expression.contains("LazyOptional.") || expression.contains("ofNullable(")) {
-                match.value
-            } else {
-                "${match.groupValues[1]}return LazyOptional.ofNullable($expression);"
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!Regex("""\bLazyOptional\s*<""").containsMatchIn(executableCode) ||
+            !executableCode.contains(".getData(")) {
+            return source
+        }
+        val methodPattern = Regex(
+            """(?m)^[ \t]*(?:(?:public|protected|private)\s+)?static\s+LazyOptional\s*<[^>\r\n]+>\s+[A-Za-z_$][\w$]*\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\{"""
+        )
+        val returnPattern = Regex("""return\s+([^;\r\n{}]+?\.getData\([^;\r\n{}]+?\))\s*;""")
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        methodPattern.findAll(executableCode).forEach methodLoop@{ method ->
+            val openBrace = executableCode.indexOf('{', method.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
+            if (closeBrace <= openBrace) return@methodLoop
+            val methodBody = executableCode.substring(openBrace + 1, closeBrace)
+            returnPattern.findAll(methodBody).forEach returnLoop@{ returnMatch ->
+                val expressionRange = returnMatch.groups[1]?.range ?: return@returnLoop
+                val expressionStart = openBrace + 1 + expressionRange.first
+                val expressionEnd = openBrace + 1 + expressionRange.last
+                val expression = source.substring(expressionStart, expressionEnd + 1).trim()
+                if (expression.contains("LazyOptional.") || expression.contains("ofNullable(")) {
+                    return@returnLoop
+                }
+                val returnStart = openBrace + 1 + returnMatch.range.first
+                val returnEnd = openBrace + 1 + returnMatch.range.last
+                edits += returnStart..returnEnd to "return LazyOptional.ofNullable($expression);"
             }
         }
+        return applyStringEdits(source, edits)
     }
 
     private fun migrateAttachmentGetDataIfPresentSource(source: String): String {

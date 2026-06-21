@@ -2541,6 +2541,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `attachment LazyOptional getData return migration uses executable method evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyAttachmentGetDataLazyOptionalReturns")
+        assertTrue(start >= 0, "migrateLegacyAttachmentGetDataLazyOptionalReturns is missing")
+        val end = source.indexOf("private fun migrateAttachmentGetDataIfPresentSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw LazyOptional prefilter" to """source.contains("LazyOptional<")""",
+            "raw getData prefilter" to """source.contains(".getData(")""",
+            "raw whole-source replacement" to """).replace(source)"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("methodPattern.findAll(executableCode)") &&
+                body.contains("returnPattern.findAll(methodBody)") &&
+                body.contains("applyStringEdits(source, edits)"),
+            "Attachment LazyOptional getData return migration must inspect executable method source and apply bounded edits"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Attachment LazyOptional getData return migration must not use raw whole-source evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `resource mod id detection does not infer constant owners from file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot
