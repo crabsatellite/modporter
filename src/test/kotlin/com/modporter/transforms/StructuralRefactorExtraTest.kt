@@ -9505,7 +9505,7 @@ class StructuralRefactorExtraTest {
 
     @Test
     fun `migrates brewing registration to NeoForge brewing event`() {
-        val projectDir = createFile("HotBath.java", """
+        val projectDir = createFile("BrewingSurface.java", """
             package com.example;
 
             import net.minecraft.world.item.Items;
@@ -9515,8 +9515,10 @@ class StructuralRefactorExtraTest {
             import net.neoforged.neoforge.common.NeoForge;
             import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 
-            public class HotBath {
-                public HotBath() {
+            public class BrewingSurface {
+                private static final String DOC = "BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.DOC.get()), Ingredient.EMPTY, ExampleItems.DOC_RESULT.get())";
+
+                public BrewingSurface() {
                     NeoForge.EVENT_BUS.register(this);
                 }
 
@@ -9527,6 +9529,7 @@ class StructuralRefactorExtraTest {
                 private void registerBrewingRecipes(final FMLCommonSetupEvent event) {
                     event.enqueueWork(() -> {
                         BrewingRecipeRegistry.addRecipe(Ingredient.of(ItemRegister.HOT_WATER_BOTTLE.get()), Ingredient.of(Items.GUNPOWDER), ItemRegister.SPLASH_HOT_WATER_BOTTLE.get().getDefaultInstance());
+                        BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.BASE.get()), Ingredient.of(ExampleItems.BOOST.get()), ExampleItems.RESULT.get().getDefaultInstance());
                         BrewingRecipeRegistry.addRecipe(new CustomFluidBrewingRecipe());
                     });
                 }
@@ -9542,15 +9545,21 @@ class StructuralRefactorExtraTest {
 
         val pass = StructuralRefactorPass()
         val result = pass.apply(projectDir)
-        val migrated = tempDir.resolve("src/main/java/com/example/HotBath.java").readText()
+        val migrated = tempDir.resolve("src/main/java/com/example/BrewingSurface.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-brewing-recipes-event" })
         assertTrue(migrated.contains("import net.neoforged.neoforge.event.brewing.RegisterBrewingRecipesEvent;"))
-        assertTrue(!migrated.contains("BrewingRecipeRegistry"))
+        assertFalse(migrated.contains("import net.neoforged.neoforge.common.brewing.BrewingRecipeRegistry;"))
         assertTrue(!migrated.contains("registerBrewingRecipes(event);"))
         assertTrue(migrated.contains("@SubscribeEvent"))
         assertTrue(migrated.contains("public void registerBrewingRecipes(final RegisterBrewingRecipesEvent event)"))
+        assertTrue(migrated.contains("event.getBuilder().addRecipe(Ingredient.of(ItemRegister.HOT_WATER_BOTTLE.get()), Ingredient.of(Items.GUNPOWDER), ItemRegister.SPLASH_HOT_WATER_BOTTLE.get().getDefaultInstance());"))
+        assertTrue(migrated.contains("event.getBuilder().addRecipe(Ingredient.of(ExampleItems.BASE.get()), Ingredient.of(ExampleItems.BOOST.get()), ExampleItems.RESULT.get().getDefaultInstance());"))
         assertTrue(migrated.contains("event.getBuilder().addRecipe(new CustomFluidBrewingRecipe());"))
+        assertTrue(migrated.contains("""private static final String DOC = "BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.DOC.get()), Ingredient.EMPTY, ExampleItems.DOC_RESULT.get())";"""))
+        assertFalse(migrated.contains("event.getBuilder().addRecipe(Ingredient.of(ExampleItems.DOC.get())"))
+        assertFalse(migrated.contains("HONEY_BATH_BOTTLE"))
+        assertFalse(migrated.contains("MILK_BATH_BOTTLE"))
         assertTrue(!migrated.contains("onBrewingRecipeRegister"))
     }
 

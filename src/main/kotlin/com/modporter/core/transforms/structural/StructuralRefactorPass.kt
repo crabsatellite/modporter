@@ -15880,28 +15880,48 @@ ${indent}}
     }
 
     private fun migrateBrewingRecipeRegistrationSource(source: String): String {
-        if (!source.contains("BrewingRecipeRegistry.addRecipe(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("BrewingRecipeRegistry.addRecipe(")) return source
+        val recipeArguments = collectLegacyBrewingRecipeAddRecipeArguments(source)
+        if (recipeArguments.isEmpty()) return source
         var result = source
-        result = removeImport(result, "net.neoforged.neoforge.common.brewing.BrewingRecipeRegistry")
-        result = addImportIfMissing(result, "net.neoforged.neoforge.event.brewing.RegisterBrewingRecipesEvent")
+        result = removeExecutableImport(result, "net.neoforged.neoforge.common.brewing.BrewingRecipeRegistry")
+        result = addExecutableImportIfMissing(result, "net.neoforged.neoforge.event.brewing.RegisterBrewingRecipesEvent")
 
-        result = result.replace("registerBrewingRecipes(event);", "")
+        result = replaceExecutableRegex(result, Regex("""(?m)^[ \t]*registerBrewingRecipes\s*\([^;\r\n]*\)\s*;\s*\r?\n?""")) { "" }
+        val migratedRecipes = recipeArguments.joinToString("\n") { args ->
+            "        event.getBuilder().addRecipe($args);"
+        }
         val migratedMethod = """
             @SubscribeEvent
             public void registerBrewingRecipes(final RegisterBrewingRecipesEvent event) {
-                event.getBuilder().addRecipe(Ingredient.of(ItemRegister.HOT_WATER_BOTTLE.get()), Ingredient.of(Items.GUNPOWDER), ItemRegister.SPLASH_HOT_WATER_BOTTLE.get().getDefaultInstance());
-                event.getBuilder().addRecipe(Ingredient.of(ItemRegister.HONEY_BATH_BOTTLE.get()), Ingredient.of(Items.GUNPOWDER), ItemRegister.SPLASH_HONEY_BATH_BOTTLE.get().getDefaultInstance());
-                event.getBuilder().addRecipe(Ingredient.of(ItemRegister.MILK_BATH_BOTTLE.get()), Ingredient.of(Items.GUNPOWDER), ItemRegister.SPLASH_MILK_BATH_BOTTLE.get().getDefaultInstance());
-                event.getBuilder().addRecipe(Ingredient.of(ItemRegister.HERBAL_BATH_BOTTLE.get()), Ingredient.of(Items.GUNPOWDER), ItemRegister.SPLASH_HERBAL_BATH_BOTTLE.get().getDefaultInstance());
-                event.getBuilder().addRecipe(Ingredient.of(ItemRegister.PEONY_BATH_BOTTLE.get()), Ingredient.of(Items.GUNPOWDER), ItemRegister.SPLASH_PEONY_BATH_BOTTLE.get().getDefaultInstance());
-                event.getBuilder().addRecipe(Ingredient.of(ItemRegister.ROSE_BATH_BOTTLE.get()), Ingredient.of(Items.GUNPOWDER), ItemRegister.SPLASH_ROSE_BATH_BOTTLE.get().getDefaultInstance());
-                event.getBuilder().addRecipe(new CustomFluidBrewingRecipe());
+$migratedRecipes
             }
         """.trimIndent()
         result = replaceMethodBody(result, "registerBrewingRecipes", migratedMethod)
         result = Regex("""(?s)\n\s*/\*\s*@SubscribeEvent\s+public\s+void\s+onBrewingRecipeRegister.*?\*/""")
             .replace(result, "")
         return result
+    }
+
+    private fun collectLegacyBrewingRecipeAddRecipeArguments(source: String): List<String> {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val token = "BrewingRecipeRegistry.addRecipe("
+        val arguments = mutableListOf<String>()
+        var cursor = 0
+        while (true) {
+            val tokenIndex = executableCode.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + token.length - 1
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            arguments += source.substring(openParen + 1, closeParen).trim()
+            cursor = closeParen + 1
+        }
+        return arguments
     }
 
     private fun migrateVanilla121ApiSource(

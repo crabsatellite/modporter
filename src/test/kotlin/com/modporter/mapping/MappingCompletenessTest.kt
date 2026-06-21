@@ -3338,6 +3338,46 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `brewing recipe migration derives event recipes from executable source calls`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateBrewingRecipeRegistrationSource")
+        assertTrue(start >= 0, "migrateBrewingRecipeRegistrationSource is missing")
+        val end = source.indexOf("private fun migrateVanilla121ApiSource", start + 1)
+        assertTrue(end > start, "migrateBrewingRecipeRegistrationSource boundary is missing")
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "HotBath hot water bottle" to "HOT_WATER_BOTTLE",
+            "HotBath honey bottle" to "HONEY_BATH_BOTTLE",
+            "HotBath milk bottle" to "MILK_BATH_BOTTLE",
+            "HotBath herbal bottle" to "HERBAL_BATH_BOTTLE",
+            "HotBath peony bottle" to "PEONY_BATH_BOTTLE",
+            "HotBath rose bottle" to "ROSE_BATH_BOTTLE",
+            "hardcoded custom fluid recipe" to "new CustomFluidBrewingRecipe()",
+            "fixed setup call removal" to "result.replace(\"registerBrewingRecipes(event);\""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val recipeArguments = collectLegacyBrewingRecipeAddRecipeArguments(source)") &&
+                body.contains("event.getBuilder().addRecipe(${'$'}args);") &&
+                body.contains("replaceExecutableRegex(result, Regex") &&
+                body.contains("removeExecutableImport(result, \"net.neoforged.neoforge.common.brewing.BrewingRecipeRegistry\")") &&
+                body.contains("addExecutableImportIfMissing(result, \"net.neoforged.neoforge.event.brewing.RegisterBrewingRecipesEvent\")") &&
+                body.contains("findMatchingParen(executableCode, openParen)"),
+            "Brewing migration must derive event builder recipes from executable BrewingRecipeRegistry.addRecipe calls"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Brewing migration must not retain mod-specific recipe names or fixed setup-call rewrites: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy registry utility migrations use executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
