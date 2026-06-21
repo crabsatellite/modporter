@@ -5219,6 +5219,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `registry object reflection migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyRegistryObjectReflection")
+        assertTrue(start >= 0, "migrateLegacyRegistryObjectReflection is missing")
+        val end = source.indexOf("private fun payloadPathName", start + 1)
+        assertTrue(end > start, "migrateLegacyRegistryObjectReflection boundary is missing")
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw RegistryObject.class prefilter" to """source.contains("RegistryObject.class")""",
+            "raw RegistryObject.class replacement" to """source.replace("RegistryObject.class", "DeferredHolder.class")""",
+            "raw RegistryObject fields replacement" to """source.replace("RegistryObject fields", "DeferredHolder fields")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("RegistryObject.class")""") &&
+                body.contains("replaceExecutableRegex(source, Regex") &&
+                body.contains("val maskedResult = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("executableSlice.trimStart().startsWith(\"return\")") &&
+                body.contains("applyStringEdits(result, messageEdits)"),
+            "RegistryObject reflection migration must rewrite class literals and paired return messages with executable evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "RegistryObject reflection migration must not rewrite comments or arbitrary strings: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy event bus post migration uses executable call and cancellation evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

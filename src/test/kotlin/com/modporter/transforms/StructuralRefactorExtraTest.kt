@@ -10775,6 +10775,15 @@ class StructuralRefactorExtraTest {
             package com.example;
 
             public class BlockItemsTest {
+                private static final String DOC = "RegistryObject.class has RegistryObject fields";
+                /*
+                boolean docs(java.lang.reflect.Field f) {
+                    return RegistryObject.class.isAssignableFrom(f.getType());
+                }
+                String docMessage() {
+                    return "BlockItemRegistry has no RegistryObject fields";
+                }
+                */
                 boolean isRegistryField(java.lang.reflect.Field f) {
                     return RegistryObject.class.isAssignableFrom(f.getType());
                 }
@@ -10882,6 +10891,11 @@ class StructuralRefactorExtraTest {
         assertTrue(!crops.contains(", false)"))
         assertTrue(blockItems.contains("DeferredHolder.class.isAssignableFrom(f.getType())"))
         assertTrue(blockItems.contains("BlockItemRegistry has no DeferredHolder fields"))
+        assertTrue(blockItems.contains("""private static final String DOC = "RegistryObject.class has RegistryObject fields";"""))
+        val blockItemsComment = blockItems.substringAfter("/*").substringBefore("*/")
+        assertTrue(blockItemsComment.contains("RegistryObject.class.isAssignableFrom(f.getType())"))
+        assertTrue(blockItemsComment.contains("BlockItemRegistry has no RegistryObject fields"))
+        assertFalse(blockItemsComment.contains("DeferredHolder.class"))
         assertTrue(!specialItems.contains("import net.minecraft.core.component.DataComponents;"))
         assertTrue(specialItems.contains("ItemStack stack = new ItemStack(ItemRegistry.HYDRA_RAMEN.get());"))
         assertTrue(specialItems.contains("FoodProperties food = stack.getFoodProperties(null);"))

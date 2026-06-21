@@ -34733,10 +34733,21 @@ $indent}"""
     }
 
     private fun migrateLegacyRegistryObjectReflection(source: String): String {
-        if (!source.contains("RegistryObject.class")) return source
-        return source
-            .replace("RegistryObject.class", "DeferredHolder.class")
-            .replace("RegistryObject fields", "DeferredHolder fields")
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("RegistryObject.class")) return source
+        var result = replaceExecutableRegex(source, Regex("""\bRegistryObject\.class\b""")) {
+            "DeferredHolder.class"
+        }
+        val maskedResult = maskJavaCommentsAndLiterals(result)
+        val messageEdits = Regex("""return\s+"([^"\\]*(?:\\.[^"\\]*)*)RegistryObject fields([^"\\]*(?:\\.[^"\\]*)*)"\s*;""")
+            .findAll(result)
+            .mapNotNull { match ->
+                val executableSlice = maskedResult.substring(match.range)
+                if (!executableSlice.trimStart().startsWith("return")) return@mapNotNull null
+                match.range to match.value.replace("RegistryObject fields", "DeferredHolder fields")
+            }
+            .toList()
+        return applyStringEdits(result, messageEdits)
     }
 
     private fun payloadPathName(className: String): String {
