@@ -3295,6 +3295,55 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy registry utility migrations use executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val lazyStart = source.indexOf("private fun migrateLegacyLazyRegistryCodecs")
+        assertTrue(lazyStart >= 0, "migrateLegacyLazyRegistryCodecs is missing")
+        val delegateStart = source.indexOf("private fun migrateLegacyDeferredHolderDelegateAccessors", lazyStart + 1)
+        assertTrue(delegateStart > lazyStart, "migrateLegacyLazyRegistryCodecs boundary is missing")
+        val registryStart = source.indexOf("private fun migrateLegacyRegistryObjectMethodReferences")
+        assertTrue(registryStart >= 0, "migrateLegacyRegistryObjectMethodReferences is missing")
+        val registryEnd = source.indexOf("private fun migrateDeferredHolderCollectionVariance", registryStart + 1)
+        assertTrue(registryEnd > registryStart, "migrateLegacyRegistryObjectMethodReferences boundary is missing")
+        val lazyBody = source.substring(lazyStart, delegateStart)
+        val registryBody = source.substring(registryStart, registryEnd)
+        val inspectedBody = lazyBody + registryBody
+        val offenders = listOf(
+            "raw ExtraCodecs prefilter" to "source.contains(\"ExtraCodecs.lazyInitializedCodec(\")",
+            "raw lazy codec regex replacement" to ".replace(source) { match -> match.groupValues[1] }",
+            "raw ExtraCodecs import check" to "result.contains(\"ExtraCodecs.\")",
+            "raw RegistryObject prefilter" to "source.contains(\"RegistryObject::get\")",
+            "raw RegistryObject method reference replacement" to "source.replace(\"RegistryObject::get\"",
+            "raw RegistryObject import check" to "result.contains(\"RegistryObject\")"
+        )
+            .filter { (_, marker) -> inspectedBody.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            lazyBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                lazyBody.contains("replaceExecutableJavaRegex(source") &&
+                lazyBody.contains("maskJavaCommentsAndLiterals(result)") &&
+                lazyBody.contains("removeExecutableImport(result, \"net.minecraft.util.ExtraCodecs\")"),
+            "Legacy lazy registry codec migration must rewrite and clean imports using executable Java evidence"
+        )
+        assertTrue(
+            registryBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                registryBody.contains("replaceExecutableJavaRegex(source") &&
+                registryBody.contains("addExecutableImportIfMissing(result, \"net.neoforged.neoforge.registries.DeferredHolder\")") &&
+                registryBody.contains("maskJavaCommentsAndLiterals(result)") &&
+                registryBody.contains("removeExecutableImport(result, \"net.neoforged.neoforge.registries.RegistryObject\")"),
+            "Legacy RegistryObject method reference migration must rewrite and clean imports using executable Java evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy registry utility migrations must not use raw-source evidence or replacements: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy holder accessor migrations use executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

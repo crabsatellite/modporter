@@ -26754,12 +26754,15 @@ public $className(Properties $propertiesName, WoodType $typeName) {
     }
 
     private fun migrateLegacyLazyRegistryCodecs(source: String): String {
-        if (!source.contains("ExtraCodecs.lazyInitializedCodec(") || !source.contains(".byNameCodec()")) return source
-        var result = Regex(
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("ExtraCodecs.lazyInitializedCodec(") || !executableCode.contains(".byNameCodec()")) return source
+        var result = replaceExecutableJavaRegex(source, Regex(
             """ExtraCodecs\.lazyInitializedCodec\(\s*\(\s*\)\s*->\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.byNameCodec\(\))\s*\)"""
-        ).replace(source) { match -> match.groupValues[1] }
-        if (!result.contains("ExtraCodecs.")) {
-            result = removeImport(result, "net.minecraft.util.ExtraCodecs")
+        )) { match ->
+            match.groupValues[1]
+        }
+        if (!maskJavaCommentsAndLiterals(result).contains("ExtraCodecs.")) {
+            result = removeExecutableImport(result, "net.minecraft.util.ExtraCodecs")
         }
         return result
     }
@@ -26773,12 +26776,15 @@ public $className(Properties $propertiesName, WoodType $typeName) {
     }
 
     private fun migrateLegacyRegistryObjectMethodReferences(source: String): String {
-        if (!source.contains("RegistryObject::get")) return source
-        var result = source.replace("RegistryObject::get", "DeferredHolder::get")
-        result = addImportIfMissing(result, "net.neoforged.neoforge.registries.DeferredHolder")
-        if (!result.contains("RegistryObject")) {
-            result = removeImport(result, "net.neoforged.neoforge.registries.RegistryObject")
-            result = removeImport(result, "net.minecraftforge.registries.RegistryObject")
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("RegistryObject::get")) return source
+        var result = replaceExecutableJavaRegex(source, Regex("""\bRegistryObject::get\b""")) {
+            "DeferredHolder::get"
+        }
+        result = addExecutableImportIfMissing(result, "net.neoforged.neoforge.registries.DeferredHolder")
+        if (!Regex("""\bRegistryObject\b""").containsMatchIn(maskJavaCommentsAndLiterals(result))) {
+            result = removeExecutableImport(result, "net.neoforged.neoforge.registries.RegistryObject")
+            result = removeExecutableImport(result, "net.minecraftforge.registries.RegistryObject")
         }
         return result
     }

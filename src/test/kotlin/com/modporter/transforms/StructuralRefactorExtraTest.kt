@@ -11294,6 +11294,49 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy registry utility rewrites ignore comments and strings`() {
+        val projectDir = createFile("LegacyRegistryUtilitySurface.java", """
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.core.Registry;
+            import net.minecraft.util.ExtraCodecs;
+            import net.neoforged.neoforge.registries.RegistryObject;
+
+            public class LegacyRegistryUtilitySurface {
+                private static final String DOC = "ExtraCodecs.lazyInitializedCodec(() -> REGISTRY.byNameCodec()) RegistryObject::get";
+
+                /*
+                public static final Codec<Thing> COMMENT_CODEC = ExtraCodecs.lazyInitializedCodec(() -> REGISTRY.byNameCodec());
+
+                public Object comment(java.util.stream.Stream<RegistryObject<String>> stream) {
+                    return stream.map(RegistryObject::get);
+                }
+                */
+                public static final Registry<Thing> REGISTRY = null;
+                public static final Codec<Thing> CODEC = ExtraCodecs.lazyInitializedCodec(() -> REGISTRY.byNameCodec());
+
+                public Object real(java.util.stream.Stream<RegistryObject<String>> stream) {
+                    return stream.map(RegistryObject::get);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = projectDir.resolve("src/main/java/com/example/LegacyRegistryUtilitySurface.java").readText()
+        assertTrue(migrated.contains("public static final Codec<Thing> CODEC = REGISTRY.byNameCodec();"), migrated)
+        assertTrue(migrated.contains("return stream.map(DeferredHolder::get);"), migrated)
+        assertTrue(migrated.contains("import net.neoforged.neoforge.registries.DeferredHolder;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.util.ExtraCodecs;"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "ExtraCodecs.lazyInitializedCodec(() -> REGISTRY.byNameCodec()) RegistryObject::get";"""), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("COMMENT_CODEC = ExtraCodecs.lazyInitializedCodec(() -> REGISTRY.byNameCodec())"), migrated)
+        assertTrue(commentBlock.contains("return stream.map(RegistryObject::get);"), migrated)
+        assertFalse(commentBlock.contains("DeferredHolder::get"), migrated)
+    }
+
+    @Test
     fun `migrates block entity fluid capability override to RegisterCapabilitiesEvent`() {
         val projectDir = createFile("ExampleMod.java", """
             package com.example;
