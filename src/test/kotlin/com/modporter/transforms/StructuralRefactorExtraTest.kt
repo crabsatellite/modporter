@@ -13597,6 +13597,81 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `nitrogen recipe builder migration requires named serializer evidence`() {
+        val recipeDir = tempDir.resolve("src/main/java/com/example/recipe/recipes/block")
+        val serializerDir = tempDir.resolve("src/main/java/com/example/recipe/serializer")
+        val builderDir = tempDir.resolve("src/main/java/com/example/recipe/builder")
+        recipeDir.createDirectories()
+        serializerDir.createDirectories()
+        builderDir.createDirectories()
+
+        recipeDir.resolve("AbstractBiomeParameterRecipe.java").writeText("""
+            package com.example.recipe.recipes.block;
+
+            public abstract class AbstractBiomeParameterRecipe {
+            }
+        """.trimIndent())
+        serializerDir.resolve("BiomeParameterRecipeSerializer.java").writeText("""
+            package com.example.recipe.serializer;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.aetherteam.nitrogen.recipe.serializer.BlockStateRecipeSerializer;
+            import com.example.recipe.recipes.block.AbstractBiomeParameterRecipe;
+            import com.mojang.datafixers.util.Either;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.biome.Biome;
+
+            import java.util.Optional;
+
+            public class BiomeParameterRecipeSerializer<T extends AbstractBiomeParameterRecipe> extends BlockStateRecipeSerializer<T> {
+                public interface Factory<T extends AbstractBiomeParameterRecipe> {
+                    T create(Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome, BlockStateIngredient ingredient, BlockPropertyPair result, Optional<ResourceLocation> function);
+                }
+            }
+        """.trimIndent())
+        builderDir.resolve("MismatchedRecipeBuilder.java").writeText("""
+            package com.example.recipe.builder;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import com.aetherteam.nitrogen.recipe.builder.BlockStateRecipeBuilder;
+            import com.aetherteam.nitrogen.recipe.serializer.BlockStateRecipeSerializer;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.biome.Biome;
+
+            public class MismatchedRecipeBuilder extends BlockStateRecipeBuilder {
+                private final ResourceKey<Biome> biomeKey;
+                private final TagKey<Biome> biomeTag;
+
+                public MismatchedRecipeBuilder(BlockPropertyPair result, BlockStateIngredient ingredient, ResourceKey<Biome> biomeKey, TagKey<Biome> biomeTag, BlockStateRecipeSerializer<?> serializer) {
+                    super(result, ingredient, serializer);
+                    this.biomeKey = biomeKey;
+                    this.biomeTag = biomeTag;
+                }
+
+                public static class Result extends BlockStateRecipeBuilder.Result {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val builder = builderDir.resolve("MismatchedRecipeBuilder.java").readText()
+
+        assertTrue(
+            result.changes.none { it.ruleId == "struct-nitrogen-recipe-builder-121" },
+            "Mismatched builder/serializer names must not be joined by global uniqueness: ${result.changes}"
+        )
+        assertTrue(builder.contains("public class MismatchedRecipeBuilder extends BlockStateRecipeBuilder"), builder)
+        assertTrue(builder.contains("public static class Result extends BlockStateRecipeBuilder.Result"), builder)
+        assertFalse(builder.contains("implements RecipeBuilder"), builder)
+        assertFalse(builder.contains("BiomeParameterRecipeSerializer.Factory<?>"), builder)
+    }
+
+    @Test
     fun `migrates legacy item tag enchantment and mob spawn equipment APIs`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

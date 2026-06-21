@@ -2773,6 +2773,31 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `nitrogen recipe builder migration does not bind serializer by global uniqueness`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateNitrogenRecipeBuilders")
+        assertTrue(start >= 0, "migrateNitrogenRecipeBuilders is missing")
+        val end = source.indexOf("private fun collectNitrogenRecipeSerializers", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+
+        assertTrue(
+            body.contains("val expectedSerializerName = type.className.removeSuffix(\"Builder\") + \"Serializer\"") &&
+                body.contains("val serializer = serializerByName[expectedSerializerName]") &&
+                body.contains("?: continue"),
+            "Nitrogen recipe builder migration must require a serializer name derived from the builder type"
+        )
+        assertTrue(
+            !body.contains("serializers.singleOrNull()"),
+            "Nitrogen recipe builder migration must not bind unmatched builders to a globally unique serializer"
+        )
+    }
+
+    @Test
     fun `custom enchantment data migrations do not resolve references by qualified tail fallback`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

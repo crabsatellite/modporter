@@ -40453,7 +40453,6 @@ $writeLines
 
             val expectedSerializerName = type.className.removeSuffix("Builder") + "Serializer"
             val serializer = serializerByName[expectedSerializerName]
-                ?: serializers.singleOrNull()
                 ?: continue
             val recipeType = typeByName[serializer.recipeClassName]?.singleOrNull() ?: continue
             val migrated = nitrogenBiomeParameterRecipeBuilderSource(type, recipeType, serializer.type)
