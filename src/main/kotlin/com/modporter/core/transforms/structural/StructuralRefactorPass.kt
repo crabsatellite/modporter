@@ -17877,14 +17877,7 @@ $migratedRecipes
                 "PoseStack $stack = new PoseStack();\n            $stack.mulPose(RenderSystem.getModelViewMatrix());"
             }
 
-        val bufferBuilderVariables = Regex("""\bBufferBuilder\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
-            .map { it.groupValues[1] }
-            .toList()
-        val firstBufferBuilder = bufferBuilderVariables.firstOrNull()
-        if (firstBufferBuilder != null && "buffer" !in bufferBuilderVariables) {
-            result = result.replace("buffer.buildOrThrow()", "$firstBufferBuilder.buildOrThrow()")
-        }
+        result = migrateImplicitBufferBuildOrThrowCalls(result)
         if (result.contains("BufferUploader.drawWithShader(")) {
             needsBufferUploader = true
         }
@@ -18068,6 +18061,48 @@ $migratedRecipes
                 "$entity)"
         }
         return result
+    }
+
+    private fun migrateImplicitBufferBuildOrThrowCalls(source: String): String {
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        val matches = Regex("""\bbuffer\.buildOrThrow\(\)""").findAll(executableSource).toList()
+        if (matches.isEmpty()) return source
+
+        val methods = javaMethodRanges(source)
+        val hasBufferField = hasBufferBuilderBufferDeclarationOutsideMethods(executableSource, methods)
+        val replacements = matches.mapNotNull { match ->
+            val method = methods.singleOrNull { match.range.first in it.range }
+                ?: error("Cannot derive BufferBuilder for buffer.buildOrThrow(): call must be inside one Java method")
+            val methodText = executableSource.substring(method.range)
+            val bufferVariables = Regex("""\bBufferBuilder\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(methodText)
+                .map { it.groupValues[1] }
+                .distinct()
+                .toList()
+            if ("buffer" in bufferVariables || hasBufferField) return@mapNotNull null
+            val replacementBuffer = bufferVariables
+                .filter { it != "buffer" }
+                .singleOrNull()
+                ?: error("Cannot derive BufferBuilder for buffer.buildOrThrow(): method must declare exactly one non-buffer BufferBuilder")
+            match.range to "$replacementBuffer.buildOrThrow()"
+        }
+        if (replacements.isEmpty()) return source
+
+        var result = source
+        replacements.asReversed().forEach { (range, replacement) ->
+            result = result.substring(0, range.first) + replacement + result.substring(range.last + 1)
+        }
+        return result
+    }
+
+    private fun hasBufferBuilderBufferDeclarationOutsideMethods(
+        executableSource: String,
+        methods: List<JavaMethodRange>
+    ): Boolean {
+        val methodRanges = methods.map { it.range }
+        return Regex("""\bBufferBuilder\s+buffer\b""")
+            .findAll(executableSource)
+            .any { match -> methodRanges.none { match.range.first in it } }
     }
 
     private fun migrateLegacyTesselatorSource(source: String): String {

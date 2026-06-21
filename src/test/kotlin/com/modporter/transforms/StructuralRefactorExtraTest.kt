@@ -27484,6 +27484,66 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `implicit buffer buildOrThrow migration rejects ambiguous buffer variables`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AmbiguousBufferBuildSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+            import com.mojang.blaze3d.vertex.BufferUploader;
+            import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+            import com.mojang.blaze3d.vertex.Tesselator;
+            import com.mojang.blaze3d.vertex.VertexFormat;
+
+            public class AmbiguousBufferBuildSurface {
+                private void render() {
+                    BufferBuilder first = Tesselator.getInstance().begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION);
+                    BufferBuilder second = Tesselator.getInstance().begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
+                    BufferUploader.drawWithShader(buffer.buildOrThrow());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("AmbiguousBufferBuildSurface.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive BufferBuilder for buffer.buildOrThrow()") },
+            "Expected buffer build hard gate, got: ${result.errors}"
+        )
+        assertTrue(source.contains("BufferUploader.drawWithShader(buffer.buildOrThrow());"), source)
+        assertFalse(source.contains("BufferUploader.drawWithShader(first.buildOrThrow());"), source)
+    }
+
+    @Test
+    fun `implicit buffer buildOrThrow migration preserves declared buffer field`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DeclaredBufferBuildSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+            import com.mojang.blaze3d.vertex.BufferUploader;
+
+            public class DeclaredBufferBuildSurface {
+                private BufferBuilder buffer;
+
+                private void render() {
+                    BufferUploader.drawWithShader(buffer.buildOrThrow());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("DeclaredBufferBuildSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(source.contains("private BufferBuilder buffer;"), source)
+        assertTrue(source.contains("BufferUploader.drawWithShader(buffer.buildOrThrow());"), source)
+    }
+
+    @Test
     fun `migrates legacy tooltip entity data loot and enchantment APIs by source shape`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

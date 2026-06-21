@@ -6176,6 +6176,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `implicit buffer buildOrThrow migration uses enclosing method evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyClientRenderingSource")
+        assertTrue(start >= 0, "migrateLegacyClientRenderingSource is missing")
+        val end = source.indexOf("private fun migrateLegacyTesselatorSource", start + 1)
+        assertTrue(end > start, "migrateLegacyClientRenderingSource boundary is missing")
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "first BufferBuilder fallback" to "firstBufferBuilder",
+            "whole file buffer replacement" to """result.replace("buffer.buildOrThrow()"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("migrateImplicitBufferBuildOrThrowCalls(result)") &&
+                source.contains("private fun migrateImplicitBufferBuildOrThrowCalls") &&
+                source.contains("hasBufferBuilderBufferDeclarationOutsideMethods(executableSource, methods)") &&
+                source.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                source.contains("val method = methods.singleOrNull { match.range.first in it.range }") &&
+                source.contains("method must declare exactly one non-buffer BufferBuilder"),
+            "Implicit buffer.buildOrThrow migration must use executable enclosing-method BufferBuilder evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Implicit buffer.buildOrThrow migration must not use whole-file first BufferBuilder fallback: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy tesselator end migration requires active buffer evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
