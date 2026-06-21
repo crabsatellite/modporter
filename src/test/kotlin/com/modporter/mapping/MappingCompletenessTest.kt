@@ -3675,6 +3675,47 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy item constructor migration uses executable constructor and superclass evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyItemConstructorsAndProperties")
+        assertTrue(start >= 0, "migrateLegacyItemConstructorsAndProperties is missing")
+        val end = source.indexOf("private fun migrateLegacyTierLevelSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw SwordItem source prefilter" to """source.contains("new SwordItem(")""",
+            "raw meat source prefilter" to """source.contains(".meat()")""",
+            "raw meat replacement" to """source.replace(".meat()", "")""",
+            "raw BowlFoodItem replacement" to """result.replace("new BowlFoodItem(", "new Item(")""",
+            "raw SwordItem constructor rewrite" to """rewriteJavaNew(result, "SwordItem")""",
+            "raw SwordItem superclass check" to "Regex(\"\"\"\\bextends\\s+SwordItem\\b\"\"\").containsMatchIn(result)",
+            "raw super constructor rewrite" to """rewriteSuperConstructorCalls(result)"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableSource.contains("new SwordItem(")""") &&
+                body.contains("replaceExecutableJavaRegex(source, Regex(\"\"\"\\.meat\\(\\)\"\"\"))") &&
+                body.contains("replaceExecutableJavaRegex(result, Regex(\"\"\"\\bnew\\s+BowlFoodItem") &&
+                body.contains("""rewriteExecutableJavaNew(result, "SwordItem")""") &&
+                body.contains("containsMatchIn(maskJavaCommentsAndLiterals(result))") &&
+                body.contains("rewriteExecutableSuperConstructorCalls(result)") &&
+                source.contains("private fun rewriteExecutableSuperConstructorCalls("),
+            "Legacy item constructor migration must locate item constructors and tool superclass calls in executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy item constructor migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `map codec serialization migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

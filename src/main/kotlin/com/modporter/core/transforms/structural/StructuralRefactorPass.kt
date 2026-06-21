@@ -28173,24 +28173,27 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
     }
 
     private fun migrateLegacyItemConstructorsAndProperties(source: String): String {
-        if (!source.contains("new SwordItem(") &&
-            !source.contains("super(") &&
-            !source.contains("new RecordItem(") &&
-            !source.contains(".meat()") &&
-            !source.contains("new BowlFoodItem(")
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        if (!executableSource.contains("new SwordItem(") &&
+            !executableSource.contains("super(") &&
+            !executableSource.contains("new RecordItem(") &&
+            !executableSource.contains(".meat()") &&
+            !executableSource.contains("new BowlFoodItem(")
         ) {
             return source
         }
-        var result = source.replace(".meat()", "")
-        if (result.contains("new BowlFoodItem(")) {
-            result = result.replace("new BowlFoodItem(", "new Item(")
-            if (!result.contains("BowlFoodItem")) {
+        var result = replaceExecutableJavaRegex(source, Regex("""\.meat\(\)""")) { "" }
+        if (maskJavaCommentsAndLiterals(result).contains("new BowlFoodItem(")) {
+            result = replaceExecutableJavaRegex(result, Regex("""\bnew\s+BowlFoodItem\s*\(""")) {
+                "new Item("
+            }
+            if (!maskJavaCommentsAndLiterals(result).contains("BowlFoodItem")) {
                 result = removeImport(result, "net.minecraft.world.item.BowlFoodItem")
             }
             result = addImportIfMissing(result, "net.minecraft.world.item.Item")
         }
-        result = rewriteJavaNew(result, "SwordItem") { args ->
-            if (args.size != 4) return@rewriteJavaNew null
+        result = rewriteExecutableJavaNew(result, "SwordItem") { args ->
+            if (args.size != 4) return@rewriteExecutableJavaNew null
             val tier = args[0].trim()
             val damage = args[1].trim()
             val speed = args[2].trim()
@@ -28198,9 +28201,9 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
             "new SwordItem($tier, $properties.attributes(SwordItem.createAttributes($tier, $damage, $speed)))"
         }
         result = migrateLegacyRecordItemRegistrations(result)
-        if (Regex("""\bextends\s+SwordItem\b""").containsMatchIn(result)) {
-            result = rewriteSuperConstructorCalls(result) { args ->
-                if (args.size != 4) return@rewriteSuperConstructorCalls null
+        if (Regex("""\bextends\s+SwordItem\b""").containsMatchIn(maskJavaCommentsAndLiterals(result))) {
+            result = rewriteExecutableSuperConstructorCalls(result) { args ->
+                if (args.size != 4) return@rewriteExecutableSuperConstructorCalls null
                 val tier = args[0].trim()
                 val damage = args[1].trim()
                 val speed = args[2].trim()
@@ -28208,9 +28211,9 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
                 "super($tier, $properties.attributes(SwordItem.createAttributes($tier, $damage, $speed)))"
             }
         }
-        if (Regex("""\bextends\s+(?:PickaxeItem|AxeItem|HoeItem|ShovelItem)\b""").containsMatchIn(result)) {
-            result = rewriteSuperConstructorCalls(result) { args ->
-                if (args.size != 4) return@rewriteSuperConstructorCalls null
+        if (Regex("""\bextends\s+(?:PickaxeItem|AxeItem|HoeItem|ShovelItem)\b""").containsMatchIn(maskJavaCommentsAndLiterals(result))) {
+            result = rewriteExecutableSuperConstructorCalls(result) { args ->
+                if (args.size != 4) return@rewriteExecutableSuperConstructorCalls null
                 val tier = args[0].trim()
                 val damage = args[1].trim()
                 val speed = args[2].trim()
@@ -38697,6 +38700,39 @@ $encodeLines
             }
             val openParen = tokenIndex + token.length - 1
             val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            val replacement = transform(args)
+            if (replacement == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
+            cursor = tokenIndex + replacement.length
+        }
+        return result
+    }
+
+    private fun rewriteExecutableSuperConstructorCalls(
+        source: String,
+        transform: (args: List<String>) -> String?
+    ): String {
+        var result = source
+        var cursor = 0
+        val token = "super("
+        while (true) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenIndex = executableCode.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            if (tokenIndex > 0 && (executableCode[tokenIndex - 1].isLetterOrDigit() || executableCode[tokenIndex - 1] == '_' || executableCode[tokenIndex - 1] == '.')) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val openParen = tokenIndex + token.length - 1
+            val closeParen = findMatchingParen(executableCode, openParen)
             if (closeParen < 0) {
                 cursor = tokenIndex + token.length
                 continue

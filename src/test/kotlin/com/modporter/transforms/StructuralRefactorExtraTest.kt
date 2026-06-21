@@ -22776,6 +22776,54 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy item constructor migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val sourceFile = srcDir.resolve("ItemConstructorDocs.java")
+        sourceFile.writeText("""
+            package com.example;
+
+            public class ItemConstructorDocs {
+                /*
+                public Object sword(Tier tier) {
+                    return new SwordItem(tier, 3, -2.4F, new Item.Properties());
+                }
+
+                public class DocumentedSword extends SwordItem {
+                    public DocumentedSword(Tier tier, Item.Properties properties) {
+                        super(tier, 3, -2.4F, properties);
+                    }
+                }
+
+                public class DocumentedPickaxe extends PickaxeItem {
+                    public DocumentedPickaxe(Tier tier, Item.Properties properties) {
+                        super(tier, 1, -2.8F, properties);
+                    }
+                }
+                */
+                private static final String SWORD_DOC = "new SwordItem(tier, 3, -2.4F, new Item.Properties())";
+                private static final String BOWL_DOC = "new BowlFoodItem(new Item.Properties().food(new FoodProperties.Builder().nutrition(1).meat().build()))";
+                private static final String SUPER_DOC = "class DocSword extends SwordItem { DocSword(Tier tier, Item.Properties properties) { super(tier, 3, -2.4F, properties); } }";
+
+                public int keep() {
+                    return SWORD_DOC.length() + BOWL_DOC.length() + SUPER_DOC.length();
+                }
+            }
+        """.trimIndent())
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = sourceFile.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertEquals(0, result.changeCount)
+        assertEquals(original, transformed)
+        assertFalse(transformed.contains("SwordItem.createAttributes"), transformed)
+        assertTrue(transformed.contains(".meat()"), transformed)
+        assertTrue(transformed.contains("new BowlFoodItem("), transformed)
+    }
+
+    @Test
     fun `legacy vanilla block constructor migration ignores comments and string literals`() {
         val projectDir = createFile("BlockConstructorDocs.java", """
             package com.example;
