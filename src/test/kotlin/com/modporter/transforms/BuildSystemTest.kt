@@ -2978,6 +2978,33 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `title screen update indicator cleanup ignores comments and strings`() {
+        val projectDir = tempDir.resolve("title-screen-update-indicator-comment")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val notesFile = srcDir.resolve("TitleScreenNotes.java")
+        notesFile.writeText("""
+            package com.example;
+
+            public class TitleScreenNotes {
+                String note = "class Removed extends TitleScreenModUpdateIndicator";
+
+                void describe() {
+                    // class Removed extends TitleScreenModUpdateIndicator
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val notes = notesFile.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-title-screen-update-indicator-class" })
+        assertTrue(notesFile.exists())
+        assertTrue(notes.contains("TitleScreenModUpdateIndicator"), notes)
+    }
+
+    @Test
     fun `migrates removed noParticlesOnBreak block property to AT backed helper`() {
         val projectDir = tempDir.resolve("no-particles-block-properties")
         projectDir.createDirectories()

@@ -3182,12 +3182,14 @@ config="$configName"
             removeRemovedTitleScreenAccessorCallStatements(it.readText(), removedMethods)
         }
         val updateIndicatorClasses = sources.mapNotNull { (file, source) ->
-            if (!source.contains("extends TitleScreenModUpdateIndicator")) return@mapNotNull null
-            val className = Regex("""\bclass\s+([A-Za-z_$][\w$]*)\b[\s\S]*?\bextends\s+TitleScreenModUpdateIndicator\b""")
-                .find(source)
+            val executableCode = maskJavaCommentsAndLiterals(source)
+            val className = Regex(
+                """\bclass\s+([A-Za-z_$][\w$]*)\b[\s\S]*?\bextends\s+(?:[A-Za-z_$][\w$]*\.)*TitleScreenModUpdateIndicator\b"""
+            )
+                .find(executableCode)
                 ?.groupValues
                 ?.get(1)
-                ?: file.fileName.toString().removeSuffix(".java")
+                ?: return@mapNotNull null
             file to className
         }
 

@@ -3376,6 +3376,38 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `title screen update indicator cleanup uses executable class declarations`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun removeUnusedTitleScreenUpdateIndicatorClasses")
+        assertTrue(start >= 0, "removeUnusedTitleScreenUpdateIndicatorClasses is missing")
+        val end = source.indexOf("private fun cleanupTitleScreenRemovedAccessorImports", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "java file-name owner fallback" to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "raw source inheritance sentinel" to Regex("""source\.contains\("extends TitleScreenModUpdateIndicator"\)"""),
+            "raw source class scan" to Regex("""\.find\(source\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "TitleScreen update indicator cleanup contains $label" }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains(".find(executableCode)") &&
+                body.contains("?: return@mapNotNull null"),
+            "TitleScreen update indicator cleanup must prove an executable class declaration before deleting files"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "TitleScreen update indicator cleanup must not infer owners from file names or comments/strings: $offenders"
+        )
+    }
+
+    @Test
     fun `missing mapping alias migrations do not infer owners from java file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
