@@ -12470,6 +12470,82 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `block entity capability migration hard gates unsupported provider shapes`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntityRegistry.BLOCK_ENTITIES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/UnsupportedBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import javax.annotation.Nullable;
+
+            public class UnsupportedBlockEntity extends BlockEntity {
+                public UnsupportedBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntityRegistry.UNSUPPORTED.get(), pos, state);
+                }
+
+                @Override
+                public <T> LazyOptional<T> getCapability(Capability<T> capability, @Nullable Direction side) {
+                    if (capability == Capabilities.ItemHandler.BLOCK) {
+                        return makeHandler(capability, side);
+                    }
+                    return super.getCapability(capability, side);
+                }
+
+                private <T> LazyOptional<T> makeHandler(Capability<T> capability, Direction side) {
+                    return LazyOptional.empty();
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockEntityRegistry {
+                public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = null;
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<UnsupportedBlockEntity>> UNSUPPORTED = null;
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val blockEntity = tempDir.resolve("src/main/java/com/example/UnsupportedBlockEntity.java").readText()
+
+        assertTrue(result.errors.any {
+            it.contains("Cannot migrate BlockEntity getCapability") &&
+                it.contains("Capabilities.ItemHandler.BLOCK")
+        }, result.errors.joinToString("\n"))
+        assertTrue(result.changes.none { it.ruleId == "struct-blockentity-capability-provider" })
+        assertTrue(blockEntity.contains("getCapability("), blockEntity)
+        assertTrue(blockEntity.contains("makeHandler(capability, side)"), blockEntity)
+    }
+
+    @Test
     fun `migrates sided inventory wrapper arrays to direct block entity capability providers`() {
         val projectDir = createFile("ExampleMod.java", """
             package com.example;

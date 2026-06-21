@@ -227,11 +227,10 @@ class StructuralRefactorPass : Pass {
         }
 
         // Migrate remaining source-shaped block-entity capability overrides
-        // to RegisterCapabilitiesEvent providers. This is intentionally
-        // structural: unsupported getCapability shapes are left for strict
-        // compile/runtime gates instead of generating a fallback provider.
+        // to RegisterCapabilitiesEvent providers. Candidate getCapability()
+        // shapes hard-gate when their provider expressions cannot be derived.
         try {
-            val blockEntityCapabilityChanges = migrateBlockEntityLegacyCapabilities(projectDir, dryRun)
+            val blockEntityCapabilityChanges = migrateBlockEntityLegacyCapabilities(projectDir, dryRun, errors)
             changes.addAll(blockEntityCapabilityChanges)
         } catch (e: Exception) {
             errors.add("Block entity capability migration error: ${e.message}")
@@ -7497,7 +7496,11 @@ public class DelegatingPackResources extends AbstractPackResources {
 
     private data class JavaIfBlock(val condition: String, val body: String)
 
-    private fun migrateBlockEntityLegacyCapabilities(projectDir: Path, dryRun: Boolean): List<Change> {
+    private fun migrateBlockEntityLegacyCapabilities(
+        projectDir: Path,
+        dryRun: Boolean,
+        errors: MutableList<String>
+    ): List<Change> {
         val changes = mutableListOf<Change>()
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return changes
@@ -7518,7 +7521,7 @@ public class DelegatingPackResources extends AbstractPackResources {
             }
 
             val id = """[A-Za-z_$][\w$]*"""
-            val className = Regex("""\bclass\s+($id)\s+extends\s+$id(?:\.$id)*BlockEntity\b""")
+            val className = Regex("""\bclass\s+($id)\s+extends\s+(?:$id(?:\.$id)*\.)?(?:$id)?BlockEntity\b""")
                 .find(original)
                 ?.groupValues
                 ?.get(1)
@@ -7527,8 +7530,26 @@ public class DelegatingPackResources extends AbstractPackResources {
             val registryOwner = registryRef.substringBeforeLast('.')
             val registryField = registryRef.substringAfterLast('.')
             val getCapabilityMethod = javaDeclaredMethodText(original, "getCapability") ?: continue
+            val capabilityTokens = legacyBlockEntityCapabilityTokens(getCapabilityMethod)
             val providers = extractBlockEntityLegacyCapabilityProviders(getCapabilityMethod, original)
-            if (providers.isEmpty()) continue
+            if (providers.isEmpty()) {
+                val relative = projectDir.relativize(javaFile).invariantSeparatorsPathString
+                errors.add(
+                    "Cannot migrate BlockEntity getCapability in $relative: no source-shaped provider for " +
+                        capabilityTokens.ifEmpty { listOf("Capabilities.*") }.joinToString(", ")
+                )
+                continue
+            }
+            val migratedCapabilities = providers.map { it.capabilityExpression }.toSet()
+            val unmigratedCapabilities = capabilityTokens.filterNot { it in migratedCapabilities }
+            if (unmigratedCapabilities.isNotEmpty()) {
+                val relative = projectDir.relativize(javaFile).invariantSeparatorsPathString
+                errors.add(
+                    "Cannot partially migrate BlockEntity getCapability in $relative: unsupported capability branches " +
+                        unmigratedCapabilities.joinToString(", ")
+                )
+                continue
+            }
 
             var modified = original
             val consumedFields = providers.flatMap { it.consumedLazyOptionalFields }.toSet()
@@ -7612,6 +7633,13 @@ public class DelegatingPackResources extends AbstractPackResources {
             ?.let { return "${it.groupValues[1]}.${it.groupValues[2]}" }
         return null
     }
+
+    private fun legacyBlockEntityCapabilityTokens(methodText: String): List<String> =
+        Regex("""Capabilities\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?""")
+            .findAll(methodText)
+            .map { it.value }
+            .distinct()
+            .toList()
 
     private fun extractBlockEntityLegacyCapabilityProviders(
         methodText: String,
