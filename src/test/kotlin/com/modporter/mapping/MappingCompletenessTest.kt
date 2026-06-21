@@ -4783,6 +4783,47 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `INBTSerializable holder lookup migration uses executable type body evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateINBTSerializableHolderLookupSource")
+        assertTrue(start >= 0, "migrateINBTSerializableHolderLookupSource is missing")
+        val end = source.indexOf("private fun migrateTooltipContextImportsSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw source prefilter" to body.contains("""source.contains("serializeNBT()")"""),
+            "raw implements prefilter" to body.contains("""source.contains("implements")"""),
+            "raw INBTSerializable prefilter" to body.contains("""source.contains("INBTSerializable")"""),
+            "raw regex replacement" to body.contains(".replace(result)")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""\bdeserializeNBT\s*\(\s*CompoundTag\b""") &&
+                body.contains("containsMatchIn(executableCode)") &&
+                body.contains("inbtSerializableTypeBodyRanges(source).isEmpty()") &&
+                body.contains("replaceExecutableRegex(current, pattern)") &&
+                body.contains("ranges.any { match.range.first in it }") &&
+                body.contains("private fun inbtSerializableTypeBodyRanges(source: String)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""\b(?:implements|extends)\b""") &&
+                body.contains("""\bINBTSerializable\b""") &&
+                body.contains("findMatchingBrace(executableCode, openBrace)"),
+            "INBTSerializable holder lookup migration must use executable serializable type body ranges"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "INBTSerializable holder lookup migration must not use raw whole-file source evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `mob effect holder migration scopes executable method evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

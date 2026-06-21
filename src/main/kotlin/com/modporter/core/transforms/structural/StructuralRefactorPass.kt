@@ -15245,18 +15245,46 @@ ${entries.joinToString(",\n")}
     }
 
     private fun migrateINBTSerializableHolderLookupSource(source: String): String {
-        if (!source.contains("serializeNBT()") && !source.contains("deserializeNBT(CompoundTag")) return source
-        if (!source.contains("implements") && !source.contains("INBTSerializable")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("serializeNBT()") &&
+            !Regex("""\bdeserializeNBT\s*\(\s*CompoundTag\b""").containsMatchIn(executableCode)
+        ) return source
+        if (inbtSerializableTypeBodyRanges(source).isEmpty()) return source
+
+        fun replaceInSerializableTypes(current: String, pattern: Regex, replacement: (MatchResult) -> String): String {
+            val ranges = inbtSerializableTypeBodyRanges(current)
+            if (ranges.isEmpty()) return current
+            return replaceExecutableRegex(current, pattern) { match ->
+                if (ranges.any { match.range.first in it }) replacement(match) else match.value
+            }
+        }
+
         var result = source
-        result = Regex("""\b(public|protected)\s+CompoundTag\s+serializeNBT\s*\(\s*\)""")
-            .replace(result) { match ->
-                "${match.groupValues[1]} CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider)"
-            }
-        result = Regex("""\b(public|protected)\s+void\s+deserializeNBT\s*\(\s*CompoundTag\s+([A-Za-z_$][\w$]*)\s*\)""")
-            .replace(result) { match ->
-                "${match.groupValues[1]} void deserializeNBT(net.minecraft.core.HolderLookup.Provider provider, CompoundTag ${match.groupValues[2]})"
-            }
+        result = replaceInSerializableTypes(
+            result,
+            Regex("""\b(public|protected)\s+CompoundTag\s+serializeNBT\s*\(\s*\)""")
+        ) { match ->
+            "${match.groupValues[1]} CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider)"
+        }
+        result = replaceInSerializableTypes(
+            result,
+            Regex("""\b(public|protected)\s+void\s+deserializeNBT\s*\(\s*CompoundTag\s+([A-Za-z_$][\w$]*)\s*\)""")
+        ) { match ->
+            "${match.groupValues[1]} void deserializeNBT(net.minecraft.core.HolderLookup.Provider provider, CompoundTag ${match.groupValues[2]})"
+        }
         return result
+    }
+
+    private fun inbtSerializableTypeBodyRanges(source: String): List<IntRange> {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val typePattern = Regex(
+            """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*(?:class|record|interface)\s+[A-Za-z_$][\w$]*(?:\s*<[^>{}]+>)?[^{;]*\b(?:implements|extends)\b[^{;]*\bINBTSerializable\b[^{;]*\{"""
+        )
+        return typePattern.findAll(executableCode).mapNotNull { match ->
+            val openBrace = executableCode.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) null else openBrace..closeBrace
+        }.toList()
     }
 
     private fun migrateTooltipContextImportsSource(source: String): String {

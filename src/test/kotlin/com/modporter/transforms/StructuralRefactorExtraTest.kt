@@ -4559,6 +4559,61 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `INBTSerializable holder lookup migration is scoped to executable serializable types`() {
+        val projectDir = createFile("NbtSerializableSurface.java", """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.neoforged.neoforge.common.util.INBTSerializable;
+
+            public class NbtSerializableSurface implements INBTSerializable<CompoundTag> {
+                private static final String DOC = "public CompoundTag serializeNBT() public void deserializeNBT(CompoundTag tag)";
+
+                /*
+                public CompoundTag serializeNBT() {
+                    return new CompoundTag();
+                }
+
+                public void deserializeNBT(CompoundTag tag) {
+                }
+                */
+                @Override
+                public CompoundTag serializeNBT() {
+                    return new CompoundTag();
+                }
+
+                @Override
+                public void deserializeNBT(CompoundTag tag) {
+                }
+            }
+
+            class DocumentationOnly {
+                public CompoundTag serializeNBT() {
+                    return new CompoundTag();
+                }
+
+                public void deserializeNBT(CompoundTag tag) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/NbtSerializableSurface.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-inbtserializable-holderlookup" })
+        assertTrue(migrated.contains("""private static final String DOC = "public CompoundTag serializeNBT() public void deserializeNBT(CompoundTag tag)";"""), migrated)
+        assertTrue(migrated.contains("public CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider)"), migrated)
+        assertTrue(migrated.contains("public void deserializeNBT(net.minecraft.core.HolderLookup.Provider provider, CompoundTag tag)"), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("public CompoundTag serializeNBT()"), migrated)
+        assertTrue(commentBlock.contains("public void deserializeNBT(CompoundTag tag)"), migrated)
+        val documentationOnly = migrated.substringAfter("class DocumentationOnly")
+        assertTrue(documentationOnly.contains("public CompoundTag serializeNBT()"), migrated)
+        assertTrue(documentationOnly.contains("public void deserializeNBT(CompoundTag tag)"), migrated)
+        assertFalse(documentationOnly.contains("HolderLookup.Provider"), migrated)
+    }
+
+    @Test
     fun `legacy capability facade migration rejects placeholder attachment ids`() {
         val srcDir = tempDir.resolve("src/main/java/com/example/invalid")
         srcDir.createDirectories()
