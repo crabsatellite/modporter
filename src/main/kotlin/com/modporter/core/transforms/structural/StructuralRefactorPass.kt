@@ -15733,15 +15733,16 @@ ${indent}}
     }
 
     private fun migrateColoredCutoutModelCopyLayerRenderSource(source: String): String {
-        if (!source.contains("coloredCutoutModelCopyLayerRender(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("coloredCutoutModelCopyLayerRender(")) return source
         var changed = false
-        val result = rewriteJavaInvocationArguments(source, "coloredCutoutModelCopyLayerRender") { args ->
-            if (args.size != 16) return@rewriteJavaInvocationArguments null
+        val result = rewriteExecutableJavaInvocationArguments(source, "coloredCutoutModelCopyLayerRender") { args ->
+            if (args.size != 16) return@rewriteExecutableJavaInvocationArguments null
             val color = "FastColor.ARGB32.colorFromFloat(1.0F, ${args[13].trim()}, ${args[14].trim()}, ${args[15].trim()})"
             changed = true
             args.take(13) + color
         }
-        return if (changed) addImportIfMissing(result, "net.minecraft.util.FastColor") else source
+        return if (changed) addExecutableImportIfMissing(result, "net.minecraft.util.FastColor") else source
     }
 
     private fun migrateLegacyShearableSignaturesSource(source: String): String {

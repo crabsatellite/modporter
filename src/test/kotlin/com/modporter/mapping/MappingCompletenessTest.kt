@@ -3637,6 +3637,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `colored cutout layer packed color migration uses executable invocation evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateColoredCutoutModelCopyLayerRenderSource")
+        assertTrue(start >= 0, "migrateColoredCutoutModelCopyLayerRenderSource is missing")
+        val end = source.indexOf("private fun migrateLegacyShearableSignaturesSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw colored cutout prefilter" to body.contains("""source.contains("coloredCutoutModelCopyLayerRender(")"""),
+            "raw invocation rewrite" to body.contains("""rewriteJavaInvocationArguments(source, "coloredCutoutModelCopyLayerRender")"""),
+            "raw FastColor import insertion" to body.contains("""addImportIfMissing(result, "net.minecraft.util.FastColor")""")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("coloredCutoutModelCopyLayerRender(")""") &&
+                body.contains("""rewriteExecutableJavaInvocationArguments(source, "coloredCutoutModelCopyLayerRender")""") &&
+                body.contains("if (args.size != 16)") &&
+                body.contains("FastColor.ARGB32.colorFromFloat") &&
+                body.contains("""addExecutableImportIfMissing(result, "net.minecraft.util.FastColor")"""),
+            "Colored cutout layer migration must rewrite executable helper invocations before importing FastColor"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Colored cutout layer migration must not rewrite comments or strings: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy add layer skin migrations use executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

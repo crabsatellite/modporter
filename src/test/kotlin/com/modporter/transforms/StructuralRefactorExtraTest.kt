@@ -29296,6 +29296,36 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `colored cutout layer helper packed color migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ColoredLayerDocsOnly.java").writeText("""
+            package com.example;
+
+            public class ColoredLayerDocsOnly {
+                private static final String OLD_CALL = "RenderLayer.coloredCutoutModelCopyLayerRender(parent, model, texture, poseStack, buffer, packedLight, entity, limbSwing, limbSwingAmount, ageInTicks, netHeadYaw, headPitch, partialTicks, red, green, blue);";
+
+                /*
+                RenderLayer.coloredCutoutModelCopyLayerRender(parent, model, texture, poseStack, buffer, packedLight, entity, limbSwing, limbSwingAmount, ageInTicks, netHeadYaw, headPitch, partialTicks, red, green, blue);
+                */
+
+                public void render() {
+                    this.toString();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ColoredLayerDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-colored-cutout-layer-packed-color" }, result.changes.toString())
+        assertFalse(migrated.contains("import net.minecraft.util.FastColor;"), migrated)
+        assertTrue(migrated.contains("""private static final String OLD_CALL = "RenderLayer.coloredCutoutModelCopyLayerRender(parent, model, texture, poseStack, buffer, packedLight, entity, limbSwing, limbSwingAmount, ageInTicks, netHeadYaw, headPitch, partialTicks, red, green, blue);";"""), migrated)
+        assertTrue(migrated.contains("RenderLayer.coloredCutoutModelCopyLayerRender(parent, model, texture, poseStack, buffer, packedLight, entity, limbSwing, limbSwingAmount, ageInTicks, netHeadYaw, headPitch, partialTicks, red, green, blue);"), migrated)
+        assertFalse(migrated.contains("FastColor.ARGB32.colorFromFloat"), migrated)
+    }
+
+    @Test
     fun `migrates RecipeHolder optional map lambdas to recipe values`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
