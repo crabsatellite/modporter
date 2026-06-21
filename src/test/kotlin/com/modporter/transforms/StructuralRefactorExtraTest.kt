@@ -6629,6 +6629,59 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `attachment registration event cleanup ignores commented and text block handlers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val capabilityDir = srcDir.resolve("capability")
+        capabilityDir.createDirectories()
+
+        capabilityDir.resolve("ExampleCapabilities.java").writeText("""
+            package com.example.capability;
+
+            import com.example.ExampleMod;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.attachment.AttachmentType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+            import net.neoforged.neoforge.registries.NeoForgeRegistries;
+
+            @EventBusSubscriber(modid = ExampleMod.MOD_ID)
+            public class ExampleCapabilities {
+                public static final DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES = DeferredRegister.create(NeoForgeRegistries.ATTACHMENT_TYPES, ExampleMod.MOD_ID);
+
+                /*
+                @SubscribeEvent
+                public void commented(RegisterCapabilitiesEvent event) {
+                }
+                */
+
+                private static final String DOC = ""${'"'}
+                    @SubscribeEvent
+                    public void documented(RegisterCapabilitiesEvent event) {
+                    }
+                ""${'"'};
+
+                @SubscribeEvent
+
+                public static void registerAttachments(IEventBus modEventBus) {
+                    ATTACHMENT_TYPES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val capabilities = capabilityDir.resolve("ExampleCapabilities.java").readText().replace("\r\n", "\n")
+
+        assertTrue(result.changes.any { it.ruleId == "struct-attachment-registration-event-cleanup" })
+        assertTrue(capabilities.contains("public static void registerAttachments(IEventBus modEventBus)"), capabilities)
+        assertFalse(Regex("""@SubscribeEvent\s+public static void registerAttachments""").containsMatchIn(capabilities), capabilities)
+        assertFalse(Regex("""(?m)^@EventBusSubscriber""").containsMatchIn(capabilities), capabilities)
+        assertFalse(capabilities.contains("import net.neoforged.bus.api.SubscribeEvent;"), capabilities)
+        assertTrue(Regex("""(?s)/\*\s*@SubscribeEvent\s+public void commented\(RegisterCapabilitiesEvent event\)""").containsMatchIn(capabilities), capabilities)
+        assertTrue(Regex("""@SubscribeEvent\s+public void documented\(RegisterCapabilitiesEvent event\)""").containsMatchIn(capabilities), capabilities)
+    }
+
+    @Test
     fun `migrates legacy advancement triggers to codec DeferredRegister API`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val advancementDir = srcDir.resolve("advancements")

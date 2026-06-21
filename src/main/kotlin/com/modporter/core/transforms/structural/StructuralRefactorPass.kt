@@ -5015,7 +5015,7 @@ $itemArguments
         for (importName in importNames) {
             val withoutImport = removeImportIfPresent(result, importName)
             val simpleName = importName.substringAfterLast('.')
-            if (!Regex("""\b${Regex.escape(simpleName)}\b""").containsMatchIn(withoutImport)) {
+            if (!Regex("""\b${Regex.escape(simpleName)}\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutImport))) {
                 result = withoutImport
             }
         }
@@ -5342,15 +5342,22 @@ $itemArguments
             .toList()
             .forEach { file ->
                 val original = file.readText()
-                if (!original.contains("registerAttachments(IEventBus") || !original.contains("@SubscribeEvent")) {
+                val executableOriginal = maskJavaCommentsAndLiterals(original)
+                if (!executableOriginal.contains("registerAttachments(IEventBus") ||
+                    !Regex("""@\s*SubscribeEvent\b""").containsMatchIn(executableOriginal)) {
                     return@forEach
                 }
-                var modified = Regex("""(?m)^([ \t]*)@SubscribeEvent[ \t]*(?:\r?\n[ \t]*)+((?:public|protected|private)\s+static\s+void\s+registerAttachments\s*\(\s*IEventBus\b)""")
-                    .replace(original) { match -> match.groupValues[1] + match.groupValues[2] }
+                var modified = replaceExecutableRegex(
+                    original,
+                    Regex("""(?m)^([ \t]*)@SubscribeEvent[ \t]*(?:\r?\n[ \t]*)+((?:public|protected|private)\s+static\s+void\s+registerAttachments\s*\(\s*IEventBus\b)""")
+                ) { match -> match.groupValues[1] + match.groupValues[2] }
                 if (modified != original) {
-                    if (!modified.contains("@SubscribeEvent")) {
-                        modified = Regex("""(?m)^[ \t]*@(?:Mod\.)?EventBusSubscriber\b[^\r\n]*\r?\n""").replace(modified, "")
-                        modified = removeImport(modified, "net.neoforged.fml.common.EventBusSubscriber")
+                    if (!Regex("""@\s*SubscribeEvent\b""").containsMatchIn(maskJavaCommentsAndLiterals(modified))) {
+                        modified = replaceExecutableRegex(
+                            modified,
+                            Regex("""(?m)^[ \t]*@(?:Mod\.)?EventBusSubscriber\b[^\r\n]*\r?\n""")
+                        ) { "" }
+                        modified = removeExecutableImport(modified, "net.neoforged.fml.common.EventBusSubscriber")
                     }
                     modified = removeUnusedSimpleImports(modified, listOf(
                         "net.neoforged.bus.api.SubscribeEvent",
@@ -5627,11 +5634,16 @@ $itemArguments
                 modified,
                 Regex("""Capability|CapabilityManager|CapabilityToken|CapabilityProvider|RegisterCapabilitiesEvent""")
             )
-            modified = Regex("""(?m)^([ \t]*)@SubscribeEvent[ \t]*(?:\r?\n[ \t]*)+((?:public|protected|private)\s+static\s+void\s+registerAttachments\s*\()""")
-                .replace(modified) { match -> match.groupValues[1] + match.groupValues[2] }
-            if (!modified.contains("@SubscribeEvent")) {
-                modified = Regex("""(?m)^[ \t]*@(?:Mod\.)?EventBusSubscriber\b[^\r\n]*\r?\n""").replace(modified, "")
-                modified = removeImport(modified, "net.neoforged.fml.common.EventBusSubscriber")
+            modified = replaceExecutableRegex(
+                modified,
+                Regex("""(?m)^([ \t]*)@SubscribeEvent[ \t]*(?:\r?\n[ \t]*)+((?:public|protected|private)\s+static\s+void\s+registerAttachments\s*\()""")
+            ) { match -> match.groupValues[1] + match.groupValues[2] }
+            if (!Regex("""@\s*SubscribeEvent\b""").containsMatchIn(maskJavaCommentsAndLiterals(modified))) {
+                modified = replaceExecutableRegex(
+                    modified,
+                    Regex("""(?m)^[ \t]*@(?:Mod\.)?EventBusSubscriber\b[^\r\n]*\r?\n""")
+                ) { "" }
+                modified = removeExecutableImport(modified, "net.neoforged.fml.common.EventBusSubscriber")
             }
             modified = removeUnusedSimpleImports(modified, listOf("net.neoforged.bus.api.SubscribeEvent"))
 
