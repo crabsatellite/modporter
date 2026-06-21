@@ -4020,6 +4020,67 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `nested simplechannel packet discovery uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        fun bodyBetween(startMarker: String, endMarker: String): String {
+            val start = source.indexOf(startMarker)
+            assertTrue(start >= 0, "$startMarker is missing")
+            val end = source.indexOf(endMarker, start + 1).let { if (it < 0) source.length else it }
+            return source.substring(start, end)
+        }
+
+        val migrationBody = bodyBetween(
+            "private fun migrateKnownNestedSimpleChannelNetworking",
+            "private data class NestedSimpleChannelPacketInfo"
+        )
+        val namesBody = bodyBetween("private fun nestedSimpleChannelNames", "private fun nestedSimpleChannelPackets")
+        val packetsBody = bodyBetween("private fun nestedSimpleChannelPackets", "private fun nestedPacketBufferType")
+        val bufferBody = bodyBetween("private fun nestedPacketBufferType", "private fun javaTypeBody")
+        val argsBody = bodyBetween("private fun nestedSimpleChannelArgs", "private fun migrateNestedSimpleChannelPacketSource")
+
+        val offenders = listOf(
+            "raw SimpleChannel prefilter" to migrationBody.contains("""!original.contains("SimpleChannel")"""),
+            "raw newSimpleChannel prefilter" to migrationBody.contains("""!original.contains("NetworkRegistry.newSimpleChannel")"""),
+            "raw registerMessage prefilter" to migrationBody.contains("""!original.contains(".registerMessage(")"""),
+            "raw channel name scan" to namesBody.contains(".findAll(source)"),
+            "raw registerMessage lookup" to packetsBody.contains("source.indexOf(callName, cursor)"),
+            "raw registerMessage paren match" to packetsBody.contains("findMatchingParen(source, openParen)"),
+            "raw packet type lookup" to packetsBody.contains("findTypeDeclarationStart(source, packetClassName)"),
+            "raw encode buffer lookup" to bufferBody.contains(".find(source)?.let"),
+            "raw newSimpleChannel lookup" to argsBody.contains("val index = source.indexOf(token)"),
+            "raw newSimpleChannel paren match" to argsBody.contains("findMatchingParen(source, openParen)")
+        )
+            .filter { (_, present) -> present }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            migrationBody.contains("val executableCode = maskJavaCommentsAndLiterals(original)") &&
+                migrationBody.contains("""!executableCode.contains("SimpleChannel")""") &&
+                migrationBody.contains("""!executableCode.contains("NetworkRegistry.newSimpleChannel")""") &&
+                migrationBody.contains("""!executableCode.contains(".registerMessage(")""") &&
+                namesBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                namesBody.contains(".findAll(executableCode)") &&
+                packetsBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                packetsBody.contains("executableCode.indexOf(callName, cursor)") &&
+                packetsBody.contains("findMatchingParen(executableCode, openParen)") &&
+                packetsBody.contains("findTypeDeclarationStart(executableCode, packetClassName)") &&
+                bufferBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                bufferBody.contains(".find(executableCode)?.let") &&
+                argsBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                argsBody.contains("val index = executableCode.indexOf(token)") &&
+                argsBody.contains("findMatchingParen(executableCode, openParen)"),
+            "Nested SimpleChannel discovery must locate channel and packet structure from executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Nested SimpleChannel discovery must not use comments or strings as structure evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy simplechannel wrapper cleanup requires payload registration evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

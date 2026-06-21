@@ -1962,6 +1962,72 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `nested SimpleChannel packet discovery ignores commented register messages`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+            }
+        """.trimIndent())
+
+        networkDir.resolve("StatusNetworking.java").writeText("""
+            package com.example.network;
+
+            import com.example.ExampleMod;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraftforge.network.NetworkDirection;
+            import net.minecraftforge.network.NetworkEvent;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+            import java.util.function.Supplier;
+
+            public class StatusNetworking {
+                public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
+                        ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, "status"),
+                        () -> "1",
+                        "1"::equals,
+                        "1"::equals
+                );
+
+                /*
+                public static void register() {
+                    CHANNEL.registerMessage(0, StatusPacket.class,
+                            StatusPacket::encode,
+                            StatusPacket::decode,
+                            StatusPacket::handle,
+                            java.util.Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+                }
+                */
+
+                public static class StatusPacket {
+                    public static void encode(StatusPacket packet, FriendlyByteBuf buf) {}
+                    public static StatusPacket decode(FriendlyByteBuf buf) { return new StatusPacket(); }
+                    public static void handle(StatusPacket packet, Supplier<NetworkEvent.Context> ctx) {}
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val networking = networkDir.resolve("StatusNetworking.java").readText()
+
+        assertTrue(result.changes.none { it.ruleId == "struct-nested-simplechannel-payloads" }, "changes=${result.changes}")
+        assertTrue(networking.contains("NetworkRegistry.newSimpleChannel"), networking)
+        assertTrue(networking.contains("CHANNEL.registerMessage(0, StatusPacket.class"), networking)
+        assertFalse(networking.contains("registerPayloads(RegisterPayloadHandlersEvent"), networking)
+        assertFalse(networking.contains("implements CustomPacketPayload"), networking)
+    }
+
+    @Test
     fun `base packet records handlers and relay calls migrate to payload registrar`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val networkDir = srcDir.resolve("network")

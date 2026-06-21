@@ -1623,9 +1623,10 @@ ${indent}}
             .filter { it.extension == "java" }
             .forEach { file ->
                 val original = file.readText()
-                if (!original.contains("SimpleChannel") ||
-                    !original.contains("NetworkRegistry.newSimpleChannel") ||
-                    !original.contains(".registerMessage(")) {
+                val executableCode = maskJavaCommentsAndLiterals(original)
+                if (!executableCode.contains("SimpleChannel") ||
+                    !executableCode.contains("NetworkRegistry.newSimpleChannel") ||
+                    !executableCode.contains(".registerMessage(")) {
                     return@forEach
                 }
                 val packageName = packageNameOf(original)
@@ -1698,11 +1699,12 @@ ${indent}}
 
     private fun nestedSimpleChannelNames(source: String): Set<String> =
         buildSet {
+            val executableCode = maskJavaCommentsAndLiterals(source)
             Regex("""\bSimpleChannel\s+([A-Za-z_$][\w$]*)\b""")
-                .findAll(source)
+                .findAll(executableCode)
                 .forEach { add(it.groupValues[1]) }
             Regex("""\b([A-Za-z_$][\w$]*)\s*=\s*NetworkRegistry\.newSimpleChannel\s*\(""")
-                .findAll(source)
+                .findAll(executableCode)
                 .forEach { add(it.groupValues[1]) }
         }
 
@@ -1713,15 +1715,16 @@ ${indent}}
         ownerClassName: String,
         channelNames: Set<String>
     ): List<NestedSimpleChannelPacketInfo> {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val packets = mutableListOf<NestedSimpleChannelPacketInfo>()
         for (channelName in channelNames) {
             val callName = "$channelName.registerMessage"
             var cursor = 0
             while (true) {
-                val callIndex = source.indexOf(callName, cursor)
+                val callIndex = executableCode.indexOf(callName, cursor)
                 if (callIndex < 0) break
-                val openParen = source.indexOf('(', callIndex + callName.length)
-                val closeParen = if (openParen >= 0) findMatchingParen(source, openParen) else -1
+                val openParen = executableCode.indexOf('(', callIndex + callName.length)
+                val closeParen = if (openParen >= 0) findMatchingParen(executableCode, openParen) else -1
                 if (openParen < 0 || closeParen < 0) {
                     cursor = callIndex + callName.length
                     continue
@@ -1732,7 +1735,7 @@ ${indent}}
                     continue
                 }
                 val packetClassName = args[1].removeSuffix(".class").substringAfterLast('.').trim()
-                if (packetClassName.isBlank() || findTypeDeclarationStart(source, packetClassName) == null) {
+                if (packetClassName.isBlank() || findTypeDeclarationStart(executableCode, packetClassName) == null) {
                     cursor = closeParen + 1
                     continue
                 }
@@ -1765,12 +1768,13 @@ ${indent}}
     }
 
     private fun nestedPacketBufferType(source: String, packetClassName: String): String? {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         Regex(
             """static\s+void\s+encode\s*\(\s*${Regex.escape(packetClassName)}\s+[A-Za-z_$][\w$]*\s*,\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+[A-Za-z_$][\w$]*\s*\)"""
-        ).find(source)?.let { return it.groupValues[1] }
+        ).find(executableCode)?.let { return it.groupValues[1] }
         Regex(
             """\bvoid\s+encode\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+[A-Za-z_$][\w$]*\s*\)"""
-        ).find(source)?.let { return it.groupValues[1] }
+        ).find(executableCode)?.let { return it.groupValues[1] }
         return null
     }
 
@@ -1861,11 +1865,12 @@ ${indent}}
     }
 
     private fun nestedSimpleChannelArgs(source: String): List<String>? {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val token = "NetworkRegistry.newSimpleChannel"
-        val index = source.indexOf(token)
+        val index = executableCode.indexOf(token)
         if (index < 0) return null
-        val openParen = source.indexOf('(', index + token.length)
-        val closeParen = if (openParen >= 0) findMatchingParen(source, openParen) else -1
+        val openParen = executableCode.indexOf('(', index + token.length)
+        val closeParen = if (openParen >= 0) findMatchingParen(executableCode, openParen) else -1
         if (openParen < 0 || closeParen < 0) return null
         return splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
     }
