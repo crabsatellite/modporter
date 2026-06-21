@@ -877,6 +877,77 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `bucket fluid helper migration uses executable source`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateBucketItemCanBlockContainFluidSource")
+        assertTrue(start >= 0, "migrateBucketItemCanBlockContainFluidSource is missing")
+        val end = source.indexOf("private fun migrateUnboundLevelRegistryAccessCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw canPlaceLiquid rewrite" to Regex("""rewriteJavaCall\(body,\s*"canPlaceLiquid""""),
+            "raw canBlockContainFluid rewrite" to Regex("""rewriteJavaCall\(body,\s*"canBlockContainFluid""""),
+            "raw unqualified token scan" to Regex("""result\.indexOf\(token,\s*cursor\)"""),
+            "raw unqualified paren matching" to Regex("""findMatchingParen\(result,\s*openParen\)"""),
+            "raw helper method scan" to Regex("""helperPattern\.findAll\(result\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("collectJavaClassDeclarations(executableCode)") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("helperPattern.findAll(executableResult)") &&
+                body.contains("rewriteExecutableJavaCall(body, \"canPlaceLiquid\")") &&
+                body.contains("rewriteExecutableJavaCall(body, \"canBlockContainFluid\")") &&
+                body.contains("executableCode.indexOf(token, cursor)") &&
+                body.contains("findMatchingParen(executableCode, openParen)"),
+            "Bucket fluid helper migration must locate helpers and calls in executable Java, not comments or strings"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Bucket fluid helper migration must not rewrite commented examples: $offenders"
+        )
+    }
+
+    @Test
+    fun `bucket fluid access migration uses executable source`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateBucketItemFluidAccessSource")
+        assertTrue(start >= 0, "migrateBucketItemFluidAccessSource is missing")
+        val end = source.indexOf("private fun migrateItemStackHoverNameSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getFluid replacement" to Regex("""\.replace\("this\.getFluid\(\)",\s*"this\.content"\)"""),
+            "raw FluidStack variable scan" to Regex("""\.findAll\(result\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("executableCode.contains(\"extends BucketItem\")") &&
+                body.contains("replaceExecutableJavaRegex(result, Regex") &&
+                body.contains(".findAll(executableCode)"),
+            "Bucket fluid access migration must locate getFluid usages and FluidStack variables in executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Bucket fluid access migration must not rewrite comments or strings: $offenders"
+        )
+    }
+
+    @Test
     fun `level summary nullable migration uses enclosing method structure`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

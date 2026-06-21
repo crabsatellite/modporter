@@ -35413,10 +35413,11 @@ ${modifierLines.joinToString("\n")}
         source: String,
         javaInheritanceIndex: JavaInheritanceIndex
     ): String {
-        if (!source.contains("canBlockContainFluid(") ||
-            !source.contains("canPlaceLiquid(") ||
-            !source.contains("extends") ||
-            collectJavaClassDeclarations(source).none { javaClassExtendsAny(it, setOf("BucketItem"), javaInheritanceIndex) }) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("canBlockContainFluid(") ||
+            !executableCode.contains("canPlaceLiquid(") ||
+            !executableCode.contains("extends") ||
+            collectJavaClassDeclarations(executableCode).none { javaClassExtendsAny(it, setOf("BucketItem"), javaInheritanceIndex) }) {
             return source
         }
 
@@ -35425,20 +35426,21 @@ ${modifierLines.joinToString("\n")}
             """(?m)^([ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private)\s+)?)boolean\s+canBlockContainFluid\s*\(\s*(?:Level|BlockGetter)\s+([A-Za-z_$][\w$]*)\s*,\s*BlockPos\s+([A-Za-z_$][\w$]*)\s*,\s*BlockState\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
         )
         var changed = result != source
-        helperPattern.findAll(result).toList().asReversed().forEach { match ->
-            val openBrace = result.indexOf('{', match.range.last)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+        val executableResult = maskJavaCommentsAndLiterals(result)
+        helperPattern.findAll(executableResult).toList().asReversed().forEach { match ->
+            val openBrace = executableResult.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableResult, openBrace) else -1
             if (openBrace < 0 || closeBrace < 0) return@forEach
             val levelName = match.groupValues[2]
             val posName = match.groupValues[3]
             val stateName = match.groupValues[4]
             val body = result.substring(openBrace + 1, closeBrace)
-            val rewrittenBody = rewriteJavaCall(body, "canPlaceLiquid") { receiver, args ->
+            val rewrittenBody = rewriteExecutableJavaCall(body, "canPlaceLiquid") { receiver, args ->
                 if (args.size != 4 ||
                     args[0].trim() != levelName ||
                     args[1].trim() != posName ||
                     args[2].trim() != stateName) {
-                    return@rewriteJavaCall null
+                    return@rewriteExecutableJavaCall null
                 }
                 "$receiver.canPlaceLiquid(player, $levelName, $posName, $stateName, ${args[3].trim()})"
             }
@@ -35458,15 +35460,16 @@ ${modifierLines.joinToString("\n")}
             """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|static|final|synchronized)\s+)+(?:<[^>{};]+>\s*)?[A-Za-z_$][\w$<>\[\].?,\s]*\s+[A-Za-z_$][\w$]*\s*\(([^;{}]*)\)\s*(?:throws\s+[^{;]+)?\{"""
         )
         var result = source
-        methodPattern.findAll(source).toList().asReversed().forEach { match ->
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        methodPattern.findAll(executableCode).toList().asReversed().forEach { match ->
             val params = parseJavaParameters(match.groupValues[1])
             val playerName = params.firstOrNull { simpleJavaTypeName(it.type) == "Player" }?.name ?: return@forEach
-            val openBrace = result.indexOf('{', match.range.last)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            val openBrace = executableCode.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
             if (openBrace < 0 || closeBrace < 0) return@forEach
             val body = result.substring(openBrace + 1, closeBrace)
-            var rewrittenBody = rewriteJavaCall(body, "canBlockContainFluid") { receiver, args ->
-                if (args.size != 3 || (receiver != "this" && receiver != "super")) return@rewriteJavaCall null
+            var rewrittenBody = rewriteExecutableJavaCall(body, "canBlockContainFluid") { receiver, args ->
+                if (args.size != 3 || (receiver != "this" && receiver != "super")) return@rewriteExecutableJavaCall null
                 "$receiver.canBlockContainFluid($playerName, ${args.joinToString(", ") { it.trim() }})"
             }
             rewrittenBody = rewriteUnqualifiedCanBlockContainFluidCalls(rewrittenBody, playerName)
@@ -35483,15 +35486,16 @@ ${modifierLines.joinToString("\n")}
         val methodName = "canBlockContainFluid"
         val token = "$methodName("
         while (true) {
-            val tokenIndex = result.indexOf(token, cursor)
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenIndex = executableCode.indexOf(token, cursor)
             if (tokenIndex < 0) break
-            val previous = if (tokenIndex > 0) result[tokenIndex - 1] else '\u0000'
+            val previous = if (tokenIndex > 0) executableCode[tokenIndex - 1] else '\u0000'
             if (previous == '.' || previous.isLetterOrDigit() || previous == '_' || previous == '$') {
                 cursor = tokenIndex + token.length
                 continue
             }
             val openParen = tokenIndex + methodName.length
-            val closeParen = findMatchingParen(result, openParen)
+            val closeParen = findMatchingParen(executableCode, openParen)
             if (closeParen < 0) {
                 cursor = tokenIndex + token.length
                 continue
@@ -35696,24 +35700,27 @@ ${indent}}
         }
 
     private fun migrateBucketItemFluidAccessSource(source: String): String {
-        if (!source.contains(".getFluid()") && !source.contains("getFluidType()")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".getFluid()") && !executableCode.contains("getFluidType()")) return source
         var result = source
         var changed = false
-        if (result.contains("extends BucketItem")) {
+        if (executableCode.contains("extends BucketItem")) {
             val before = result
-            result = result.replace("this.getFluid()", "this.content")
+            result = replaceExecutableJavaRegex(result, Regex("""\bthis\.getFluid\(\)""")) { "this.content" }
             if (result != before) changed = true
         }
         val fluidStackVariables = Regex("""\bFluidStack\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
+            .findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
         fluidStackVariables.forEach { variable ->
             val before = result
-            result = Regex("""\b${Regex.escape(variable)}\.getFluid\(\)\.is\(""")
-                .replace(result, "$variable.is(")
-            result = Regex("""\b${Regex.escape(variable)}\.getFluid\(\)\.getFluidType\(\)""")
-                .replace(result, "$variable.getFluidType()")
+            result = replaceExecutableJavaRegex(result, Regex("""\b${Regex.escape(variable)}\.getFluid\(\)\.is\(""")) {
+                "$variable.is("
+            }
+            result = replaceExecutableJavaRegex(result, Regex("""\b${Regex.escape(variable)}\.getFluid\(\)\.getFluidType\(\)""")) {
+                "$variable.getFluidType()"
+            }
             if (result != before) changed = true
         }
         return if (changed) result else source

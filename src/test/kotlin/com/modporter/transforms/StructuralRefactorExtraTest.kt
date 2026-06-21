@@ -3064,6 +3064,57 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `bucket canBlockContainFluid helper migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/items")
+        srcDir.createDirectories()
+
+        srcDir.resolve("LegacyBucketItem.java").writeText("""
+            package com.example.items;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.InteractionResultHolder;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.BucketItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.LiquidBlockContainer;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class LegacyBucketItem extends BucketItem {
+                public InteractionResultHolder<ItemStack> use(Level level, Player player, InteractionHand hand) {
+                    BlockPos pos = BlockPos.ZERO;
+                    BlockState state = level.getBlockState(pos);
+                    // canBlockContainFluid(level, pos, state);
+                    String callDoc = "canBlockContainFluid(level, pos, state)";
+                    BlockPos target = canBlockContainFluid(level, pos, state) ? pos : pos.above();
+                    return InteractionResultHolder.success(new ItemStack(this));
+                }
+
+                protected boolean canBlockContainFluid(Level level, BlockPos pos, BlockState state) {
+                    return state.getBlock() instanceof LiquidBlockContainer liquidBlockContainer
+                        // liquidBlockContainer.canPlaceLiquid(level, pos, state, this.getFluid());
+                        && "liquidBlockContainer.canPlaceLiquid(level, pos, state, this.getFluid())".isEmpty()
+                        && liquidBlockContainer.canPlaceLiquid(level, pos, state, this.getFluid());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val bucket = srcDir.resolve("LegacyBucketItem.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(bucket.contains("BlockPos target = canBlockContainFluid(player, level, pos, state) ? pos : pos.above();"), bucket)
+        assertTrue(bucket.contains("// canBlockContainFluid(level, pos, state);"), bucket)
+        assertTrue(bucket.contains("""String callDoc = "canBlockContainFluid(level, pos, state)";"""), bucket)
+        assertTrue(bucket.contains("liquidBlockContainer.canPlaceLiquid(player, level, pos, state, this.content)"), bucket)
+        assertTrue(bucket.contains("// liquidBlockContainer.canPlaceLiquid(level, pos, state, this.getFluid());"), bucket)
+        assertTrue(bucket.contains(""""liquidBlockContainer.canPlaceLiquid(level, pos, state, this.getFluid())".isEmpty()"""), bucket)
+        assertFalse(bucket.contains("// canBlockContainFluid(player,"), bucket)
+        assertFalse(bucket.contains(""""canBlockContainFluid(player,"""), bucket)
+    }
+
+    @Test
     fun `removes removed bucket use hook guard without dropping bucket flow`() {
         val srcDir = tempDir.resolve("src/main/java/com/example/items")
         srcDir.createDirectories()
