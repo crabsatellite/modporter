@@ -28094,6 +28094,44 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `curios attribute modifier holder migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CurioAttributeDocsOnly.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class CurioAttributeDocsOnly {
+                private static final String DOC = "public Multimap<Attribute, AttributeModifier> getAttributeModifiers(SlotContext slotContext) { ImmutableMultimap.Builder<Attribute, AttributeModifier> builder = ImmutableMultimap.builder(); return builder.build(); }";
+
+                /*
+                public Multimap<Attribute, AttributeModifier> getAttributeModifiers(SlotContext slotContext) {
+                    ImmutableMultimap.Builder<Attribute, AttributeModifier> builder = ImmutableMultimap.builder();
+                    return builder.build();
+                }
+                */
+
+                public void keep() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("CurioAttributeDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, result.changes.toString())
+        assertFalse(migrated.contains("import net.minecraft.core.Holder;"), migrated)
+        assertTrue(migrated.contains("Multimap<Attribute, AttributeModifier> getAttributeModifiers"), migrated)
+        assertTrue(migrated.contains("ImmutableMultimap.Builder<Attribute, AttributeModifier> builder"), migrated)
+        assertFalse(migrated.contains("Multimap<Holder<Attribute>, AttributeModifier>"), migrated)
+        assertFalse(migrated.contains("ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier>"), migrated)
+    }
+
+    @Test
     fun `JEI recipe category background migration ignores comments and strings`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

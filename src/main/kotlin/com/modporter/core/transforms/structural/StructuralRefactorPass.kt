@@ -17189,24 +17189,31 @@ $migratedRecipes
     }
 
     private fun migrateCuriosAttributeModifierHolderTypes(source: String): String {
-        if (!source.contains("getAttributeModifiers") ||
-            !source.contains("AttributeModifier") ||
-            !source.contains("Multimap") ||
-            !source.contains("Attribute") ||
-            !Regex("""\b(?:ICurioItem|SlotContext)\b""").containsMatchIn(source)) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("getAttributeModifiers") ||
+            !executableCode.contains("AttributeModifier") ||
+            !executableCode.contains("Multimap") ||
+            !executableCode.contains("Attribute") ||
+            !Regex("""\b(?:ICurioItem|SlotContext)\b""").containsMatchIn(executableCode)) {
             return source
         }
 
         var result = source
-        result = Regex("""\bMultimap\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""")
-            .replace(result, "Multimap<Holder<Attribute>, AttributeModifier>")
-        result = Regex("""\bImmutableMultimap\.Builder\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""")
-            .replace(result, "ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier>")
-        result = Regex("""\bImmutableMultimap\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""")
-            .replace(result, "ImmutableMultimap<Holder<Attribute>, AttributeModifier>")
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\bMultimap\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""")
+        ) { "Multimap<Holder<Attribute>, AttributeModifier>" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\bImmutableMultimap\.Builder\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""")
+        ) { "ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier>" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\bImmutableMultimap\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""")
+        ) { "ImmutableMultimap<Holder<Attribute>, AttributeModifier>" }
 
         if (result == source) return source
-        return addImportIfMissing(result, "net.minecraft.core.Holder")
+        return addExecutableImportIfMissing(result, "net.minecraft.core.Holder")
     }
 
     private fun migrateAttributeModifierMultimapHolderTypes(source: String): String {

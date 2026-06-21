@@ -8258,6 +8258,51 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `curios attribute modifier holder migration uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateCuriosAttributeModifierHolderTypes")
+        assertTrue(start >= 0, "migrateCuriosAttributeModifierHolderTypes is missing")
+        val end = source.indexOf("private fun migrateAttributeModifierMultimapHolderTypes", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getAttributeModifiers prefilter" to body.contains("""source.contains("getAttributeModifiers")"""),
+            "raw AttributeModifier prefilter" to body.contains("""source.contains("AttributeModifier")"""),
+            "raw Multimap prefilter" to body.contains("""source.contains("Multimap")"""),
+            "raw Attribute prefilter" to body.contains("""source.contains("Attribute")"""),
+            "raw Curios type scan" to body.contains("containsMatchIn(source)"),
+            "raw Multimap replacement" to body.contains(".replace(result, \"Multimap<Holder<Attribute>, AttributeModifier>\")"),
+            "raw ImmutableMultimap builder replacement" to body.contains(".replace(result, \"ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier>\")"),
+            "raw ImmutableMultimap replacement" to body.contains(".replace(result, \"ImmutableMultimap<Holder<Attribute>, AttributeModifier>\")"),
+            "raw Holder import insertion" to body.contains("""addImportIfMissing(result, "net.minecraft.core.Holder")""")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("getAttributeModifiers")""") &&
+                body.contains("""executableCode.contains("AttributeModifier")""") &&
+                body.contains("""executableCode.contains("Multimap")""") &&
+                body.contains("""executableCode.contains("Attribute")""") &&
+                body.contains("containsMatchIn(executableCode)") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("""\bMultimap\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""") &&
+                body.contains("""\bImmutableMultimap\.Builder\s*<\s*Attribute\s*,\s*AttributeModifier\s*>""") &&
+                body.contains("""addExecutableImportIfMissing(result, "net.minecraft.core.Holder")"""),
+            "Curios attribute modifier holder migration must rewrite only executable Curios attribute generic surfaces"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Curios attribute modifier holder migration must not rewrite comments or strings: $offenders"
+        )
+    }
+
+    @Test
     fun `nested simplechannel migration does not depend on fixed networking class names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
