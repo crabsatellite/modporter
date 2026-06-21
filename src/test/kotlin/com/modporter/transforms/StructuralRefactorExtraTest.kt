@@ -11177,6 +11177,47 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `step height addition migration ignores comments and strings`() {
+        val projectDir = createFile("StepHeightSurface.java", """
+            package com.example;
+
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.neoforged.neoforge.common.NeoForgeMod;
+
+            public class StepHeightSurface {
+                private static final String DOC = "NeoForgeMod.STEP_HEIGHT_ADDITION.get()";
+                private static final String FQN_DOC = "net.neoforged.neoforge.common.NeoForgeMod.STEP_HEIGHT_ADDITION.get()";
+
+                /*
+                AttributeInstance docs(Entity entity) {
+                    return entity.getAttribute(NeoForgeMod.STEP_HEIGHT_ADDITION.get());
+                }
+                */
+                public AttributeInstance simple(Entity entity) {
+                    return entity.getAttribute(NeoForgeMod.STEP_HEIGHT_ADDITION.get());
+                }
+
+                public AttributeInstance qualified(Entity entity) {
+                    return entity.getAttribute(net.neoforged.neoforge.common.NeoForgeMod.STEP_HEIGHT_ADDITION.get());
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = projectDir.resolve("src/main/java/com/example/StepHeightSurface.java").readText()
+        assertTrue(migrated.contains("return entity.getAttribute(Attributes.STEP_HEIGHT);"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "NeoForgeMod.STEP_HEIGHT_ADDITION.get()";"""), migrated)
+        assertTrue(migrated.contains("""private static final String FQN_DOC = "net.neoforged.neoforge.common.NeoForgeMod.STEP_HEIGHT_ADDITION.get()";"""), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.entity.ai.attributes.Attributes;"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.neoforge.common.NeoForgeMod;"), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("return entity.getAttribute(NeoForgeMod.STEP_HEIGHT_ADDITION.get());"), migrated)
+        assertFalse(commentBlock.contains("Attributes.STEP_HEIGHT"), migrated)
+    }
+
+    @Test
     fun `migrates block entity fluid capability override to RegisterCapabilitiesEvent`() {
         val projectDir = createFile("ExampleMod.java", """
             package com.example;

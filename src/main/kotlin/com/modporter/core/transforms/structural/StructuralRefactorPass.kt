@@ -31869,14 +31869,22 @@ ${indent}}
                 result = withoutNeoForgeMod
             }
         }
-        if (result.contains("NeoForgeMod.STEP_HEIGHT_ADDITION.get()") ||
-            result.contains("net.neoforged.neoforge.common.NeoForgeMod.STEP_HEIGHT_ADDITION.get()")) {
-            result = result
-                .replace("net.neoforged.neoforge.common.NeoForgeMod.STEP_HEIGHT_ADDITION.get()", "Attributes.STEP_HEIGHT")
-                .replace("NeoForgeMod.STEP_HEIGHT_ADDITION.get()", "Attributes.STEP_HEIGHT")
-            needsAttributes = true
+        if (maskJavaCommentsAndLiterals(result).contains("NeoForgeMod.STEP_HEIGHT_ADDITION.get()") ||
+            maskJavaCommentsAndLiterals(result).contains("net.neoforged.neoforge.common.NeoForgeMod.STEP_HEIGHT_ADDITION.get()")) {
+            val beforeStepHeight = result
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\bnet\.neoforged\.neoforge\.common\.NeoForgeMod\.STEP_HEIGHT_ADDITION\.get\(\)""")
+            ) { "Attributes.STEP_HEIGHT" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\bNeoForgeMod\.STEP_HEIGHT_ADDITION\.get\(\)""")
+            ) { "Attributes.STEP_HEIGHT" }
+            if (result != beforeStepHeight) {
+                needsAttributes = true
+            }
             val withoutNeoForgeMod = removeImport(result, "net.neoforged.neoforge.common.NeoForgeMod")
-            if (!Regex("""\bNeoForgeMod\b""").containsMatchIn(withoutNeoForgeMod)) {
+            if (!Regex("""\bNeoForgeMod\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutNeoForgeMod))) {
                 result = withoutNeoForgeMod
             }
         }

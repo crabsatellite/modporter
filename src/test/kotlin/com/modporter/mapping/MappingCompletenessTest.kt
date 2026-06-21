@@ -3232,6 +3232,35 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `step height addition migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val stepHeightIndex = source.indexOf("STEP_HEIGHT_ADDITION")
+        assertTrue(stepHeightIndex >= 0, "STEP_HEIGHT_ADDITION migration is missing")
+        val body = source.substring((stepHeightIndex - 600).coerceAtLeast(0), (stepHeightIndex + 1200).coerceAtMost(source.length))
+        val offenders = listOf(
+            "raw simple STEP_HEIGHT_ADDITION replacement" to ".replace(\"NeoForgeMod.STEP_HEIGHT_ADDITION.get()\"",
+            "raw qualified STEP_HEIGHT_ADDITION replacement" to ".replace(\"net.neoforged.neoforge.common.NeoForgeMod.STEP_HEIGHT_ADDITION.get()\""
+        )
+            .filter { (_, marker) -> source.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("maskJavaCommentsAndLiterals(result)") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("beforeStepHeight") &&
+                body.contains("maskJavaCommentsAndLiterals(withoutNeoForgeMod)"),
+            "STEP_HEIGHT_ADDITION migration must rewrite executable Java only and remove imports using executable evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "STEP_HEIGHT_ADDITION migration must not use raw String.replace: $offenders"
+        )
+    }
+
+    @Test
     fun `holder value accessor migration uses executable typed variables`() {
         val source = Path.of("")
             .toAbsolutePath()
