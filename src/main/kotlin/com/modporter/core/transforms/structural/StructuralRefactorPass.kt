@@ -26804,7 +26804,7 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
                 .removeSuffix(".location()")
                 .removeSurrounding("(", ")")
                 .trim()
-            if (Regex("""(?:[A-Za-z_$][\w$]*\.)?[A-Z][A-Z0-9_]*""").matches(normalized)) {
+            if (Regex("""(?:[A-Za-z_$][\w$]*\.)?(?:[A-Z][A-Z0-9_]*|[A-Za-z_$][\w$]*\(\))""").matches(normalized)) {
                 references += normalized
             }
         }
@@ -26853,7 +26853,7 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         }
 
         var result = source
-        val ownerClass = classNameOfJavaSource(source) ?: ""
+        val ownerClass = classNameOfJavaSource(source) ?: return source
         val ownerPackage = packageNameOf(source)
         fun isProvenLootReference(fieldName: String): Boolean {
             if (fieldName in legacyLootTableResourceLocationReferences) return true
@@ -26871,19 +26871,45 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
             .map { it.groupValues[3] }
             .toSet()
         val registerSetNames = legacyResourceLocationRegisterSets(result, resourceLocationSetNames)
-        val provenSetNames = registerSetNames.filterTo(linkedSetOf(), ::isProvenLootReference)
+        val setAliases = legacyResourceLocationSetAliases(result, resourceLocationSetNames)
+        val setReturnMethods = legacyResourceLocationSetReturnMethods(result, resourceLocationSetNames)
+        fun isProvenLootSetReference(fieldName: String): Boolean {
+            if (isProvenLootReference(fieldName)) return true
+            return setReturnMethods
+                .filterValues { returnedField -> returnedField == fieldName }
+                .keys
+                .any { methodName ->
+                    "$methodName()" in legacyLootTableResourceLocationReferences ||
+                        "$ownerClass.$methodName()" in legacyLootTableResourceLocationReferences ||
+                        (ownerPackage.isNotBlank() &&
+                            "$ownerPackage.$ownerClass.$methodName()" in legacyLootTableResourceLocationReferences)
+                }
+        }
+        fun expandSetAliases(seed: Set<String>): Set<String> {
+            val expanded = seed.toCollection(linkedSetOf())
+            var changed: Boolean
+            do {
+                changed = false
+                setAliases.forEach { (alias, target) ->
+                    if (target in expanded && expanded.add(alias)) changed = true
+                    if (alias in expanded && expanded.add(target)) changed = true
+                }
+            } while (changed)
+            return expanded
+        }
+        val directlyProvenSetNames = resourceLocationSetNames.filterTo(linkedSetOf(), ::isProvenLootReference)
+        val provenSetNames = registerSetNames.filterTo(linkedSetOf(), ::isProvenLootSetReference) + directlyProvenSetNames
         val provenRegisteredFieldNames = Regex(
             """(?m)^\s*public\s+static\s+final\s+ResourceLocation\s+([A-Z0-9_]+)\s*=\s*register\("""
         ).findAll(result)
             .map { it.groupValues[1] }
             .filterTo(linkedSetOf(), ::isProvenLootReference)
-        val inSourceLootTableApiMarker = Regex("""\bLootTable(?:Provider|SubProvider)?\b""").containsMatchIn(source)
-        val lootSetNames = when {
+        val baseLootSetNames = when {
             provenSetNames.isNotEmpty() -> provenSetNames
             provenRegisteredFieldNames.isNotEmpty() -> registerSetNames
-            inSourceLootTableApiMarker -> registerSetNames
             else -> emptySet()
         }
+        val lootSetNames = expandSetAliases(baseLootSetNames)
         if (lootSetNames.isEmpty()) return source
         if (!Regex("""(?m)^\s*public\s+static\s+final\s+ResourceLocation\s+[A-Z0-9_]+\s*=\s*register\(""").containsMatchIn(result) &&
             staticResourceLocationSetPattern.findAll(result).none { it.groupValues[3] in lootSetNames }) {
@@ -26935,6 +26961,36 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         val withoutResourceLocation = removeImport(result, "net.minecraft.resources.ResourceLocation")
         if (!Regex("""\bResourceLocation\b""").containsMatchIn(withoutResourceLocation)) {
             result = withoutResourceLocation
+        }
+        return result
+    }
+
+    private fun legacyResourceLocationSetAliases(source: String, setNames: Set<String>): Map<String, String> {
+        val result = linkedMapOf<String, String>()
+        val pattern = Regex(
+            """(?ms)^[ \t]*(?:public|protected|private)?\s*static\s+final\s+Set\s*<\s*ResourceLocation\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]+);"""
+        )
+        pattern.findAll(source).forEach { match ->
+            val alias = match.groupValues[1]
+            val initializer = match.groupValues[2]
+            setNames
+                .firstOrNull { target -> target != alias && Regex("""\b${Regex.escape(target)}\b""").containsMatchIn(initializer) }
+                ?.let { target -> result[alias] = target }
+        }
+        return result
+    }
+
+    private fun legacyResourceLocationSetReturnMethods(source: String, setNames: Set<String>): Map<String, String> {
+        val result = linkedMapOf<String, String>()
+        val pattern = Regex(
+            """(?ms)\b(?:public|protected|private)?\s*static\s+Set\s*<\s*ResourceLocation\s*>\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{\s*return\s+([A-Za-z_$][\w$]*)\s*;\s*}"""
+        )
+        pattern.findAll(source).forEach { match ->
+            val methodName = match.groupValues[1]
+            val fieldName = match.groupValues[2]
+            if (fieldName in setNames) {
+                result[methodName] = fieldName
+            }
         }
         return result
     }

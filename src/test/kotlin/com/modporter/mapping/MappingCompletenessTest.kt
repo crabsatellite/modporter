@@ -2904,7 +2904,9 @@ class MappingCompletenessTest {
         val body = source.substring(start, end)
         val forbidden = listOf(
             "class name loot suffix variable" to "classLooksLikeLootRegistry",
-            "LootTables class suffix regex" to Regex("""LootTables\|LootIds|Loot\|LootTables""")
+            "LootTables class suffix regex" to Regex("""LootTables\|LootIds|Loot\|LootTables"""),
+            "local LootTable marker fallback" to "inSourceLootTableApiMarker",
+            "blank owner class fallback" to "classNameOfJavaSource(source) ?: \"\""
         )
         val offenders = forbidden
             .filter { (_, marker) ->
@@ -2919,6 +2921,14 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty(),
             "Loot table registry migrations must use API/register-set structure, not class-name suffix inference: $offenders"
+        )
+        assertTrue(
+            body.contains("legacyResourceLocationSetReturnMethods"),
+            "Loot table registry migrations must prove set-returning helper methods from external loot API call sites"
+        )
+        assertTrue(
+            body.contains("legacyResourceLocationSetAliases"),
+            "Loot table registry migrations must propagate proof through explicit set aliases instead of local markers"
         )
 
         val keyExpressionStart = source.indexOf("private fun isLootTableResourceKeyExpression")

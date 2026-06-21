@@ -7895,13 +7895,14 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
-    fun `loot table registry migration does not trust class name suffix`() {
+    fun `loot table registry migration does not trust class name suffix or local loot markers`() {
         val projectDir = createFile("LootTables.java", """
             package com.example;
 
             import java.util.HashSet;
             import java.util.Set;
             import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.storage.loot.LootTable;
 
             public class LootTables {
                 private static final Set<ResourceLocation> IDS = new HashSet<>();
@@ -14374,6 +14375,20 @@ class StructuralRefactorExtraTest {
 
                 public static Set<ResourceLocation> allBuiltin() {
                     return MOD_LOOT_TABLES;
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("LootIdsProviderFactory.java").writeText("""
+            package com.example.data;
+
+            import com.example.LootIds;
+            import java.util.List;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.loot.LootTableProvider;
+
+            public class LootIdsProviderFactory {
+                public static LootTableProvider create(PackOutput output) {
+                    return new LootTableProvider(output, LootIds.allBuiltin(), List.of());
                 }
             }
         """.trimIndent())
