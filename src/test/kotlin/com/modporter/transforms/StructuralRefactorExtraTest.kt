@@ -16245,6 +16245,9 @@ class StructuralRefactorExtraTest {
             import net.minecraft.network.chat.ComponentUtils;
 
             public class WhitelistCommand {
+                // ComponentUtils.getDisplayName(documentedProfile);
+                private static final String DOC = "ComponentUtils.getDisplayName(profile)";
+
                 public void add(CommandSourceStack source, GameProfile gameProfile) {
                     source.sendSuccess(() -> Component.translatable("commands.example.add.success", ComponentUtils.getDisplayName(gameProfile)), true);
                 }
@@ -16257,7 +16260,9 @@ class StructuralRefactorExtraTest {
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
         assertTrue(command.contains("Component.translatable(\"commands.example.add.success\", Component.literal(gameProfile.getName()))"), command)
         assertFalse(command.contains("import net.minecraft.network.chat.ComponentUtils;"), command)
-        assertFalse(command.contains("ComponentUtils.getDisplayName"), command)
+        assertFalse(command.contains("ComponentUtils.getDisplayName(gameProfile)), true);"), command)
+        assertTrue(command.contains("ComponentUtils.getDisplayName(documentedProfile);"), command)
+        assertTrue(command.contains("""private static final String DOC = "ComponentUtils.getDisplayName(profile)";"""), command)
     }
 
     @Test

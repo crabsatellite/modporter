@@ -25715,10 +25715,11 @@ public $className(Properties $propertiesName, WoodType $typeName) {
     }
 
     private fun migrateGameProfileDisplayNameComponents(source: String): String {
-        if (!source.contains("ComponentUtils.getDisplayName(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("ComponentUtils.getDisplayName(")) return source
 
-        var result = rewriteJavaCall(source, "getDisplayName") { receiver, args ->
-            if (receiver != "ComponentUtils" || args.size != 1) return@rewriteJavaCall null
+        var result = rewriteExecutableJavaCall(source, "getDisplayName") { receiver, args ->
+            if (receiver != "ComponentUtils" || args.size != 1) return@rewriteExecutableJavaCall null
             val profile = args[0].trim()
             "Component.literal($profile.getName())"
         }
@@ -25726,7 +25727,7 @@ public $className(Properties $propertiesName, WoodType $typeName) {
 
         result = addImportIfMissing(result, "net.minecraft.network.chat.Component")
         val withoutComponentUtils = removeImport(result, "net.minecraft.network.chat.ComponentUtils")
-        if (!Regex("""\bComponentUtils\b""").containsMatchIn(withoutComponentUtils)) {
+        if (!Regex("""\bComponentUtils\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutComponentUtils))) {
             result = withoutComponentUtils
         }
         return result

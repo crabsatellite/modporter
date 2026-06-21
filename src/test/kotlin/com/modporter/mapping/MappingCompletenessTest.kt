@@ -2752,6 +2752,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `game profile display name migration uses executable call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateGameProfileDisplayNameComponents")
+        assertTrue(start >= 0, "migrateGameProfileDisplayNameComponents is missing")
+        val end = source.indexOf("private fun migrateRegistryAccessEmptyFallbacks", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw ComponentUtils prefilter" to """source.contains("ComponentUtils.getDisplayName(")""",
+            "raw getDisplayName rewrite" to """rewriteJavaCall(source, "getDisplayName")""",
+            "raw ComponentUtils import usage scan" to """containsMatchIn(withoutComponentUtils)"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("ComponentUtils.getDisplayName(")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "getDisplayName")""") &&
+                body.contains("""receiver != "ComponentUtils"""") &&
+                body.contains("maskJavaCommentsAndLiterals(withoutComponentUtils)"),
+            "GameProfile display-name migration must inspect executable calls and remove imports using executable usage evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "GameProfile display-name migration must not rewrite comments or keep imports because of strings: $offenders"
+        )
+    }
+
+    @Test
     fun `resource mod id detection does not infer constant owners from file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot
