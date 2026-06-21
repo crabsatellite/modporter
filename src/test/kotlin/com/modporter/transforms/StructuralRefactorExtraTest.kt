@@ -11218,6 +11218,82 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `vanilla 121 small API rewrites ignore comments and strings`() {
+        val projectDir = createFile("SmallVanillaApiSurface.java", """
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.tags.Tags;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.common.NeoForgeMod;
+
+            public class SmallVanillaApiSurface {
+                private static final String DOC = "stack.hasCustomHoverName() Tags.Items.HEADS NeoForgeMod.BLOCK_REACH.get()";
+                private static final String HOLDER_DOC = "thing.VALUE.getHolder().orElseThrow() effect.getEffect().isInstantenous(source)";
+
+                /*
+                boolean docs(ItemStack stack, BlockState state, Level level, BlockPos pos, Entity entity) {
+                    return stack.hasCustomHoverName()
+                            && state.is(Tags.Items.HEADS)
+                            && level.getBiome(pos).get().toString().isEmpty()
+                            && entity.getAttribute(NeoForgeMod.ENTITY_REACH.get()) != null;
+                }
+
+                boolean holderDocs(RegistryThing thing, EffectInstance effect, Object source) {
+                    return thing.VALUE.getHolder().orElseThrow() != null
+                            && effect.getEffect().isInstantenous(source);
+                }
+                */
+                boolean real(ItemStack stack, BlockState state, Level level, BlockPos pos, Entity entity) {
+                    return stack.hasCustomHoverName()
+                            && state.is(Tags.Items.HEADS)
+                            && level.getBiome(pos).get().toString().isEmpty()
+                            && entity.getAttribute(NeoForgeMod.BLOCK_REACH.get()) != null
+                            && entity.getAttribute(NeoForgeMod.ENTITY_REACH.get()) != null;
+                }
+
+                boolean holderReal(RegistryThing thing, EffectInstance effect, Object source) {
+                    return thing.VALUE.getHolder().orElseThrow() != null
+                            && effect.getEffect().isInstantenous(source);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = projectDir.resolve("src/main/java/com/example/SmallVanillaApiSurface.java").readText()
+        assertTrue(migrated.contains("stack.has(DataComponents.CUSTOM_NAME)"), migrated)
+        assertTrue(migrated.contains("state.is(ItemTags.SKULLS)"), migrated)
+        assertTrue(migrated.contains("level.getBiome(pos).value().toString().isEmpty()"), migrated)
+        assertTrue(migrated.contains("entity.getAttribute(Attributes.BLOCK_INTERACTION_RANGE) != null"), migrated)
+        assertTrue(migrated.contains("entity.getAttribute(Attributes.ENTITY_INTERACTION_RANGE) != null"), migrated)
+        assertTrue(migrated.contains("thing.VALUE.getDelegate() != null"), migrated)
+        assertTrue(migrated.contains("effect.getEffect().value().isInstantenous(source)"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.core.component.DataComponents;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.tags.ItemTags;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.entity.ai.attributes.Attributes;"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.neoforge.common.NeoForgeMod;"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "stack.hasCustomHoverName() Tags.Items.HEADS NeoForgeMod.BLOCK_REACH.get()";"""), migrated)
+        assertTrue(migrated.contains("""private static final String HOLDER_DOC = "thing.VALUE.getHolder().orElseThrow() effect.getEffect().isInstantenous(source)";"""), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("stack.hasCustomHoverName()"), migrated)
+        assertTrue(commentBlock.contains("state.is(Tags.Items.HEADS)"), migrated)
+        assertTrue(commentBlock.contains("level.getBiome(pos).get().toString().isEmpty()"), migrated)
+        assertTrue(commentBlock.contains("entity.getAttribute(NeoForgeMod.ENTITY_REACH.get()) != null"), migrated)
+        assertTrue(commentBlock.contains("thing.VALUE.getHolder().orElseThrow() != null"), migrated)
+        assertTrue(commentBlock.contains("effect.getEffect().isInstantenous(source)"), migrated)
+        assertFalse(commentBlock.contains("DataComponents.CUSTOM_NAME"), migrated)
+        assertFalse(commentBlock.contains("ItemTags.SKULLS"), migrated)
+        assertFalse(commentBlock.contains("Attributes.ENTITY_INTERACTION_RANGE"), migrated)
+        assertFalse(commentBlock.contains("getDelegate()"), migrated)
+        assertFalse(commentBlock.contains("getEffect().value().isInstantenous"), migrated)
+    }
+
+    @Test
     fun `migrates block entity fluid capability override to RegisterCapabilitiesEvent`() {
         val projectDir = createFile("ExampleMod.java", """
             package com.example;

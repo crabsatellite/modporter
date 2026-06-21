@@ -26765,8 +26765,11 @@ public $className(Properties $propertiesName, WoodType $typeName) {
     }
 
     private fun migrateLegacyDeferredHolderDelegateAccessors(source: String): String {
-        if (!source.contains(".getHolder().orElseThrow()")) return source
-        return source.replace(".getHolder().orElseThrow()", ".getDelegate()")
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".getHolder().orElseThrow()")) return source
+        return replaceExecutableJavaRegex(source, Regex("""\.getHolder\(\)\.orElseThrow\(\)""")) {
+            ".getDelegate()"
+        }
     }
 
     private fun migrateLegacyRegistryObjectMethodReferences(source: String): String {
@@ -28711,47 +28714,63 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
     }
 
     private fun migrateLegacyHolderAccessors(source: String): String {
-        if (!source.contains("Holder") &&
-            !source.contains(".getHolder().get()") &&
-            !source.contains(".getHolder().orElseThrow()") &&
-            !source.contains(".getEffect().") &&
-            !source.contains(".getBiome(")
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        if (!executableSource.contains("Holder") &&
+            !executableSource.contains(".getHolder().get()") &&
+            !executableSource.contains(".getHolder().orElseThrow()") &&
+            !executableSource.contains(".getEffect().") &&
+            !executableSource.contains(".getBiome(")
         ) {
             return source
         }
-        var result = source
-            .replace(".getHolder().orElseThrow()", ".getDelegate()")
-            .replace(".getHolder().get()", ".getDelegate()")
+        var result = replaceExecutableJavaRegex(source, Regex("""\.getHolder\(\)\.orElseThrow\(\)""")) {
+            ".getDelegate()"
+        }
+        result = replaceExecutableJavaRegex(result, Regex("""\.getHolder\(\)\.get\(\)""")) {
+            ".getDelegate()"
+        }
 
         val holderVariables = Regex("""\bHolder\s*<[^>\r\n]+>\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
+            .findAll(maskJavaCommentsAndLiterals(result))
             .map { it.groupValues[1] }
             .toSet()
         for (variable in holderVariables) {
-            result = Regex("""\bthis\.${Regex.escape(variable)}\.get\(\)""")
-                .replace(result, "this.$variable.value()")
-            result = Regex("""(?<![\w$.\]])\b${Regex.escape(variable)}\.get\(\)""")
-                .replace(result, "$variable.value()")
+            result = replaceExecutableJavaRegex(
+                result,
+                Regex("""\bthis\.${Regex.escape(variable)}\.get\(\)""")
+            ) {
+                "this.$variable.value()"
+            }
+            result = replaceExecutableJavaRegex(
+                result,
+                Regex("""(?<![\w$.\]])\b${Regex.escape(variable)}\.get\(\)""")
+            ) {
+                "$variable.value()"
+            }
         }
 
         val holderBlockVariables = Regex("""\bHolder\s*<\s*Block\s*>\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
+            .findAll(maskJavaCommentsAndLiterals(result))
             .map { it.groupValues[1] }
             .toMutableSet()
         Regex("""BuiltInRegistries\.BLOCK\.getOrCreateTag\([^;\r\n]*?\)\.forEach\(\s*([A-Za-z_$][\w$]*)\s*->""")
-            .findAll(result)
+            .findAll(maskJavaCommentsAndLiterals(result))
             .forEach { holderBlockVariables += it.groupValues[1] }
         for (variable in holderBlockVariables) {
-            result = Regex("""(?<![\w$.\]])\b${Regex.escape(variable)}\.defaultBlockState\(\)""")
-                .replace(result, "$variable.value().defaultBlockState()")
+            result = replaceExecutableJavaRegex(
+                result,
+                Regex("""(?<![\w$.\]])\b${Regex.escape(variable)}\.defaultBlockState\(\)""")
+            ) {
+                "$variable.value().defaultBlockState()"
+            }
         }
         val blockMapVariables = Regex("""\b(?:Map|HashMap|LinkedHashMap|ConcurrentHashMap)\s*<\s*Block\s*,\s*Block\s*>\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
+            .findAll(maskJavaCommentsAndLiterals(result))
             .map { it.groupValues[1] }
             .toSet()
         for (mapVariable in blockMapVariables) {
-            result = rewriteJavaInvocationArguments(result, "$mapVariable.put") { args ->
-                if (args.size != 2) return@rewriteJavaInvocationArguments null
+            result = rewriteExecutableJavaInvocationArguments(result, "$mapVariable.put") { args ->
+                if (args.size != 2) return@rewriteExecutableJavaInvocationArguments null
                 args.map { arg ->
                     val trimmed = arg.trim()
                     if (trimmed in holderBlockVariables) "$trimmed.value()" else arg
@@ -28759,11 +28778,18 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
             }
         }
 
-        result = Regex("""(\.getBiome\((?:[^()]|\([^()]*\))*\))\.get\(\)""")
-            .replace(result) { match -> "${match.groupValues[1]}.value()" }
-        result = result
-            .replace(".getEffect().isInstantenous(", ".getEffect().value().isInstantenous(")
-            .replace(".getEffect().applyInstantenousEffect(", ".getEffect().value().applyInstantenousEffect(")
+        result = replaceExecutableJavaRegex(
+            result,
+            Regex("""(\.getBiome\((?:[^()]|\([^()]*\))*\))\.get\(\)""")
+        ) { match ->
+            "${match.groupValues[1]}.value()"
+        }
+        result = replaceExecutableJavaRegex(result, Regex("""\.getEffect\(\)\.isInstantenous\(""")) {
+            ".getEffect().value().isInstantenous("
+        }
+        result = replaceExecutableJavaRegex(result, Regex("""\.getEffect\(\)\.applyInstantenousEffect\(""")) {
+            ".getEffect().value().applyInstantenousEffect("
+        }
         return result
     }
 
@@ -31836,25 +31862,30 @@ ${indent}}
                 needsLevelReader = true
             }
         }
-        if (result.contains(".hasCustomHoverName()")) {
-            result = result.replace(".hasCustomHoverName()", ".has(DataComponents.CUSTOM_NAME)")
+        val beforeCustomHoverName = result
+        result = replaceExecutableRegex(result, Regex("""\.hasCustomHoverName\(\)""")) { ".has(DataComponents.CUSTOM_NAME)" }
+        if (result != beforeCustomHoverName) {
             needsDataComponents = true
         }
-        result = result.replace(".getBiome(pos).get().", ".getBiome(pos).value().")
-        result = Regex("""\.getBiome\(([^)]+)\)\.get\(\)\.""")
-            .replace(result) { match -> ".getBiome(${match.groupValues[1].trim()}).value()." }
-        if (result.contains("Tags.Items.HEADS")) {
-            result = result.replace("Tags.Items.HEADS", "ItemTags.SKULLS")
+        result = replaceExecutableRegex(result, Regex("""\.getBiome\(([^)]+)\)\.get\(\)\.""")) { match ->
+            ".getBiome(${match.groupValues[1].trim()}).value()."
+        }
+        val beforeItemHeads = result
+        result = replaceExecutableRegex(result, Regex("""\bTags\.Items\.HEADS\b""")) { "ItemTags.SKULLS" }
+        if (result != beforeItemHeads) {
             needsItemTags = true
         }
-        if ((result.contains("NeoForgeMod.BLOCK_REACH.get()") || result.contains("NeoForgeMod.ENTITY_REACH.get()")) &&
-            !(result.contains("getDefaultAttributeModifiers(EquipmentSlot") && result.contains("ImmutableMultimap"))) {
-            result = result
-                .replace("NeoForgeMod.BLOCK_REACH.get()", "Attributes.BLOCK_INTERACTION_RANGE")
-                .replace("NeoForgeMod.ENTITY_REACH.get()", "Attributes.ENTITY_INTERACTION_RANGE")
-            needsAttributes = true
+        val executableReachSource = maskJavaCommentsAndLiterals(result)
+        if ((executableReachSource.contains("NeoForgeMod.BLOCK_REACH.get()") || executableReachSource.contains("NeoForgeMod.ENTITY_REACH.get()")) &&
+            !(executableReachSource.contains("getDefaultAttributeModifiers(EquipmentSlot") && executableReachSource.contains("ImmutableMultimap"))) {
+            val beforeReach = result
+            result = replaceExecutableRegex(result, Regex("""\bNeoForgeMod\.BLOCK_REACH\.get\(\)""")) { "Attributes.BLOCK_INTERACTION_RANGE" }
+            result = replaceExecutableRegex(result, Regex("""\bNeoForgeMod\.ENTITY_REACH\.get\(\)""")) { "Attributes.ENTITY_INTERACTION_RANGE" }
+            if (result != beforeReach) {
+                needsAttributes = true
+            }
             val withoutNeoForgeMod = removeImport(result, "net.neoforged.neoforge.common.NeoForgeMod")
-            if (!Regex("""\bNeoForgeMod\b""").containsMatchIn(withoutNeoForgeMod)) {
+            if (!Regex("""\bNeoForgeMod\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutNeoForgeMod))) {
                 result = withoutNeoForgeMod
             }
         }

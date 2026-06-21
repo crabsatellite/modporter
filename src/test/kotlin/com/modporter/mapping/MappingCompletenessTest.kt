@@ -3261,6 +3261,83 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `vanilla 121 small API rewrites use executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val hoverIndex = source.indexOf("hasCustomHoverName")
+        assertTrue(hoverIndex >= 0, "small API rewrite block is missing")
+        val body = source.substring((hoverIndex - 400).coerceAtLeast(0), (hoverIndex + 2200).coerceAtMost(source.length))
+        val offenders = listOf(
+            "raw hasCustomHoverName replacement" to ".replace(\".hasCustomHoverName()\"",
+            "raw getBiome(pos) replacement" to ".replace(\".getBiome(pos).get().\"",
+            "raw Tags.Items.HEADS replacement" to ".replace(\"Tags.Items.HEADS\"",
+            "raw BLOCK_REACH replacement" to ".replace(\"NeoForgeMod.BLOCK_REACH.get()\"",
+            "raw ENTITY_REACH replacement" to ".replace(\"NeoForgeMod.ENTITY_REACH.get()\""
+        )
+            .filter { (_, marker) -> source.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("beforeCustomHoverName") &&
+                body.contains("beforeItemHeads") &&
+                body.contains("executableReachSource") &&
+                body.contains("beforeReach") &&
+                body.contains("replaceExecutableRegex(result, Regex") &&
+                body.contains("maskJavaCommentsAndLiterals(withoutNeoForgeMod)"),
+            "Small vanilla 1.21 API rewrites must use executable source evidence and set imports only after real rewrites"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Small vanilla 1.21 API rewrites must not use raw String.replace: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy holder accessor migrations use executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val delegateStart = source.indexOf("private fun migrateLegacyDeferredHolderDelegateAccessors")
+        assertTrue(delegateStart >= 0, "migrateLegacyDeferredHolderDelegateAccessors is missing")
+        val holderStart = source.indexOf("private fun migrateLegacyHolderAccessors")
+        assertTrue(holderStart >= 0, "migrateLegacyHolderAccessors is missing")
+        val holderEnd = source.indexOf("private fun migrateLegacyItemConstructorsAndProperties", holderStart + 1)
+        assertTrue(holderEnd > holderStart, "migrateLegacyHolderAccessors boundary is missing")
+        val delegateBody = source.substring(delegateStart, holderStart)
+        val holderBody = source.substring(holderStart, holderEnd)
+        val inspectedBody = delegateBody + holderBody
+        val offenders = listOf(
+            "raw getHolder orElseThrow replacement" to ".replace(\".getHolder().orElseThrow()\"",
+            "raw getHolder get replacement" to ".replace(\".getHolder().get()\"",
+            "raw instant effect replacement" to ".replace(\".getEffect().isInstantenous(\"",
+            "raw apply instant effect replacement" to ".replace(\".getEffect().applyInstantenousEffect(\"",
+            "raw biome holder replacement" to ".replace(result) { match -> \"${'$'}{match.groupValues[1]}.value()\" }"
+        )
+            .filter { (_, marker) -> inspectedBody.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            delegateBody.contains("maskJavaCommentsAndLiterals(source)") &&
+                delegateBody.contains("replaceExecutableJavaRegex(source"),
+            "DeferredHolder delegate accessor migration must gate replacements on executable Java"
+        )
+        assertTrue(
+            holderBody.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                holderBody.contains("replaceExecutableJavaRegex(") &&
+                holderBody.contains(".findAll(maskJavaCommentsAndLiterals(result))") &&
+                holderBody.contains("rewriteExecutableJavaInvocationArguments"),
+            "Legacy holder accessor migration must collect and rewrite executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy holder accessor migrations must not use raw String.replace or raw Regex.replace: $offenders"
+        )
+    }
+
+    @Test
     fun `holder value accessor migration uses executable typed variables`() {
         val source = Path.of("")
             .toAbsolutePath()
