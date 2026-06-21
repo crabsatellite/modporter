@@ -15646,36 +15646,40 @@ ${indent}}
     }
 
     private fun migrateLegacyShearableSignaturesSource(source: String): String {
-        if (!source.contains("onSheared(") && !source.contains("isShearable(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("onSheared(") && !executableCode.contains("isShearable(")) return source
         val id = """[A-Za-z_$][\w$]*"""
-        var changed = false
-        var result = source
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        val methodRanges = javaMethodRanges(executableCode)
 
         val onShearedPattern = Regex(
             """onSheared\s*\(\s*((?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*)*)Player\s+($id)\s*,\s*ItemStack\s+($id)\s*,\s*Level\s+($id)\s*,\s*BlockPos\s+($id)\s*,\s*int\s+($id)\s*\)"""
         )
-        result = onShearedPattern.replace(result) { match ->
+        onShearedPattern.findAll(executableCode).forEach { match ->
             val fortuneName = match.groupValues[6]
-            val methodText = javaDeclaredMethodText(source, "onSheared")
-            val bodyStart = methodText?.indexOf('{') ?: -1
+            val method = methodRanges.singleOrNull { it.name == "onSheared" && match.range.first in it.range }
+                ?: return@forEach
+            val methodText = executableCode.substring(method.range)
+            val bodyStart = methodText.indexOf('{')
             val bodyUsesFortune = bodyStart >= 0 &&
-                Regex("""\b${Regex.escape(fortuneName)}\b""").containsMatchIn(methodText!!.substring(bodyStart))
-            if (bodyUsesFortune) {
-                match.value
-            } else {
-                changed = true
-                "onSheared(${match.groupValues[1]}Player ${match.groupValues[2]}, ItemStack ${match.groupValues[3]}, Level ${match.groupValues[4]}, BlockPos ${match.groupValues[5]})"
+                Regex("""\b${Regex.escape(fortuneName)}\b""").containsMatchIn(methodText.substring(bodyStart))
+            if (!bodyUsesFortune) {
+                val annotations = match.groups[1]?.range?.let { source.substring(it) }.orEmpty()
+                edits += match.range to
+                    "onSheared(${annotations}Player ${match.groupValues[2]}, ItemStack ${match.groupValues[3]}, Level ${match.groupValues[4]}, BlockPos ${match.groupValues[5]})"
             }
         }
 
-        result = Regex(
+        val isShearablePattern = Regex(
             """isShearable\s*\(\s*ItemStack\s+($id)\s*,\s*Level\s+($id)\s*,\s*BlockPos\s+($id)\s*\)"""
-        ).replace(result) { match ->
-            changed = true
-            "isShearable(Player player, ItemStack ${match.groupValues[1]}, Level ${match.groupValues[2]}, BlockPos ${match.groupValues[3]})"
+        )
+        isShearablePattern.findAll(executableCode).forEach { match ->
+            edits += match.range to
+                "isShearable(Player player, ItemStack ${match.groupValues[1]}, Level ${match.groupValues[2]}, BlockPos ${match.groupValues[3]})"
         }
 
-        if (!changed) return source
+        if (edits.isEmpty()) return source
+        var result = applyStringEdits(source, edits)
         if (Regex("""\bisShearable\s*\(\s*Player\s+""").containsMatchIn(result)) {
             result = addImportIfMissing(result, "net.minecraft.world.entity.player.Player")
         }

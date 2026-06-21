@@ -3792,6 +3792,44 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy shearable signature migration uses executable method ranges`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyShearableSignaturesSource")
+        assertTrue(start >= 0, "migrateLegacyShearableSignaturesSource is missing")
+        val end = source.indexOf("private fun migrateLegacyIgnoreExplosionSignatureSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw onSheared prefilter" to """source.contains("onSheared(")""",
+            "raw isShearable prefilter" to """source.contains("isShearable(")""",
+            "raw onSheared replacement" to "onShearedPattern.replace(result)",
+            "raw onSheared method extraction" to """javaDeclaredMethodText(source, "onSheared")""",
+            "raw isShearable replacement" to ").replace(result) { match ->"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val methodRanges = javaMethodRanges(executableCode)") &&
+                body.contains("onShearedPattern.findAll(executableCode)") &&
+                body.contains("val methodText = executableCode.substring(method.range)") &&
+                body.contains("methodText.substring(bodyStart)") &&
+                body.contains("isShearablePattern.findAll(executableCode)") &&
+                body.contains("applyStringEdits(source, edits)"),
+            "Legacy shearable signature migration must locate signatures and fortune usage from executable Java source"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy shearable signature migration must not use comments, strings, or raw method text as signature evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `painting variant accessor migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

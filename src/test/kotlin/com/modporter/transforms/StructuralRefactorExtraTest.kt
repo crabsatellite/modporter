@@ -28391,6 +28391,49 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy shearable signature migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DocumentedShearableSurface.java").writeText("""
+            package com.example;
+
+            import java.util.Collections;
+            import java.util.List;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            public class DocumentedShearableSurface {
+                private static final String DOC = "isShearable(ItemStack item, Level world, BlockPos pos)";
+
+                /*
+                public List<ItemStack> onSheared(Player player, ItemStack item, Level level, BlockPos pos, int fortune) {
+                    return Collections.emptyList();
+                }
+
+                public boolean isShearable(ItemStack item, Level world, BlockPos pos) {
+                    return true;
+                }
+                */
+
+                public boolean keep() {
+                    return DOC.length() > 0;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("DocumentedShearableSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("private static final String DOC = \"isShearable(ItemStack item, Level world, BlockPos pos)\";"), migrated)
+        assertTrue(migrated.contains("onSheared(Player player, ItemStack item, Level level, BlockPos pos, int fortune)"), migrated)
+        assertTrue(migrated.contains("isShearable(ItemStack item, Level world, BlockPos pos)"), migrated)
+        assertFalse(migrated.contains("isShearable(Player player, ItemStack item, Level world, BlockPos pos)"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.world.entity.player.Player;"), migrated)
+    }
+
+    @Test
     fun `migrates legacy explosion override signature`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
