@@ -1157,25 +1157,27 @@ $streamFields,
         sourceFile: Path,
         errors: MutableList<String>
     ): String {
-        if (!source.contains("TierSortingRegistry.registerTier(") &&
-            !source.contains("TierSortingRegistry.isCorrectTierForDrops(")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("TierSortingRegistry.registerTier(") &&
+            !executableCode.contains("TierSortingRegistry.isCorrectTierForDrops(")) {
             return source
         }
 
         var result = source
         var changed = false
 
-        if (result.contains("TierSortingRegistry.registerTier(")) {
+        if (executableCode.contains("TierSortingRegistry.registerTier(")) {
+            val executableResult = maskJavaCommentsAndLiterals(result)
             val marker = "TierSortingRegistry.registerTier"
             val builder = StringBuilder()
             var cursor = 0
 
             while (true) {
-                val markerIndex = result.indexOf(marker, cursor)
+                val markerIndex = executableResult.indexOf(marker, cursor)
                 if (markerIndex < 0) break
-                val openParen = result.indexOf('(', markerIndex + marker.length)
+                val openParen = executableResult.indexOf('(', markerIndex + marker.length)
                 if (openParen < 0) break
-                val closeParen = findMatchingDelimiter(result, openParen, '(', ')')
+                val closeParen = findMatchingDelimiter(executableResult, openParen, '(', ')')
                 if (closeParen < 0) break
 
                 val inside = result.substring(openParen + 1, closeParen)
@@ -1214,16 +1216,17 @@ $streamFields,
 
     private fun migrateTierSortingRegistryDropChecks(source: String): String {
         val marker = "TierSortingRegistry.isCorrectTierForDrops"
-        if (!source.contains(marker)) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(marker)) return source
 
         val builder = StringBuilder()
         var cursor = 0
         while (true) {
-            val markerIndex = source.indexOf(marker, cursor)
+            val markerIndex = executableCode.indexOf(marker, cursor)
             if (markerIndex < 0) break
-            val openParen = source.indexOf('(', markerIndex + marker.length)
+            val openParen = executableCode.indexOf('(', markerIndex + marker.length)
             if (openParen < 0) break
-            val closeParen = findMatchingDelimiter(source, openParen, '(', ')')
+            val closeParen = findMatchingDelimiter(executableCode, openParen, '(', ')')
             if (closeParen < 0) break
 
             val args = splitTopLevelArguments(source.substring(openParen + 1, closeParen))

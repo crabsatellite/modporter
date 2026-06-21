@@ -6540,6 +6540,58 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `tier sorting registry migration uses executable source evidence`() {
+        val textPass = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val tierStart = textPass.indexOf("private fun migrateTierSortingRegistryTiers")
+        assertTrue(tierStart >= 0, "migrateTierSortingRegistryTiers is missing")
+        val tierEnd = textPass.indexOf("private fun migrateTierSortingRegistryDropChecks", tierStart + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val tierBody = textPass.substring(tierStart, tierEnd)
+        val dropStart = textPass.indexOf("private fun migrateTierSortingRegistryDropChecks")
+        assertTrue(dropStart >= 0, "migrateTierSortingRegistryDropChecks is missing")
+        val dropEnd = textPass.indexOf("private fun tierSortingDropCheckExpression", dropStart + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val dropBody = textPass.substring(dropStart, dropEnd)
+        val offenders = listOf(
+            "raw register prefilter" to tierBody.contains("""source.contains("TierSortingRegistry.registerTier(")"""),
+            "raw drop prefilter" to tierBody.contains("""source.contains("TierSortingRegistry.isCorrectTierForDrops(")"""),
+            "raw result register prefilter" to tierBody.contains("""result.contains("TierSortingRegistry.registerTier(")"""),
+            "raw register scan" to tierBody.contains("result.indexOf(marker"),
+            "raw register open paren scan" to tierBody.contains("result.indexOf('(', markerIndex"),
+            "raw register delimiter scan" to tierBody.contains("findMatchingDelimiter(result, openParen"),
+            "raw drop marker prefilter" to dropBody.contains("source.contains(marker)"),
+            "raw drop scan" to dropBody.contains("source.indexOf(marker"),
+            "raw drop open paren scan" to dropBody.contains("source.indexOf('(', markerIndex"),
+            "raw drop delimiter scan" to dropBody.contains("findMatchingDelimiter(source, openParen")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            tierBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                tierBody.contains("""executableCode.contains("TierSortingRegistry.registerTier(")""") &&
+                tierBody.contains("""executableCode.contains("TierSortingRegistry.isCorrectTierForDrops(")""") &&
+                tierBody.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                tierBody.contains("executableResult.indexOf(marker, cursor)") &&
+                tierBody.contains("findMatchingDelimiter(executableResult, openParen") &&
+                dropBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                dropBody.contains("executableCode.contains(marker)") &&
+                dropBody.contains("executableCode.indexOf(marker, cursor)") &&
+                dropBody.contains("findMatchingDelimiter(executableCode, openParen"),
+            "TierSortingRegistry migration must locate registerTier and drop checks in executable Java source"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "TierSortingRegistry migration must not rewrite comments or strings: $offenders"
+        )
+    }
+
+    @Test
     fun `default migration surfaces do not retreat to manual handling`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val scannedRoots = listOf(

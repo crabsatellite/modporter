@@ -4845,6 +4845,82 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `tier sorting registry migrations ignore comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example.util;
+
+            import net.minecraft.tags.BlockTags;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.item.Tiers;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.common.SimpleTier;
+            import net.neoforged.neoforge.common.TierSortingRegistry;
+            import com.example.ExampleMod;
+            import com.example.init.ModItems;
+
+            import java.util.List;
+
+            public class TestMod {
+                private static final String DOC = "TierSortingRegistry.isCorrectTierForDrops(getHarvestLevel(stack), state)";
+
+                /*
+                 public static final Tier DOC_TIER = TierSortingRegistry.registerTier(
+                         new SimpleTier(2, 512, 6.5F, 2, 25, BlockTags.create(ExampleMod.prefix("needs_doc_tool")), () -> Ingredient.EMPTY),
+                         ExampleMod.prefix("doc"), List.of(Tiers.IRON), List.of(Tiers.DIAMOND));
+
+                 return TierSortingRegistry.isCorrectTierForDrops(getHarvestLevel(stack), state);
+                 */
+
+                public static final Tier COPPER = TierSortingRegistry.registerTier(
+                        new SimpleTier(2, 512, 6.5F, 2, 25, BlockTags.create(ExampleMod.prefix("needs_copper_tool")), () -> Ingredient.of(ModItems.COPPER_INGOT.get())),
+                        ExampleMod.prefix("copper"), List.of(Tiers.IRON), List.of(Tiers.DIAMOND));
+
+                public boolean isCorrectToolForDrops(ItemStack stack, BlockState state) {
+                    return TierSortingRegistry.isCorrectTierForDrops(getHarvestLevel(stack), state);
+                }
+
+                private Tier getHarvestLevel(ItemStack stack) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+        projectDir.resolve("src/generated/resources/data/example").createDirectories()
+        projectDir.resolve("src/main/java/com/example/ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public static ResourceLocation prefix(String path) {
+                    return ResourceLocation.fromNamespaceAndPath(ID, path);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+        val copperTag = projectDir.resolve("src/generated/resources/data/example/tags/block/incorrect_for_copper_tool.json")
+        val docTag = projectDir.resolve("src/generated/resources/data/example/tags/block/incorrect_for_doc_tool.json")
+
+        assertTrue(transformed.contains("""new SimpleTier(BlockTags.create(ExampleMod.prefix("incorrect_for_copper_tool")), 512, 6.5F, 2, 25, () -> Ingredient.of(ModItems.COPPER_INGOT.get()))"""), transformed)
+        assertTrue(transformed.contains("(getHarvestLevel(stack)).createToolProperties("), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"TierSortingRegistry.isCorrectTierForDrops(getHarvestLevel(stack), state)\";"), transformed)
+        assertTrue(transformed.contains("""needs_doc_tool"""), transformed)
+        assertTrue(transformed.contains("return TierSortingRegistry.isCorrectTierForDrops(getHarvestLevel(stack), state);"), transformed)
+        assertTrue(copperTag.exists())
+        assertFalse(docTag.exists(), "Commented registerTier must not emit generated tag resources")
+        assertFalse(transformed.contains("import net.neoforged.neoforge.common.TierSortingRegistry;"), transformed)
+        assertFalse(transformed.contains("DOC = \"(getHarvestLevel"), transformed)
+    }
+
+    @Test
     fun `dry run does not modify files`() {
         val original = """
             import net.minecraftforge.common.MinecraftForge;
