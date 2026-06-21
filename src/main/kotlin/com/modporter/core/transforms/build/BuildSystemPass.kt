@@ -720,7 +720,7 @@ class BuildSystemPass(
         content = normalizeJarJarRangePinDsl(content, changes, file)
 
         // 11. Keep unresolved dependencies active while removing ForgeGradle-only wrappers.
-        content = normalizeOldDependencyWrappers(content, resolvedPrefixes)
+        content = normalizeOldDependencyWrappers(content)
 
         // 11b. Guard optional run-preparation hooks whose task may not exist under ModDev
         val prepareGameTestTaskPattern = Regex("""tasks\.named\(\s*(['"])prepareGameTestServerRun\1\s*\)\.configure\s*\{""")
@@ -4862,18 +4862,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
      * Keep third-party dependencies active while removing ForgeGradle-only wrappers.
      * Dependency incompatibility must surface as a real resolution/compile failure.
      */
-    private fun normalizeOldDependencyWrappers(content: String, skipPrefixes: Set<String> = emptySet()): String {
-        val allDepPrefixes = listOf("mezz.jei:", "squeek.appleskin:", "com.blamejared.crafttweaker:",
-            "Crafttweaker_Annotation_Processors", "org.spongepowered:mixin:", "vazkii.botania",
-            "org.valkyrienskies", "maven.modrinth:", "curse.maven:", "top.theillusivec4:",
-            "com.github.", "de.ellpeck.", "mcjty.", "com.tterrag.",
-            "vazkii.patchouli", "cn.mcmod_mmf.mysterious_mountain_lib",
-            "com.simibubi.create", "net.createmod.ponder", "dev.engine-room.flywheel",
-            "io.github.llamalad7:mixinextras")
-        // Filter out prefixes that were already resolved to NeoForge versions
-        val depPrefixes = allDepPrefixes.filter { prefix ->
-            skipPrefixes.none { skip -> prefix.startsWith(skip) || skip.startsWith(prefix.trimEnd(':')) }
-        }
+    private fun normalizeOldDependencyWrappers(content: String): String {
         val depKeywords = listOf("compileOnly", "runtimeOnly", "implementation", "annotationProcessor", "def ")
 
         val lines = content.lines().toMutableList()
@@ -4896,7 +4885,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
             } while (j < lines.size && depth > 0)
 
             val blockText = lines.subList(blockStart, j).joinToString("\n")
-            if (depPrefixes.any { blockText.contains(it) }) {
+            if (blockText.contains("fg.deobf")) {
                 val replacementLines = blockText.lines().map { removeFgDeobfWrapper(it) }
                 for (k in blockStart until j) {
                     lines[k] = replacementLines[k - blockStart]
@@ -4908,10 +4897,15 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
     }
 
     private fun removeFgDeobfWrapper(line: String): String =
-        line.replace(
-            Regex("""compileOnly\s+fg\.deobf\(\s*([^)]+?)\s*\)"""),
-            "compileOnly $1"
-        )
+        line
+            .replace(
+                Regex("""\b([A-Za-z_$][\w$]*)\s+fg\.deobf\s*\(\s*([^)]+?)\s*\)"""),
+                "$1 $2"
+            )
+            .replace(
+                Regex("""\b([A-Za-z_$][\w$]*)\s+fg\.deobf\s+("[^"]+"|'[^']+'|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)"""),
+                "$1 $2"
+            )
 
     private data class LegacyTreeGrower(
         val className: String,

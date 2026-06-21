@@ -787,6 +787,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `old dependency wrapper normalization is coordinate agnostic`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun normalizeOldDependencyWrappers")
+        assertTrue(start >= 0, "normalizeOldDependencyWrappers is missing")
+        val end = source.indexOf("private data class LegacyTreeGrower", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "known dependency prefix list" to "allDepPrefixes",
+            "filtered dependency prefix list" to "depPrefixes",
+            "JEI coordinate prefix" to "mezz.jei:",
+            "Botania coordinate prefix" to "vazkii.botania",
+            "Create coordinate prefix" to "com.simibubi.create",
+            "CurseMaven coordinate prefix" to "curse.maven:",
+            "prefix-gated wrapper rewrite" to "depPrefixes.any"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("""blockText.contains("fg.deobf")""") &&
+                body.contains("fg\\.deobf") &&
+                body.contains("removeFgDeobfWrapper"),
+            "Old dependency wrappers must be detected by Gradle wrapper shape, not artifact coordinates"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "Old dependency wrapper normalization must not depend on known artifact prefixes: $forbidden"
+        )
+    }
+
+    @Test
     fun `production cleanup rules do not depend on legacy forge2neo comment markers`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(

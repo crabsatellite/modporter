@@ -4295,6 +4295,29 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `unresolved fg deobf wrappers are removed without dependency prefix allowlist`() {
+        val projectDir = tempDir.resolve("p19-generic-fg-deobf")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                compileOnly fg.deobf "com.example.unlisted:api:1.2.3"
+                runtimeOnly fg.deobf("com.example.unlisted:runtime:4.5.6")
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(content.contains("""compileOnly "com.example.unlisted:api:1.2.3""""))
+        assertTrue(content.contains("""runtimeOnly "com.example.unlisted:runtime:4.5.6""""))
+        assertFalse(content.contains("fg.deobf"), content)
+    }
+
+    @Test
     fun `resolves versioned public library dependencies to target NeoForge coordinates`() {
         val projectDir = tempDir.resolve("p19-versioned-public-libraries")
         projectDir.createDirectories()
