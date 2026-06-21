@@ -14946,17 +14946,28 @@ ${entries.joinToString(",\n")}
         result = removeLegacyTickPhaseChecks(result)
         result = migrateSplitLevelTickSideChecks(result)
         result = removeInvalidTickEventImports(result)
-
-        val playerTickEventName = Regex("""PlayerTickEvent\.Post\s+([A-Za-z_$][\w$]*)""")
-            .find(result)
-            ?.groupValues
-            ?.get(1)
-        if (playerTickEventName != null) {
-            result = Regex("""\b([A-Za-z_$][\w$.]*)\.tick\(player\);""")
-                .replace(result) { match -> "${match.groupValues[1]}.tick($playerTickEventName.getEntity());" }
-        }
+        result = migratePlayerTickEventPlayerArguments(result)
 
         return result
+    }
+
+    private fun migratePlayerTickEventPlayerArguments(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("PlayerTickEvent.Post") || !executableCode.contains(".tick(player)")) return source
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        val eventParameterPattern = Regex("""\bPlayerTickEvent\.Post\s+([A-Za-z_$][\w$]*)\b""")
+        val tickPlayerPattern = Regex("""\b([A-Za-z_$][\w$.]*)\.tick\(player\);""")
+
+        javaMethodRanges(executableCode).forEach { method ->
+            val methodText = executableCode.substring(method.range)
+            val eventName = eventParameterPattern.find(methodText)?.groupValues?.get(1) ?: return@forEach
+            tickPlayerPattern.findAll(executableCode, method.range.first)
+                .takeWhile { it.range.last <= method.range.last }
+                .forEach { match ->
+                    edits += match.range to "${match.groupValues[1]}.tick($eventName.getEntity());"
+                }
+        }
+        return applyStringEdits(source, edits)
     }
 
     private fun migrateSplitLevelTickSideChecks(source: String): String {

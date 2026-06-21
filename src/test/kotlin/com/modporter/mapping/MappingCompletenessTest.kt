@@ -3290,6 +3290,43 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `player tick event player argument migration uses executable method evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migratePlayerTickEventPlayerArguments")
+        assertTrue(start >= 0, "migratePlayerTickEventPlayerArguments is missing")
+        val end = source.indexOf("private fun migrateSplitLevelTickSideChecks", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw player tick prefilter" to body.contains("""source.contains("PlayerTickEvent.Post")"""),
+            "raw tick(player) prefilter" to body.contains("""source.contains(".tick(player)")"""),
+            "raw event scan" to (
+                body.contains(".find(result)") || body.contains(".find(source)")
+                ),
+            "raw tick replacement" to body.contains(".replace(result")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("javaMethodRanges(executableCode)") &&
+                body.contains("eventParameterPattern.find(methodText)") &&
+                body.contains("tickPlayerPattern.findAll(executableCode, method.range.first)") &&
+                body.contains("applyStringEdits(source, edits)"),
+            "PlayerTickEvent player argument migration must use executable method-scoped event evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "PlayerTickEvent player argument migration must not use comments, strings, or whole-file event fallbacks: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy pack metadata accessors use executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

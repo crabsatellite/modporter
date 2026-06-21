@@ -9335,6 +9335,12 @@ class StructuralRefactorExtraTest {
                 @SubscribeEvent
                 public static void onPlayerTick(LivingEvent.LivingTickEvent event) {
                     if (!(event.getEntity() instanceof ServerPlayer player)) return;
+                    String playerTickDoc = "scheduler.tick(player);";
+                    String playerTickBlock = ${"\"\"\""}
+                        scheduler.tick(player);
+                        ${"\"\"\""};
+                    // scheduler.tick(player);
+                    scheduler.tick(player);
                     use(player);
                 }
 
@@ -9387,6 +9393,10 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("public static void onCancelableLivingTick(EntityTickEvent.Pre event)"))
         assertTrue(migrated.contains("if (!event.isCanceled())"))
         assertTrue(migrated.contains("public static void onPlayerTick(PlayerTickEvent.Post event)"))
+        assertTrue(migrated.contains("scheduler.tick(event.getEntity());"), migrated)
+        assertTrue(migrated.contains("""String playerTickDoc = "scheduler.tick(player);";"""), migrated)
+        assertTrue(migrated.contains("scheduler.tick(player);\n            \"\"\";"), migrated)
+        assertTrue(migrated.contains("// scheduler.tick(player);"), migrated)
         assertTrue(migrated.contains("if (pending <= 0) {"))
         assertTrue(migrated.contains("public static void onNamedClientTick(ClientTickEvent.Post tick)"))
         assertTrue(migrated.contains("if (pending > 0) {"))
