@@ -3296,39 +3296,17 @@ config="$configName"
                 "public net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool templates"
             "public net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool f_210559_" ->
                 "public net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates"
-            else -> migrateAccessTransformerLineFromComment(line, entry) ?: entry
+            "public net.minecraft.client.resources.model.ModelBakery f_119234_" ->
+                "public net.minecraft.client.resources.model.ModelBakery UNREFERENCED_TEXTURES"
+            "public net.minecraft.world.level.chunk.ChunkGenerator m_223138_(Lnet/minecraft/core/Holder;Lnet/minecraft/world/level/levelgen/RandomState;)Ljava/util/List;" ->
+                "public net.minecraft.world.level.chunk.ChunkGenerator getPlacementsForStructure(Lnet/minecraft/core/Holder;Lnet/minecraft/world/level/levelgen/RandomState;)Ljava/util/List;"
+            else -> entry
         }
         val finalized = finalizeAccessTransformerEntry(migrated) ?: return ""
         if (finalized == entry && migrated == entry) return line
 
         val comment = line.substringAfter("#", "").trim()
         return if (comment.isNotEmpty()) "$finalized # $comment" else finalized
-    }
-
-    private fun migrateAccessTransformerLineFromComment(line: String, entry: String): String? {
-        val commentName = line.substringAfter("#", "").trim().split(Regex("""\s+""")).firstOrNull()
-            ?.takeIf { Regex("""[A-Za-z_$][\w$]*""").matches(it) }
-            ?: return null
-        val specialName = mapOf(
-            "advancementToProgress" to "progress",
-            "x" to "centerX",
-            "z" to "centerZ",
-            "floorLevel" to "floorLevel",
-            "setFlammable" to "setFlammable",
-            "add" to "add",
-            "ctor" to "<init>",
-            "constructor" to "<init>"
-        )[commentName] ?: commentName
-
-        val migratedEntry = when {
-            Regex("""\bf_\d+_\b""").containsMatchIn(entry) ->
-                Regex("""\bf_\d+_\b""").replace(entry, specialName)
-            Regex("""\bm_\d+_""").containsMatchIn(entry) ->
-                Regex("""\bm_\d+_""").replace(entry, specialName)
-            else -> return null
-        }
-
-        return migratedEntry
     }
 
     private fun finalizeAccessTransformerEntry(entry: String): String? {

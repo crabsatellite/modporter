@@ -2677,8 +2677,8 @@ class BuildSystemTest {
     }
 
     @Test
-    fun `migrates stale Twilight access transformers to valid 121 targets`() {
-        val projectDir = tempDir.resolve("twilight-at")
+    fun `migrates stale access transformers to explicit valid 121 targets`() {
+        val projectDir = tempDir.resolve("legacy-at")
         val atDir = projectDir.resolve("src/main/resources/META-INF")
         atDir.createDirectories()
         atDir.resolve("accesstransformer.cfg").writeText("""
@@ -2699,6 +2699,28 @@ class BuildSystemTest {
         assertFalse(at.contains("getPlacementsForStructure"))
         assertFalse(at.contains("f_119234_"))
         assertFalse(at.contains("m_223138_"))
+    }
+
+    @Test
+    fun `unknown access transformer comments do not become member names`() {
+        val projectDir = tempDir.resolve("unknown-comment-at")
+        val atDir = projectDir.resolve("src/main/resources/META-INF")
+        atDir.createDirectories()
+        atDir.resolve("accesstransformer.cfg").writeText(
+            listOf(
+                "public net.minecraft.world.entity.Entity f_123456_ # bogusMember",
+                "public net.minecraft.world.entity.Mob m_999999_()V # fakeMethod"
+            ).joinToString(System.lineSeparator(), postfix = System.lineSeparator())
+        )
+
+        val result = pass.apply(projectDir)
+
+        val at = atDir.resolve("accesstransformer.cfg").readText()
+        assertTrue(result.changes.none { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.world.entity.Entity f_123456_ # bogusMember"), at)
+        assertTrue(at.contains("public net.minecraft.world.entity.Mob m_999999_()V # fakeMethod"), at)
+        assertFalse(at.contains("public net.minecraft.world.entity.Entity bogusMember"), at)
+        assertFalse(at.contains("public net.minecraft.world.entity.Mob fakeMethod()V"), at)
     }
 
     @Test

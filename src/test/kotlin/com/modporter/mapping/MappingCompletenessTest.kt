@@ -1571,6 +1571,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `access transformer migration does not derive members from comments`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateAccessTransformerLine")
+        assertTrue(start >= 0, "migrateAccessTransformerLine is missing")
+        val end = source.indexOf("private fun finalizeAccessTransformerEntry", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val dynamicSrgReplacement = Regex("""Regex\(\s*"{3}\\b[fm]_\\d[\s\S]{0,240}\.replace\(entry,\s*[a-zA-Z_]""")
+        val offenders = listOf(
+            "comment-derived AT helper" to source.contains("migrateAccessTransformerLineFromComment"),
+            "comment token member name" to source.contains("commentName"),
+            "comment special member name" to source.contains("specialName"),
+            "first comment token extraction" to body.contains(".substringAfter(\"#\", \"\").trim().substringBefore"),
+            "dynamic SRG replacement" to dynamicSrgReplacement.containsMatchIn(body)
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> "access transformer migration contains $label" }
+
+        assertTrue(
+            body.contains("public net.minecraft.client.resources.model.ModelBakery f_119234_") &&
+                body.contains("public net.minecraft.world.level.chunk.ChunkGenerator m_223138_") &&
+                body.contains("else -> entry"),
+            "Access transformer migration must use explicit legacy member mappings and leave unknown SRG entries for validation"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Access transformer migration must not infer named members from AT comments: $offenders"
+        )
+    }
+
+    @Test
     fun `production registry access migrations do not use nearby variable or fallback inference`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(
