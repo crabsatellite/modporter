@@ -10183,6 +10183,7 @@ $fields
         val holderLookupCompoundTagMethods = collectHolderLookupCompoundTagMethods(javaFiles)
         val legacyPlacementBanBaseClasses = collectLegacyPlacementBanBaseClasses(javaFiles)
         val legacyPlacementBanBuilderClasses = collectLegacyPlacementBanBuilderClasses(javaFiles)
+        val legacyPlacementBanDisplayClasses = collectLegacyPlacementBanDisplayClasses(javaFiles, legacyPlacementBanBaseClasses)
         val savedDataClassNames = collectJavaClassNamesExtending(javaFiles, setOf("SavedData"), javaInheritanceIndex)
         val modId = detectModId(projectDir) ?: projectMetadataModId(projectDir)
         val mainClass = detectModMainClass(projectDir)
@@ -10661,6 +10662,7 @@ $fields
                     recipeImplementationClasses,
                     legacyPlacementBanBaseClasses,
                     legacyPlacementBanBuilderClasses,
+                    legacyPlacementBanDisplayClasses,
                     modId.orEmpty(),
                     { detectRequiredGeneratedCompatPackage(projectDir, "common 1.21 LazyOptional import bridge") },
                     savedDataClassNames,
@@ -16074,6 +16076,7 @@ $migratedRecipes
         recipeImplementationClasses: Set<String> = emptySet(),
         legacyPlacementBanBaseClasses: Set<String> = emptySet(),
         legacyPlacementBanBuilderClasses: Set<String> = emptySet(),
+        legacyPlacementBanDisplayClasses: Set<String> = emptySet(),
         modId: String = "",
         generatedCompatPackage: () -> String = { "" },
         savedDataClassNames: Set<String> = emptySet(),
@@ -16400,7 +16403,12 @@ $migratedRecipes
         result = migrateRecipeBookCategoryFinderRecipeHolders(result)
         result = migrateLegacyCraftingRecipeBoundaries(result)
         result = migrateGenericRecipeInputImplementations(result)
-        result = migrateLegacyPlacementBanRecipeSource(result, legacyPlacementBanBaseClasses, legacyPlacementBanBuilderClasses)
+        result = migrateLegacyPlacementBanRecipeSource(
+            result,
+            legacyPlacementBanBaseClasses,
+            legacyPlacementBanBuilderClasses,
+            legacyPlacementBanDisplayClasses
+        )
         result = migrateRecipeDisplayRecipeIdWithoutHolderSource(result, javaInheritanceIndex, recipeImplementationClasses)
         result = migrateRecipeHolderOptionalMapLambdaValueAccess(result)
         result = migrateMerchantOfferItemCosts(result)
@@ -37079,10 +37087,31 @@ public class $className<T extends $recipeBase> extends BlockStateRecipeSerialize
         }.toSet()
     }
 
+    private fun collectLegacyPlacementBanDisplayClasses(
+        javaFiles: List<Path>,
+        placementBanBaseClasses: Set<String>
+    ): Set<String> {
+        if (placementBanBaseClasses.isEmpty()) return emptySet()
+        val id = """[A-Za-z_$][\w$]*"""
+        return javaFiles.mapNotNull { javaFile ->
+            val source = javaFile.readText()
+            val className = javaTopLevelTypeName(source) ?: return@mapNotNull null
+            className.takeIf {
+                Regex("""\bclass\s+${Regex.escape(className)}(?:\s*<[^{}]+>)?\s+extends\s+($id\.)?BasicDisplay\b""")
+                    .containsMatchIn(source) &&
+                    placementBanBaseClasses.any { baseClass -> source.contains(baseClass) } &&
+                    source.contains("getBiomeKey()") &&
+                    source.contains("getBiomeTag()") &&
+                    source.contains("getBypassBlock()")
+            }
+        }.toSet()
+    }
+
     private fun migrateLegacyPlacementBanRecipeSource(
         source: String,
         placementBanBaseClasses: Set<String>,
-        placementBanBuilderClasses: Set<String>
+        placementBanBuilderClasses: Set<String>,
+        placementBanDisplayClasses: Set<String>
     ): String {
         if (placementBanBaseClasses.isEmpty()) return source
         if (!source.contains("BlockStateIngredient") &&
@@ -37099,7 +37128,7 @@ public class $className<T extends $recipeBase> extends BlockStateRecipeSerialize
         result = migrateLegacyPlacementBanBuilderSource(result)
         result = migrateLegacyPlacementBanReferenceAritiesSource(result)
         result = migrateLegacyPlacementBanBuilderCallSitesSource(result, placementBanBuilderClasses)
-        result = migrateLegacyPlacementBanDisplaySource(result, placementBanBaseClasses)
+        result = migrateLegacyPlacementBanDisplaySource(result, placementBanBaseClasses, placementBanDisplayClasses)
         result = migrateNitrogenBlockPropertyPairRuntimeAccess(result)
         return result
     }
@@ -37922,7 +37951,8 @@ public class $className extends PlacementBanBuilder {
 
     private fun migrateLegacyPlacementBanDisplaySource(
         source: String,
-        placementBanBaseClasses: Set<String>
+        placementBanBaseClasses: Set<String>,
+        placementBanDisplayClasses: Set<String>
     ): String {
         if (source.contains("PlacementBanRecipeSerializer")) return source
         if (placementBanBaseClasses.none { source.contains(it) }) return source
@@ -37942,12 +37972,7 @@ public class $className extends PlacementBanBuilder {
         }
         result = migratePlacementBanBypassBlockOptionalAccess(result)
         result = replacePlacementBanJeiSetRecipe(result)
-        result = result.replace("Optional.ofNullable(recipe.getBiomeKey()),\n                Optional.ofNullable(recipe.getBiomeTag())", "recipe.getBiome()")
-        result = Regex("""this\(\s*categoryIdentifier,\s*inputs,\s*recipe\.getBypassBlock\(\),\s*recipe\.getBiome\(\),""")
-            .replace(result, "this(categoryIdentifier,\n                inputs,\n                recipe.getBiome(),\n                recipe.getBypassBlock(),")
-        result = result.replace("recipe.getBiomeKey(), recipe.getBiomeTag()", "recipe.getBiome().left().orElse(null), recipe.getBiome().right().orElse(null)")
-        result = result.replace("this.populateBiomeInformation(display.getBiomeKey(), display.getBiomeTag(), tooltip);", "this.populateBiomeInformation(display.getBiome().left(), display.getBiome().right(), tooltip);")
-        result = result.replace("this.populateBiomeInformation(recipe.getBiomeKey(), recipe.getBiomeTag(), tooltip);", "this.populateBiomeInformation(recipe.getBiome().left().orElse(null), recipe.getBiome().right().orElse(null), tooltip);")
+        result = migratePlacementBanBiomeAccess(result, placementBanBaseClasses, placementBanDisplayClasses)
 
         result = Regex("""private\s+final\s+BlockStateIngredient\s+bypassBlock\s*;""")
             .replace(result) {
@@ -37968,7 +37993,6 @@ public class $className extends PlacementBanBuilder {
         }
         result = result
             .replace("this.bypassBlock = bypassBlock;\n        this.biomeKey = biomeKey;\n        this.biomeTag = biomeTag;", "this.biome = biome;\n        this.bypassBlock = bypassBlock;")
-            .replace("this(categoryIdentifier, inputs, recipe.getBypassBlock(), recipe.getBiome(), Optional.ofNullable((recipe.getIngredient() instanceof BlockStateIngredient ingredient) ? ingredient : null), Optional.empty())", "this(categoryIdentifier, inputs, recipe.getBiome(), recipe.getBypassBlock(), Optional.ofNullable((recipe.getIngredient() instanceof BlockStateIngredient ingredient) ? ingredient : null), Optional.empty())")
 
         result = Regex("""public\s+BlockStateIngredient\s+getBypassBlock\s*\(\s*\)""")
             .replace(result) {
@@ -37998,6 +38022,163 @@ public class $className extends PlacementBanBuilder {
             result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeInput")
         }
         return result
+    }
+
+    private enum class PlacementBanBiomeReceiverKind {
+        RECIPE,
+        DISPLAY
+    }
+
+    private data class PlacementBanBiomeReceiverTypes(
+        val recipeReceivers: Set<String>,
+        val displayReceivers: Set<String>,
+        val thisKind: PlacementBanBiomeReceiverKind?
+    )
+
+    private fun migratePlacementBanBiomeAccess(
+        source: String,
+        placementBanBaseClasses: Set<String>,
+        placementBanDisplayClasses: Set<String>
+    ): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("getBiomeKey()") && !executableCode.contains("getBiomeTag()")) return source
+        val id = """[A-Za-z_$][\w$]*"""
+        val receiverExpression = """$id(?:\.$id(?:\(\))?)*"""
+        val receiverTypes = placementBanBiomeReceiverTypes(
+            source,
+            executableCode,
+            placementBanBaseClasses,
+            placementBanDisplayClasses
+        )
+
+        var result = replaceExecutableRegex(
+            source,
+            Regex("""Optional\.ofNullable\(\s*($receiverExpression)\.getBiomeKey\(\)\s*\)\s*,\s*Optional\.ofNullable\(\s*($receiverExpression)\.getBiomeTag\(\)\s*\)""")
+        ) { match ->
+            val receiver = match.groupValues[1]
+            if (receiver == match.groupValues[2] &&
+                placementBanBiomeReceiverKind(receiver, receiverTypes) != null
+            ) {
+                "$receiver.getBiome()"
+            } else {
+                match.value
+            }
+        }
+
+        result = replaceExecutableRegex(
+            result,
+            Regex("""this\(\s*([^,\r\n]+)\s*,\s*([^,\r\n]+)\s*,\s*($receiverExpression)\.getBypassBlock\(\)\s*,\s*\3\.getBiome\(\)\s*,""")
+        ) { match ->
+            val category = match.groupValues[1].trim()
+            val inputs = match.groupValues[2].trim()
+            val receiver = match.groupValues[3]
+            if (placementBanBiomeReceiverKind(receiver, receiverTypes) == null) {
+                match.value
+            } else {
+                "this($category,\n                $inputs,\n                $receiver.getBiome(),\n                $receiver.getBypassBlock(),"
+            }
+        }
+
+        result = replaceExecutableRegex(
+            result,
+            Regex("""this\.populateBiomeInformation\(\s*($receiverExpression)\.getBiomeKey\(\)\s*,\s*($receiverExpression)\.getBiomeTag\(\)\s*,\s*([^);]+)\s*\)\s*;""")
+        ) { match ->
+            val receiver = match.groupValues[1]
+            if (receiver != match.groupValues[2]) return@replaceExecutableRegex match.value
+            when (placementBanBiomeReceiverKind(receiver, receiverTypes)) {
+                PlacementBanBiomeReceiverKind.DISPLAY ->
+                    "this.populateBiomeInformation($receiver.getBiome().left(), $receiver.getBiome().right(), ${match.groupValues[3].trim()});"
+                PlacementBanBiomeReceiverKind.RECIPE ->
+                    "this.populateBiomeInformation($receiver.getBiome().left().orElse(null), $receiver.getBiome().right().orElse(null), ${match.groupValues[3].trim()});"
+                null -> match.value
+            }
+        }
+
+        result = replaceExecutableRegex(
+            result,
+            Regex("""($receiverExpression)\.getBiomeKey\(\)\s*,\s*($receiverExpression)\.getBiomeTag\(\)""")
+        ) { match ->
+            val receiver = match.groupValues[1]
+            if (receiver == match.groupValues[2]) {
+                when (placementBanBiomeReceiverKind(receiver, receiverTypes)) {
+                    PlacementBanBiomeReceiverKind.DISPLAY ->
+                        "$receiver.getBiome().left(), $receiver.getBiome().right()"
+                    PlacementBanBiomeReceiverKind.RECIPE ->
+                        "$receiver.getBiome().left().orElse(null), $receiver.getBiome().right().orElse(null)"
+                    null -> match.value
+                }
+            } else {
+                match.value
+            }
+        }
+        return result
+    }
+
+    private fun placementBanBiomeReceiverTypes(
+        source: String,
+        executableCode: String,
+        placementBanBaseClasses: Set<String>,
+        placementBanDisplayClasses: Set<String>
+    ): PlacementBanBiomeReceiverTypes {
+        val id = """[A-Za-z_$][\w$]*"""
+        val recipeTypes = placementBanBaseClasses.toMutableSet()
+        if (placementBanBaseClasses.isNotEmpty()) {
+            val baseAlternation = placementBanBaseClasses.joinToString("|") { Regex.escape(it) }
+            Regex("""\b($id)\s+extends\s+(?:$id\.)?(?:$baseAlternation)\b""")
+                .findAll(executableCode)
+                .mapTo(recipeTypes) { it.groupValues[1] }
+        }
+        val displayTypes = placementBanDisplayClasses.toMutableSet()
+        Regex("""\bclass\s+($id)(?:\s*<[^{}]+>)?\s+extends\s+(?:$id\.)?BasicDisplay\b""")
+            .findAll(executableCode)
+            .filter { placementBanBaseClasses.any { baseClass -> executableCode.contains(baseClass) } }
+            .mapTo(displayTypes) { it.groupValues[1] }
+
+        fun collectReceivers(typeNames: Set<String>): Set<String> {
+            if (typeNames.isEmpty()) return emptySet()
+            val typeAlternation = typeNames.joinToString("|") { Regex.escape(it) }
+            return Regex("""\b(?:final\s+)?(?:$id\.)?(?:$typeAlternation)(?:\s*<[^,;=(){}\r\n<>]+>)?(?:\s*\[\s*])?\s+($id)\b""")
+                .findAll(executableCode)
+                .map { it.groupValues[1] }
+                .filterNot { it in setOf("extends", "implements", "return", "new") }
+                .toSet()
+        }
+
+        val className = javaTopLevelTypeName(source)
+        val thisKind = when (className) {
+            in displayTypes -> PlacementBanBiomeReceiverKind.DISPLAY
+            in recipeTypes -> PlacementBanBiomeReceiverKind.RECIPE
+            else -> null
+        }
+        return PlacementBanBiomeReceiverTypes(
+            recipeReceivers = collectReceivers(recipeTypes),
+            displayReceivers = collectReceivers(displayTypes),
+            thisKind = thisKind
+        )
+    }
+
+    private fun placementBanBiomeReceiverKind(
+        receiver: String,
+        receiverTypes: PlacementBanBiomeReceiverTypes
+    ): PlacementBanBiomeReceiverKind? {
+        val root = receiver.substringBefore('.')
+        if (receiver == "this") return receiverTypes.thisKind
+        if (root in receiverTypes.recipeReceivers) return PlacementBanBiomeReceiverKind.RECIPE
+        if (root in receiverTypes.displayReceivers) {
+            return if (receiver == root) {
+                PlacementBanBiomeReceiverKind.DISPLAY
+            } else if (receiver.startsWith("$root.getRecipe()")) {
+                PlacementBanBiomeReceiverKind.RECIPE
+            } else {
+                null
+            }
+        }
+        if (receiver.startsWith("this.getRecipe()") &&
+            receiverTypes.thisKind == PlacementBanBiomeReceiverKind.DISPLAY
+        ) {
+            return PlacementBanBiomeReceiverKind.RECIPE
+        }
+        return null
     }
 
     private fun migratePlacementBanBypassBlockOptionalAccess(source: String): String {

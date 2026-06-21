@@ -8554,6 +8554,49 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `placement ban display biome migration uses executable receiver evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val helperStart = source.indexOf("private fun migratePlacementBanBiomeAccess")
+        assertTrue(helperStart >= 0, "migratePlacementBanBiomeAccess is missing")
+        val start = source.indexOf("private fun migrateLegacyPlacementBanDisplaySource")
+        assertTrue(start >= 0, "migrateLegacyPlacementBanDisplaySource is missing")
+        val body = source.substring(start, helperStart)
+        val helperEnd = source.indexOf("private fun migratePlacementBanBypassBlockOptionalAccess", helperStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val helper = source.substring(helperStart, helperEnd)
+        val offenders = listOf(
+            "fixed Optional recipe biome pair" to body.contains("""Optional.ofNullable(recipe.getBiomeKey())"""),
+            "fixed recipe constructor reorder" to body.contains("""recipe.getBypassBlock(), recipe.getBiome()"""),
+            "fixed recipe biome pair" to body.contains("""recipe.getBiomeKey(), recipe.getBiomeTag()"""),
+            "fixed display biome pair" to body.contains("""display.getBiomeKey(), display.getBiomeTag()"""),
+            "fixed display populate rewrite" to body.contains("""this.populateBiomeInformation(display.getBiomeKey(), display.getBiomeTag(), tooltip);"""),
+            "fixed recipe populate rewrite" to body.contains("""this.populateBiomeInformation(recipe.getBiomeKey(), recipe.getBiomeTag(), tooltip);""")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("migratePlacementBanBiomeAccess(result, placementBanBaseClasses, placementBanDisplayClasses)") &&
+                helper.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                helper.contains("val receiverTypes = placementBanBiomeReceiverTypes(") &&
+                helper.contains("replaceExecutableRegex(") &&
+                helper.contains("placementBanBiomeReceiverKind(receiver, receiverTypes)") &&
+                helper.contains("PlacementBanBiomeReceiverKind.DISPLAY") &&
+                helper.contains("PlacementBanBiomeReceiverKind.RECIPE") &&
+                helper.contains("null -> match.value"),
+            "PlacementBan display biome migration must derive recipe/display receivers from executable source"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "PlacementBan display biome migration must not depend on fixed recipe/display sample names: $offenders"
+        )
+    }
+
+    @Test
     fun `nullable import cleanup uses executable annotation evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

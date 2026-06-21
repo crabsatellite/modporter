@@ -226,6 +226,80 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `placement ban display biome migration binds arbitrary recipe and display receivers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AbstractPlacementBanRecipe.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeInput;
+            import net.minecraft.world.level.biome.Biome;
+            import java.util.function.Predicate;
+
+            public class AbstractPlacementBanRecipe<T, S extends Predicate<T>> implements Recipe<RecipeInput> {
+                ResourceLocation id;
+                public ResourceKey<Biome> getBiomeKey() { return null; }
+                public TagKey<Biome> getBiomeTag() { return null; }
+                public BlockStateIngredient getBypassBlock() { return null; }
+            }
+        """.trimIndent())
+        srcDir.resolve("AltBiomeDisplay.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import me.shedaniel.rei.api.common.display.basic.BasicDisplay;
+            import me.shedaniel.rei.api.common.entry.EntryIngredient;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.biome.Biome;
+            import java.util.List;
+            import java.util.Optional;
+
+            public class AltBiomeDisplay<R extends AbstractPlacementBanRecipe<?, ?>> extends BasicDisplay {
+                public AltBiomeDisplay(Object categoryToken, List<EntryIngredient> inputEntries, R sourceRecipe) {
+                    this(categoryToken,
+                            inputEntries,
+                            sourceRecipe.getBypassBlock(),
+                            Optional.ofNullable(sourceRecipe.getBiomeKey()),
+                            Optional.ofNullable(sourceRecipe.getBiomeTag()),
+                            Optional.empty());
+                }
+
+                public AltBiomeDisplay(Object categoryToken, List<EntryIngredient> inputEntries, BlockStateIngredient bypassBlock, Optional<ResourceKey<Biome>> biomeKey, Optional<TagKey<Biome>> biomeTag, Optional<Object> other) {
+                    super(List.of(), List.of(), Optional.empty());
+                }
+
+                public void addTooltip(AltBiomeDisplay<R> shownDisplay, R sourceRecipe, List<Object> tooltip) {
+                    this.populateBiomeInformation(shownDisplay.getBiomeKey(), shownDisplay.getBiomeTag(), tooltip);
+                    this.populateBiomeInformation(sourceRecipe.getBiomeKey(), sourceRecipe.getBiomeTag(), tooltip);
+                    Object[] raw = new Object[] { sourceRecipe.getBiomeKey(), sourceRecipe.getBiomeTag() };
+                }
+
+                public ResourceKey<Biome> getBiomeKey() { return null; }
+                public TagKey<Biome> getBiomeTag() { return null; }
+                protected void populateBiomeInformation(Object left, Object right, List<Object> tooltip) {}
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("AltBiomeDisplay.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("sourceRecipe.getBiome(),\n                sourceRecipe.getBypassBlock(),"), transformed)
+        assertTrue(transformed.contains("this.populateBiomeInformation(shownDisplay.getBiome().left(), shownDisplay.getBiome().right(), tooltip);"), transformed)
+        assertTrue(transformed.contains("this.populateBiomeInformation(sourceRecipe.getBiome().left().orElse(null), sourceRecipe.getBiome().right().orElse(null), tooltip);"), transformed)
+        assertTrue(transformed.contains("Object[] raw = new Object[] { sourceRecipe.getBiome().left().orElse(null), sourceRecipe.getBiome().right().orElse(null) };"), transformed)
+        assertFalse(transformed.contains("Optional.ofNullable(sourceRecipe.getBiomeKey())"), transformed)
+        assertFalse(transformed.contains("shownDisplay.getBiomeKey()"), transformed)
+    }
+
+    @Test
     fun `legacy tooltip part hiding ignores comments and string literals`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
