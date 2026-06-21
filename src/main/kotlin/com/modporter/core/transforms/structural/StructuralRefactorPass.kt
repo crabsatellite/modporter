@@ -5031,7 +5031,7 @@ $itemArguments
         for ((importName, simpleName) in imports) {
             if (!simpleNamePattern.matches(simpleName)) continue
             val withoutImport = removeImportIfPresent(result, importName)
-            if (!Regex("""\b${Regex.escape(simpleName)}\b""").containsMatchIn(withoutImport)) {
+            if (!Regex("""\b${Regex.escape(simpleName)}\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutImport))) {
                 result = withoutImport
             }
         }

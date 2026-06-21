@@ -1838,6 +1838,37 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `structural unused import cleanup ignores comments and literals`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val simpleStart = source.indexOf("private fun removeUnusedSimpleImports")
+        assertTrue(simpleStart >= 0, "removeUnusedSimpleImports is missing")
+        val simpleEnd = source.indexOf("private fun removeUnusedImportsBySimpleNamePattern", simpleStart + 1)
+        assertTrue(simpleEnd > simpleStart, "removeUnusedImportsBySimpleNamePattern must follow removeUnusedSimpleImports")
+        val simpleBody = source.substring(simpleStart, simpleEnd)
+
+        val patternStart = simpleEnd
+        val patternEnd = source.indexOf("\n    private fun", patternStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val patternBody = source.substring(patternStart, patternEnd)
+
+        val offenders = listOf(
+            "simple import cleanup raw reference scan" to !simpleBody.contains("maskJavaCommentsAndLiterals(withoutImport)"),
+            "pattern import cleanup raw reference scan" to !patternBody.contains("maskJavaCommentsAndLiterals(withoutImport)")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Unused import cleanup must ignore references that exist only in comments, strings, or text blocks: $offenders"
+        )
+    }
+
+    @Test
     fun `structural brace matching ignores Java comments and literals`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
