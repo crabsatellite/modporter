@@ -3037,7 +3037,7 @@ class MappingCompletenessTest {
             .readText()
         val start = source.indexOf("""maskJavaCommentsAndLiterals(result).contains("PotionUtils.")""")
         assertTrue(start >= 0, "potion component migration block is missing")
-        val end = source.indexOf("result = Regex(\"\"\"\\bthis\\.has", start + 1).let {
+        val end = source.indexOf("result = migrateUseOnContextDataComponentHasCalls(result)", start + 1).let {
             if (it < 0) source.length else it
         }
         val body = source.substring(start, end)
@@ -3076,6 +3076,42 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty(),
             "Potion component migration must not rewrite comments or string literals with raw replacements: $offenders"
+        )
+    }
+
+    @Test
+    fun `use on context data component has migration uses method local executable evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateUseOnContextDataComponentHasCalls")
+        assertTrue(start >= 0, "migrateUseOnContextDataComponentHasCalls is missing")
+        val end = source.indexOf("private fun migrateLegacyAddLayersSkinNameLoopsSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "whole-file UseOnContext context fallback" to """result.contains("UseOnContext context")""",
+            "raw this.has replacement against full source" to """result = Regex(""" + "\"\"\"" + """\bthis\.has"""
+        )
+            .filter { (_, marker) -> source.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("javaMethodRangesIncludingDefault(executableCode)") &&
+                body.contains("contextParameterPattern.find(methodText)") &&
+                body.contains("source.substring(absoluteRange) != match.value") &&
+                body.contains("return applyStringEdits(source, edits)") &&
+                source.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                source.contains("pattern.findAll(executableSource)") &&
+                source.contains("findMatchingBrace(executableSource, openBrace)"),
+            "UseOnContext item component migration must derive context and call sites from the same executable method"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "UseOnContext item component migration must not use whole-file fallbacks or raw source replacements: $offenders"
         )
     }
 

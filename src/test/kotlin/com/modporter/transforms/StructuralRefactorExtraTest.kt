@@ -10955,6 +10955,48 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `use on context data component has migration uses method local evidence`() {
+        val projectDir = createFile("UseOnContextDataComponentItem.java", """
+            package com.example;
+
+            import net.minecraft.world.InteractionResult;
+            import net.minecraft.world.item.context.UseOnContext;
+
+            public class UseOnContextDataComponentItem {
+                private static final String DOC = "this.has(net.minecraft.core.component.DataComponents.CUSTOM_DATA)";
+
+                /*
+                InteractionResult docs(UseOnContext context) {
+                    return this.has(net.minecraft.core.component.DataComponents.CUSTOM_DATA)
+                            ? InteractionResult.SUCCESS
+                            : InteractionResult.PASS;
+                }
+                */
+                InteractionResult useOn(UseOnContext click) {
+                    if (this.has(net.minecraft.core.component.DataComponents.CUSTOM_DATA)) {
+                        return InteractionResult.SUCCESS;
+                    }
+                    return InteractionResult.PASS;
+                }
+
+                boolean unrelated() {
+                    return this.has(net.minecraft.core.component.DataComponents.CUSTOM_DATA);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = projectDir.resolve("src/main/java/com/example/UseOnContextDataComponentItem.java").readText()
+        assertTrue(migrated.contains("if (click.getItemInHand().has(net.minecraft.core.component.DataComponents.CUSTOM_DATA))"), migrated)
+        assertTrue(migrated.contains("boolean unrelated() {\n        return this.has(net.minecraft.core.component.DataComponents.CUSTOM_DATA);"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "this.has(net.minecraft.core.component.DataComponents.CUSTOM_DATA)";"""), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("return this.has(net.minecraft.core.component.DataComponents.CUSTOM_DATA)"), migrated)
+        assertFalse(commentBlock.contains("getItemInHand()"), migrated)
+    }
+
+    @Test
     fun `migrates block entity fluid capability override to RegisterCapabilitiesEvent`() {
         val projectDir = createFile("ExampleMod.java", """
             package com.example;

@@ -11609,11 +11609,12 @@ $fields
         val pattern = Regex(
             """(?m)^[ \t]*(?:@\w+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:public|protected|private)\s+(?:static\s+)?(?:<[^>{};]+>\s*)?[\w<>\[\].?,\s]+\s+([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\{"""
         )
-        return pattern.findAll(source).mapNotNull { match ->
-            val openBrace = source.indexOf('{', match.range.last)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        return pattern.findAll(executableSource).mapNotNull { match ->
+            val openBrace = executableSource.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableSource, openBrace) else -1
             if (openBrace < 0 || closeBrace < 0) return@mapNotNull null
-            JavaMethodRange(match.groupValues[1], match.value, match.range.first..closeBrace)
+            JavaMethodRange(match.groupValues[1], source.substring(match.range), match.range.first..closeBrace)
         }.toList()
     }
 
@@ -16649,14 +16650,7 @@ ${indent}}
             }
         }
 
-        result = Regex("""\bthis\.has\(\s*(DataComponents\.[A-Z0-9_]+|net\.minecraft\.core\.component\.DataComponents\.[A-Z0-9_]+)\s*\)""")
-            .replace(result) { match ->
-                if (result.contains("UseOnContext context")) {
-                    "context.getItemInHand().has(${match.groupValues[1]})"
-                } else {
-                    match.value
-                }
-            }
+        result = migrateUseOnContextDataComponentHasCalls(result)
         result = Regex("""\bthis\.getUseDuration\(\s*stack\s*\)""")
             .replace(result) {
                 if (result.contains("LivingEntity living")) {
@@ -16767,6 +16761,24 @@ ${indent}}
             }
             match.range to "\"minecraft:empty\".equals(${match.groupValues[1]}.getString(\"Potion\"))"
         }.toList()
+        return applyStringEdits(source, edits)
+    }
+
+    private fun migrateUseOnContextDataComponentHasCalls(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("UseOnContext") || !executableCode.contains("this.has(")) return source
+        val contextParameterPattern = Regex("""\bUseOnContext\s+([A-Za-z_$][\w$]*)\b""")
+        val hasCallPattern = Regex("""\bthis\.has\(\s*(DataComponents\.[A-Z0-9_]+|net\.minecraft\.core\.component\.DataComponents\.[A-Z0-9_]+)\s*\)""")
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        for (method in javaMethodRangesIncludingDefault(executableCode)) {
+            val methodText = executableCode.substring(method.range)
+            val contextParameter = contextParameterPattern.find(methodText)?.groupValues?.get(1) ?: continue
+            hasCallPattern.findAll(methodText).forEach { match ->
+                val absoluteRange = (method.range.first + match.range.first)..(method.range.first + match.range.last)
+                if (source.substring(absoluteRange) != match.value) return@forEach
+                edits += absoluteRange to "$contextParameter.getItemInHand().has(${match.groupValues[1]})"
+            }
+        }
         return applyStringEdits(source, edits)
     }
 
@@ -35467,13 +35479,14 @@ ${modifierLines.joinToString("\n")}
 
     private fun javaMethodRangesIncludingDefault(source: String): List<JavaMethodRange> {
         val pattern = Regex(
-            """(?m)^[ \t]*(?:@\w+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:(?:public|protected|private|static|final|synchronized|default|abstract)\s+)+(?:<[^>{};]+>\s*)?[\w<>\[\].?,\s]+\s+([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\{"""
+            """(?m)^[ \t]*(?:@\w+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:(?:public|protected|private|static|final|synchronized|default|abstract)\s+)*(?:<[^>{};]+>\s*)?[\w<>\[\].?,\s]+\s+([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\{"""
         )
-        return pattern.findAll(source).mapNotNull { match ->
-            val openBrace = source.indexOf('{', match.range.last)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        return pattern.findAll(executableSource).mapNotNull { match ->
+            val openBrace = executableSource.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableSource, openBrace) else -1
             if (openBrace < 0 || closeBrace < 0) return@mapNotNull null
-            JavaMethodRange(match.groupValues[1], match.value, match.range.first..closeBrace)
+            JavaMethodRange(match.groupValues[1], source.substring(match.range), match.range.first..closeBrace)
         }.toList()
     }
 
