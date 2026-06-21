@@ -39989,36 +39989,8 @@ $encodeLines
         source: String,
         methodName: String,
         transform: (receiver: String, args: List<String>, callOffset: Int) -> String?
-    ): String {
-        var result = source
-        var cursor = 0
-        val token = ".${methodName}("
-        while (true) {
-            val tokenIndex = result.indexOf(token, cursor)
-            if (tokenIndex < 0) break
-            val openParen = tokenIndex + methodName.length + 1
-            val closeParen = findMatchingParen(result, openParen)
-            if (closeParen < 0) {
-                cursor = tokenIndex + token.length
-                continue
-            }
-            val receiverStart = findExpressionReceiverStart(result, tokenIndex)
-            if (receiverStart < 0 || receiverStart >= tokenIndex) {
-                cursor = closeParen + 1
-                continue
-            }
-            val receiver = result.substring(receiverStart, tokenIndex).trim()
-            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
-            val replacement = transform(receiver, args, tokenIndex)
-            if (replacement == null) {
-                cursor = closeParen + 1
-                continue
-            }
-            result = result.substring(0, receiverStart) + replacement + result.substring(closeParen + 1)
-            cursor = receiverStart + replacement.length
-        }
-        return result
-    }
+    ): String =
+        rewriteExecutableJavaCallWithOffset(source, methodName, transform)
 
     private fun rewriteJavaInvocationArguments(
         source: String,

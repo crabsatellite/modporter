@@ -1896,6 +1896,34 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `offset Java call helper delegates to executable scanner`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun rewriteJavaCallWithOffset(")
+        assertTrue(start >= 0, "rewriteJavaCallWithOffset is missing")
+        val end = source.indexOf("private fun rewriteJavaInvocationArguments", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+
+        val offenders = listOf(
+            "missing executable delegate" to !body.contains("rewriteExecutableJavaCallWithOffset(source, methodName, transform)"),
+            "raw token scan" to body.contains("result.indexOf(token, cursor)"),
+            "raw parenthesis matcher" to body.contains("findMatchingParen(result, openParen)"),
+            "raw receiver scan" to body.contains("findExpressionReceiverStart(result, tokenIndex)")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Offset Java call rewrites must reuse the executable-code scanner instead of raw source traversal: $offenders"
+        )
+    }
+
+    @Test
     fun `structural brace matching ignores Java comments and literals`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
