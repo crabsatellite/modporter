@@ -8303,6 +8303,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy item max damage migration uses executable item declarations`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyItemMaxDamageCalls")
+        assertTrue(start >= 0, "migrateLegacyItemMaxDamageCalls is missing")
+        val end = source.indexOf("private fun migrateRecipeHolderIdAndLocalMmlibApi", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw max damage prefilter" to body.contains("""source.contains(".getMaxDamage()")"""),
+            "raw Item declaration scan" to body.contains("containsMatchIn(source)"),
+            "raw Item variable collection" to body.contains(".findAll(source)"),
+            "raw max damage replacement" to body.contains(".replace(result,")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".getMaxDamage()")""") &&
+                body.contains("containsMatchIn(executableCode)") &&
+                body.contains(".findAll(executableCode)") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("""\b${'$'}{Regex.escape(variable)}\.getMaxDamage\(\)"""),
+            "Legacy Item.getMaxDamage migration must derive variables from executable declarations and rewrite executable calls only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy Item.getMaxDamage migration must not use comments or strings as Item variable evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `nested simplechannel migration does not depend on fixed networking class names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

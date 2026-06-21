@@ -37939,17 +37939,21 @@ ${indent}}
     }
 
     private fun migrateLegacyItemMaxDamageCalls(source: String): String {
-        if (!source.contains(".getMaxDamage()") || !Regex("""\bItem\s+[A-Za-z_$][\w$]*\b""").containsMatchIn(source)) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".getMaxDamage()") ||
+            !Regex("""\bItem\s+[A-Za-z_$][\w$]*\b""").containsMatchIn(executableCode)) {
             return source
         }
         var result = source
         val itemVariables = Regex("""\bItem\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(source)
+            .findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
         for (variable in itemVariables) {
-            result = Regex("""\b${Regex.escape(variable)}\.getMaxDamage\(\)""")
-                .replace(result, "$variable.getDefaultInstance().getMaxDamage()")
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b${Regex.escape(variable)}\.getMaxDamage\(\)""")
+            ) { "$variable.getDefaultInstance().getMaxDamage()" }
         }
         return result
     }

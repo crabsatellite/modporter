@@ -28132,6 +28132,37 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy item max damage migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ItemMaxDamageDocsOnly.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Item;
+
+            public class ItemMaxDamageDocsOnly {
+                private static final String DOC = "public int durability(Item item) { return item.getMaxDamage(); }";
+
+                /*
+                public int durability(Item item) {
+                    return item.getMaxDamage();
+                }
+                */
+
+                public void keep() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ItemMaxDamageDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, result.changes.toString())
+        assertTrue(migrated.contains("return item.getMaxDamage();"), migrated)
+        assertFalse(migrated.contains("item.getDefaultInstance().getMaxDamage()"), migrated)
+    }
+
+    @Test
     fun `JEI recipe category background migration ignores comments and strings`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
