@@ -24212,6 +24212,39 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy gui survival elements migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val sourceFile = srcDir.resolve("GuiSurvivalSurface.java")
+        sourceFile.writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.Gui;
+
+            public class GuiSurvivalSurface {
+                // if (gui.shouldDrawSurvivalElements()) render();
+                private static final String DOC = "gui.shouldDrawSurvivalElements()";
+
+                public boolean visible(Gui gui) {
+                    return gui.shouldDrawSurvivalElements();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertTrue(
+            migrated.contains("return net.minecraft.client.Minecraft.getInstance().gameMode.canHurtPlayer() && !net.minecraft.client.Minecraft.getInstance().options.hideGui;"),
+            migrated
+        )
+        assertTrue(migrated.contains("// if (gui.shouldDrawSurvivalElements()) render();"), migrated)
+        assertTrue(migrated.contains("private static final String DOC = \"gui.shouldDrawSurvivalElements()\";"), migrated)
+        assertFalse(migrated.contains("// if (net.minecraft.client.Minecraft.getInstance()"), migrated)
+        assertFalse(migrated.contains("DOC = \"net.minecraft.client.Minecraft.getInstance()"), migrated)
+    }
+
+    @Test
     fun `migrates NeoForge 121 compile API surfaces by structural shape`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

@@ -4290,6 +4290,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy gui survival elements migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyGuiSurvivalElementsSource")
+        assertTrue(start >= 0, "migrateLegacyGuiSurvivalElementsSource is missing")
+        val end = source.indexOf("private fun migrateLegacyJumpFromGroundVisibility", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw shouldDrawSurvivalElements prefilter" to body.contains("""source.contains(".shouldDrawSurvivalElements()")"""),
+            "raw shouldDrawSurvivalElements replacement" to Regex("""Regex\([\s\S]*?\)\s*\.\s*replace\(""").containsMatchIn(body)
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".shouldDrawSurvivalElements()")""") &&
+                body.contains("replaceExecutableRegex(source") &&
+                body.contains("gameMode.canHurtPlayer()") &&
+                body.contains("options.hideGui"),
+            "Legacy gui survival element migration must rewrite only executable Java source"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy gui survival element migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `curative item effect migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

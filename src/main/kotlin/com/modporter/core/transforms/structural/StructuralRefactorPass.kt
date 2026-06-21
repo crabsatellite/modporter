@@ -19390,12 +19390,11 @@ $body
     }
 
     private fun migrateLegacyGuiSurvivalElementsSource(source: String): String {
-        if (!source.contains(".shouldDrawSurvivalElements()")) return source
-        return Regex("""\b[A-Za-z_$][\w$]*\.shouldDrawSurvivalElements\(\)""")
-            .replace(
-                source,
-                "net.minecraft.client.Minecraft.getInstance().gameMode.canHurtPlayer() && !net.minecraft.client.Minecraft.getInstance().options.hideGui"
-            )
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".shouldDrawSurvivalElements()")) return source
+        return replaceExecutableRegex(source, Regex("""\b[A-Za-z_$][\w$]*\.shouldDrawSurvivalElements\(\)""")) {
+            "net.minecraft.client.Minecraft.getInstance().gameMode.canHurtPlayer() && !net.minecraft.client.Minecraft.getInstance().options.hideGui"
+        }
     }
 
     private fun migrateLegacyJumpFromGroundVisibility(source: String): String =
