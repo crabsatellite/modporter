@@ -3301,7 +3301,9 @@ class MappingCompletenessTest {
             "fixed dirtiness packet name" to "SyncDirtiness",
             "fixed dirtiness capability call" to "DirtinessCapability",
             "fixed networking file-name branch" to "fileName ==",
-            "fixed whole-file networking template" to "PayloadSource(packageName"
+            "fixed whole-file networking template" to "PayloadSource(packageName",
+            "missing channel args mod id fallback" to "nestedSimpleChannelArgs(source) ?: return inferModAccess",
+            "unresolved channel namespace mod id fallback" to "return inferModAccess(source)?.modIdExpression"
         )
             .filter { (_, marker) -> body.contains(marker) }
             .map { (label, _) -> "nested SimpleChannel migration contains $label" }
@@ -3309,6 +3311,68 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty(),
             "Nested SimpleChannel migrations must use source-declared packet/register/send structure, not fixed networking class templates: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy simplechannel wrapper cleanup requires payload registration evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("// 8. Replace old SimpleChannel registration class")
+        assertTrue(start >= 0, "legacy SimpleChannel replacement block is missing")
+        val end = source.indexOf("changes.addAll(cleanupInlineSimpleChannelRegistrations", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val gateIndex = body.indexOf("val modNetworkFile = file.parent?.resolve(\"ModNetwork.java\")")
+        val packetEvidenceIndex = body.indexOf("val registeredPacketNames = Regex")
+        val wrapperIndex = body.indexOf("val newContent = buildString")
+
+        assertTrue(
+            gateIndex >= 0 &&
+                body.contains("modNetworkText.contains(\"PayloadRegistrar\")") &&
+                body.contains("modNetworkText.contains(\"registrar.\")"),
+            "Legacy SimpleChannel wrappers must require generated payload registrar evidence before replacing source"
+        )
+        assertTrue(
+            packetEvidenceIndex >= 0 &&
+                body.contains("modNetworkText.contains(\"${'$'}packetName.TYPE\")") &&
+                body.contains("implements\\s+CustomPacketPayload") &&
+                body.contains("CustomPacketPayload.Type<${'$'}packetName>") &&
+                packetEvidenceIndex < wrapperIndex,
+            "Legacy SimpleChannel wrappers must prove registerMessage packet payloads before generating replacement wrappers"
+        )
+    }
+
+    @Test
+    fun `simplechannel packet payload migration requires channel namespace evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun transformPacketClasses")
+        assertTrue(start >= 0, "transformPacketClasses is missing")
+        val end = source.indexOf("private fun detectModBusVariable", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+
+        assertTrue(
+            !body.contains("detectModId(projectDir)"),
+            "SimpleChannel payload migration must not use project-level mod id as channel namespace fallback"
+        )
+        assertTrue(
+            !body.contains("ResourceLocation.fromNamespaceAndPath(\"${'$'}modId") &&
+                !body.contains("event.registrar(\"${'$'}modId"),
+            "SimpleChannel payload TYPE and registrar namespaces must come from channel namespace evidence"
+        )
+        assertTrue(
+            body.contains("simpleChannelNamespaceExpression(content, channelName)") &&
+                body.contains("namespaceExpression = namespaceExpression") &&
+                body.contains("event.registrar(${'$'}registrarNamespaceExpression)"),
+            "SimpleChannel payload migration must thread parsed channel namespace evidence into generated payloads and registrar"
         )
     }
 

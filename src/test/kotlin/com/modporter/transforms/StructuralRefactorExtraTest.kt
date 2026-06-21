@@ -1409,6 +1409,30 @@ class StructuralRefactorExtraTest {
             }
         """.trimIndent())
 
+        networkDir.resolve("NetworkHandler.java").writeText("""
+            package com.example.network;
+
+            import com.example.ExampleMod;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            public class NetworkHandler {
+                private static final String PROTOCOL_VERSION = "1";
+                public static final SimpleChannel INSTANCE = NetworkRegistry.newSimpleChannel(
+                    new ResourceLocation(ExampleMod.MODID, "main"),
+                    () -> PROTOCOL_VERSION,
+                    PROTOCOL_VERSION::equals,
+                    PROTOCOL_VERSION::equals
+                );
+
+                public static void register() {
+                    int id = 0;
+                    INSTANCE.registerMessage(id++, PacketPing.class, PacketPing::encode, PacketPing::decode, PacketPing.Handler::handle);
+                }
+            }
+        """.trimIndent())
+
         networkDir.resolve("ModPackets.java").writeText("""
             package com.example.network;
 
@@ -1433,7 +1457,7 @@ class StructuralRefactorExtraTest {
         assertTrue(mainClass.contains("public static final String MODID = \"example\";"))
         assertTrue(mainClass.contains("public static ExampleMod instance;"))
         assertTrue(!mainClass.contains("Replaced SimpleChannel registration class"))
-        assertTrue(modNetwork.contains("PacketPing.Handler::handle"))
+        assertTrue(modNetwork.contains("PacketPing.Handler.handle(payload, context)"))
         assertTrue(modPackets.contains("void sendToPlayer(ServerPlayer player, T msg)"))
         assertTrue(modPackets.contains("void sendToPlayer(T msg, ServerPlayer player)"))
     }
@@ -1581,6 +1605,34 @@ class StructuralRefactorExtraTest {
             }
         """.trimIndent())
 
+        networkDir.resolve("NetworkHandler.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraftforge.network.NetworkDirection;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            public class NetworkHandler {
+                private static final String PROTOCOL_VERSION = "1";
+                public static final SimpleChannel INSTANCE = NetworkRegistry.newSimpleChannel(
+                    new ResourceLocation("example", "main"),
+                    () -> PROTOCOL_VERSION,
+                    PROTOCOL_VERSION::equals,
+                    PROTOCOL_VERSION::equals
+                );
+
+                public static void register() {
+                    int id = 0;
+                    INSTANCE.registerMessage(id++, MenuPacket.class,
+                            MenuPacket::encode,
+                            MenuPacket::decode,
+                            MenuPacket::handle,
+                            java.util.Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+                }
+            }
+        """.trimIndent())
+
         val pass = StructuralRefactorPass()
         val result = pass.apply(tempDir)
         val packet = networkDir.resolve("MenuPacket.java").readText()
@@ -1636,6 +1688,32 @@ class StructuralRefactorExtraTest {
                         if(!ctx.get().getDirection().getReceptionSide().isClient()) return;
                         ctx.get().setPacketHandled(true);
                     }
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("NetworkHandler.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            public class NetworkHandler {
+                private static final String PROTOCOL_VERSION = "1";
+                public static final SimpleChannel INSTANCE = NetworkRegistry.newSimpleChannel(
+                    new ResourceLocation("example", "main"),
+                    () -> PROTOCOL_VERSION,
+                    PROTOCOL_VERSION::equals,
+                    PROTOCOL_VERSION::equals
+                );
+
+                public static void register() {
+                    int id = 0;
+                    INSTANCE.registerMessage(id++, ClientPacket.class,
+                            ClientPacket::encode,
+                            ClientPacket::decode,
+                            ClientPacket.Handler::handle);
                 }
             }
         """.trimIndent())
@@ -1747,6 +1825,75 @@ class StructuralRefactorExtraTest {
         assertFalse(networking.contains("registerMessage"), networking)
         assertFalse(networking.contains("messageId"), networking)
         assertFalse(networking.contains("ctx.get()"), networking)
+    }
+
+    @Test
+    fun `nested SimpleChannel packets do not use mod id when channel namespace is unresolved`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+            }
+        """.trimIndent())
+
+        networkDir.resolve("StatusNetworking.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraftforge.network.NetworkEvent;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.NetworkDirection;
+            import net.minecraftforge.network.simple.SimpleChannel;
+            import java.util.function.Supplier;
+
+            public class StatusNetworking {
+                private static final ResourceLocation CHANNEL_ID = channelId();
+                public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
+                        CHANNEL_ID,
+                        () -> "1",
+                        "1"::equals,
+                        "1"::equals
+                );
+
+                private static ResourceLocation channelId() {
+                    return new ResourceLocation("custom_network", "status");
+                }
+
+                public static void register() {
+                    CHANNEL.registerMessage(0, SyncStatusPacket.class,
+                            SyncStatusPacket::encode,
+                            SyncStatusPacket::decode,
+                            SyncStatusPacket::handle,
+                            java.util.Optional.of(NetworkDirection.PLAY_TO_CLIENT));
+                }
+
+                public static class SyncStatusPacket {
+                    public static void encode(SyncStatusPacket packet, FriendlyByteBuf buf) {}
+                    public static SyncStatusPacket decode(FriendlyByteBuf buf) { return new SyncStatusPacket(); }
+                    public static void handle(SyncStatusPacket packet, Supplier<NetworkEvent.Context> ctx) {}
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val networking = networkDir.resolve("StatusNetworking.java").readText()
+
+        assertTrue(result.changes.none { it.ruleId == "struct-nested-simplechannel-payloads" }, "changes=${result.changes}")
+        assertTrue(networking.contains("NetworkRegistry.newSimpleChannel"), networking)
+        assertTrue(networking.contains("CHANNEL_ID"), networking)
+        assertTrue(networking.contains("registerMessage"), networking)
+        assertFalse(networking.contains("ResourceLocation.fromNamespaceAndPath(ExampleMod.ID"), networking)
+        assertFalse(networking.contains("implements CustomPacketPayload"), networking)
     }
 
     @Test
@@ -2069,6 +2216,34 @@ class StructuralRefactorExtraTest {
                         }
                     });
                     context.setPacketHandled(true);
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("NetworkHandler.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraftforge.network.NetworkDirection;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            public class NetworkHandler {
+                private static final String PROTOCOL_VERSION = "1";
+                public static final SimpleChannel INSTANCE = NetworkRegistry.newSimpleChannel(
+                    new ResourceLocation("example", "main"),
+                    () -> PROTOCOL_VERSION,
+                    PROTOCOL_VERSION::equals,
+                    PROTOCOL_VERSION::equals
+                );
+
+                public static void register() {
+                    int id = 0;
+                    INSTANCE.registerMessage(id++, TeleportPacket.class,
+                            TeleportPacket::encode,
+                            TeleportPacket::decode,
+                            TeleportPacket::handle,
+                            java.util.Optional.of(NetworkDirection.PLAY_TO_SERVER));
                 }
             }
         """.trimIndent())
