@@ -22570,6 +22570,38 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy vanilla block constructor migration ignores comments and string literals`() {
+        val projectDir = createFile("BlockConstructorDocs.java", """
+            package com.example;
+
+            public class BlockConstructorDocs {
+                // new StairBlock(() -> Blocks.STONE.get().defaultBlockState(), BlockBehaviour.Properties.ofFullCopy(Blocks.STONE.get()));
+                // new ButtonBlock(BlockBehaviour.Properties.of().noCollission(), ModBlockSets.WOOD_SET, 30, true);
+                private static final String GATE_DOC = "new FenceGateBlock(BlockBehaviour.Properties.ofFullCopy(Blocks.PLANKS.get()), ModWoodTypes.WOOD);";
+                private static final String PLATE_DOC = "new PressurePlateBlock(PressurePlateBlock.Sensitivity.EVERYTHING, BlockBehaviour.Properties.of().strength(0.5F), ModBlockSets.WOOD_SET);";
+                private static final String DOOR_DOC = "new DoorBlock(BlockBehaviour.Properties.of().noOcclusion(), ModBlockSets.WOOD_SET);";
+                private static final String TRAPDOOR_DOC = "new TrapDoorBlock(BlockBehaviour.Properties.of().noOcclusion(), ModBlockSets.WOOD_SET);";
+                private static final String TORCH_DOC = "new TorchBlock(BlockBehaviour.Properties.ofFullCopy(Blocks.TORCH), ParticleTypes.SMOKE);";
+                private static final String WALL_TORCH_DOC = "new WallTorchBlock(BlockBehaviour.Properties.ofFullCopy(Blocks.WALL_TORCH), ModParticleTypes.SPARKLE.get());";
+
+                public int keep() {
+                    return GATE_DOC.length() + PLATE_DOC.length() + DOOR_DOC.length() + TRAPDOOR_DOC.length() + TORCH_DOC.length() + WALL_TORCH_DOC.length();
+                }
+            }
+        """.trimIndent())
+        val sourceFile = tempDir.resolve("src/main/java/com/example/BlockConstructorDocs.java")
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = sourceFile.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("new ButtonBlock(ModBlockSets.WOOD_SET, 30, BlockBehaviour.Properties.of().noCollission())"), migrated)
+        assertFalse(migrated.contains("new TorchBlock(ParticleTypes.SMOKE, BlockBehaviour.Properties.ofFullCopy(Blocks.TORCH))"), migrated)
+    }
+
+    @Test
     fun `legacy banner pattern constructors require deferred register namespace evidence`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

@@ -3380,6 +3380,56 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy vanilla block constructor migration uses executable constructor evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyVanillaBlockConstructors121")
+        assertTrue(start >= 0, "migrateLegacyVanillaBlockConstructors121 is missing")
+        val end = source.indexOf("private fun looksLikeBlockPropertiesExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val constructors = listOf(
+            "StairBlock",
+            "ButtonBlock",
+            "FenceGateBlock",
+            "PressurePlateBlock",
+            "DoorBlock",
+            "TrapDoorBlock",
+            "TorchBlock",
+            "WallTorchBlock"
+        )
+        val offenders = constructors.flatMap { constructor ->
+            listOf(
+                "raw $constructor prefilter" to """source.contains("new $constructor(")""",
+                "raw $constructor constructor rewrite" to """rewriteJavaNew(result, "$constructor")"""
+            )
+        }
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                constructors.all { constructor ->
+                    body.contains("""executableCode.contains("new $constructor(")""") &&
+                        body.contains("""rewriteExecutableJavaNew(result, "$constructor")""")
+                } &&
+                body.contains("looksLikeBlockPropertiesExpression") &&
+                body.contains("looksLikeParticleOptionsExpression") &&
+                body.contains("args.size != 4") &&
+                body.contains("args.size != 3") &&
+                body.contains("args.size != 2"),
+            "Legacy vanilla block constructor migration must locate every supported constructor in executable Java and preserve signature-shape checks"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy vanilla block constructor migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `map codec serialization migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

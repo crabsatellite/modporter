@@ -25238,59 +25238,60 @@ $signatureIndent}"""
     }
 
     private fun migrateLegacyVanillaBlockConstructors121(source: String): String {
-        if (!source.contains("new StairBlock(") &&
-            !source.contains("new ButtonBlock(") &&
-            !source.contains("new FenceGateBlock(") &&
-            !source.contains("new PressurePlateBlock(") &&
-            !source.contains("new DoorBlock(") &&
-            !source.contains("new TrapDoorBlock(") &&
-            !source.contains("new TorchBlock(") &&
-            !source.contains("new WallTorchBlock(")
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("new StairBlock(") &&
+            !executableCode.contains("new ButtonBlock(") &&
+            !executableCode.contains("new FenceGateBlock(") &&
+            !executableCode.contains("new PressurePlateBlock(") &&
+            !executableCode.contains("new DoorBlock(") &&
+            !executableCode.contains("new TrapDoorBlock(") &&
+            !executableCode.contains("new TorchBlock(") &&
+            !executableCode.contains("new WallTorchBlock(")
         ) {
             return source
         }
 
         var result = source
-        result = rewriteJavaNew(result, "StairBlock") { args ->
-            if (args.size != 2) return@rewriteJavaNew null
+        result = rewriteExecutableJavaNew(result, "StairBlock") { args ->
+            if (args.size != 2) return@rewriteExecutableJavaNew null
             val stateSupplier = args[0].trim()
             if (!stateSupplier.startsWith("() ->") || !stateSupplier.contains(".defaultBlockState()")) {
-                return@rewriteJavaNew null
+                return@rewriteExecutableJavaNew null
             }
             val state = stateSupplier.removePrefix("() ->").trim()
             "new StairBlock($state, ${args[1].trim()})"
         }
-        result = rewriteJavaNew(result, "ButtonBlock") { args ->
-            if (args.size != 4 || !looksLikeBlockPropertiesExpression(args[0])) return@rewriteJavaNew null
+        result = rewriteExecutableJavaNew(result, "ButtonBlock") { args ->
+            if (args.size != 4 || !looksLikeBlockPropertiesExpression(args[0])) return@rewriteExecutableJavaNew null
             "new ButtonBlock(${args[1].trim()}, ${args[2].trim()}, ${args[0].trim()})"
         }
-        result = rewriteJavaNew(result, "FenceGateBlock") { args ->
-            if (args.size != 2 || !looksLikeBlockPropertiesExpression(args[0])) return@rewriteJavaNew null
+        result = rewriteExecutableJavaNew(result, "FenceGateBlock") { args ->
+            if (args.size != 2 || !looksLikeBlockPropertiesExpression(args[0])) return@rewriteExecutableJavaNew null
             "new FenceGateBlock(${args[1].trim()}, ${args[0].trim()})"
         }
-        result = rewriteJavaNew(result, "PressurePlateBlock") { args ->
+        result = rewriteExecutableJavaNew(result, "PressurePlateBlock") { args ->
             if (args.size != 3 || !args[0].trim().contains("Sensitivity") || !looksLikeBlockPropertiesExpression(args[1])) {
-                return@rewriteJavaNew null
+                return@rewriteExecutableJavaNew null
             }
             "new PressurePlateBlock(${args[2].trim()}, ${args[1].trim()})"
         }
-        result = rewriteJavaNew(result, "DoorBlock") { args ->
-            if (args.size != 2 || !looksLikeBlockPropertiesExpression(args[0])) return@rewriteJavaNew null
+        result = rewriteExecutableJavaNew(result, "DoorBlock") { args ->
+            if (args.size != 2 || !looksLikeBlockPropertiesExpression(args[0])) return@rewriteExecutableJavaNew null
             "new DoorBlock(${args[1].trim()}, ${args[0].trim()})"
         }
-        result = rewriteJavaNew(result, "TrapDoorBlock") { args ->
-            if (args.size != 2 || !looksLikeBlockPropertiesExpression(args[0])) return@rewriteJavaNew null
+        result = rewriteExecutableJavaNew(result, "TrapDoorBlock") { args ->
+            if (args.size != 2 || !looksLikeBlockPropertiesExpression(args[0])) return@rewriteExecutableJavaNew null
             "new TrapDoorBlock(${args[1].trim()}, ${args[0].trim()})"
         }
-        result = rewriteJavaNew(result, "TorchBlock") { args ->
+        result = rewriteExecutableJavaNew(result, "TorchBlock") { args ->
             if (args.size != 2 || !looksLikeBlockPropertiesExpression(args[0]) || !looksLikeParticleOptionsExpression(args[1])) {
-                return@rewriteJavaNew null
+                return@rewriteExecutableJavaNew null
             }
             "new TorchBlock(${args[1].trim()}, ${args[0].trim()})"
         }
-        result = rewriteJavaNew(result, "WallTorchBlock") { args ->
+        result = rewriteExecutableJavaNew(result, "WallTorchBlock") { args ->
             if (args.size != 2 || !looksLikeBlockPropertiesExpression(args[0]) || !looksLikeParticleOptionsExpression(args[1])) {
-                return@rewriteJavaNew null
+                return@rewriteExecutableJavaNew null
             }
             "new WallTorchBlock(${args[1].trim()}, ${args[0].trim()})"
         }
