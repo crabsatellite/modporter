@@ -35523,30 +35523,35 @@ ${modifierLines.joinToString("\n")}
     }
 
     private fun migrateUnboundLevelRegistryAccessCalls(source: String): String {
-        if (!source.contains("level.registryAccess()")) return source
-        var result = source
+        val token = "level.registryAccess()"
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(token)) return source
+        val edits = mutableListOf<Pair<IntRange, String>>()
         val methodPattern = Regex(
             """(?m)(?:^|\r?\n)[ \t]*(?:(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*)(?:(?:public|protected|private|static|final|synchronized)\s+)+[A-Za-z_$][\w$<>\[\].?,\s]*\s+[A-Za-z_$][\w$]*\s*\(([^()]*)\)\s*\{"""
         )
-        methodPattern.findAll(source).toList().asReversed().forEach { match ->
-            val openBrace = source.indexOf('{', match.range.last - 1)
+        methodPattern.findAll(executableCode).forEach { match ->
+            val openBrace = executableCode.indexOf('{', match.range.last - 1)
             if (openBrace < 0) return@forEach
-            val closeBrace = findMatchingBrace(source, openBrace)
+            val closeBrace = findMatchingBrace(executableCode, openBrace)
             if (closeBrace < 0) return@forEach
-            val methodText = result.substring(match.range.first, closeBrace + 1)
-            if (!methodText.contains("level.registryAccess()")) return@forEach
+            val methodText = executableCode.substring(match.range.first, closeBrace + 1)
+            if (!methodText.contains(token)) return@forEach
             val parameters = splitTopLevelJavaArgs(match.groupValues[1])
             val registryAccess = registryAccessFromParameters(parameters) ?: return@forEach
             val hasLevelBinding = Regex(
                 """\b(?:ServerLevel|Level|WorldGenLevel|ServerLevelAccessor|LevelAccessor|LevelReader)\s+level\b"""
             ).containsMatchIn(methodText)
             if (hasLevelBinding) return@forEach
-            val replacement = methodText.replace("level.registryAccess()", registryAccess)
-            if (replacement != methodText) {
-                result = result.substring(0, match.range.first) + replacement + result.substring(closeBrace + 1)
+            var cursor = openBrace + 1
+            while (cursor < closeBrace) {
+                val index = executableCode.indexOf(token, cursor)
+                if (index < 0 || index > closeBrace) break
+                edits += index until index + token.length to registryAccess
+                cursor = index + token.length
             }
         }
-        return result
+        return applyStringEdits(source, edits)
     }
 
     private fun migrateFoodComponentAccess(

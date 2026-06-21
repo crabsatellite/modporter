@@ -11523,6 +11523,39 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `unbound level registry access migration ignores comments and string literals`() {
+        val projectDir = createFile("RegistryAccessSurface.java", """
+            package com.example;
+
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public class RegistryAccessSurface {
+                public ItemStack parse(RegistryAccess registryAccess, CompoundTag tag) {
+                    String doc = "level.registryAccess()";
+                    // ItemStack.parseOptional(level.registryAccess(), tag);
+                    /*
+                     ItemStack.parseOptional(level.registryAccess(), tag);
+                     */
+                    return ItemStack.parseOptional(level.registryAccess(), tag);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val transformed = tempDir.resolve("src/main/java/com/example/RegistryAccessSurface.java").readText()
+
+        assertTrue(transformed.contains("return ItemStack.parseOptional(registryAccess, tag);"), transformed)
+        assertTrue(transformed.contains("String doc = \"level.registryAccess()\";"), transformed)
+        assertTrue(transformed.contains("// ItemStack.parseOptional(level.registryAccess(), tag);"), transformed)
+        assertTrue(transformed.contains("ItemStack.parseOptional(level.registryAccess(), tag);"), transformed)
+        assertFalse(transformed.contains("return ItemStack.parseOptional(level.registryAccess(), tag);"), transformed)
+        assertFalse(transformed.contains("\"registryAccess\""), transformed)
+    }
+
+    @Test
     fun `migrates legacy entity enchantment helper calls to holder lookups`() {
         val projectDir = createFile("LegacyEntityEnchantments.java", """
             package com.example;

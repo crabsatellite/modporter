@@ -2177,6 +2177,43 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `unbound level registry access migration uses executable token edits`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateUnboundLevelRegistryAccessCalls")
+        assertTrue(start >= 0, "migrateUnboundLevelRegistryAccessCalls is missing")
+        val end = source.indexOf("private fun migrateFoodComponentAccess", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw source prefilter" to body.contains("""source.contains("level.registryAccess()")"""),
+            "raw method scan" to body.contains("methodPattern.findAll(source)"),
+            "raw brace matching" to body.contains("findMatchingBrace(source, openBrace)"),
+            "raw method replace" to body.contains("""methodText.replace("level.registryAccess()", registryAccess)"""),
+            "raw result splice" to body.contains("result.substring(0, match.range.first) + replacement")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("executableCode.contains(token)") &&
+                body.contains("methodPattern.findAll(executableCode)") &&
+                body.contains("findMatchingBrace(executableCode, openBrace)") &&
+                body.contains("edits += index until index + token.length to registryAccess") &&
+                body.contains("return applyStringEdits(source, edits)"),
+            "Unbound level registryAccess migration must replace only executable token ranges"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Unbound level registryAccess migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `production registry access migrations do not use nearby variable or fallback inference`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(
