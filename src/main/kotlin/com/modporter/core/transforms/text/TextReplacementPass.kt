@@ -666,17 +666,18 @@ class TextReplacementPass(
     }
 
     private fun migrateParticleOptionsCodecs(source: String): String {
-        if (!source.contains("ParticleOptions.Deserializer") ||
-            !source.contains("implements ParticleOptions") ||
-            !source.contains("writeToNetwork")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("ParticleOptions.Deserializer") ||
+            !executableCode.contains("implements ParticleOptions") ||
+            !executableCode.contains("writeToNetwork")) {
             return source
         }
 
-        val classMatch = Regex("""public\s+class\s+([A-Za-z_$][\w$]*)\s+implements\s+ParticleOptions\s*\{""").find(source)
+        val classMatch = Regex("""public\s+class\s+([A-Za-z_$][\w$]*)\s+implements\s+ParticleOptions\s*\{""").find(executableCode)
             ?: return source
         val className = classMatch.groupValues[1]
         val fields = Regex("""(?m)^[ \t]*public\s+final\s+(int)\s+([A-Za-z_$][\w$]*);\s*$""")
-            .findAll(source)
+            .findAll(executableCode)
             .map { ParticleField(it.groupValues[1], it.groupValues[2]) }
             .toList()
         if (fields.isEmpty()) return source
@@ -3577,6 +3578,91 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
             index++
         }
         return -1
+    }
+
+    private fun maskJavaCommentsAndLiterals(source: String): String {
+        val result = StringBuilder(source.length)
+        var index = 0
+        var inLineComment = false
+        var inBlockComment = false
+        var inString = false
+        var inTextBlock = false
+        var inChar = false
+        var escaped = false
+        while (index < source.length) {
+            val ch = source[index]
+            val next = source.getOrNull(index + 1)
+            val nextTwo = source.getOrNull(index + 2)
+
+            when {
+                inLineComment -> {
+                    if (ch == '\r' || ch == '\n') {
+                        inLineComment = false
+                        result.append(ch)
+                    } else {
+                        result.append(' ')
+                    }
+                }
+                inBlockComment -> {
+                    if (ch == '*' && next == '/') {
+                        result.append("  ")
+                        index++
+                        inBlockComment = false
+                    } else {
+                        result.append(if (ch == '\r' || ch == '\n') ch else ' ')
+                    }
+                }
+                inTextBlock -> {
+                    result.append(if (ch == '\r' || ch == '\n') ch else ' ')
+                    if (ch == '"' && next == '"' && nextTwo == '"') {
+                        result.append("  ")
+                        index += 2
+                        inTextBlock = false
+                    }
+                }
+                inString -> {
+                    result.append(if (ch == '\r' || ch == '\n') ch else ' ')
+                    if (ch == '"' && !escaped) inString = false
+                    escaped = ch == '\\' && !escaped
+                    if (ch != '\\') escaped = false
+                }
+                inChar -> {
+                    result.append(if (ch == '\r' || ch == '\n') ch else ' ')
+                    if (ch == '\'' && !escaped) inChar = false
+                    escaped = ch == '\\' && !escaped
+                    if (ch != '\\') escaped = false
+                }
+                ch == '/' && next == '/' -> {
+                    result.append("  ")
+                    index++
+                    inLineComment = true
+                }
+                ch == '/' && next == '*' -> {
+                    result.append("  ")
+                    index++
+                    inBlockComment = true
+                }
+                ch == '"' && next == '"' && nextTwo == '"' -> {
+                    result.append("   ")
+                    index += 2
+                    inTextBlock = true
+                    escaped = false
+                }
+                ch == '"' -> {
+                    result.append(' ')
+                    inString = true
+                    escaped = false
+                }
+                ch == '\'' -> {
+                    result.append(' ')
+                    inChar = true
+                    escaped = false
+                }
+                else -> result.append(ch)
+            }
+            index++
+        }
+        return result.toString()
     }
 
     private data class ParticleField(

@@ -1029,6 +1029,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `particle options codec migration uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateParticleOptionsCodecs")
+        assertTrue(start >= 0, "migrateParticleOptionsCodecs is missing")
+        val end = source.indexOf("private fun particleCodecSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw deserializer prefilter" to """source.contains("ParticleOptions.Deserializer")""",
+            "raw implements prefilter" to """source.contains("implements ParticleOptions")""",
+            "raw writeToNetwork prefilter" to """source.contains("writeToNetwork")""",
+            "raw class scan" to ".find(source)",
+            "raw field scan" to ".findAll(source)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""!executableCode.contains("ParticleOptions.Deserializer")""") &&
+                body.contains(".find(executableCode)") &&
+                body.contains(".findAll(executableCode)"),
+            "ParticleOptions codec migration must prove class and fields from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "ParticleOptions codec migration must not treat comments or string literals as source evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `client only build detection ignores comments and strings`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

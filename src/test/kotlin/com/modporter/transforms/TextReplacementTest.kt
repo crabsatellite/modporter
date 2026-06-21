@@ -2932,6 +2932,42 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `custom particle options migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            public class ParticleDocs {
+                /*
+                public class LeafParticleData implements ParticleOptions {
+                    public final int r;
+
+                    public void writeToNetwork(FriendlyByteBuf buf) {
+                        buf.writeVarInt(r);
+                    }
+
+                    public static class Deserializer implements ParticleOptions.Deserializer<LeafParticleData> {
+                    }
+                }
+                */
+                private static final String DOC = "ParticleOptions.Deserializer implements ParticleOptions writeToNetwork public final int g;";
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "particle-options-codec-streamcodec" }, result.changes.joinToString("\n"))
+        assertFalse(transformed.contains("public record LeafParticleData"), transformed)
+        assertFalse(transformed.contains("MapCodec<LeafParticleData>"), transformed)
+        assertTrue(transformed.contains("public class LeafParticleData implements ParticleOptions"), transformed)
+        assertTrue(transformed.contains("public final int r;"), transformed)
+        assertTrue(transformed.contains("ParticleOptions.Deserializer implements ParticleOptions writeToNetwork"), transformed)
+    }
+
+    @Test
     fun `loot datagen builders and global loot modifier generics migrate to 1_21 APIs`() {
         val projectDir = createTestFile("""
             package com.example;
