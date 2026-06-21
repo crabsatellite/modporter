@@ -523,7 +523,8 @@ class MappingCompletenessTest {
             """result.contains("com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory")""",
             """result.contains("com.aetherteam.nitrogen.integration.rei.categories.fuel.AbstractFuelCategory")""",
             """result.contains("new AbstractFuelCategory(")""",
-            """result.contains("getTexture()")"""
+            """result.contains("getTexture()")""",
+            """textureFields.first()"""
         )
         val offenders = listOf(
             "structural" to structuralBody,
@@ -539,6 +540,10 @@ class MappingCompletenessTest {
                 structuralBody.contains("containsNitrogenFuelCategoryApiUse(source, \"rei\")") &&
                 structuralBody.contains("containsNitrogenFuelGetTextureOverride(result)") &&
                 structuralBody.contains("containsNitrogenFuelCategoryConstructorCall(result)") &&
+                structuralBody.contains("nitrogenFuelTextureFieldReturnedByGetTexture(result, textureFields)") &&
+                structuralSource.contains("private fun nitrogenFuelTextureFieldReturnedByGetTexture") &&
+                structuralSource.contains("javaMethodText(maskJavaCommentsAndLiterals(source), \"getTexture\")") &&
+                structuralSource.contains("returnedFields.singleOrNull()") &&
                 structuralSource.contains("maskJavaComments(source)") &&
                 structuralSource.contains("maskJavaCommentsAndLiterals(source)"),
             "Structural Nitrogen fuel migration must use typed API-shape evidence and comment masking"

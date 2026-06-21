@@ -26731,6 +26731,45 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `Nitrogen fuel category migration rejects ambiguous getTexture fields`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleFuelCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleFuelCategory extends AbstractFuelCategory {
+                public static final ResourceLocation FURNACE_TEXTURE = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "textures/gui/menu/furnace.png");
+                public static final ResourceLocation ALTAR_TEXTURE = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "textures/gui/menu/altar.png");
+                private final boolean alternate;
+
+                public ResourceLocation getTexture() {
+                    return alternate ? ALTAR_TEXTURE : FURNACE_TEXTURE;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("ExampleFuelCategory.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive Nitrogen fuel getTexture texture field") },
+            "Expected ambiguous getTexture field hard gate, got: ${result.errors}"
+        )
+        assertFalse(source.contains("MODPORTER_NITROGEN_FUEL_ICON_TEXTURE"), source)
+        assertTrue(source.contains("public ResourceLocation getTexture()"), source)
+    }
+
+    @Test
     fun `Nitrogen fuel category migration ignores comments and strings without API type use`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

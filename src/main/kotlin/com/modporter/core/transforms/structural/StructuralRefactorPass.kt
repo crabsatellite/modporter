@@ -33422,11 +33422,12 @@ ${indent}}
         var result = source
         val jeiFuelCategory = containsNitrogenFuelCategoryApiUse(result, "jei")
         if (jeiFuelCategory && containsNitrogenFuelGetTextureOverride(result)) {
-            result = Regex("""\bResourceLocation\s+getTexture\s*\(\s*\)""")
-                .replace(result, "ResourceLocation getBackgroundTexture()")
+            val field = nitrogenFuelTextureFieldReturnedByGetTexture(result, textureFields)
+                ?: error("Cannot derive Nitrogen fuel getTexture texture field: getTexture() must return exactly one declared menu texture field")
+            result = replaceExecutableRegex(result, Regex("""\bResourceLocation\s+getTexture\s*\(\s*\)""")) {
+                "ResourceLocation getBackgroundTexture()"
+            }
             if (!result.contains("getIconTexture()")) {
-                val field = textureFields.firstOrNull { result.contains("return ${it.fieldName};") }
-                    ?: textureFields.first()
                 val iconField = "MODPORTER_NITROGEN_FUEL_ICON_TEXTURE"
                 if (!result.contains(iconField)) {
                     result = insertNitrogenFuelResourceLocationField(
@@ -33468,6 +33469,19 @@ ${indent}}
         }
 
         return result
+    }
+
+    private fun nitrogenFuelTextureFieldReturnedByGetTexture(
+        source: String,
+        textureFields: List<NitrogenFuelTextureField>
+    ): NitrogenFuelTextureField? {
+        val methodText = javaMethodText(maskJavaCommentsAndLiterals(source), "getTexture") ?: return null
+        val returnedFields = textureFields
+            .filter { field ->
+                Regex("""\breturn\s+${Regex.escape(field.fieldName)}\s*;""").containsMatchIn(methodText)
+            }
+            .distinctBy { it.fieldName }
+        return returnedFields.singleOrNull()
     }
 
     private fun containsNitrogenFuelCategoryApiUse(source: String, integration: String): Boolean {
