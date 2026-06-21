@@ -16570,53 +16570,81 @@ ${indent}}
                 "new MerchantOffer(\n                                            new ItemCost(${match.groupValues[1]}, ${match.groupValues[2]}),"
             }
 
-        if (result.contains("PotionUtils.")) {
-            result = Regex("""(?:net\.minecraft\.world\.item\.alchemy\.)?PotionUtils\.setPotion\(([^,]+),\s*([^)]+)\)""")
-                .replace(result) { match ->
-                    "${match.groupValues[1].trim()}.set(DataComponents.POTION_CONTENTS, new PotionContents(${match.groupValues[2].trim()}))"
-                }
-            result = Regex("""(?:net\.minecraft\.world\.item\.alchemy\.)?PotionUtils\.getPotion\(([^)]+)\)""")
-                .replace(result) { match ->
-                    "${match.groupValues[1].trim()}.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().orElse(Potions.EMPTY)"
-                }
-            result = Regex("""(?:net\.minecraft\.world\.item\.alchemy\.)?PotionUtils\.getColor\(([^)]+)\)""")
-                .replace(result) { match ->
-                    "${match.groupValues[1].trim()}.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"
-                }
-            result = Regex("""(?:net\.minecraft\.world\.item\.alchemy\.)?PotionUtils\.getMobEffects\(([^)]+)\)\.isEmpty\(\)""")
-                .replace(result) { match ->
-                    "!${match.groupValues[1].trim()}.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects().iterator().hasNext()"
-                }
-            result = Regex("""(?:net\.minecraft\.world\.item\.alchemy\.)?PotionUtils\.getMobEffects\(([^)]+)\)""")
-                .replace(result) { match ->
-                    "${match.groupValues[1].trim()}.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects()"
-                }
-            result = Regex("""(?:net\.minecraft\.world\.item\.alchemy\.)?PotionUtils\.addPotionTooltip\(([^,]+),\s*([^,]+),\s*([^)]+)\)""")
-                .replace(result) { match ->
-                    "${match.groupValues[1].trim()}.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).addPotionTooltip(${match.groupValues[2].trim()}::add, ${match.groupValues[3].trim()}, 20.0F)"
-                }
-            needsDataComponents = true
-            needsPotionContents = true
-            if (!result.contains("PotionUtils.")) {
+        if (maskJavaCommentsAndLiterals(result).contains("PotionUtils.")) {
+            var migratedPotionUtils = false
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(?:net\.minecraft\.world\.item\.alchemy\.)?PotionUtils\.setPotion\(([^,]+),\s*([^)]+)\)""")
+            ) { match ->
+                migratedPotionUtils = true
+                "${match.groupValues[1].trim()}.set(DataComponents.POTION_CONTENTS, new PotionContents(${match.groupValues[2].trim()}))"
+            }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(?:net\.minecraft\.world\.item\.alchemy\.)?PotionUtils\.getPotion\(([^)]+)\)""")
+            ) { match ->
+                migratedPotionUtils = true
+                "${match.groupValues[1].trim()}.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().orElse(Potions.EMPTY)"
+            }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(?:net\.minecraft\.world\.item\.alchemy\.)?PotionUtils\.getColor\(([^)]+)\)""")
+            ) { match ->
+                migratedPotionUtils = true
+                "${match.groupValues[1].trim()}.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"
+            }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(?:net\.minecraft\.world\.item\.alchemy\.)?PotionUtils\.getMobEffects\(([^)]+)\)\.isEmpty\(\)""")
+            ) { match ->
+                migratedPotionUtils = true
+                "!${match.groupValues[1].trim()}.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects().iterator().hasNext()"
+            }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(?:net\.minecraft\.world\.item\.alchemy\.)?PotionUtils\.getMobEffects\(([^)]+)\)""")
+            ) { match ->
+                migratedPotionUtils = true
+                "${match.groupValues[1].trim()}.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects()"
+            }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(?:net\.minecraft\.world\.item\.alchemy\.)?PotionUtils\.addPotionTooltip\(([^,]+),\s*([^,]+),\s*([^)]+)\)""")
+            ) { match ->
+                migratedPotionUtils = true
+                "${match.groupValues[1].trim()}.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).addPotionTooltip(${match.groupValues[2].trim()}::add, ${match.groupValues[3].trim()}, 20.0F)"
+            }
+            if (migratedPotionUtils) {
+                needsDataComponents = true
+                needsPotionContents = true
+            }
+            if (!maskJavaCommentsAndLiterals(result).contains("PotionUtils.")) {
                 result = removeImport(result, "net.minecraft.world.item.alchemy.PotionUtils")
             }
         }
-        if (result.contains("Potions.EMPTY") || result.contains("Potion.byName(") || result.contains("new PotionContents(")) {
-            result = Regex("""new\s+PotionContents\(\s*Potions\.EMPTY\s*\)""")
-                .replace(result, "PotionContents.EMPTY")
-            result = Regex("""([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*\([^)]*\))*\.getOrDefault\(DataComponents\.POTION_CONTENTS,\s*PotionContents\.EMPTY\))\.potion\(\)\.orElse\(Potions\.EMPTY\)\s*!=\s*Potions\.EMPTY""")
-                .replace(result) { match -> "${match.groupValues[1]}.potion().isPresent()" }
-            result = Regex("""([A-Za-z_$][\w$]*)\.getString\("Potion"\)\.equals\(Potions\.EMPTY\.toString\(\)\)""")
-                .replace(result) { match -> "\"minecraft:empty\".equals(${match.groupValues[1]}.getString(\"Potion\"))" }
-            result = Regex("""Potion\.byName\(\s*([^)]+)\s*\)""")
-                .replace(result) { match ->
-                    "net.minecraft.core.registries.BuiltInRegistries.POTION.get(net.minecraft.resources.ResourceLocation.parse(${match.groupValues[1].trim()}))"
-                }
-            result = result.replace("Potions.EMPTY.value()", "Potions.WATER.value()")
-            result = result.replace("Potions.EMPTY", "Potions.WATER.value()")
-            result = Regex("""([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*\([^)]*\))*\.getOrDefault\(DataComponents\.POTION_CONTENTS,\s*PotionContents\.EMPTY\))\.potion\(\)\.orElse\(Potions\.WATER\.value\(\)\)\s*!=\s*Potions\.WATER\.value\(\)""")
-                .replace(result) { match -> "${match.groupValues[1]}.potion().isPresent()" }
-            if (result.contains("PotionContents.EMPTY")) {
+        if (maskJavaCommentsAndLiterals(result).let { it.contains("Potions.EMPTY") || it.contains("Potion.byName(") || it.contains("new PotionContents(") }) {
+            result = replaceExecutableRegex(
+                result,
+                Regex("""new\s+PotionContents\(\s*Potions\.EMPTY\s*\)""")
+            ) { "PotionContents.EMPTY" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*\([^)]*\))*\.getOrDefault\(DataComponents\.POTION_CONTENTS,\s*PotionContents\.EMPTY\))\.potion\(\)\.orElse\(Potions\.EMPTY\)\s*!=\s*Potions\.EMPTY""")
+            ) { match -> "${match.groupValues[1]}.potion().isPresent()" }
+            result = migrateLegacyPotionEmptyStringChecks(result)
+            result = replaceExecutableRegex(
+                result,
+                Regex("""Potion\.byName\(\s*([^)]+)\s*\)""")
+            ) { match ->
+                "net.minecraft.core.registries.BuiltInRegistries.POTION.get(net.minecraft.resources.ResourceLocation.parse(${match.groupValues[1].trim()}))"
+            }
+            result = replaceExecutableRegex(result, Regex("""\bPotions\.EMPTY\.value\(\)""")) { "Potions.WATER.value()" }
+            result = replaceExecutableRegex(result, Regex("""\bPotions\.EMPTY\b""")) { "Potions.WATER.value()" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*\([^)]*\))*\.getOrDefault\(DataComponents\.POTION_CONTENTS,\s*PotionContents\.EMPTY\))\.potion\(\)\.orElse\(Potions\.WATER\.value\(\)\)\s*!=\s*Potions\.WATER\.value\(\)""")
+            ) { match -> "${match.groupValues[1]}.potion().isPresent()" }
+            if (maskJavaCommentsAndLiterals(result).contains("PotionContents.EMPTY")) {
                 needsPotionContents = true
             }
         }
@@ -16721,6 +16749,23 @@ ${indent}}
                 else -> return@mapNotNull null
             }
             match.range to "${match.groupValues[1]}.getSkin(PlayerSkin.Model.$model)"
+        }.toList()
+        return applyStringEdits(source, edits)
+    }
+
+    private fun migrateLegacyPotionEmptyStringChecks(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".getString(") || !executableCode.contains("Potions.EMPTY.toString()")) return source
+        val sourcePattern = Regex("""([A-Za-z_$][\w$]*)\.getString\("Potion"\)\.equals\(Potions\.EMPTY\.toString\(\)\)""")
+        val executablePattern = Regex("""([A-Za-z_$][\w$]*)\.getString\(\s*\)\.equals\(Potions\.EMPTY\.toString\(\)\)""")
+        val edits = sourcePattern.findAll(source).mapNotNull { match ->
+            val executableMatch = executablePattern.find(executableCode, match.range.first)
+                ?: return@mapNotNull null
+            if (executableMatch.range != match.range ||
+                executableMatch.groupValues[1] != match.groupValues[1]) {
+                return@mapNotNull null
+            }
+            match.range to "\"minecraft:empty\".equals(${match.groupValues[1]}.getString(\"Potion\"))"
         }.toList()
         return applyStringEdits(source, edits)
     }

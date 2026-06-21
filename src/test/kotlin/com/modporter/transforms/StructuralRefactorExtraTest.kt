@@ -12552,6 +12552,50 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `potion component migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PotionDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.alchemy.PotionUtils;
+            import net.minecraft.world.item.alchemy.Potions;
+
+            class PotionDocs {
+                private static final String DOC = "PotionUtils.getPotion(stack) != Potions.EMPTY";
+
+                /*
+                boolean docs(ItemStack stack, CompoundTag tag) {
+                    return PotionUtils.getPotion(stack) != Potions.EMPTY
+                        || tag.getString("Potion").equals(Potions.EMPTY.toString());
+                }
+                */
+
+                boolean real(ItemStack stack, CompoundTag tag) {
+                    return PotionUtils.getPotion(stack) != Potions.EMPTY
+                        || tag.getString("Potion").equals(Potions.EMPTY.toString());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val potion = srcDir.resolve("PotionDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(potion.contains("""private static final String DOC = "PotionUtils.getPotion(stack) != Potions.EMPTY";"""), potion)
+        assertTrue(
+            Regex("""/\*\s*boolean docs\(ItemStack stack, CompoundTag tag\)\s*\{\s*return PotionUtils\.getPotion\(stack\) != Potions\.EMPTY\s*\|\| tag\.getString\("Potion"\)\.equals\(Potions\.EMPTY\.toString\(\)\);""", RegexOption.DOT_MATCHES_ALL)
+                .containsMatchIn(potion),
+            potion
+        )
+        assertTrue(potion.contains("return stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().isPresent()"), potion)
+        assertTrue(potion.contains("""|| "minecraft:empty".equals(tag.getString("Potion"));"""), potion)
+        assertTrue(!potion.contains("import net.minecraft.world.item.alchemy.PotionUtils;"), potion)
+    }
+
+    @Test
     fun `migrates removed entity riding offset center expression`() {
         val projectDir = createFile("EntityCenter.java", """
             package com.example;

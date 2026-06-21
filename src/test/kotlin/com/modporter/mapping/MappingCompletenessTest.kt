@@ -3030,6 +3030,56 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `potion component migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("""maskJavaCommentsAndLiterals(result).contains("PotionUtils.")""")
+        assertTrue(start >= 0, "potion component migration block is missing")
+        val end = source.indexOf("result = Regex(\"\"\"\\bthis\\.has", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw PotionUtils prefilter" to """result.contains("PotionUtils.")""",
+            "raw PotionUtils replacement" to Regex("""Regex\([\s\S]*?PotionUtils[\s\S]*?\)\s*\.\s*replace\(result"""),
+            "raw Potions.EMPTY replacement" to "result.replace(\"Potions.EMPTY\"",
+            "raw Potion.byName replacement" to Regex("""Regex\([\s\S]*?Potion\.byName[\s\S]*?\)\s*\.\s*replace\(result""")
+        )
+            .filter { (_, marker) ->
+                when (marker) {
+                    is String -> body.contains(marker)
+                    is Regex -> marker.containsMatchIn(body)
+                    else -> false
+                }
+            }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("maskJavaCommentsAndLiterals(result)") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("migrateLegacyPotionEmptyStringChecks(result)") &&
+                body.contains("migratedPotionUtils") &&
+                body.contains("needsDataComponents = true") &&
+                body.contains("needsPotionContents = true"),
+            "Potion component migration must inspect executable Java and gate import flags on real rewrites"
+        )
+        assertTrue(
+            source.contains("private fun migrateLegacyPotionEmptyStringChecks(source: String): String") &&
+                source.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                source.contains("sourcePattern.findAll(source)") &&
+                source.contains("executablePattern.find(executableCode, match.range.first)") &&
+                source.contains("return applyStringEdits(source, edits)"),
+            "Potion string-key migration must verify source matches against executable Java ranges"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Potion component migration must not rewrite comments or string literals with raw replacements: $offenders"
+        )
+    }
+
+    @Test
     fun `holder value accessor migration uses executable typed variables`() {
         val source = Path.of("")
             .toAbsolutePath()
