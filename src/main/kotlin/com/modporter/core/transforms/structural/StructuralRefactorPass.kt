@@ -678,22 +678,29 @@ class StructuralRefactorPass : Pass {
                 val hasGeneratedNetwork = srcDir.resolve(srcDir.relativize(javaFile).parent ?: Path.of(""))
                     .resolve("ModNetwork.java")
                     .exists()
-                if (!text.contains("[forge2neo] SimpleChannel") && !hasGeneratedNetwork) return@forEach
+                fun isLegacySimpleChannelCleanupComment(line: String): Boolean {
+                    val trimmed = line.trimStart()
+                    return trimmed.startsWith("//") &&
+                        (trimmed.contains("SimpleChannel field removed") ||
+                            trimmed.contains("registerMessage() removed") ||
+                            (trimmed.contains("HANDLER removed") && trimmed.contains("RegisterPayloadHandlersEvent")))
+                }
+
+                if (!hasGeneratedNetwork && text.lineSequence().none(::isLegacySimpleChannelCleanupComment)) return@forEach
 
                 var modified = text
 
                 val lines = modified.lines()
                 val cleanedLines = mutableListOf<String>()
                 var removedRegisterMessages = false
+                val removedRegisterMessageComment = lines.any { line ->
+                    isLegacySimpleChannelCleanupComment(line) && line.contains("registerMessage() removed")
+                }
                 for (line in lines) {
                     val trimmed = line.trimStart()
                     val removeLine =
-                        Regex("""//\s*T(?:ODO):\s*\[forge2neo]\s*SimpleChannel field removed.*""").matches(trimmed) ||
-                            trimmed.startsWith("// [forge2neo] HANDLER removed, packets registered via RegisterPayloadHandlersEvent") ||
-                            Regex("""//\s*T(?:ODO):\s*\[forge2neo]\s*registerMessage\(\) removed.*""").matches(trimmed) ||
-                            trimmed == "int packetIndex = 0;" && lines.any {
-                                it.contains("registerMessage() removed - register via PayloadRegistrar")
-                            }
+                        isLegacySimpleChannelCleanupComment(line) ||
+                            trimmed == "int packetIndex = 0;" && removedRegisterMessageComment
                     if (removeLine) {
                         removedRegisterMessages = true
                     } else {
@@ -1241,7 +1248,7 @@ ${indent}}
     private fun removeDistExecutorImports(source: String): String {
         var result = source
         result = result.replace(
-            Regex("""(?m)^[ \t]*(?://\s*\[forge2neo]\s*)?import\s+net\.(?:minecraftforge|neoforged)\.fml\.DistExecutor;\s*\r?\n"""),
+            Regex("""(?m)^[ \t]*(?://\s*(?:\[[^\]\r\n]+]\s*)?)?import\s+net\.(?:minecraftforge|neoforged)\.fml\.DistExecutor;\s*\r?\n"""),
             ""
         )
         result = result.replace(
@@ -9265,9 +9272,7 @@ public class $className extends SimpleCriterionTrigger<$className.$instanceName>
 
     private fun migrateLegacyPlantApiSource(source: String): String {
         var result = source
-        result = Regex("""(?m)^[ \t]*(?://\s*T(?:ODO):\s*)?PlantType removed in NeoForge 1\.21[^\r\n]*\r?\n""")
-            .replace(result, "")
-        result = Regex("""(?m)^[ \t]*//\s*T(?:ODO):\s*PlantType removed in NeoForge 1\.21[^\r\n]*\r?\n""")
+        result = Regex("""(?m)^[ \t]*(?://.*)?PlantType removed in NeoForge 1\.21[^\r\n]*\r?\n""")
             .replace(result, "")
         result = Regex("""(?m)^[ \t]*import\s+net\.neoforged\.neoforge\.common\.PlantType;\s*\r?\n""")
             .replace(result, "")
@@ -14163,11 +14168,11 @@ ${entries.joinToString(",\n")}
     private fun removeLegacyTickPhaseChecks(source: String): String {
         var result = source
         result = Regex(
-            """(?m)^[ \t]*//\s*\[forge2neo]\s*.*TickEvent\.Phase\.END.*\r?\n[ \t]*//\s*phase check removed in NeoForge\s*\r?\n?""",
+            """(?m)^[ \t]*//.*TickEvent\.Phase\.(?:END|START).*\r?\n[ \t]*//\s*phase check removed in NeoForge\s*\r?\n?""",
             RegexOption.IGNORE_CASE
         ).replace(result, "")
         result = Regex(
-            """(?m)^[ \t]*//\s*\[forge2neo]\s*.*Phase check removed.*\r?\n""",
+            """(?m)^[ \t]*//.*Phase check removed.*\r?\n""",
             RegexOption.IGNORE_CASE
         ).replace(result, "")
         result = Regex(
@@ -39674,7 +39679,7 @@ $writeLines
                         content = removeImport(content, "net.minecraft.network.protocol.game.ClientboundAddEntityPacket")
                     }
                     content = removeImport(content, "net.neoforged.neoforge.network.NetworkHooks")
-                    content = Regex("""(?m)^[ \t]*//\s*T(?:ODO):\s*NetworkHooks removed[^\r\n]*\r?\n""").replace(content, "")
+                    content = Regex("""(?m)^[ \t]*//.*NetworkHooks removed[^\r\n]*\r?\n""").replace(content, "")
                     modified = true
                     changes.add(Change(
                         file = file,
@@ -42272,7 +42277,7 @@ public class ${builder.className} implements RecipeBuilder {
                         val previousLineBreak = text.lastIndexOf('\n', (adjStart - 1).coerceAtLeast(0))
                         val previousLineStart = if (previousLineBreak >= 0) previousLineBreak + 1 else 0
                         val previousLine = text.substring(previousLineStart, adjStart).trim()
-                        if (previousLine.contains("[forge2neo]") && previousLine.contains("event handlers extracted")) {
+                        if (previousLine.startsWith("//") && previousLine.contains("event handlers extracted", ignoreCase = true)) {
                             adjStart = previousLineStart
                         }
 

@@ -756,6 +756,34 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `production cleanup rules do not depend on legacy forge2neo comment markers`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val forbidden = listOf(
+            "legacy forge2neo comment marker" to "[forge2neo]",
+            "split TODO regex bypass" to "T(?:ODO)"
+        )
+
+        val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) && it.extension == "kt" }
+                .flatMap { file ->
+                    val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                    val text = file.readText()
+                    forbidden
+                        .filter { (_, marker) -> text.contains(marker) }
+                        .map { (label, _) -> "$relative contains $label" }
+                        .stream()
+                }
+                .toList()
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Production cleanup must be structural and must not depend on legacy tool comment markers: $offenders"
+        )
+    }
+
+    @Test
     fun `structural migrations do not synthesize placeholder names for unclear source structure`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

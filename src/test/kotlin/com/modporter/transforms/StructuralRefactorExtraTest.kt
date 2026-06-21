@@ -1307,6 +1307,36 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `simplechannel cleanup removes legacy marker comments by cleanup shape`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public class ExampleMod {
+                private void commonSetup() {
+                    // TODO: [forge2neo] SimpleChannel field removed after payload migration
+                    // TODO: [forge2neo] registerMessage() removed - register via PayloadRegistrar
+                    int packetIndex = 0;
+                    keepRegistrationTail();
+                }
+
+                private void keepRegistrationTail() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "structural-simplechannel-cleanup" })
+        assertFalse(migrated.contains("[forge2neo]"), migrated)
+        assertFalse(migrated.contains("registerMessage() removed"), migrated)
+        assertFalse(migrated.contains("packetIndex"), migrated)
+        assertTrue(migrated.contains("keepRegistrationTail();"), migrated)
+    }
+
+    @Test
     fun `packet migration supports records client direction and IPayloadContext handlers`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val networkDir = srcDir.resolve("network")
@@ -7241,6 +7271,8 @@ class StructuralRefactorExtraTest {
 
                 @SubscribeEvent
                 public static void onClientTick(ClientTickEvent.Post event) {
+                    // [forge2neo] TickEvent.Phase.END guard removed
+                    // phase check removed in NeoForge
                     if (event.phase == TickEvent.Phase.END) {
                         ping();
                     }
@@ -7291,6 +7323,7 @@ class StructuralRefactorExtraTest {
         assertTrue(!migrated.contains("tick.phase"))
         assertTrue(!migrated.contains("event.side"))
         assertTrue(!migrated.contains("LogicalSide"))
+        assertTrue(!migrated.contains("phase check removed"), migrated)
     }
 
     @Test

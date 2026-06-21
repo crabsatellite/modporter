@@ -443,7 +443,7 @@ class TextReplacementPass(
             result = result.replace(Regex("""\bLivingDamageEvent\.Post\b"""), "Post")
         }
         result = result.replace(
-            Regex("""(?m)^[ \t]*//\s*\[forge2neo]\s*import\s+net\.neoforged\.fml\.DistExecutor;\s*\r?\n"""),
+            Regex("""(?m)^[ \t]*//\s*(?:\[[^\]\r\n]+]\s*)?import\s+net\.(?:minecraftforge|neoforged)\.fml\.DistExecutor;\s*\r?\n"""),
             ""
         )
         result = result.replace(
