@@ -5219,6 +5219,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `record codec builder witness migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateRecordCodecBuilderWitnessSource")
+        assertTrue(start >= 0, "migrateRecordCodecBuilderWitnessSource is missing")
+        val end = source.indexOf("private fun migrateLegacyTickEventSource", start + 1)
+        assertTrue(end > start, "migrateRecordCodecBuilderWitnessSource boundary is missing")
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw RecordCodecBuilder prefilter" to """source.contains("RecordCodecBuilder.")""",
+            "raw ResourceLocation list codec replacement" to """source.replace("ResourceLocation.CODEC.codec().listOf()", "ResourceLocation.CODEC.listOf()")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("RecordCodecBuilder.")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("""ResourceLocation\.CODEC\.codec\(\)\.listOf\(\)""") &&
+                body.contains(""".findAll(maskJavaCommentsAndLiterals(result))""") &&
+                body.contains("""maskJavaCommentsAndLiterals(result).contains("RecordCodecBuilder.<${'$'}typeName>")"""),
+            "RecordCodecBuilder witness migration must rewrite ResourceLocation CODEC list calls only in executable source"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "RecordCodecBuilder witness migration must not rewrite comments or arbitrary strings: $offenders"
+        )
+    }
+
+    @Test
     fun `registry object reflection migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

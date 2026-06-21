@@ -14681,49 +14681,62 @@ ${entries.joinToString(",\n")}
     }
 
     private fun migrateRecordCodecBuilderWitnessSource(source: String): String {
-        if (!source.contains("RecordCodecBuilder.")) return source
-        var result = source.replace("ResourceLocation.CODEC.codec().listOf()", "ResourceLocation.CODEC.listOf()")
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("RecordCodecBuilder.")) return source
+        var result = replaceExecutableRegex(
+            source,
+            Regex("""\bResourceLocation\.CODEC\.codec\(\)\.listOf\(\)""")
+        ) {
+            "ResourceLocation.CODEC.listOf()"
+        }
         Regex("""\b(?:class|record)\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
+            .findAll(maskJavaCommentsAndLiterals(result))
             .map { it.groupValues[1] }
             .toSet()
             .forEach { typeName ->
                 val isBiomeSourceType = Regex("""\bclass\s+${Regex.escape(typeName)}\s+extends\s+(?:[A-Za-z_$][\w$]*\.)?BiomeSource\b""")
-                    .containsMatchIn(result)
-                result = Regex(
-                    """((?:(?:public|protected|private|static|final)\s+)*(?:(?:[A-Za-z_$][\w$]*\.)*)Codec\s*<\s*${Regex.escape(typeName)}\s*>\s+[A-Za-z_$][\w$]*\s*=\s*)((?:[A-Za-z_$][\w$]*\.)*RecordCodecBuilder)(?:\.<[^>]+>)?\.create\("""
-                ).replace(result) { match ->
+                    .containsMatchIn(maskJavaCommentsAndLiterals(result))
+                result = replaceExecutableRegex(
+                    result,
+                    Regex("""((?:(?:public|protected|private|static|final)\s+)*(?:(?:[A-Za-z_$][\w$]*\.)*)Codec\s*<\s*${Regex.escape(typeName)}\s*>\s+[A-Za-z_$][\w$]*\s*=\s*)((?:[A-Za-z_$][\w$]*\.)*RecordCodecBuilder)(?:\.<[^>]+>)?\.create\(""")
+                ) { match ->
                     "${match.groupValues[1]}${match.groupValues[2]}.<$typeName>create("
                 }
-                result = Regex(
-                    """((?:(?:public|protected|private|static|final)\s+)*(?:(?:[A-Za-z_$][\w$]*\.)*)MapCodec\s*<\s*${Regex.escape(typeName)}\s*>\s+[A-Za-z_$][\w$]*\s*=\s*)((?:[A-Za-z_$][\w$]*\.)*RecordCodecBuilder)(?:\.<[^>]+>)?\.mapCodec\("""
-                ).replace(result) { match ->
+                result = replaceExecutableRegex(
+                    result,
+                    Regex("""((?:(?:public|protected|private|static|final)\s+)*(?:(?:[A-Za-z_$][\w$]*\.)*)MapCodec\s*<\s*${Regex.escape(typeName)}\s*>\s+[A-Za-z_$][\w$]*\s*=\s*)((?:[A-Za-z_$][\w$]*\.)*RecordCodecBuilder)(?:\.<[^>]+>)?\.mapCodec\(""")
+                ) { match ->
                     if (isBiomeSourceType) {
                         "${match.groupValues[1]}${match.groupValues[2]}.mapCodec("
                     } else {
                         "${match.groupValues[1]}${match.groupValues[2]}.<$typeName>mapCodec("
                     }
                 }
-                if (result.contains("RecordCodecBuilder.<$typeName>") || isBiomeSourceType) {
-                    result = Regex("""\.forGetter\(\s*([A-Za-z_$][\w$]*)\s*->\s*\1\.""")
-                        .replace(result) { match ->
-                            ".forGetter(($typeName ${match.groupValues[1]}) -> ${match.groupValues[1]}."
-                        }
+                if (maskJavaCommentsAndLiterals(result).contains("RecordCodecBuilder.<$typeName>") || isBiomeSourceType) {
+                    result = replaceExecutableRegex(
+                        result,
+                        Regex("""\.forGetter\(\s*([A-Za-z_$][\w$]*)\s*->\s*\1\.""")
+                    ) { match ->
+                        ".forGetter(($typeName ${match.groupValues[1]}) -> ${match.groupValues[1]}."
+                    }
                 }
                 if (isBiomeSourceType) {
-                    result = result.replace(
-                        "RecordCodecBuilder.<$typeName>mapCodec(",
-                        "RecordCodecBuilder.mapCodec("
-                    )
+                    result = replaceExecutableRegex(
+                        result,
+                        Regex("""\bRecordCodecBuilder\.<${Regex.escape(typeName)}>mapCodec\(""")
+                    ) { "RecordCodecBuilder.mapCodec(" }
                 }
             }
-        if (result.contains("extends BiomeSource") && result.contains("RecordCodecBuilder.<")) {
-            result = Regex("""RecordCodecBuilder\s*\.\s*<\s*([A-Za-z_$][\w$]*)\s*>\s*mapCodec\(""")
-                .replace(result) { match ->
+        if (maskJavaCommentsAndLiterals(result).contains("extends BiomeSource") &&
+            maskJavaCommentsAndLiterals(result).contains("RecordCodecBuilder.<")) {
+            result = replaceExecutableRegex(
+                result,
+                Regex("""RecordCodecBuilder\s*\.\s*<\s*([A-Za-z_$][\w$]*)\s*>\s*mapCodec\(""")
+            ) { match ->
                     val typeName = match.groupValues[1]
                     val typeExtendsBiomeSource = Regex(
                         """\bclass\s+${Regex.escape(typeName)}\b[^{;]*\bextends\s+(?:[A-Za-z_$][\w$]*\.)?BiomeSource\b"""
-                    ).containsMatchIn(result)
+                    ).containsMatchIn(maskJavaCommentsAndLiterals(result))
                     if (typeExtendsBiomeSource) "RecordCodecBuilder.mapCodec(" else match.value
                 }
         }

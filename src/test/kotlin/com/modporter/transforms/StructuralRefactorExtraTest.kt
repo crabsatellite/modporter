@@ -11439,6 +11439,51 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `record codec witness rewrites ignore comments and strings`() {
+        val projectDir = createFile("RecordCodecWitnessSurface.java", """
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import java.util.List;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class RecordCodecWitnessSurface {
+                private static final String DOC = "ResourceLocation.CODEC.codec().listOf() RecordCodecBuilder.create";
+
+                /*
+                public static final Codec<List<ResourceLocation>> COMMENT_IDS = ResourceLocation.CODEC.codec().listOf();
+                public static final Codec<RecordCodecWitnessSurface> COMMENT_CODEC = RecordCodecBuilder.create(instance -> instance.group(
+                        ResourceLocation.CODEC.fieldOf("id").forGetter(surface -> surface.id)
+                ).apply(instance, RecordCodecWitnessSurface::new));
+                */
+                public static final Codec<List<ResourceLocation>> IDS = ResourceLocation.CODEC.codec().listOf();
+                public static final Codec<RecordCodecWitnessSurface> CODEC = RecordCodecBuilder.create(instance -> instance.group(
+                        ResourceLocation.CODEC.fieldOf("id").forGetter(surface -> surface.id)
+                ).apply(instance, RecordCodecWitnessSurface::new));
+
+                private final ResourceLocation id;
+
+                public RecordCodecWitnessSurface(ResourceLocation id) {
+                    this.id = id;
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = projectDir.resolve("src/main/java/com/example/RecordCodecWitnessSurface.java").readText()
+        assertTrue(migrated.contains("public static final Codec<List<ResourceLocation>> IDS = ResourceLocation.CODEC.listOf();"), migrated)
+        assertTrue(migrated.contains("RecordCodecBuilder.<RecordCodecWitnessSurface>create("), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "ResourceLocation.CODEC.codec().listOf() RecordCodecBuilder.create";"""), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("COMMENT_IDS = ResourceLocation.CODEC.codec().listOf();"), migrated)
+        assertTrue(commentBlock.contains("COMMENT_CODEC = RecordCodecBuilder.create"), migrated)
+        assertFalse(commentBlock.contains("ResourceLocation.CODEC.listOf()"), migrated)
+        assertFalse(commentBlock.contains("RecordCodecBuilder.<RecordCodecWitnessSurface>create"), migrated)
+    }
+
+    @Test
     fun `migrates block entity fluid capability override to RegisterCapabilitiesEvent`() {
         val projectDir = createFile("ExampleMod.java", """
             package com.example;
