@@ -17196,10 +17196,11 @@ ${indent}}
     }
 
     private fun migrateArmorFoilBufferCalls(source: String): String {
-        if (!source.contains("ItemRenderer.getArmorFoilBuffer(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("ItemRenderer.getArmorFoilBuffer(")) return source
 
-        return rewriteJavaCall(source, "getArmorFoilBuffer") { receiver, args ->
-            if (receiver != "ItemRenderer" || args.size != 4) return@rewriteJavaCall null
+        return rewriteExecutableJavaCall(source, "getArmorFoilBuffer") { receiver, args ->
+            if (receiver != "ItemRenderer" || args.size != 4) return@rewriteExecutableJavaCall null
             "ItemRenderer.getArmorFoilBuffer(${args[0].trim()}, ${args[1].trim()}, ${args[3].trim()})"
         }
     }
@@ -26775,15 +26776,17 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
     }
 
     private fun migrateRandomizableContainerLootTableCalls(source: String): String {
-        if (!source.contains("RandomizableContainerBlockEntity.setLootTable(")) return source
-        var result = rewriteJavaCall(source, "setLootTable") { receiver, args ->
-            if (receiver != "RandomizableContainerBlockEntity" || args.size != 4) return@rewriteJavaCall null
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("RandomizableContainerBlockEntity.setLootTable(")) return source
+        var result = rewriteExecutableJavaCall(source, "setLootTable") { receiver, args ->
+            if (receiver != "RandomizableContainerBlockEntity" || args.size != 4) return@rewriteExecutableJavaCall null
             "RandomizableContainer.setBlockEntityLootTable(${args.joinToString(", ") { it.trim() }})"
         }
         if (result != source) {
             result = addImportIfMissing(result, "net.minecraft.world.RandomizableContainer")
             val withoutBlockEntityImport = removeImport(result, "net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity")
-            if (!Regex("""\bRandomizableContainerBlockEntity\b""").containsMatchIn(withoutBlockEntityImport)) {
+            if (!Regex("""\bRandomizableContainerBlockEntity\b""")
+                    .containsMatchIn(maskJavaCommentsAndLiterals(withoutBlockEntityImport))) {
                 result = withoutBlockEntityImport
             }
         }

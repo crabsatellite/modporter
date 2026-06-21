@@ -220,6 +220,41 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `randomizable container loot table migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("StructurePieceDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.server.level.ServerLevelAccessor;
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity;
+            import net.minecraft.world.level.storage.loot.LootTable;
+
+            public class StructurePieceDocs {
+                // RandomizableContainerBlockEntity.setLootTable(level, random, chest, loot);
+                private static final String DOC = "RandomizableContainerBlockEntity.setLootTable(level, random, chest, loot);";
+
+                public void place(ServerLevelAccessor level, RandomSource random, BlockPos chest, ResourceKey<LootTable> loot) {
+                    RandomizableContainerBlockEntity.setLootTable(level, random, chest, loot);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("StructurePieceDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(transformed.contains("import net.minecraft.world.RandomizableContainer;"), transformed)
+        assertFalse(transformed.contains("import net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity;"), transformed)
+        assertTrue(transformed.contains("RandomizableContainer.setBlockEntityLootTable(level, random, chest, loot);"), transformed)
+        assertTrue(transformed.contains("// RandomizableContainerBlockEntity.setLootTable(level, random, chest, loot);"), transformed)
+        assertTrue(transformed.contains("""private static final String DOC = "RandomizableContainerBlockEntity.setLootTable(level, random, chest, loot);";"""), transformed)
+    }
+
+    @Test
     fun `migrates legacy NbtUtils block position compound lists without changing storage shape`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -16336,6 +16371,39 @@ class StructuralRefactorExtraTest {
         assertTrue(renderer.contains("ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), stack.isEnchanted())"), renderer)
         assertTrue(renderer.contains("ItemRenderer.getArmorFoilBuffer(buffer, renderType, false)"), renderer)
         assertFalse(renderer.contains("false, stack.isEnchanted()"), renderer)
+    }
+
+    @Test
+    fun `armor foil buffer migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AccessoryRendererDocs.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import net.minecraft.client.renderer.MultiBufferSource;
+            import net.minecraft.client.renderer.RenderType;
+            import net.minecraft.client.renderer.entity.ItemRenderer;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.ItemStack;
+
+            public class AccessoryRendererDocs {
+                // ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), false, stack.isEnchanted());
+                private static final String DOC = "ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), false, stack.isEnchanted());";
+
+                public VertexConsumer legacy(MultiBufferSource buffer, ResourceLocation texture, ItemStack stack) {
+                    return ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), false, stack.isEnchanted());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val renderer = srcDir.resolve("AccessoryRendererDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(renderer.contains("return ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), stack.isEnchanted());"), renderer)
+        assertTrue(renderer.contains("// ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), false, stack.isEnchanted());"), renderer)
+        assertTrue(renderer.contains("""private static final String DOC = "ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), false, stack.isEnchanted());";"""), renderer)
     }
 
     @Test

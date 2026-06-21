@@ -3026,6 +3026,75 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `randomizable container loot table migration uses executable call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateRandomizableContainerLootTableCalls")
+        assertTrue(start >= 0, "migrateRandomizableContainerLootTableCalls is missing")
+        val end = source.indexOf("private fun migrateContainerEntityLootTableResourceKeys", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw setLootTable prefilter" to """source.contains("RandomizableContainerBlockEntity.setLootTable(")""",
+            "raw setLootTable rewrite" to """rewriteJavaCall(source, "setLootTable")""",
+            "raw old import usage check" to """containsMatchIn(withoutBlockEntityImport)"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("RandomizableContainerBlockEntity.setLootTable(")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "setLootTable")""") &&
+                body.contains("""receiver != "RandomizableContainerBlockEntity"""") &&
+                body.contains("args.size != 4") &&
+                body.contains("maskJavaCommentsAndLiterals(withoutBlockEntityImport)"),
+            "RandomizableContainerBlockEntity.setLootTable migration must use executable call and import usage evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "RandomizableContainerBlockEntity.setLootTable migration must not rewrite comments or preserve imports from literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `armor foil buffer migration uses executable call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateArmorFoilBufferCalls")
+        assertTrue(start >= 0, "migrateArmorFoilBufferCalls is missing")
+        val end = source.indexOf("private fun migrateArmorTrimComponentRendering", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getArmorFoilBuffer prefilter" to """source.contains("ItemRenderer.getArmorFoilBuffer(")""",
+            "raw getArmorFoilBuffer rewrite" to """rewriteJavaCall(source, "getArmorFoilBuffer")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("ItemRenderer.getArmorFoilBuffer(")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "getArmorFoilBuffer")""") &&
+                body.contains("""receiver != "ItemRenderer"""") &&
+                body.contains("args.size != 4") &&
+                body.contains("args[3].trim()"),
+            "Armor foil buffer migration must use executable call evidence and preserve glint argument semantics"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Armor foil buffer migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `data result getOrThrow migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
