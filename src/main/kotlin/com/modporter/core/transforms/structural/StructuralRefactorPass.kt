@@ -25313,29 +25313,30 @@ $signatureIndent}"""
     }
 
     private fun migrateLegacyGameEventConstructors(source: String): String {
-        if (!source.contains("new GameEvent(") || !source.contains("DeferredRegister")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("new GameEvent(") || !executableCode.contains("DeferredRegister")) return source
         val gameEventRegisters = Regex("""\bDeferredRegister\s*<\s*GameEvent\s*>\s+([A-Za-z_$][\w$]*)\s*=""")
-            .findAll(source)
+            .findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
         if (gameEventRegisters.isEmpty()) return source
 
         val stringLiteral = Regex(""""(?:\\.|[^"\\])*"""")
         fun migrateSupplier(registerId: String, supplier: String): String {
-            return rewriteJavaNew(supplier, "GameEvent") { args ->
-                if (args.size != 2) return@rewriteJavaNew null
+            return rewriteExecutableJavaNew(supplier, "GameEvent") { args ->
+                if (args.size != 2) return@rewriteExecutableJavaNew null
                 val legacyId = args[0].trim()
-                if (!stringLiteral.matches(registerId) || legacyId != registerId) return@rewriteJavaNew null
+                if (!stringLiteral.matches(registerId) || legacyId != registerId) return@rewriteExecutableJavaNew null
                 "new GameEvent(${args[1].trim()})"
             }
         }
 
-        return rewriteJavaCall(source, "register") { receiver, args ->
-            if (args.size < 2) return@rewriteJavaCall null
+        return rewriteExecutableJavaCall(source, "register") { receiver, args ->
+            if (args.size < 2) return@rewriteExecutableJavaCall null
             val registerName = receiver.trim().substringAfterLast(".")
-            if (registerName !in gameEventRegisters) return@rewriteJavaCall null
+            if (registerName !in gameEventRegisters) return@rewriteExecutableJavaCall null
             val migratedSupplier = migrateSupplier(args[0].trim(), args[1])
-            if (migratedSupplier == args[1]) return@rewriteJavaCall null
+            if (migratedSupplier == args[1]) return@rewriteExecutableJavaCall null
             val migratedArgs = args.toMutableList()
             migratedArgs[1] = migratedSupplier
             "$receiver.register(${migratedArgs.joinToString(", ") { it.trim() }})"
@@ -38552,6 +38553,36 @@ $encodeLines
             if (tokenIndex < 0) break
             val openParen = tokenIndex + token.length - 1
             val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            val replacement = transform(args)
+            if (replacement == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
+            cursor = tokenIndex + replacement.length
+        }
+        return result
+    }
+
+    private fun rewriteExecutableJavaNew(
+        source: String,
+        className: String,
+        transform: (args: List<String>) -> String?
+    ): String {
+        var result = source
+        var cursor = 0
+        val token = "new $className("
+        while (true) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenIndex = executableCode.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + token.length - 1
+            val closeParen = findMatchingParen(executableCode, openParen)
             if (closeParen < 0) {
                 cursor = tokenIndex + token.length
                 continue

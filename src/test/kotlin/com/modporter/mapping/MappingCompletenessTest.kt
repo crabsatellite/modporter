@@ -2855,6 +2855,58 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy game event constructor migration uses executable call and constructor evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyGameEventConstructors")
+        assertTrue(start >= 0, "migrateLegacyGameEventConstructors is missing")
+        val end = source.indexOf("private fun migrateLegacyBannerPatternConstructors", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val helperStart = source.indexOf("private fun rewriteExecutableJavaNew")
+        assertTrue(helperStart >= 0, "rewriteExecutableJavaNew is missing")
+        val helperEnd = source.indexOf("private fun rewriteSuperConstructorCalls", helperStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val helperBody = source.substring(helperStart, helperEnd)
+        val offenders = listOf(
+            "raw GameEvent prefilter" to """source.contains("new GameEvent(")""",
+            "raw DeferredRegister prefilter" to """source.contains("DeferredRegister")""",
+            "raw register collection" to ".findAll(source)",
+            "raw supplier constructor rewrite" to """rewriteJavaNew(supplier, "GameEvent")""",
+            "raw register rewrite" to """rewriteJavaCall(source, "register")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("new GameEvent(")""") &&
+                body.contains("""executableCode.contains("DeferredRegister")""") &&
+                body.contains(".findAll(executableCode)") &&
+                body.contains("""rewriteExecutableJavaNew(supplier, "GameEvent")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "register")""") &&
+                body.contains("stringLiteral.matches(registerId)") &&
+                body.contains("legacyId != registerId"),
+            "Legacy GameEvent constructor migration must derive registers, register calls, and nested constructors from executable Java"
+        )
+        assertTrue(
+            helperBody.contains("val executableCode = maskJavaCommentsAndLiterals(result)") &&
+                helperBody.contains("executableCode.indexOf(token, cursor)") &&
+                helperBody.contains("findMatchingParen(executableCode, openParen)") &&
+                helperBody.contains("splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))"),
+            "Executable constructor rewriting must find constructors in masked Java while preserving original argument text"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy GameEvent constructor migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `deferred holder game event arguments use executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

@@ -22594,6 +22594,35 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy game event constructor migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val sourceFile = srcDir.resolve("GameEventDocs.java")
+        sourceFile.writeText("""
+            package com.example;
+
+            public class GameEventDocs {
+                public static final DeferredRegister<GameEvent> GAME_EVENTS = null;
+
+                // GAME_EVENTS.register("matching", () -> new GameEvent("matching", 4));
+                private static final String DOC = "GAME_EVENTS.register(\"matching\", () -> new GameEvent(\"matching\", 4));";
+
+                public String keep() {
+                    return DOC;
+                }
+            }
+        """.trimIndent())
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("new GameEvent(4)"), migrated)
+    }
+
+    @Test
     fun `game event calls pass deferred holders without resolving values`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
