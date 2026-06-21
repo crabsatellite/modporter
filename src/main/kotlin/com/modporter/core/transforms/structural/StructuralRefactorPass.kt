@@ -41820,16 +41820,19 @@ $writeLines
     }
 
     private fun migrateEventBusSubscriberStaticMethodsSource(source: String): String {
-        if (!source.contains("@EventBusSubscriber") || !source.contains("@SubscribeEvent")) return source
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        if (!Regex("""@\s*(?:Mod\.)?EventBusSubscriber\b""").containsMatchIn(executableSource) ||
+            !Regex("""@\s*SubscribeEvent\b""").containsMatchIn(executableSource)) return source
         var result = source
         var cursor = 0
         val subscriberAnnotation = Regex("""@(?:Mod\.)?EventBusSubscriber\b(?:\([^)]*\))?""")
         val classDeclaration = Regex("""\b(?:(?:public|protected|private|abstract|final|static)\s+)*(?:class|enum)\s+[A-Za-z_$][\w$]*\b""")
 
         while (true) {
-            val annotation = subscriberAnnotation.find(result, cursor) ?: break
-            val declaration = classDeclaration.find(result, annotation.range.last + 1) ?: break
-            val openBrace = result.indexOf('{', declaration.range.last)
+            val executableResult = maskJavaCommentsAndLiterals(result)
+            val annotation = subscriberAnnotation.find(executableResult, cursor) ?: break
+            val declaration = classDeclaration.find(executableResult, annotation.range.last + 1) ?: break
+            val openBrace = executableResult.indexOf('{', declaration.range.last)
             if (openBrace < 0) {
                 cursor = declaration.range.last + 1
                 continue
@@ -41855,12 +41858,15 @@ $writeLines
         val methodPattern = Regex(
             """(?m)^([ \t]*@SubscribeEvent(?:\([^)]*\))?[ \t]*(?:\r?\n[ \t]*@[A-Za-z0-9_.]+(?:\([^)]*\))?[ \t]*)*\r?\n)([ \t]*)((?:(?:public|protected|private|final|synchronized|static)\s+)*)(void\s+[A-Za-z_$][\w$]*\s*\()"""
         )
-        return methodPattern.replace(body) { match ->
+        return replaceExecutableRegex(body, methodPattern) { match ->
+            fun originalGroup(index: Int): String =
+                match.groups[index]?.range?.let { body.substring(it.first, it.last + 1) }.orEmpty()
+
             val modifiers = match.groupValues[3]
             if (Regex("""\bstatic\b""").containsMatchIn(modifiers)) {
-                match.value
+                body.substring(match.range.first, match.range.last + 1)
             } else {
-                "${match.groupValues[1]}${match.groupValues[2]}${modifiers}static ${match.groupValues[4]}"
+                "${originalGroup(1)}${originalGroup(2)}${originalGroup(3)}static ${originalGroup(4)}"
             }
         }
     }

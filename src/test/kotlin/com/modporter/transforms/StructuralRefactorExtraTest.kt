@@ -1237,6 +1237,49 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `event bus subscriber static migration ignores commented and text block handlers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ClientEvents.java").writeText("""
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.fml.event.lifecycle.FMLLoadCompleteEvent;
+
+            @EventBusSubscriber(modid = ExampleMod.MODID, value = Dist.CLIENT)
+            public class ClientEvents {
+                /*
+                @SubscribeEvent
+                public void commented(FMLLoadCompleteEvent event) {
+                }
+                */
+
+                private static final String DOC = ""${'"'}
+                    @SubscribeEvent
+                    public void documented(FMLLoadCompleteEvent event) {
+                    }
+                ""${'"'};
+
+                @SubscribeEvent
+                public void real(FMLLoadCompleteEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ClientEvents.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-eventbussubscriber-static-methods" })
+        assertTrue(migrated.contains("@SubscribeEvent\n    public static void real(FMLLoadCompleteEvent event)"), migrated)
+        assertTrue(migrated.contains("public void commented(FMLLoadCompleteEvent event)"), migrated)
+        assertTrue(migrated.contains("public void documented(FMLLoadCompleteEvent event)"), migrated)
+        assertFalse(migrated.contains("public static void commented"), migrated)
+        assertFalse(migrated.contains("public static void documented"), migrated)
+    }
+
+    @Test
     fun `migrates static bus mod subscribers to constructor listener registration`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val dataDir = srcDir.resolve("data")
