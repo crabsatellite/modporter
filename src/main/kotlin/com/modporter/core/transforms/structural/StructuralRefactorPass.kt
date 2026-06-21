@@ -30639,12 +30639,9 @@ ${indent}}""".trimStart('\n')
     }
 
     private fun isNullableLevelSummaryMethod(source: String, offset: Int): Boolean {
-        val prefix = source.substring(0, offset)
-        val methodPattern = Regex(
-            """(?ms)(?:^[ \t]*@[^\r\n]+\s*\r?\n[ \t]*)*(?:public|protected|private)?\s*(?:static\s+)?(?:@Nullable\s+)?LevelSummary\s+[A-Za-z_$][\w$]*\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\{"""
-        )
-        val method = methodPattern.findAll(prefix).lastOrNull() ?: return false
-        return method.value.contains("@Nullable")
+        val method = javaMethodRanges(source).firstOrNull { offset in it.range } ?: return false
+        return Regex("""\bLevelSummary\s+${Regex.escape(method.name)}\s*\(""").containsMatchIn(method.header) &&
+            Regex("""(?<![\w$])@Nullable(?![\w$])""").containsMatchIn(method.header)
     }
 
     private fun migrateLegacyBindingCurseChecks(source: String): String {

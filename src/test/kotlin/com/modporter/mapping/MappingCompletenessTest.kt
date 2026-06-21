@@ -846,6 +846,37 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `level summary nullable migration uses enclosing method structure`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun isNullableLevelSummaryMethod")
+        assertTrue(start >= 0, "isNullableLevelSummaryMethod is missing")
+        val end = source.indexOf("private fun migrateLegacyBindingCurseChecks", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "file-prefix method scan" to "source.substring(0, offset)",
+            "last previous method fallback" to "lastOrNull()"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("javaMethodRanges(source).firstOrNull { offset in it.range }") &&
+                body.contains("LevelSummary") &&
+                body.contains("@Nullable"),
+            "LevelSummary nullable migration must inspect the enclosing Java method, not a previous method in the file"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "LevelSummary nullable migration must not use file-prefix or previous-method fallback: $offenders"
+        )
+    }
+
+    @Test
     fun `client only build detection ignores comments and strings`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

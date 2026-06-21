@@ -25955,6 +25955,42 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `level summary nullable migration does not use previous method fallback`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LevelSummarySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.storage.LevelStorageSource;
+            import net.minecraft.world.level.storage.LevelSummary;
+
+            import javax.annotation.Nullable;
+
+            public class LevelSummarySurface {
+                @Nullable
+                public static LevelSummary previous(LevelStorageSource.LevelStorageAccess source) {
+                    return null;
+                }
+
+                public static Object current(LevelStorageSource.LevelStorageAccess source) {
+                    LevelSummary summary = null;
+                    summary = source.getSummary();
+                    return summary;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LevelSummarySurface.java").readText()
+        val currentMethod = migrated.substringAfter("public static Object current")
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("summary = source.getSummary(source.getDataTag());"), migrated)
+        assertFalse(migrated.contains("catch (IOException"), migrated)
+        assertFalse(currentMethod.contains("return null;"), currentMethod)
+    }
+
+    @Test
     fun `wraps void LevelStorageAccess data tag reads in IOException guard`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
