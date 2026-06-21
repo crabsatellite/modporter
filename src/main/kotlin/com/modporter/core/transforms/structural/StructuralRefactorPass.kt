@@ -16045,7 +16045,7 @@ ${indent}}
         result = migrateLossyCompoundAssignments(result)
         result = migrateLegacyEntityTypeAabbCalls(result)
         result = migrateLegacyBlockValidSpawnOverrides(result)
-        result = migrateLegacyBlockAndEntityCapabilityAccessors(result)
+        result = migrateLegacyBlockAndEntityCapabilityAccessors(result, javaInheritanceIndex)
         result = migrateLegacyITeleporterDimensionTransitions(result)
         result = migrateLegacyCanChangeDimensionsCallSites(result)
         result = migrateLegacyPortalWaitTimeCalls(result)
@@ -24693,12 +24693,16 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         return result
     }
 
-    private fun migrateLegacyBlockAndEntityCapabilityAccessors(source: String): String {
-        if (!source.contains("getCapability(Capabilities.ItemHandler.")) return source
+    private fun migrateLegacyBlockAndEntityCapabilityAccessors(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("getCapability(Capabilities.ItemHandler.")) return source
 
         var result = source
-        val blockEntityAccesses = collectBlockEntityAccesses(result)
-        val blockEntityVariables = collectBlockEntityVariables(result)
+        val blockEntityAccesses = collectBlockEntityAccesses(executableCode)
+        val blockEntityVariables = collectBlockEntityVariables(executableCode)
         var needsServerLevel = false
         var needsItemHandler = false
         var handlerCounter = 0
@@ -24706,18 +24710,19 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         val blockIfPresentPattern = Regex(
             """(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.getCapability\(\s*Capabilities\.ItemHandler\.BLOCK\s*,\s*([A-Za-z_$][\w$]*)\s*\)\.ifPresent\(([^;\r\n]+)\);\s*$"""
         )
-        result = blockIfPresentPattern.replace(result) { match ->
+        val blockEdits = blockIfPresentPattern.findAll(executableCode).mapNotNull { match ->
             val receiver = match.groupValues[2]
-            val access = blockEntityAccesses[receiver] ?: return@replace match.value
+            val access = blockEntityAccesses[receiver] ?: return@mapNotNull null
             val side = match.groupValues[3]
-            val consumer = match.groupValues[4].trim()
+            val consumerRange = match.groups[4]?.range ?: return@mapNotNull null
+            val consumer = source.substring(consumerRange.first, consumerRange.last + 1).trim()
             val indent = match.groupValues[1]
             val handlerVar = "modporterItemHandler${handlerCounter++}"
             needsServerLevel = needsServerLevel || !access.levelIsServerLevel
             needsItemHandler = true
             val statement = consumerToItemHandlerStatement(consumer, handlerVar)
                 ?: "$consumer.accept($handlerVar);"
-            if (access.levelIsServerLevel) {
+            val replacement = if (access.levelIsServerLevel) {
                 """${indent}IItemHandler $handlerVar = net.neoforged.neoforge.capabilities.BlockCapabilityCache.create(Capabilities.ItemHandler.BLOCK, ${access.levelExpression}, ${access.positionExpression}, $side).getCapability();
 ${indent}if ($handlerVar != null) $statement"""
             } else {
@@ -24726,28 +24731,35 @@ ${indent}    IItemHandler $handlerVar = net.neoforged.neoforge.capabilities.Bloc
 ${indent}    if ($handlerVar != null) $statement
 ${indent}}"""
             }
-        }
+            match.range to replacement
+        }.toList()
+        result = applyStringEdits(result, blockEdits)
 
         val entityIfPresentPattern = Regex(
             """(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.getCapability\(\s*Capabilities\.ItemHandler\.BLOCK\s*,\s*([A-Za-z_$][\w$]*)\s*\)\.ifPresent\(([^;\r\n]+)\);\s*$"""
         )
-        result = entityIfPresentPattern.replace(result) { match ->
+        val executableAfterBlockEdits = maskJavaCommentsAndLiterals(result)
+        val entityEdits = entityIfPresentPattern.findAll(executableAfterBlockEdits).mapNotNull { match ->
             val receiver = match.groupValues[2]
-            if (receiver in blockEntityVariables) return@replace match.value
+            if (receiver in blockEntityVariables ||
+                !isEntityCapabilityReceiver(executableAfterBlockEdits, match.range.first, receiver, javaInheritanceIndex)) {
+                return@mapNotNull null
+            }
             val side = match.groupValues[3]
-            val consumer = match.groupValues[4].trim()
+            val consumerRange = match.groups[4]?.range ?: return@mapNotNull null
+            val consumer = result.substring(consumerRange.first, consumerRange.last + 1).trim()
             val indent = match.groupValues[1]
             val handlerVar = "modporterItemHandler${handlerCounter++}"
             needsItemHandler = true
             val statement = consumerToItemHandlerStatement(consumer, handlerVar)
                 ?: "$consumer.accept($handlerVar);"
-            """${indent}IItemHandler $handlerVar = $receiver.getCapability(Capabilities.ItemHandler.ENTITY_AUTOMATION, $side);
+            val replacement = """${indent}IItemHandler $handlerVar = $receiver.getCapability(Capabilities.ItemHandler.ENTITY_AUTOMATION, $side);
 ${indent}if ($handlerVar != null) $statement"""
-        }
+            match.range to replacement
+        }.toList()
+        result = applyStringEdits(result, entityEdits)
 
-        result = Regex("""Capabilities\.ItemHandler\.BLOCK\)""")
-            .replace(result, "Capabilities.ItemHandler.ENTITY)")
-
+        if (blockEdits.isEmpty() && entityEdits.isEmpty()) return source
         if (needsServerLevel) result = addImportIfMissing(result, "net.minecraft.server.level.ServerLevel")
         if (needsItemHandler) result = addImportIfMissing(result, "net.neoforged.neoforge.items.IItemHandler")
         return result
@@ -24785,6 +24797,22 @@ ${indent}if ($handlerVar != null) $statement"""
             .findAll(source)
             .map { it.groupValues[1] }
             .toSet()
+
+    private fun isEntityCapabilityReceiver(
+        executableCode: String,
+        offset: Int,
+        receiver: String,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): Boolean {
+        val entityBaseTypes = javaEntityBaseTypes()
+        if (receiver == "this") {
+            val declaration = enclosingJavaClassDeclaration(executableCode, offset) ?: return false
+            return javaClassExtendsAny(declaration, entityBaseTypes, javaInheritanceIndex)
+        }
+        val scope = enclosingMethodText(executableCode, offset) ?: executableCode
+        val receiverType = javaLocalVariableTypes(scope)[receiver] ?: return false
+        return receiverType in entityBaseTypes || javaInheritanceIndex.inherits(receiverType, entityBaseTypes)
+    }
 
     private fun consumerToItemHandlerStatement(consumer: String, handlerVar: String): String? {
         Regex("""^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)::([A-Za-z_$][\w$]*)$""")

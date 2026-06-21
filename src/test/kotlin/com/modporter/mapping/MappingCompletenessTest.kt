@@ -2862,6 +2862,50 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy block and entity capability accessor migration uses executable typed receivers`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyBlockAndEntityCapabilityAccessors")
+        assertTrue(start >= 0, "migrateLegacyBlockAndEntityCapabilityAccessors is missing")
+        val end = source.indexOf("private fun consumerToItemHandlerStatement", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw capability prefilter" to """source.contains("getCapability(Capabilities.ItemHandler.")""",
+            "raw block ifPresent replacement" to "blockIfPresentPattern.replace(result)",
+            "raw entity ifPresent replacement" to "entityIfPresentPattern.replace(result)",
+            "untyped entity fallback" to "if (receiver in blockEntityVariables) return@replace match.value",
+            "full-file BLOCK-to-ENTITY replacement" to """Capabilities\.ItemHandler\.BLOCK\)""",
+            "raw block entity access collection" to "collectBlockEntityAccesses(result)",
+            "raw block entity variable collection" to "collectBlockEntityVariables(result)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("collectBlockEntityAccesses(executableCode)") &&
+                body.contains("collectBlockEntityVariables(executableCode)") &&
+                body.contains("blockIfPresentPattern.findAll(executableCode)") &&
+                body.contains("val executableAfterBlockEdits = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("entityIfPresentPattern.findAll(executableAfterBlockEdits)") &&
+                body.contains("isEntityCapabilityReceiver(executableAfterBlockEdits") &&
+                body.contains("applyStringEdits(result, blockEdits)") &&
+                body.contains("applyStringEdits(result, entityEdits)") &&
+                body.contains("javaLocalVariableTypes(scope)[receiver]") &&
+                body.contains("javaInheritanceIndex.inherits(receiverType, entityBaseTypes)"),
+            "Legacy block/entity capability migration must use executable Java and typed receiver evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy block/entity capability migration must not rewrite raw source, comments, strings, or untyped receivers: $offenders"
+        )
+    }
+
+    @Test
     fun `production mod event bus listener migrations do not infer owners from java file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

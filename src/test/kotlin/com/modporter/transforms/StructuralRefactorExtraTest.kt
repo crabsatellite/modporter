@@ -27562,6 +27562,67 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `block and entity capability accessor migration uses executable typed receiver evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CapabilityDocsSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+
+            public class CapabilityDocsSurface {
+                private static final String DOC = "entity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());";
+                private static final String NO_SIDE_DOC = "inventoryStack.getCapability(Capabilities.ItemHandler.BLOCK) != null";
+
+                /*
+                 BlockEntity fake = level.getBlockEntity(pos);
+                 fake.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
+                 mystery.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
+                 */
+
+                public void caps(Level level, BlockPos pos, Direction side, Entity entity, Object unknown) {
+                    BlockEntity blockEntity = level.getBlockEntity(pos);
+                    blockEntity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
+                    entity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
+                    unknown.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("CapabilityDocsSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(
+            migrated.contains("BlockCapabilityCache.create(Capabilities.ItemHandler.BLOCK, modporterServerLevel, pos, side)"),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("IItemHandler modporterItemHandler1 = entity.getCapability(Capabilities.ItemHandler.ENTITY_AUTOMATION, side);"),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("unknown.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());"),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("private static final String DOC = \"entity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());\""),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("private static final String NO_SIDE_DOC = \"inventoryStack.getCapability(Capabilities.ItemHandler.BLOCK) != null\""),
+            migrated
+        )
+        assertTrue(migrated.contains("fake.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent"), migrated)
+        assertTrue(migrated.contains("mystery.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent"), migrated)
+    }
+
+    @Test
     fun `migrates legacy Gui HeartType sheet coordinates without changing texture source`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
