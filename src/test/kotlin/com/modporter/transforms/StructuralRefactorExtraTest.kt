@@ -23898,6 +23898,58 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `cumulus panorama migration does not use metadata namespace fallback`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        tempDir.resolve("gradle.properties").writeText("mod_id=metadata_mod\n")
+        val metadataPanoramaDir = tempDir.resolve("src/main/resources/assets/metadata_mod/textures/gui/title/panorama")
+        metadataPanoramaDir.createDirectories()
+        metadataPanoramaDir.resolve("panorama_0.png").writeText("png")
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMenus.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.cumulus.Cumulus;
+            import com.aetherteam.cumulus.api.Menu;
+            import com.aetherteam.cumulus.api.Menus;
+            import java.util.function.BooleanSupplier;
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.sounds.Musics;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ExampleMenus {
+                public static final DeferredRegister<Menu> MENUS = DeferredRegister.create(Cumulus.MENU_REGISTRY_KEY, ExampleMod.MODID);
+
+                private static final Component CUSTOM_NAME = Component.literal("Custom");
+                private static final ResourceLocation CUSTOM_REGULAR_BACKGROUND = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "textures/gui/title/options_background.png");
+                private static final Menu.Background CUSTOM_BACKGROUND = new Menu.Background()
+                        .regularBackground(CUSTOM_REGULAR_BACKGROUND);
+                private static final BooleanSupplier CUSTOM_CONDITION = () -> true;
+
+                public static final DeferredHolder<Menu, Menu> CUSTOM = MENUS.register("custom", () -> new Menu(Menus.MINECRAFT_ICON, CUSTOM_NAME, new TitleScreen(), CUSTOM_CONDITION, new Menu.Properties().music(Musics.MENU).background(CUSTOM_BACKGROUND)));
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val menus = srcDir.resolve("ExampleMenus.java").readText()
+
+        assertTrue(result.changes.none { it.ruleId == "struct-cumulus-menu-api-121" }, result.changes.joinToString("\n"))
+        assertTrue(menus.contains("DeferredRegister.create(Cumulus.MENU_REGISTRY_KEY, ExampleMod.MODID)"), menus)
+        assertFalse(menus.contains("new CubeMap("), menus)
+        assertFalse(menus.contains("@CumulusEntrypoint"), menus)
+    }
+
+    @Test
     fun `removes stale Cumulus prepare hooks from already migrated menu initializers`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

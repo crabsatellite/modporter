@@ -900,6 +900,35 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `cumulus panorama migration uses resolved mod id expression namespace`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun cumulusPanoramaExpression")
+        assertTrue(start >= 0, "cumulusPanoramaExpression is missing")
+        val end = source.indexOf("private fun resolveLiteralModIdExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "project metadata mod id fallback" to "projectMetadataModId(projectDir)",
+            "single asset namespace fallback" to "singleAssetNamespace(projectDir)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("resolveCumulusModIdNamespace(projectDir, source, modIdExpression)"),
+            "Cumulus panorama migration must validate resources against the source mod id expression namespace"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Cumulus panorama migration must not borrow metadata or single-asset namespaces: $offenders"
+        )
+    }
+
+    @Test
     fun `client only build detection ignores comments and strings`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

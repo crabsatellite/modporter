@@ -17722,7 +17722,7 @@ ${indent}}
             registration.args.any { it.contains(".background(") }
         } || source.contains("Menu.Background")
         val panoramaExpression = if (hasLegacyBackground) {
-            cumulusPanoramaExpression(projectDir, modIdExpression) ?: return CumulusMenuDefinitionMigration(source, null)
+            cumulusPanoramaExpression(projectDir, source, modIdExpression) ?: return CumulusMenuDefinitionMigration(source, null)
         } else {
             null
         }
@@ -17835,10 +17835,8 @@ ${indent}}
         return migrated
     }
 
-    private fun cumulusPanoramaExpression(projectDir: Path, modIdExpression: String): String? {
-        val namespace = resolveLiteralModIdExpression(modIdExpression)
-            ?: projectMetadataModId(projectDir)
-            ?: singleAssetNamespace(projectDir)
+    private fun cumulusPanoramaExpression(projectDir: Path, source: String, modIdExpression: String): String? {
+        val namespace = resolveCumulusModIdNamespace(projectDir, source, modIdExpression)
             ?: return null
         val relative = Path.of("assets", namespace, "textures", "gui", "title", "panorama", "panorama_0.png")
         val hasPanorama = listOf(
@@ -17847,6 +17845,75 @@ ${indent}}
         ).any { it.resolve(relative).exists() }
         if (!hasPanorama) return null
         return """new CubeMap(ResourceLocation.fromNamespaceAndPath($modIdExpression, "textures/gui/title/panorama/panorama"))"""
+    }
+
+    private data class JavaSourceForType(val source: String, val simpleName: String)
+
+    private fun resolveCumulusModIdNamespace(projectDir: Path, source: String, expression: String): String? {
+        val trimmed = expression.trim()
+        resolveLiteralModIdExpression(trimmed)?.let { return it }
+
+        val identifier = """[A-Za-z_$][\w$]*"""
+        if (!Regex("""$identifier(?:\.$identifier)*""").matches(trimmed)) return null
+        val constName = trimmed.substringAfterLast('.')
+        val ownerRef = trimmed.substringBeforeLast('.', missingDelimiterValue = "")
+        if (ownerRef.isBlank()) {
+            val ownerName = javaTopLevelTypeName(source) ?: return null
+            return staticFinalStringConstantInSource(source, ownerName, constName)
+        }
+
+        val ownerSource = resolveJavaSourceForTypeReference(projectDir, source, ownerRef) ?: return null
+        return staticFinalStringConstantInSource(ownerSource.source, ownerSource.simpleName, constName)
+    }
+
+    private fun staticFinalStringConstantInSource(source: String, ownerName: String, constName: String): String? {
+        val code = maskJavaComments(source)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val typeBlocks = javaTypeBlocks(source, executableCode)
+        val owner = typeBlocks.singleOrNull { it.name == ownerName } ?: return null
+        return javaStaticFinalStringConstant(code, executableCode, owner, constName, typeBlocks)
+    }
+
+    private fun resolveJavaSourceForTypeReference(
+        projectDir: Path,
+        source: String,
+        ownerRef: String
+    ): JavaSourceForType? {
+        val ownerSimpleName = ownerRef.substringAfterLast('.')
+        val currentPackage = packageNameOf(source)
+        val imports = Regex("""(?m)^\s*import\s+(?!static\b)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toList()
+        val ownerFqn = if (ownerRef.contains('.')) {
+            ownerRef
+        } else {
+            val imported = imports.filter { it.substringAfterLast('.') == ownerSimpleName }.distinct()
+            when (imported.size) {
+                0 -> if (currentPackage.isBlank()) ownerRef else "$currentPackage.$ownerRef"
+                1 -> imported.single()
+                else -> return null
+            }
+        }
+        return javaSourceForFqn(projectDir, ownerFqn)
+    }
+
+    private fun javaSourceForFqn(projectDir: Path, fqn: String): JavaSourceForType? {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return null
+        val matches = mutableListOf<JavaSourceForType>()
+        Files.walk(srcDir).use { files ->
+            files.filter { it.extension == "java" }.forEach { file ->
+                val text = file.readText()
+                val simpleName = javaTopLevelTypeName(text) ?: return@forEach
+                val packageName = packageNameOf(text)
+                val sourceFqn = if (packageName.isBlank()) simpleName else "$packageName.$simpleName"
+                if (sourceFqn == fqn) {
+                    matches += JavaSourceForType(text, simpleName)
+                }
+            }
+        }
+        return matches.singleOrNull()
     }
 
     private fun resolveLiteralModIdExpression(expression: String): String? {
@@ -17875,21 +17942,6 @@ ${indent}}
                     ?.get(1)
             }
             .firstOrNull()
-    }
-
-    private fun singleAssetNamespace(projectDir: Path): String? {
-        val namespaces = linkedSetOf<String>()
-        for (root in listOf(
-            projectDir.resolve("src/main/resources/assets"),
-            projectDir.resolve("src/generated/resources/assets")
-        )) {
-            if (!root.exists()) continue
-            Files.list(root).use { children ->
-                children.filter { it.isDirectory() }
-                    .forEach { namespaces += it.fileName.toString() }
-            }
-        }
-        return namespaces.singleOrNull()
     }
 
     private fun removeUnusedCumulusBooleanSupplierFields(source: String, booleanSuppliers: Set<String>): String {
