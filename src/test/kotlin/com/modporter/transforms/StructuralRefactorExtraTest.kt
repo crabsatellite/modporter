@@ -5505,6 +5505,64 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy state switching button migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/client")
+        srcDir.createDirectories()
+        srcDir.resolve("StateSwitchingDocs.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.client.gui.components.StateSwitchingButton;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class StateSwitchingDocs {
+                // new StateSwitchingButton(0, 0, 20, 20, false);
+                private static final String DOC_NEW = "new StateSwitchingButton(0, 0, 20, 20, false);";
+                // this.button.initTextureValues(0, 72, 28, 18, texture);
+                private static final String DOC_INIT = "this.button.initTextureValues(0, 72, 28, 18, texture);";
+                private StateSwitchingButton button;
+
+                public StateSwitchingButton create(ResourceLocation texture) {
+                    StateSwitchingButton local = new StateSwitchingButton(0, 0, 20, 20, false);
+                    this.button.initTextureValues(0, 72, 28, 18, texture);
+                    return local;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("DocumentedToggle.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.client.gui.components.StateSwitchingButton;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class DocumentedToggle extends StateSwitchingButton {
+                // this.initTextureValues(1, 2, 3, 4, texture);
+                private static final String DOC = "this.initTextureValues(1, 2, 3, 4, texture);";
+
+                public DocumentedToggle(ResourceLocation texture) {
+                    super(0, 0, 26, 16, false);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val docs = srcDir.resolve("StateSwitchingDocs.java").readText()
+        val documentedToggle = srcDir.resolve("DocumentedToggle.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-state-switching-button-textures" })
+        assertTrue(docs.contains("StateSwitchingButton local = new LegacyStateSwitchingButton(0, 0, 20, 20, false);"), docs)
+        assertTrue(docs.contains("this.button = LegacyStateSwitchingButton.replace(this.button, 0, 72, 28, 18, texture);"), docs)
+        assertTrue(docs.contains("// new StateSwitchingButton(0, 0, 20, 20, false);"), docs)
+        assertTrue(docs.contains("""private static final String DOC_NEW = "new StateSwitchingButton(0, 0, 20, 20, false);";"""), docs)
+        assertTrue(docs.contains("// this.button.initTextureValues(0, 72, 28, 18, texture);"), docs)
+        assertTrue(docs.contains("""private static final String DOC_INIT = "this.button.initTextureValues(0, 72, 28, 18, texture);";"""), docs)
+        assertTrue(documentedToggle.contains("public class DocumentedToggle extends StateSwitchingButton"), documentedToggle)
+        assertFalse(documentedToggle.contains("extends LegacyStateSwitchingButton"), documentedToggle)
+        assertTrue(documentedToggle.contains("// this.initTextureValues(1, 2, 3, 4, texture);"), documentedToggle)
+        assertTrue(documentedToggle.contains("""private static final String DOC = "this.initTextureValues(1, 2, 3, 4, texture);";"""), documentedToggle)
+    }
+
+    @Test
     fun `curios client RenderButton constructor and mod id migrate by dependency API`() {
         val srcDir = tempDir.resolve("src/main/java/com/example/client")
         srcDir.createDirectories()
@@ -16105,6 +16163,46 @@ class StructuralRefactorExtraTest {
         assertTrue(preview.contains("(float) Math.atan((double) (((float) (y + 25) - mouseY) / 40.0F))"), preview)
         assertTrue(preview.contains("InventoryScreen.renderEntityInInventory(guiGraphics, 10.0F, 20.0F, 30.0F, offset, pose, null, entity);"), preview)
         assertFalse(preview.contains("renderEntityInInventoryFollowsMouse(guiGraphics, x + 33"), preview)
+    }
+
+    @Test
+    fun `inventory screen entity preview migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PreviewScreenDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.screens.inventory.InventoryScreen;
+            import net.minecraft.world.entity.LivingEntity;
+            import org.joml.Quaternionf;
+
+            public class PreviewScreenDocs {
+                // InventoryScreen.renderEntityInInventory(guiGraphics, posX, posY, scale, xQuaternion, zQuaternion, livingEntity);
+                private static final String DOC_DIRECT = "InventoryScreen.renderEntityInInventory(guiGraphics, posX, posY, scale, xQuaternion, zQuaternion, livingEntity);";
+                // InventoryScreen.renderEntityInInventoryFollowsMouse(guiGraphics, x, y, 30, angleX, angleY, livingEntity);
+                private static final String DOC_MOUSE = "InventoryScreen.renderEntityInInventoryFollowsMouse(guiGraphics, x, y, 30, angleX, angleY, livingEntity);";
+
+                void direct(GuiGraphics guiGraphics, int posX, int posY, int scale, Quaternionf xQuaternion, Quaternionf zQuaternion, LivingEntity livingEntity) {
+                    InventoryScreen.renderEntityInInventory(guiGraphics, posX, posY, scale, xQuaternion, zQuaternion, livingEntity);
+                }
+
+                void followsAngle(GuiGraphics guiGraphics, int x, int y, float angleX, float angleY, LivingEntity livingEntity) {
+                    InventoryScreen.renderEntityInInventoryFollowsMouse(guiGraphics, x, y, 30, angleX, angleY, livingEntity);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val preview = srcDir.resolve("PreviewScreenDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(preview.contains("new org.joml.Vector3f(0.0F, livingEntity.getBbHeight() / 2.0F, 0.0F), xQuaternion, zQuaternion, livingEntity)"), preview)
+        assertTrue(preview.contains("InventoryScreen.renderEntityInInventoryFollowsAngle("), preview)
+        assertTrue(preview.contains("// InventoryScreen.renderEntityInInventory(guiGraphics, posX, posY, scale, xQuaternion, zQuaternion, livingEntity);"), preview)
+        assertTrue(preview.contains("""private static final String DOC_DIRECT = "InventoryScreen.renderEntityInInventory(guiGraphics, posX, posY, scale, xQuaternion, zQuaternion, livingEntity);";"""), preview)
+        assertTrue(preview.contains("// InventoryScreen.renderEntityInInventoryFollowsMouse(guiGraphics, x, y, 30, angleX, angleY, livingEntity);"), preview)
+        assertTrue(preview.contains("""private static final String DOC_MOUSE = "InventoryScreen.renderEntityInInventoryFollowsMouse(guiGraphics, x, y, 30, angleX, angleY, livingEntity);";"""), preview)
     }
 
     @Test

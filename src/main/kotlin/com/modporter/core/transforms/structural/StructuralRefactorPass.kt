@@ -13141,16 +13141,17 @@ public class LegacyImageButton extends ImageButton {
     }
 
     private fun containsLegacyStateSwitchingButtonInitCall(source: String): Boolean {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         var cursor = 0
         while (true) {
-            val tokenIndex = source.indexOf("initTextureValues(", cursor)
+            val tokenIndex = executableCode.indexOf("initTextureValues(", cursor)
             if (tokenIndex < 0) return false
-            if (tokenIndex > 0 && (source[tokenIndex - 1].isLetterOrDigit() || source[tokenIndex - 1] == '_' || source[tokenIndex - 1] == '$')) {
+            if (tokenIndex > 0 && (executableCode[tokenIndex - 1].isLetterOrDigit() || executableCode[tokenIndex - 1] == '_' || executableCode[tokenIndex - 1] == '$')) {
                 cursor = tokenIndex + "initTextureValues(".length
                 continue
             }
             val openParen = tokenIndex + "initTextureValues".length
-            val closeParen = findMatchingParen(source, openParen)
+            val closeParen = findMatchingParen(executableCode, openParen)
             if (closeParen < 0) {
                 cursor = tokenIndex + "initTextureValues(".length
                 continue
@@ -13162,32 +13163,34 @@ public class LegacyImageButton extends ImageButton {
     }
 
     private fun rewriteLegacyStateSwitchingButtonSuperclasses(source: String): String {
-        if (!Regex("""extends\s+StateSwitchingButton\b""").containsMatchIn(source)) return source
+        if (!Regex("""extends\s+StateSwitchingButton\b""").containsMatchIn(maskJavaCommentsAndLiterals(source))) return source
         return if (containsLegacyStateSwitchingButtonInitCall(source)) {
-            source.replace(Regex("""extends\s+StateSwitchingButton\b"""), "extends LegacyStateSwitchingButton")
+            replaceExecutableRegex(source, Regex("""extends\s+StateSwitchingButton\b""")) { "extends LegacyStateSwitchingButton" }
         } else {
             source
         }
     }
 
-    private fun rewriteLegacyStateSwitchingButtonInitCalls(source: String): String =
-        rewriteJavaCall(source, "initTextureValues") { receiver, args ->
-            if (!isLegacyStateSwitchingButtonInitArgs(args)) return@rewriteJavaCall null
-            if (receiver == "this" || receiver == "super" || source.contains("extends LegacyStateSwitchingButton")) {
-                return@rewriteJavaCall null
+    private fun rewriteLegacyStateSwitchingButtonInitCalls(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        return rewriteExecutableJavaCall(source, "initTextureValues") { receiver, args ->
+            if (!isLegacyStateSwitchingButtonInitArgs(args)) return@rewriteExecutableJavaCall null
+            if (receiver == "this" || receiver == "super" || executableCode.contains("extends LegacyStateSwitchingButton")) {
+                return@rewriteExecutableJavaCall null
             }
-            val target = legacyStateSwitchingButtonAssignmentTarget(receiver) ?: return@rewriteJavaCall null
+            val target = legacyStateSwitchingButtonAssignmentTarget(receiver) ?: return@rewriteExecutableJavaCall null
             "$target = LegacyStateSwitchingButton.replace($receiver, ${args.joinToString(", ") { it.trim() }})"
         }
+    }
 
     private fun rewriteLegacyStateSwitchingButtonObjectCreations(source: String): String {
-        var result = source
+        val executableCode = maskJavaCommentsAndLiterals(source)
         var cursor = 0
-        val replacements = mutableListOf<Pair<String, String>>()
+        val replacements = mutableListOf<Triple<Int, Int, String>>()
         while (true) {
-            val match = Regex("""new\s+StateSwitchingButton\s*\(""").find(source, cursor) ?: break
-            val openParen = source.indexOf('(', match.range.last - 1)
-            val closeParen = if (openParen >= 0) findMatchingParen(source, openParen) else -1
+            val match = Regex("""new\s+StateSwitchingButton\s*\(""").find(executableCode, cursor) ?: break
+            val openParen = executableCode.indexOf('(', match.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(executableCode, openParen) else -1
             if (closeParen < 0) {
                 cursor = match.range.last + 1
                 continue
@@ -13195,12 +13198,14 @@ public class LegacyImageButton extends ImageButton {
             val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
             if (args.size == 5) {
                 val call = source.substring(match.range.first, closeParen + 1)
-                replacements += call to call.replaceFirst(Regex("""new\s+StateSwitchingButton"""), "new LegacyStateSwitchingButton")
+                val replacement = call.replaceFirst(Regex("""new\s+StateSwitchingButton"""), "new LegacyStateSwitchingButton")
+                replacements += Triple(match.range.first, closeParen + 1, replacement)
             }
             cursor = closeParen + 1
         }
-        replacements.forEach { (before, after) ->
-            result = result.replace(before, after)
+        var result = source
+        replacements.asReversed().forEach { (start, end, replacement) ->
+            result = result.substring(0, start) + replacement + result.substring(end)
         }
         return result
     }
@@ -17303,10 +17308,11 @@ ${indent}}
     }
 
     private fun migrateInventoryScreenEntityPreviewCalls(source: String): String {
-        if (!source.contains("InventoryScreen.renderEntityInInventory")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("InventoryScreen.renderEntityInInventory")) return source
 
-        var result = rewriteJavaCall(source, "renderEntityInInventoryFollowsMouse") { receiver, args ->
-            if (receiver != "InventoryScreen" || args.size != 7) return@rewriteJavaCall null
+        var result = rewriteExecutableJavaCall(source, "renderEntityInInventoryFollowsMouse") { receiver, args ->
+            if (receiver != "InventoryScreen" || args.size != 7) return@rewriteExecutableJavaCall null
             val guiGraphics = args[0].trim()
             val x = args[1].trim()
             val y = args[2].trim()
@@ -17326,9 +17332,9 @@ ${indent}}
                 "(float) Math.atan((double) (($angleYInput) / 40.0F)), " +
                 "$entity)"
         }
-        result = rewriteJavaCall(result, "renderEntityInInventory") { receiver, args ->
-            if (receiver != "InventoryScreen" || args.size != 7) return@rewriteJavaCall null
-            if (args[4].contains("Vector3f")) return@rewriteJavaCall null
+        result = rewriteExecutableJavaCall(result, "renderEntityInInventory") { receiver, args ->
+            if (receiver != "InventoryScreen" || args.size != 7) return@rewriteExecutableJavaCall null
+            if (args[4].contains("Vector3f")) return@rewriteExecutableJavaCall null
             val entity = args[6].trim()
             "InventoryScreen.renderEntityInInventory(" +
                 "${args[0].trim()}, " +

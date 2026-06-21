@@ -3095,6 +3095,85 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `state switching button texture migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun containsLegacyStateSwitchingButtonInitCall")
+        assertTrue(start >= 0, "containsLegacyStateSwitchingButtonInitCall is missing")
+        val end = source.indexOf("private fun legacyStateSwitchingButtonAssignmentTarget", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw initTextureValues detector" to """source.indexOf("initTextureValues(")""",
+            "raw superclass match" to """containsMatchIn(source)""",
+            "raw superclass replacement" to "source.replace(Regex(",
+            "raw initTextureValues rewrite" to """rewriteJavaCall(source, "initTextureValues")""",
+            "raw LegacyStateSwitchingButton skip check" to """source.contains("extends LegacyStateSwitchingButton")""",
+            "raw object creation scan" to """find(source, cursor)""",
+            "global object creation replace" to "result.replace(before, after)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.indexOf("initTextureValues(", cursor)""") &&
+                body.contains("findMatchingParen(executableCode, openParen)") &&
+                body.contains("""containsMatchIn(maskJavaCommentsAndLiterals(source))""") &&
+                body.contains("replaceExecutableRegex(source, Regex(") &&
+                body.contains("""rewriteExecutableJavaCall(source, "initTextureValues")""") &&
+                body.contains("""executableCode.contains("extends LegacyStateSwitchingButton")""") &&
+                body.contains("new\\s+StateSwitchingButton") &&
+                body.contains(".find(executableCode, cursor)") &&
+                body.contains("replacements.asReversed().forEach"),
+            "StateSwitchingButton texture migration must use executable source for detection, rewriting, and object creation replacement"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "StateSwitchingButton texture migration must not infer or rewrite from comments/strings: $offenders"
+        )
+    }
+
+    @Test
+    fun `inventory screen entity preview migration uses executable call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateInventoryScreenEntityPreviewCalls")
+        assertTrue(start >= 0, "migrateInventoryScreenEntityPreviewCalls is missing")
+        val end = source.indexOf("private fun migrateLegacyTesselatorSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw InventoryScreen prefilter" to """source.contains("InventoryScreen.renderEntityInInventory")""",
+            "raw follows mouse rewrite" to """rewriteJavaCall(source, "renderEntityInInventoryFollowsMouse")""",
+            "raw direct preview rewrite" to """rewriteJavaCall(result, "renderEntityInInventory")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("InventoryScreen.renderEntityInInventory")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "renderEntityInInventoryFollowsMouse")""") &&
+                body.contains("""rewriteExecutableJavaCall(result, "renderEntityInInventory")""") &&
+                body.contains("""receiver != "InventoryScreen"""") &&
+                body.contains("args.size != 7") &&
+                body.contains("new org.joml.Vector3f"),
+            "InventoryScreen entity preview migration must use executable call evidence and preserve preview argument semantics"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "InventoryScreen entity preview migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `data result getOrThrow migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
