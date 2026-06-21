@@ -10056,6 +10056,37 @@ $fields
         }.toList()
     }
 
+    private fun collectJavaRecipeImplementationClasses(
+        javaFiles: List<Path>,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): Set<String> {
+        val explicitRecipeClasses = linkedSetOf<String>()
+        val declarations = mutableListOf<JavaClassDeclaration>()
+        javaFiles.forEach { javaFile ->
+            val source = maskJavaCommentsAndLiterals(javaFile.readText())
+            declarations += collectJavaClassDeclarations(source)
+            Regex(
+                """(?m)\b(?:class|record)\s+([A-Za-z_$][\w$]*)\b[^{;]*\bimplements\s+[^{;]*\bRecipe\s*<"""
+            ).findAll(source).forEach { match ->
+                explicitRecipeClasses += match.groupValues[1]
+            }
+        }
+
+        val recipeClasses = explicitRecipeClasses.toMutableSet()
+        var changed = true
+        while (changed) {
+            changed = false
+            declarations.forEach { declaration ->
+                if (declaration.name !in recipeClasses &&
+                    javaInheritanceIndex.inherits(declaration.directSuper, recipeClasses)) {
+                    recipeClasses += declaration.name
+                    changed = true
+                }
+            }
+        }
+        return recipeClasses
+    }
+
     private fun enclosingJavaClassDeclaration(source: String, index: Int): JavaClassDeclaration? =
         collectJavaClassDeclarations(source)
             .filter { index in it.bodyRange }
@@ -10147,6 +10178,7 @@ $fields
         val optionalCompoundRecipeTagOwners = collectLegacyOptionalCompoundRecipeTagOwners(javaFiles)
         val legacyCookingRecipeClasses = collectLegacyCookingRecipeClasses(javaFiles)
         val javaInheritanceIndex = collectJavaInheritanceIndex(javaFiles)
+        val recipeImplementationClasses = collectJavaRecipeImplementationClasses(javaFiles, javaInheritanceIndex)
         val inheritedRecipeStateAccessors = collectInheritedRecipeStateAccessors(javaFiles)
         val holderLookupCompoundTagMethods = collectHolderLookupCompoundTagMethods(javaFiles)
         val legacyPlacementBanBaseClasses = collectLegacyPlacementBanBaseClasses(javaFiles)
@@ -10626,6 +10658,7 @@ $fields
                     attributeHolderAccessHints,
                     optionalCompoundRecipeTagOwners,
                     javaInheritanceIndex,
+                    recipeImplementationClasses,
                     legacyPlacementBanBaseClasses,
                     legacyPlacementBanBuilderClasses,
                     modId.orEmpty(),
@@ -16038,6 +16071,7 @@ $migratedRecipes
         attributeHolderAccessHints: AttributeHolderAccessHints = AttributeHolderAccessHints(emptySet()),
         optionalCompoundRecipeTagOwners: Set<String> = emptySet(),
         javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY,
+        recipeImplementationClasses: Set<String> = emptySet(),
         legacyPlacementBanBaseClasses: Set<String> = emptySet(),
         legacyPlacementBanBuilderClasses: Set<String> = emptySet(),
         modId: String = "",
@@ -16367,7 +16401,7 @@ $migratedRecipes
         result = migrateLegacyCraftingRecipeBoundaries(result)
         result = migrateGenericRecipeInputImplementations(result)
         result = migrateLegacyPlacementBanRecipeSource(result, legacyPlacementBanBaseClasses, legacyPlacementBanBuilderClasses)
-        result = migrateRecipeDisplayRecipeIdWithoutHolderSource(result)
+        result = migrateRecipeDisplayRecipeIdWithoutHolderSource(result, javaInheritanceIndex, recipeImplementationClasses)
         result = migrateRecipeHolderOptionalMapLambdaValueAccess(result)
         result = migrateMerchantOfferItemCosts(result)
         result = migrateItemUseDurationCalls(result)
@@ -37067,7 +37101,6 @@ public class $className<T extends $recipeBase> extends BlockStateRecipeSerialize
         result = migrateLegacyPlacementBanBuilderCallSitesSource(result, placementBanBuilderClasses)
         result = migrateLegacyPlacementBanDisplaySource(result, placementBanBaseClasses)
         result = migrateNitrogenBlockPropertyPairRuntimeAccess(result)
-        result = migrateRecipeDisplayRecipeIdWithoutHolderSource(result)
         return result
     }
 
@@ -37705,15 +37738,186 @@ public class $className extends PlacementBanBuilder {
         return if (changed) result else source
     }
 
-    private fun migrateRecipeDisplayRecipeIdWithoutHolderSource(source: String): String {
-        if (!source.contains("extends BasicDisplay") ||
-            !source.contains("Recipe<?>") ||
-            !source.contains("Optional.of(") ||
-            !source.contains(".getId()")) {
+    private fun migrateRecipeDisplayRecipeIdWithoutHolderSource(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY,
+        recipeImplementationClasses: Set<String> = emptySet()
+    ): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!Regex("""\bextends\s+BasicDisplay\b""").containsMatchIn(executableCode) ||
+            !executableCode.contains("Optional.of(") ||
+            !executableCode.contains(".getId(")) {
             return source
         }
-        return Regex("""Optional\.of\(\s*recipe\.getId\(\)\s*\)""")
-            .replace(source, "Optional.empty()")
+        val recipeIdOptionalPattern = Regex("""Optional\.of\(\s*([A-Za-z_$][\w$]*)\.getId\(\s*\)\s*\)""")
+        return replaceExecutableRegex(source, recipeIdOptionalPattern) { match ->
+            val receiver = match.groupValues[1]
+            if (recipeDisplayRecipeReceiverAt(
+                    executableCode,
+                    match.range.first,
+                    receiver,
+                    javaInheritanceIndex,
+                    recipeImplementationClasses
+                )) {
+                "Optional.empty()"
+            } else {
+                match.value
+            }
+        }
+    }
+
+    private data class JavaMethodScope(
+        val header: String,
+        val parameters: List<String>
+    )
+
+    private fun recipeDisplayRecipeReceiverAt(
+        executableCode: String,
+        offset: Int,
+        receiver: String,
+        javaInheritanceIndex: JavaInheritanceIndex,
+        recipeImplementationClasses: Set<String>
+    ): Boolean {
+        val method = enclosingJavaMethodScope(executableCode, offset) ?: return false
+        val receiverType = method.parameters
+            .mapNotNull(::javaParameterTypeAndName)
+            .firstOrNull { (_, name) -> name == receiver }
+            ?.first
+            ?: return false
+        val typeParameterBounds = recipeDisplayTypeParameterBoundsAt(executableCode, offset)
+        return isJavaRecipeType(receiverType, typeParameterBounds, javaInheritanceIndex, recipeImplementationClasses)
+    }
+
+    private fun recipeDisplayTypeParameterBoundsAt(source: String, offset: Int): Map<String, String> {
+        val bounds = linkedMapOf<String, String>()
+        enclosingJavaClassHeader(source, offset)?.let { header ->
+            bounds.putAll(recipeDisplayTypeParameterBoundsFromHeader(header))
+        }
+        enclosingJavaMethodScope(source, offset)?.let { method ->
+            bounds.putAll(recipeDisplayTypeParameterBoundsFromHeader(method.header))
+        }
+        return bounds
+    }
+
+    private fun isJavaRecipeType(
+        type: String,
+        typeParameterBounds: Map<String, String>,
+        javaInheritanceIndex: JavaInheritanceIndex,
+        recipeImplementationClasses: Set<String>,
+        visitedTypeParameters: Set<String> = emptySet()
+    ): Boolean {
+        val normalized = type.trim()
+            .replace(Regex("""^\?\s+extends\s+"""), "")
+            .replace("...", "[]")
+            .trim()
+        val rawType = rawJavaTypeName(normalized)
+        if (rawType == "Recipe") return true
+        if (rawType in recipeImplementationClasses) return true
+        if (javaInheritanceIndex.inherits(rawType, recipeImplementationClasses + setOf("Recipe"))) return true
+        val bound = typeParameterBounds[rawType] ?: return false
+        if (rawType in visitedTypeParameters) return false
+        return isJavaRecipeType(
+            bound,
+            typeParameterBounds,
+            javaInheritanceIndex,
+            recipeImplementationClasses,
+            visitedTypeParameters + rawType
+        )
+    }
+
+    private fun enclosingJavaMethodScope(source: String, offset: Int): JavaMethodScope? {
+        val methodPattern = Regex(
+            """(?m)(?:^|\r?\n)[ \t]*(?:(?:@[A-Za-z_$][\w$.]*(?:\([^)]*\))?\s*)*)(?:(?:public|protected|private|static|final|synchronized|strictfp|native)\s+)+(?:(?:<[^;{}()]+>\s+)?[A-Za-z_$][\w$<>\[\].?,\s]*\s+[A-Za-z_$][\w$]*|(?:<[^;{}()]+>\s+)?[A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*(?:throws\s+[^{;]+)?\{"""
+        )
+        return methodPattern.findAll(source)
+            .filter { it.range.first < offset }
+            .lastOrNull { match ->
+                val openBrace = source.indexOf('{', match.range.last - 1)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+                closeBrace >= offset
+            }
+            ?.let { match ->
+                val openBrace = source.indexOf('{', match.range.last - 1)
+                JavaMethodScope(
+                    header = source.substring(match.range.first, openBrace).trim(),
+                    parameters = splitTopLevelJavaArgs(match.groupValues[1])
+                )
+            }
+    }
+
+    private fun enclosingJavaClassHeader(source: String, offset: Int): String? {
+        val classPattern = Regex(
+            """(?m)(?:^|\r?\n)[ \t]*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*(?:class|record)\s+[A-Za-z_$][\w$]*(?:\s*<[^{};]+>)?[^;{]*\{"""
+        )
+        return classPattern.findAll(source)
+            .filter { it.range.first < offset }
+            .mapNotNull { match ->
+                val openBrace = source.indexOf('{', match.range.last - 1)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+                if (openBrace >= 0 && closeBrace >= offset) {
+                    source.substring(match.range.first, openBrace).trim()
+                } else {
+                    null
+                }
+            }
+            .lastOrNull()
+    }
+
+    private fun recipeDisplayTypeParameterBoundsFromHeader(header: String): Map<String, String> {
+        val parameterLists = listOfNotNull(
+            javaClassTypeParameterText(header),
+            javaMethodTypeParameterText(header)
+        )
+        return parameterLists
+            .flatMap { splitTopLevelJavaArgs(it) }
+            .mapNotNull { parameter ->
+                Regex("""^\s*([A-Za-z_$][\w$]*)\s+extends\s+(.+?)\s*$""")
+                    .find(parameter)
+                    ?.let { it.groupValues[1] to it.groupValues[2].trim() }
+            }
+            .toMap()
+    }
+
+    private fun javaClassTypeParameterText(header: String): String? {
+        val match = Regex("""\b(?:class|record|interface)\s+[A-Za-z_$][\w$]*\s*<""").find(header) ?: return null
+        val openAngle = header.indexOf('<', match.range.last - 1)
+        val closeAngle = findMatchingJavaAngle(header, openAngle)
+        return if (openAngle >= 0 && closeAngle > openAngle) header.substring(openAngle + 1, closeAngle) else null
+    }
+
+    private fun javaMethodTypeParameterText(header: String): String? {
+        val match = Regex(
+            """(?m)^[ \t]*(?:(?:@[A-Za-z_$][\w$.]*(?:\([^)]*\))?\s*)*)(?:(?:public|protected|private|static|final|synchronized|strictfp|native)\s+)+<"""
+        ).find(header) ?: return null
+        val openAngle = header.indexOf('<', match.range.last - 1)
+        val closeAngle = findMatchingJavaAngle(header, openAngle)
+        return if (openAngle >= 0 && closeAngle > openAngle) header.substring(openAngle + 1, closeAngle) else null
+    }
+
+    private fun findMatchingJavaAngle(source: String, openAngle: Int): Int {
+        if (openAngle < 0 || source.getOrNull(openAngle) != '<') return -1
+        var depth = 0
+        for (index in openAngle until source.length) {
+            when (source[index]) {
+                '<' -> depth++
+                '>' -> {
+                    depth--
+                    if (depth == 0) return index
+                }
+            }
+        }
+        return -1
+    }
+
+    private fun javaParameterTypeAndName(parameter: String): Pair<String, String>? {
+        val cleaned = parameter.trim()
+            .replace(Regex("""@[A-Za-z_$][\w$.]*(?:\([^)]*\))?\s*"""), "")
+            .replace(Regex("""\bfinal\s+"""), "")
+            .trim()
+        val match = Regex("""(.+?)\s+([A-Za-z_$][\w$]*)(?:\s*\[\s*])?\s*$""")
+            .find(cleaned)
+            ?: return null
+        return match.groupValues[1].trim() to match.groupValues[2]
     }
 
     private fun migrateLegacyPlacementBanDisplaySource(
@@ -37746,7 +37950,6 @@ public class $className extends PlacementBanBuilder {
         result = result.replace("bypassBlock.getPairs()", "bypassBlock.get().getPairs()")
         result = result.replace("display.getInputEntries().get(0), bypassBlock.get().getPairs()", "display.getInputEntries().get(1), bypassBlock.get().getPairs()")
         result = result.replace("new ArrayList<>(REIUtils.toIngredientList(recipe.getBypassBlock().get().getPairs()))", "new ArrayList<>(recipe.getBypassBlock().map(blockStateIngredient -> REIUtils.toIngredientList(blockStateIngredient.getPairs())).orElse(List.of()))")
-        result = result.replace("Optional.of(recipe.getId())", "Optional.empty()")
         result = result.replace("Optional.ofNullable(recipe.getBiomeKey()),\n                Optional.ofNullable(recipe.getBiomeTag())", "recipe.getBiome()")
         result = Regex("""this\(\s*categoryIdentifier,\s*inputs,\s*recipe\.getBypassBlock\(\),\s*recipe\.getBiome\(\),""")
             .replace(result, "this(categoryIdentifier,\n                inputs,\n                recipe.getBiome(),\n                recipe.getBypassBlock(),")

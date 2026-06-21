@@ -8462,6 +8462,51 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `recipe display recipe id migration uses executable recipe receiver evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateRecipeDisplayRecipeIdWithoutHolderSource")
+        assertTrue(start >= 0, "migrateRecipeDisplayRecipeIdWithoutHolderSource is missing")
+        val end = source.indexOf("private fun migrateLegacyPlacementBanDisplaySource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val legacyDisplayStart = source.indexOf("private fun migrateLegacyPlacementBanDisplaySource")
+        assertTrue(legacyDisplayStart >= 0, "migrateLegacyPlacementBanDisplaySource is missing")
+        val legacyDisplayEnd = source.indexOf("private fun replacePlacementBanJeiSetRecipe", legacyDisplayStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val legacyDisplayBody = source.substring(legacyDisplayStart, legacyDisplayEnd)
+        val offenders = listOf(
+            "raw BasicDisplay prefilter" to body.contains("""source.contains("extends BasicDisplay")"""),
+            "raw Recipe wildcard prefilter" to body.contains("""source.contains("Recipe<?>")"""),
+            "raw Optional prefilter" to body.contains("""source.contains("Optional.of(")"""),
+            "raw getId prefilter" to body.contains("""source.contains(".getId()")"""),
+            "fixed recipe receiver" to body.contains("""Optional\.of\(\s*recipe\.getId"""),
+            "raw source replacement" to body.contains(""".replace(source, "Optional.empty()")"""),
+            "legacy display fixed recipe receiver" to legacyDisplayBody.contains("""result.replace("Optional.of(recipe.getId())", "Optional.empty()")""")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("replaceExecutableRegex(source, recipeIdOptionalPattern)") &&
+                body.contains("recipeDisplayRecipeReceiverAt(") &&
+                body.contains("match.groupValues[1]") &&
+                body.contains("javaInheritanceIndex") &&
+                body.contains("recipeImplementationClasses"),
+            "Recipe display id migration must bind executable Optional.of(receiver.getId()) calls to proven Recipe parameters"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Recipe display id migration must not depend on comments, strings, or fixed receiver names: $offenders"
+        )
+    }
+
+    @Test
     fun `nullable import cleanup uses executable annotation evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

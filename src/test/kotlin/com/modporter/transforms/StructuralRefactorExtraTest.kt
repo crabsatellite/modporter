@@ -49,6 +49,105 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `recipe display recipe id migration binds arbitrary recipe receiver names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CookingRecipeDisplay.java").writeText("""
+            package com.example;
+
+            import me.shedaniel.rei.api.common.display.basic.BasicDisplay;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.crafting.Recipe;
+            import java.util.List;
+            import java.util.Optional;
+
+            public class CookingRecipeDisplay<T extends Recipe<?>> extends BasicDisplay {
+                public CookingRecipeDisplay(Optional<ResourceLocation> location) {
+                    super(List.of(), List.of(), location);
+                }
+
+                public static <T extends Recipe<?>> CookingRecipeDisplay<T> of(T cookedRecipe) {
+                    return new CookingRecipeDisplay<>(Optional.of(cookedRecipe.getId()));
+                }
+
+                public static CookingRecipeDisplay<?> fromLabel(Label label) {
+                    return new CookingRecipeDisplay<>(Optional.of(label.getId()));
+                }
+
+                static class Label {
+                    ResourceLocation getId() {
+                        return ResourceLocation.parse("example:label");
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BaseRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeInput;
+
+            public abstract class BaseRecipe<I extends RecipeInput> implements Recipe<I> {
+            }
+        """.trimIndent())
+        srcDir.resolve("ProjectRecipeDisplay.java").writeText("""
+            package com.example;
+
+            import me.shedaniel.rei.api.common.display.basic.BasicDisplay;
+            import java.util.List;
+            import java.util.Optional;
+
+            public class ProjectRecipeDisplay<R extends BaseRecipe<?>> extends BasicDisplay {
+                public ProjectRecipeDisplay(R convertedRecipe) {
+                    super(List.of(), List.of(), Optional.of(convertedRecipe.getId()));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("CookingRecipeDisplay.java").readText()
+        val projectDisplay = srcDir.resolve("ProjectRecipeDisplay.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("return new CookingRecipeDisplay<>(Optional.empty());"), transformed)
+        assertFalse(transformed.contains("cookedRecipe.getId()"), transformed)
+        assertTrue(transformed.contains("return new CookingRecipeDisplay<>(Optional.of(label.getId()));"), transformed)
+        assertTrue(projectDisplay.contains("super(List.of(), List.of(), Optional.empty());"), projectDisplay)
+        assertFalse(projectDisplay.contains("convertedRecipe.getId()"), projectDisplay)
+    }
+
+    @Test
+    fun `recipe display recipe id migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DisplayDocs.java").writeText("""
+            package com.example;
+
+            import me.shedaniel.rei.api.common.display.basic.BasicDisplay;
+            import java.util.List;
+            import java.util.Optional;
+
+            public class DisplayDocs extends BasicDisplay {
+                // Optional.of(documentedRecipe.getId())
+                private static final String DOC = "Optional.of(documentedRecipe.getId())";
+
+                public DisplayDocs() {
+                    super(List.of(), List.of(), Optional.empty());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("DisplayDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("// Optional.of(documentedRecipe.getId())"), transformed)
+        assertTrue(transformed.contains("""private static final String DOC = "Optional.of(documentedRecipe.getId())";"""), transformed)
+    }
+
+    @Test
     fun `legacy tooltip part hiding ignores comments and string literals`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
