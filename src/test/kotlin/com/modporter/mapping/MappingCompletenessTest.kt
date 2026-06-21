@@ -3812,6 +3812,72 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `stair and flower constructor migrations use executable constructor and call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        fun body(startMarker: String, endMarker: String): String {
+            val start = source.indexOf(startMarker)
+            assertTrue(start >= 0, "$startMarker is missing")
+            val end = source.indexOf(endMarker, start + 1).let { if (it < 0) source.length else it }
+            return source.substring(start, end)
+        }
+
+        val stairSubclassBody = body(
+            "private fun migrateStairBlockSubclassConstructorSource",
+            "private fun migrateStairBlockConstructorCallSitesSource"
+        )
+        val stairCallBody = body(
+            "private fun migrateStairBlockConstructorCallSitesSource",
+            "private fun migrateFlowerBlockMobEffectHolderConstructors"
+        )
+        val flowerSubclassBody = body(
+            "private fun migrateFlowerBlockSubclassConstructorSource",
+            "private fun migrateFlowerBlockConstructorCallSitesSource"
+        )
+        val flowerCallBody = body(
+            "private fun migrateFlowerBlockConstructorCallSitesSource",
+            "private fun normalizeMobEffectHolderExpression"
+        )
+        val combined = listOf(stairSubclassBody, stairCallBody, flowerSubclassBody, flowerCallBody).joinToString("\n")
+        val offenders = listOf(
+            "raw subclass constructor scan" to "constructorPattern.find(source)",
+            "raw subclass super scan" to "superPattern.containsMatchIn(source)",
+            "raw subclass constructor replace" to "constructorPattern.replaceFirst",
+            "raw stair callsite prefilter" to """source.contains(".defaultBlockState()")""",
+            "raw flower callsite prefilter" to """source.contains("Effects.")""",
+            "raw supplier import retention" to "containsMatchIn(result)",
+            "raw flower supplier retention" to """result.contains("Supplier<")""",
+            "raw constructor callsite rewrite" to "rewriteJavaNew(result, className)"
+        )
+            .filter { (_, marker) -> combined.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            stairSubclassBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                stairSubclassBody.contains("constructorPattern.find(executableCode)") &&
+                stairSubclassBody.contains("superPattern.containsMatchIn(executableCode)") &&
+                stairSubclassBody.contains("val resultExecutableCode = maskJavaCommentsAndLiterals(result)") &&
+                stairCallBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                stairCallBody.contains("executableCode.contains(\".defaultBlockState()\")") &&
+                stairCallBody.contains("rewriteExecutableJavaNew(result, className)") &&
+                flowerSubclassBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                flowerSubclassBody.contains("constructorPattern.find(executableCode)") &&
+                flowerSubclassBody.contains("superPattern.containsMatchIn(executableCode)") &&
+                flowerSubclassBody.contains("val resultExecutableCode = maskJavaCommentsAndLiterals(result)") &&
+                flowerCallBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                flowerCallBody.contains("executableCode.contains(\"Effects.\")") &&
+                flowerCallBody.contains("rewriteExecutableJavaNew(result, className)"),
+            "StairBlock and FlowerBlock constructor migrations must use executable Java evidence for declarations and calls"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "StairBlock and FlowerBlock constructor migrations must not use comments or string literals as evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `map codec serialization migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

@@ -9913,6 +9913,11 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.level.block.FlowerBlock;
 
             public class FlowerEntityBlock extends FlowerBlock implements EntityBlock {
+                /*
+                public FlowerEntityBlock(Supplier<MobEffect> documentedEffect, int documentedDuration, Properties documentedProperties) {
+                    super(documentedEffect, documentedDuration, documentedProperties);
+                }
+                */
                 public FlowerEntityBlock(Supplier<MobEffect> effectSupplier, int effectDuration, Properties properties) {
                     super(effectSupplier, effectDuration, properties);
                 }
@@ -9926,6 +9931,11 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.level.block.state.BlockBehaviour;
 
             public class FlowerRegistry {
+                /*
+                Object commented = new FlowerEntityBlock(() -> MobEffects.HEAL, 3, BlockBehaviour.Properties.of());
+                */
+                private static final String DOC = "new FlowerEntityBlock(() -> MobEffects.HARM, 4, BlockBehaviour.Properties.of())";
+
                 public Object vanilla() {
                     return new FlowerBlock(() -> MobEffects.POISON, 7, BlockBehaviour.Properties.of());
                 }
@@ -9949,10 +9959,15 @@ class StructuralRefactorExtraTest {
         assertTrue(!block.contains("import java.util.function.Supplier;"), block)
         assertTrue(block.contains("public FlowerEntityBlock(Holder<MobEffect> effectSupplier, float effectDuration, Properties properties)"), block)
         assertTrue(block.contains("super(effectSupplier, effectDuration, properties);"), block)
+        assertTrue(block.contains("public FlowerEntityBlock(Supplier<MobEffect> documentedEffect, int documentedDuration, Properties documentedProperties)"), block)
         assertTrue(registry.contains("new FlowerBlock(MobEffects.POISON, 7, BlockBehaviour.Properties.of())"), registry)
         assertTrue(registry.contains("new FlowerEntityBlock(MobEffects.REGENERATION, 5, BlockBehaviour.Properties.of())"), registry)
         assertTrue(registry.contains("new FlowerEntityBlock(ModEffects.COMFORT, 6, BlockBehaviour.Properties.of())"), registry)
-        assertTrue(!registry.contains("() -> MobEffects"), registry)
+        assertTrue(registry.contains("new FlowerEntityBlock(() -> MobEffects.HEAL, 3, BlockBehaviour.Properties.of())"), registry)
+        assertTrue(registry.contains("new FlowerEntityBlock(() -> MobEffects.HARM, 4, BlockBehaviour.Properties.of())"), registry)
+        assertFalse(registry.contains("return new FlowerBlock(() -> MobEffects"), registry)
+        assertFalse(registry.contains("return new FlowerEntityBlock(() -> MobEffects"), registry)
+        assertFalse(registry.contains("return new FlowerEntityBlock(() -> ModEffects"), registry)
         assertTrue(!registry.contains("ModEffects.COMFORT.get()"), registry)
     }
 
@@ -21849,6 +21864,11 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.level.block.state.BlockBehaviour;
 
             public class RichStairsBlock extends StairBlock {
+                /*
+                public RichStairsBlock(Supplier<BlockState> documentedState, BlockBehaviour.Properties documentedProperties) {
+                    super(documentedState, documentedProperties);
+                }
+                */
                 public RichStairsBlock(Supplier<BlockState> state, BlockBehaviour.Properties properties) {
                     super(state, properties);
                 }
@@ -21860,6 +21880,11 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.level.block.state.BlockBehaviour;
 
             public class ExampleBlocks {
+                /*
+                Object commented = new RichStairsBlock(() -> ModBlocks.DOC.get().defaultBlockState(), BlockBehaviour.Properties.of());
+                */
+                private static final String DOC = "new RichStairsBlock(() -> ModBlocks.DOC.get().defaultBlockState(), BlockBehaviour.Properties.of())";
+
                 public Object rich() {
                     return new RichStairsBlock(() -> ModBlocks.STONE.get().defaultBlockState(), BlockBehaviour.Properties.ofFullCopy(ModBlocks.STONE.get()));
                 }
@@ -21874,8 +21899,10 @@ class StructuralRefactorExtraTest {
         assertTrue(block.contains("public RichStairsBlock(BlockState state, BlockBehaviour.Properties properties)"), block)
         assertTrue(block.contains("super(state, properties);"), block)
         assertFalse(block.contains("java.util.function.Supplier"), block)
+        assertTrue(block.contains("public RichStairsBlock(Supplier<BlockState> documentedState, BlockBehaviour.Properties documentedProperties)"), block)
         assertTrue(registry.contains("new RichStairsBlock(ModBlocks.STONE.get().defaultBlockState(), BlockBehaviour.Properties.ofFullCopy(ModBlocks.STONE.get()))"), registry)
-        assertFalse(registry.contains("() -> ModBlocks.STONE"), registry)
+        assertTrue(registry.contains("new RichStairsBlock(() -> ModBlocks.DOC.get().defaultBlockState(), BlockBehaviour.Properties.of())"), registry)
+        assertFalse(registry.contains("return new RichStairsBlock(() -> ModBlocks.STONE"), registry)
     }
 
     @Test

@@ -42207,32 +42207,34 @@ public class ${builder.className} implements RecipeBuilder {
         val constructorPattern = Regex(
             """public\s+${Regex.escape(className)}\s*\(\s*(?:java\.util\.function\.)?Supplier\s*<\s*BlockState\s*>\s+($id)\s*,\s*((?:BlockBehaviour\.)?Properties)\s+($id)\s*\)"""
         )
-        val match = constructorPattern.find(source) ?: return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val match = constructorPattern.find(executableCode) ?: return source
         val stateName = match.groupValues[1]
         val propertiesType = match.groupValues[2]
         val propertiesName = match.groupValues[3]
         val superPattern = Regex("""super\(\s*${Regex.escape(stateName)}\s*,\s*${Regex.escape(propertiesName)}\s*\)\s*;""")
-        if (!superPattern.containsMatchIn(source)) return source
-        var result = constructorPattern.replaceFirst(
-            source,
-            "public $className(BlockState $stateName, $propertiesType $propertiesName)"
-        )
-        if (!Regex("""\bSupplier\s*<""").containsMatchIn(result) &&
-            !Regex("""\bjava\.util\.function\.Supplier\s*<""").containsMatchIn(result)) {
+        if (!superPattern.containsMatchIn(executableCode)) return source
+        var result = source.substring(0, match.range.first) +
+            "public $className(BlockState $stateName, $propertiesType $propertiesName)" +
+            source.substring(match.range.last + 1)
+        val resultExecutableCode = maskJavaCommentsAndLiterals(result)
+        if (!Regex("""\bSupplier\s*<""").containsMatchIn(resultExecutableCode) &&
+            !Regex("""\bjava\.util\.function\.Supplier\s*<""").containsMatchIn(resultExecutableCode)) {
             result = removeImport(result, "java.util.function.Supplier")
         }
         return result
     }
 
     private fun migrateStairBlockConstructorCallSitesSource(source: String, constructorClasses: Set<String>): String {
-        if (!source.contains("new ") || !source.contains("() ->") || !source.contains(".defaultBlockState()")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("new ") || !executableCode.contains("() ->") || !executableCode.contains(".defaultBlockState()")) return source
         var result = source
         for (className in constructorClasses) {
-            result = rewriteJavaNew(result, className) { args ->
-                if (args.size != 2) return@rewriteJavaNew null
+            result = rewriteExecutableJavaNew(result, className) { args ->
+                if (args.size != 2) return@rewriteExecutableJavaNew null
                 val stateSupplier = args[0].trim()
                 if (!stateSupplier.startsWith("() ->") || !stateSupplier.contains(".defaultBlockState()")) {
-                    return@rewriteJavaNew null
+                    return@rewriteExecutableJavaNew null
                 }
                 val state = stateSupplier.removePrefix("() ->").trim()
                 "new $className($state, ${args[1].trim()})"
@@ -42300,7 +42302,8 @@ public class ${builder.className} implements RecipeBuilder {
         val constructorPattern = Regex(
             """public\s+${Regex.escape(className)}\s*\(\s*((?:java\.util\.function\.)?Supplier\s*<\s*(?:\?\s+extends\s+)?MobEffect\s*>)\s+($id)\s*,\s*int\s+($id)\s*,\s*($propertiesTypePattern)\s+($id)\s*\)"""
         )
-        val match = constructorPattern.find(source) ?: return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val match = constructorPattern.find(executableCode) ?: return source
         val effectName = match.groupValues[2]
         val durationName = match.groupValues[3]
         val propertiesType = match.groupValues[4]
@@ -42308,29 +42311,30 @@ public class ${builder.className} implements RecipeBuilder {
         val superPattern = Regex(
             """super\(\s*${Regex.escape(effectName)}\s*,\s*${Regex.escape(durationName)}\s*,\s*${Regex.escape(propertiesName)}\s*\)\s*;"""
         )
-        if (!superPattern.containsMatchIn(source)) return source
+        if (!superPattern.containsMatchIn(executableCode)) return source
 
-        var result = constructorPattern.replaceFirst(
-            source,
-            "public $className(Holder<MobEffect> $effectName, float $durationName, $propertiesType $propertiesName)"
-        )
+        var result = source.substring(0, match.range.first) +
+            "public $className(Holder<MobEffect> $effectName, float $durationName, $propertiesType $propertiesName)" +
+            source.substring(match.range.last + 1)
         result = addImportIfMissing(result, "net.minecraft.core.Holder")
-        if (!result.contains("Supplier<") && !result.contains("Supplier<?")) {
+        val resultExecutableCode = maskJavaCommentsAndLiterals(result)
+        if (!resultExecutableCode.contains("Supplier<") && !resultExecutableCode.contains("Supplier<?")) {
             result = removeImportIfPresent(result, "java.util.function.Supplier")
         }
         return result
     }
 
     private fun migrateFlowerBlockConstructorCallSitesSource(source: String, constructorClasses: Set<String>): String {
-        if (!source.contains("new ") || !source.contains("() ->") || !source.contains("Effects.")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("new ") || !executableCode.contains("() ->") || !executableCode.contains("Effects.")) return source
         var result = source
         for (className in constructorClasses) {
-            result = rewriteJavaNew(result, className) { args ->
-                if (args.size != 3) return@rewriteJavaNew null
+            result = rewriteExecutableJavaNew(result, className) { args ->
+                if (args.size != 3) return@rewriteExecutableJavaNew null
                 val effectSupplier = args[0].trim()
-                if (!effectSupplier.startsWith("() ->")) return@rewriteJavaNew null
+                if (!effectSupplier.startsWith("() ->")) return@rewriteExecutableJavaNew null
                 val effect = normalizeMobEffectHolderExpression(effectSupplier.removePrefix("() ->").trim())
-                    ?: return@rewriteJavaNew null
+                    ?: return@rewriteExecutableJavaNew null
                 "new $className($effect, ${args[1].trim()}, ${args[2].trim()})"
             }
         }
