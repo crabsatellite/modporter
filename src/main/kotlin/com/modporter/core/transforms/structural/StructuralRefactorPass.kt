@@ -3313,6 +3313,43 @@ ${registrations.distinct().joinToString("\n")}
         "InterModProcessEvent"
     )
 
+    private val modBusEventTypeOwners = setOf(
+        "net.neoforged.neoforge.event.entity.EntityAttributeCreationEvent",
+        "net.minecraftforge.event.entity.EntityAttributeCreationEvent",
+        "net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent",
+        "net.minecraftforge.event.BuildCreativeModeTabContentsEvent",
+        "net.neoforged.neoforge.client.event.EntityRenderersEvent",
+        "net.minecraftforge.client.event.EntityRenderersEvent",
+        "net.neoforged.neoforge.registries.RegisterEvent",
+        "net.minecraftforge.registries.RegisterEvent",
+        "net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent",
+        "net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent",
+        "net.neoforged.fml.event.lifecycle.FMLClientSetupEvent",
+        "net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent",
+        "net.neoforged.fml.event.lifecycle.FMLDedicatedServerSetupEvent",
+        "net.minecraftforge.fml.event.lifecycle.FMLDedicatedServerSetupEvent",
+        "net.neoforged.neoforge.data.event.GatherDataEvent",
+        "net.minecraftforge.data.event.GatherDataEvent",
+        "net.neoforged.neoforge.client.event.RegisterColorHandlersEvent",
+        "net.minecraftforge.client.event.RegisterColorHandlersEvent",
+        "net.neoforged.neoforge.client.event.RegisterParticleProvidersEvent",
+        "net.minecraftforge.client.event.RegisterParticleProvidersEvent",
+        "net.neoforged.neoforge.client.event.ModelEvent",
+        "net.minecraftforge.client.event.ModelEvent",
+        "net.neoforged.neoforge.client.event.TextureAtlasStitchedEvent",
+        "net.minecraftforge.client.event.TextureAtlasStitchedEvent",
+        "net.neoforged.neoforge.client.event.RegisterShadersEvent",
+        "net.minecraftforge.client.event.RegisterShadersEvent",
+        "net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent",
+        "net.minecraftforge.client.event.RegisterKeyMappingsEvent",
+        "net.neoforged.fml.event.lifecycle.FMLLoadCompleteEvent",
+        "net.minecraftforge.fml.event.lifecycle.FMLLoadCompleteEvent",
+        "net.neoforged.fml.event.lifecycle.InterModEnqueueEvent",
+        "net.minecraftforge.fml.event.lifecycle.InterModEnqueueEvent",
+        "net.neoforged.fml.event.lifecycle.InterModProcessEvent",
+        "net.minecraftforge.fml.event.lifecycle.InterModProcessEvent"
+    )
+
     private fun removeEmptyEventBusRegistration(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
         val srcDir = projectDir.resolve("src/main/java")
@@ -3322,25 +3359,26 @@ ${registrations.distinct().joinToString("\n")}
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val text = javaFile.toFile().readText()
+                val code = maskJavaComments(text)
+                val executableCode = maskJavaCommentsAndLiterals(text)
                 // Only process @Mod-annotated classes
-                if (!text.contains("@Mod(") && !text.contains("@Mod\n")) return@forEach
+                if (!Regex("""@Mod(?:\s*\(|\s*\r?\n)""").containsMatchIn(executableCode)) return@forEach
                 // Only process files with EVENT_BUS.register(this)
-                if (!text.contains("EVENT_BUS.register(this)")) return@forEach
+                if (!executableCode.contains("EVENT_BUS.register(this)")) return@forEach
 
                 // Check if any @SubscribeEvent methods handle game-bus events
                 // If ALL @SubscribeEvent methods handle mod-bus events, remove EVENT_BUS.register(this)
-                val hasGameBusEvents = if (!text.contains("@SubscribeEvent")) {
+                val imports = javaNonStaticImports(code)
+                val hasGameBusEvents = if (!executableCode.contains("@SubscribeEvent")) {
                     false
                 } else {
                     // Find @SubscribeEvent method parameter types
-                    val subscribePattern = Regex("""@SubscribeEvent\s+(?:@\w+(?:\([^)]*\))?\s+)*(?:public\s+)?(?:static\s+)?(?:void\s+)\w+\s*\((\w+(?:\.\w+)*)""")
-                    val eventTypes = subscribePattern.findAll(text).map { it.groupValues[1] }.toList()
-                    eventTypes.any { eventType ->
-                        // Check both the full type (e.g. EntityRenderersEvent.RegisterRenderers)
-                        // and simple name against known mod-bus events
-                        !modBusEventTypes.any { modEvent ->
-                            eventType.contains(modEvent)
-                        }
+                    val subscribePattern = Regex(
+                        """@SubscribeEvent\s+(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|protected|private)\s+)?(?:static\s+)?(?:final\s+)?void\s+\w+\s*\(\s*(?:final\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\b"""
+                    )
+                    val eventTypes = subscribePattern.findAll(executableCode).map { it.groupValues[1] }.toList()
+                    eventTypes.isEmpty() || eventTypes.any { eventType ->
+                        !isKnownModBusEventParameterType(eventType, imports)
                     }
                 }
 
@@ -3369,6 +3407,17 @@ ${registrations.distinct().joinToString("\n")}
             }
 
         return changes
+    }
+
+    private fun isKnownModBusEventParameterType(rawType: String, imports: Map<String, String>): Boolean {
+        val normalized = normalizeJavaTypeReference(rawType) ?: return false
+        val resolved = if (normalized.contains(".")) {
+            val firstSegment = normalized.substringBefore('.')
+            imports[firstSegment]?.let { imported -> "$imported.${normalized.substringAfter('.')}" } ?: normalized
+        } else {
+            imports[normalized] ?: return false
+        }
+        return modBusEventTypeOwners.any { owner -> resolved == owner || resolved.startsWith("$owner.") }
     }
 
     /**

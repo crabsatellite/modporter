@@ -524,6 +524,73 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `empty event bus registration removal requires resolved mod bus event type`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+            import net.neoforged.neoforge.common.NeoForge;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+                public ExampleMod() {
+                    NeoForge.EVENT_BUS.register(this);
+                }
+
+                @SubscribeEvent
+                public void setup(FMLCommonSetupEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-remove-empty-eventbus-register" })
+        assertFalse(migrated.contains("NeoForge.EVENT_BUS.register(this);"), migrated)
+    }
+
+    @Test
+    fun `empty event bus registration removal rejects local mod bus event simple names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("FMLCommonSetupEvent.java").writeText("""
+            package com.example;
+
+            public class FMLCommonSetupEvent {
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.common.NeoForge;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+                public ExampleMod() {
+                    NeoForge.EVENT_BUS.register(this);
+                }
+
+                @SubscribeEvent
+                public void setup(FMLCommonSetupEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.none { it.ruleId == "struct-remove-empty-eventbus-register" })
+        assertTrue(migrated.contains("NeoForge.EVENT_BUS.register(this);"), migrated)
+    }
+
+    @Test
     fun `extracts mod bus event methods with source derived mod ids`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

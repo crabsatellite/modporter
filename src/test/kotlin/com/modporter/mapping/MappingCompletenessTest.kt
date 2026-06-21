@@ -1944,6 +1944,43 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `empty event bus registration removal resolves mod bus event owners`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun removeEmptyEventBusRegistration")
+        assertTrue(start >= 0, "removeEmptyEventBusRegistration is missing")
+        val end = source.indexOf("private fun migrateFMLJavaModLoadingContext", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "raw subscribe scan" to "subscribePattern.findAll(text)",
+            "simple mod-bus event owner scan" to "modBusEventTypes.any",
+            "simple event type containment" to "eventType.contains(modEvent)"
+        )
+        val offenders = forbidden
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "empty event-bus registration removal contains $label" }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(text)") &&
+                body.contains("val imports = javaNonStaticImports(code)") &&
+                body.contains("eventTypes.isEmpty() || eventTypes.any") &&
+                body.contains("isKnownModBusEventParameterType(eventType, imports)") &&
+                body.contains("private fun isKnownModBusEventParameterType") &&
+                body.contains("modBusEventTypeOwners.any") &&
+                body.contains("imports[normalized] ?: return false"),
+            "Empty event-bus registration removal must resolve event parameter owners through Java-visible imports/FQNs and fail closed"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Empty event-bus registration removal must not trust simple event names or raw source scans: $offenders"
+        )
+    }
+
+    @Test
     fun `production mod event bus listener migrations do not infer owners from java file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
