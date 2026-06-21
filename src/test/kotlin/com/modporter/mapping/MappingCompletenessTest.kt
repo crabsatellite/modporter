@@ -2886,6 +2886,38 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `curative item effect migration uses executable call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyCurativeItemEffectsSource")
+        assertTrue(start >= 0, "migrateLegacyCurativeItemEffectsSource is missing")
+        val end = source.indexOf("private fun legacyCurativeItemEffectCure", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw curePotionEffects prefilter" to """source.contains(".curePotionEffects(")""",
+            "raw curePotionEffects rewrite" to """rewriteJavaCall(source, "curePotionEffects")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".curePotionEffects(")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "curePotionEffects")""") &&
+                body.contains("legacyCurativeItemEffectCure(args[0])"),
+            "Curative item effect migration must inspect executable calls and preserve proven cure argument matching"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Curative item effect migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `resource mod id detection does not infer constant owners from file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot

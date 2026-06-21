@@ -2894,6 +2894,9 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.item.Items;
 
             public class LegacyCurativeItem {
+                // user.curePotionEffects(new ItemStack(Items.MILK_BUCKET));
+                private static final String DOC = "user.curePotionEffects(new ItemStack(Items.HONEY_BOTTLE));";
+
                 public void cure(LivingEntity user, ItemStack dynamicStack) {
                     user.curePotionEffects(new ItemStack(Items.MILK_BUCKET));
                     user.curePotionEffects(new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.HONEY_BOTTLE));
@@ -2909,6 +2912,8 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("import net.neoforged.neoforge.common.EffectCures;"), migrated)
         assertTrue(migrated.contains("user.removeEffectsCuredBy(EffectCures.MILK);"), migrated)
         assertTrue(migrated.contains("user.removeEffectsCuredBy(EffectCures.HONEY);"), migrated)
+        assertTrue(migrated.contains("// user.curePotionEffects(new ItemStack(Items.MILK_BUCKET));"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "user.curePotionEffects(new ItemStack(Items.HONEY_BOTTLE));";"""), migrated)
         assertTrue(migrated.contains("user.curePotionEffects(dynamicStack);"), migrated)
     }
 

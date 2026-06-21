@@ -33099,11 +33099,12 @@ ${indent}}
     }
 
     private fun migrateLegacyCurativeItemEffectsSource(source: String): String {
-        if (!source.contains(".curePotionEffects(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".curePotionEffects(")) return source
         var changed = false
-        val migrated = rewriteJavaCall(source, "curePotionEffects") { receiver, args ->
-            if (args.size != 1) return@rewriteJavaCall null
-            val cure = legacyCurativeItemEffectCure(args[0]) ?: return@rewriteJavaCall null
+        val migrated = rewriteExecutableJavaCall(source, "curePotionEffects") { receiver, args ->
+            if (args.size != 1) return@rewriteExecutableJavaCall null
+            val cure = legacyCurativeItemEffectCure(args[0]) ?: return@rewriteExecutableJavaCall null
             changed = true
             "$receiver.removeEffectsCuredBy(EffectCures.$cure)"
         }
