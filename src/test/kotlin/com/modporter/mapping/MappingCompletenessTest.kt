@@ -1435,6 +1435,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `entity level accessor migration does not use global simple type fallback`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateEntityLevelAccessorCalls")
+        assertTrue(start >= 0, "migrateEntityLevelAccessorCalls is missing")
+        val end = source.indexOf("\n    private fun ", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "global simple type index" to Regex("""\btypeBySimple\b"""),
+            "unique simple type fallback" to Regex("""singleOrNull\(\)""")
+        )
+        val offenders = forbidden
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "migrateEntityLevelAccessorCalls contains $label" }
+
+        assertTrue(
+            body.contains("val typeByFqn = types.associateBy { it.fqn }") &&
+                body.contains("val sourceType = typeByFqn[normalized]") &&
+                body.contains("owner.imports[normalized]") &&
+                body.contains("owner.wildcardImports"),
+            "Entity level accessor migration must resolve inheritance through Java-visible FQNs"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Entity level accessor migration must not infer inheritance from project-global simple-name uniqueness: $offenders"
+        )
+    }
+
+    @Test
     fun `mmlib recipe base relocation does not infer target package from package suffixes`() {
         val source = Path.of("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
             .toAbsolutePath()

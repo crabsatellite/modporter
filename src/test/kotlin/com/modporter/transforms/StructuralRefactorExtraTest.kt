@@ -4536,6 +4536,46 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `entity getLevel accessor does not resolve invisible parents by global simple names`() {
+        val entityDir = tempDir.resolve("src/main/java/com/example/entity")
+        val baseDir = tempDir.resolve("src/main/java/com/example/base")
+        entityDir.createDirectories()
+        baseDir.createDirectories()
+        baseDir.resolve("ForeignAnimal.java").writeText("""
+            package com.example.base;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.animal.Animal;
+            import net.minecraft.world.level.Level;
+
+            public abstract class ForeignAnimal extends Animal {
+                protected ForeignAnimal(EntityType<? extends Animal> type, Level level) {
+                    super(type, level);
+                }
+            }
+        """.trimIndent())
+        entityDir.resolve("ForeignMount.java").writeText("""
+            package com.example.entity;
+
+            public class ForeignMount extends ForeignAnimal {
+                public void tickMount() {
+                    this.getLevel().getGameTime();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        val migrated = entityDir.resolve("ForeignMount.java").readText()
+        assertFalse(
+            result.changes.any { it.ruleId == "struct-entity-getlevel-accessor" },
+            "Entity accessor migration must not use project-global simple type uniqueness for invisible parents"
+        )
+        assertTrue(migrated.contains("this.getLevel().getGameTime();"), migrated)
+        assertFalse(migrated.contains("this.level().getGameTime();"), migrated)
+    }
+
+    @Test
     fun `attachment registration helper is not treated as subscribe event`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val capabilityDir = srcDir.resolve("capability")

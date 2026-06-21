@@ -39008,7 +39008,6 @@ $writeLines
         if (types.isEmpty()) return emptyList()
 
         val typeByFqn = types.associateBy { it.fqn }
-        val typeBySimple = types.groupBy { it.className }
         val entityMemo = mutableMapOf<String, Boolean>()
 
         fun resolveTypeReference(rawType: String, owner: JavaInheritanceType): String? {
@@ -39031,7 +39030,6 @@ $writeLines
                 val samePackage = "${owner.packageName}.$normalized"
                 if (samePackage in typeByFqn) return samePackage
             }
-            typeBySimple[normalized]?.singleOrNull()?.let { return it.fqn }
             owner.wildcardImports.forEach { pkg ->
                 val candidate = "$pkg.$normalized"
                 if (candidate in typeByFqn || pkg.startsWith("net.minecraft.world.entity")) {
@@ -39050,7 +39048,7 @@ $writeLines
                 return true
             }
 
-            val sourceType = typeByFqn[normalized] ?: typeBySimple[normalized]?.singleOrNull()
+            val sourceType = typeByFqn[normalized]
             val parent = sourceType?.parentType
             if (sourceType == null || parent == null) {
                 entityMemo[normalized] = false
