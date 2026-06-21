@@ -119,6 +119,22 @@ class TextReplacementPass(
             )
         }
 
+        val beforeModelRenderPackedColor = content
+        content = migrateModelRenderPackedColorText(content)
+        if (content != beforeModelRenderPackedColor) {
+            changes.add(
+                Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate legacy model render RGBA floats to packed ARGB color",
+                    before = "renderToBuffer(..., float red, float green, float blue, float alpha)",
+                    after = "renderToBuffer(..., int color) and FastColor.ARGB32.colorFromFloat(...)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "model-render-packed-color-executable"
+                )
+            )
+        }
+
         for (rule in rules) {
             val pattern = if (rule.isRegex) Regex(rule.pattern) else null
             val lines = content.lines()
@@ -3260,6 +3276,31 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
                 Regex("""(implements\s+[^{;\r\n]*?)\bRecipeHolder\b""")
                     .replace(result) { match -> "${match.groupValues[1]}RecipeCraftingHolder" }
             }
+    }
+
+    private fun migrateModelRenderPackedColorText(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("renderToBuffer(") && !executableCode.contains(".render(")) return source
+
+        var result = replaceExecutableRegex(
+            source,
+            Regex("""public\s+void\s+renderToBuffer\(\s*PoseStack\s+(\w+)\s*,\s*VertexConsumer\s+(\w+)\s*,\s*int\s+(\w+)\s*,\s*int\s+(\w+)\s*,\s*float\s+\w+\s*,\s*float\s+\w+\s*,\s*float\s+\w+\s*,\s*float\s+\w+\s*\)""")
+        ) { match ->
+            "public void renderToBuffer(PoseStack ${match.groupValues[1]}, VertexConsumer ${match.groupValues[2]}, int ${match.groupValues[3]}, int ${match.groupValues[4]}, int color)"
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(\w+)\.render\(([^;]*?packedOverlay)\s*,\s*red\s*,\s*green\s*,\s*blue\s*,\s*alpha\s*\)""")
+        ) { match ->
+            "${match.groupValues[1]}.render(${match.groupValues[2]}, color)"
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(\w+)\.renderToBuffer\(([^;]*?)\s*,\s*([A-Za-z0-9_\.]+)\s*,\s*([A-Za-z0-9_\.]+)\s*,\s*([A-Za-z0-9_\.]+)\s*,\s*([A-Za-z0-9_\.]+)\s*\)""")
+        ) { match ->
+            "${match.groupValues[1]}.renderToBuffer(${match.groupValues[2]}, FastColor.ARGB32.colorFromFloat(${match.groupValues[6]}, ${match.groupValues[3]}, ${match.groupValues[4]}, ${match.groupValues[5]}))"
+        }
+        return result
     }
 
     private fun migrateRemovedTagManagerAccess(source: String): String {

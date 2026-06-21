@@ -17106,19 +17106,20 @@ ${indent}}
     }
 
     private fun migrateLegacyModelRenderPackedColorBodies(source: String): String {
-        if (!source.contains("renderToBuffer(") && !source.contains(".render(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("renderToBuffer(") && !executableCode.contains(".render(")) return source
         var result = source
         var needsFastColor = false
 
-        result = rewriteJavaCall(result, "render") { receiver, args ->
-            if (args.size != 8) return@rewriteJavaCall null
-            if (!isLegacyModelPartColorRenderArgs(args)) return@rewriteJavaCall null
+        result = rewriteExecutableJavaCall(result, "render") { receiver, args ->
+            if (args.size != 8) return@rewriteExecutableJavaCall null
+            if (!isLegacyModelPartColorRenderArgs(args)) return@rewriteExecutableJavaCall null
             needsFastColor = true
             "$receiver.render(${args[0]}, ${args[1]}, ${args[2]}, ${args[3]}, FastColor.ARGB32.colorFromFloat(${args[7]}, ${args[4]}, ${args[5]}, ${args[6]}))"
         }
-        result = rewriteJavaCall(result, "renderToBuffer") { receiver, args ->
-            if (args.size != 8) return@rewriteJavaCall null
-            if (!isLegacyModelPartColorRenderArgs(args)) return@rewriteJavaCall null
+        result = rewriteExecutableJavaCall(result, "renderToBuffer") { receiver, args ->
+            if (args.size != 8) return@rewriteExecutableJavaCall null
+            if (!isLegacyModelPartColorRenderArgs(args)) return@rewriteExecutableJavaCall null
             needsFastColor = true
             "$receiver.renderToBuffer(${args[0]}, ${args[1]}, ${args[2]}, ${args[3]}, FastColor.ARGB32.colorFromFloat(${args[7]}, ${args[4]}, ${args[5]}, ${args[6]}))"
         }
@@ -17126,9 +17127,10 @@ ${indent}}
         var cursor = 0
         val signature = Regex("""renderToBuffer\s*\([^)]*\bint\s+color\s*\)\s*\{""")
         while (true) {
-            val match = signature.find(result, cursor) ?: break
-            val openBrace = result.indexOf('{', match.range.first)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            val executableResult = maskJavaCommentsAndLiterals(result)
+            val match = signature.find(executableResult, cursor) ?: break
+            val openBrace = executableResult.indexOf('{', match.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableResult, openBrace) else -1
             if (openBrace < 0 || closeBrace < 0) {
                 cursor = match.range.last + 1
                 continue
@@ -17180,15 +17182,16 @@ ${indent}}
         cursor = 0
         val floatColorSignature = Regex("""\([^)]*\bfloat\s+red\s*,\s*float\s+green\s*,\s*float\s+blue\s*,\s*float\s+alpha\s*\)\s*\{""")
         while (true) {
-            val match = floatColorSignature.find(result, cursor) ?: break
-            val openBrace = result.indexOf('{', match.range.first)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            val executableResult = maskJavaCommentsAndLiterals(result)
+            val match = floatColorSignature.find(executableResult, cursor) ?: break
+            val openBrace = executableResult.indexOf('{', match.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableResult, openBrace) else -1
             if (openBrace < 0 || closeBrace < 0) {
                 cursor = match.range.last + 1
                 continue
             }
             val body = result.substring(openBrace + 1, closeBrace)
-            val rewrittenBody = rewriteJavaCall(body, "render") { receiver, args ->
+            val rewrittenBody = rewriteExecutableJavaCall(body, "render") { receiver, args ->
                 if (args.size == 5 && args[4] == "color") {
                     "$receiver.render(${args[0]}, ${args[1]}, ${args[2]}, ${args[3]}, FastColor.ARGB32.colorFromFloat(alpha, red, green, blue))"
                 } else {

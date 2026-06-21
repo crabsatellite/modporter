@@ -3438,30 +3438,6 @@
       "isRegex": true
     },
     {
-      "id": "model-render-buffer-color-signature",
-      "pattern": "public\\s+void\\s+renderToBuffer\\(\\s*PoseStack\\s+(\\w+)\\s*,\\s*VertexConsumer\\s+(\\w+)\\s*,\\s*int\\s+(\\w+)\\s*,\\s*int\\s+(\\w+)\\s*,\\s*float\\s+\\w+\\s*,\\s*float\\s+\\w+\\s*,\\s*float\\s+\\w+\\s*,\\s*float\\s+\\w+\\s*\\)",
-      "replacement": "public void renderToBuffer(PoseStack $1, VertexConsumer $2, int $3, int $4, int color)",
-      "description": "Model.renderToBuffer override uses packed ARGB color in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "modelpart-render-color-arg",
-      "pattern": "(\\w+)\\.render\\(([^;]*?packedOverlay)\\s*,\\s*red\\s*,\\s*green\\s*,\\s*blue\\s*,\\s*alpha\\s*\\)",
-      "replacement": "$1.render($2, color)",
-      "description": "ModelPart.render RGBA floats -> packed ARGB color",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "model-render-buffer-float-call",
-      "pattern": "(\\w+)\\.renderToBuffer\\(([^;]*?)\\s*,\\s*([A-Za-z0-9_\\.]+)\\s*,\\s*([A-Za-z0-9_\\.]+)\\s*,\\s*([A-Za-z0-9_\\.]+)\\s*,\\s*([A-Za-z0-9_\\.]+)\\s*\\)",
-      "replacement": "$1.renderToBuffer($2, FastColor.ARGB32.colorFromFloat($6, $3, $4, $5))",
-      "description": "Model.renderToBuffer RGBA floats -> FastColor.ARGB32 packed color",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "entity-define-synched-data-builder-signature",
       "pattern": "(public|protected)\\s+void\\s+defineSynchedData\\s*\\(\\s*\\)",
       "replacement": "$1 void defineSynchedData(SynchedEntityData.Builder builder)",

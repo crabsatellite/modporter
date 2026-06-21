@@ -573,6 +573,14 @@ class TextReplacementTest {
             public class TestMod {
                 private Model model;
                 private ModelPart group;
+                // group.render(poseStack, vertexConsumer, packedLight, packedOverlay, red, green, blue, alpha);
+                private static final String RENDER_DOC = "model.renderToBuffer(poseStack, vertexConsumer, packedLight, packedOverlay, 1.0F, 1.0F, 1.0F, alpha);";
+
+                /*
+                 public void renderToBuffer(PoseStack poseStack, VertexConsumer vertexConsumer, int packedLight, int packedOverlay, int color) {
+                     group.render(poseStack, vertexConsumer, packedLight, packedOverlay, red, green, blue, alpha);
+                 }
+                 */
 
                 @Override
                 public void renderToBuffer(PoseStack poseStack, VertexConsumer vertexConsumer, int packedLight, int packedOverlay,
@@ -597,6 +605,11 @@ class TextReplacementTest {
         assertTrue(transformed.contains("public void renderToBuffer(PoseStack poseStack, VertexConsumer vertexConsumer, int packedLight, int packedOverlay, int color)"))
         assertTrue(transformed.contains("group.render(poseStack, vertexConsumer, packedLight, packedOverlay, color);"))
         assertTrue(transformed.contains("model.renderToBuffer(poseStack, vertexConsumer, packedLight, packedOverlay, FastColor.ARGB32.colorFromFloat(alpha, 1.0F, 1.0F, 1.0F));"))
+        assertTrue(transformed.contains("// group.render(poseStack, vertexConsumer, packedLight, packedOverlay, red, green, blue, alpha);"), transformed)
+        assertTrue(transformed.contains("private static final String RENDER_DOC = \"model.renderToBuffer(poseStack, vertexConsumer, packedLight, packedOverlay, 1.0F, 1.0F, 1.0F, alpha);\";"), transformed)
+        assertTrue(transformed.contains("group.render(poseStack, vertexConsumer, packedLight, packedOverlay, red, green, blue, alpha);"), transformed)
+        assertFalse(transformed.contains("// group.render(poseStack, vertexConsumer, packedLight, packedOverlay, FastColor"), transformed)
+        assertFalse(transformed.contains("RENDER_DOC = \"model.renderToBuffer(poseStack, vertexConsumer, packedLight, packedOverlay, FastColor"), transformed)
         assertTrue(!transformed.contains("float red, float green, float blue, float alpha"))
     }
 

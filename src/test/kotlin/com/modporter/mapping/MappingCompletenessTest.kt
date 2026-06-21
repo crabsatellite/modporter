@@ -4323,6 +4323,91 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy model render packed color migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyModelRenderPackedColorBodies")
+        assertTrue(start >= 0, "migrateLegacyModelRenderPackedColorBodies is missing")
+        val end = source.indexOf("private fun isLegacyModelPartColorRenderArgs", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw renderToBuffer prefilter" to body.contains("""source.contains("renderToBuffer(")"""),
+            "raw render prefilter" to body.contains("""source.contains(".render(")"""),
+            "raw render rewrite" to body.contains("""rewriteJavaCall(result, "render")"""),
+            "raw renderToBuffer rewrite" to body.contains("""rewriteJavaCall(result, "renderToBuffer")"""),
+            "raw body render rewrite" to body.contains("""rewriteJavaCall(body, "render")"""),
+            "raw int-color signature scan" to body.contains("signature.find(result, cursor)"),
+            "raw float-color signature scan" to body.contains("floatColorSignature.find(result, cursor)")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("renderToBuffer(")""") &&
+                body.contains("""executableCode.contains(".render(")""") &&
+                body.contains("""rewriteExecutableJavaCall(result, "render")""") &&
+                body.contains("""rewriteExecutableJavaCall(result, "renderToBuffer")""") &&
+                body.contains("""rewriteExecutableJavaCall(body, "render")""") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("signature.find(executableResult, cursor)") &&
+                body.contains("floatColorSignature.find(executableResult, cursor)") &&
+                body.contains("findMatchingBrace(executableResult, openBrace)"),
+            "Legacy model render packed color migration must derive calls and method bodies from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy model render packed color migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `model render packed color text migration is not a raw json replacement`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val replacements = projectRoot
+            .resolve("src/main/resources/mappings/forge2neo/text-replacements.json")
+            .readText()
+        val textPass = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = textPass.indexOf("private fun migrateModelRenderPackedColorText")
+        assertTrue(start >= 0, "migrateModelRenderPackedColorText is missing")
+        val end = textPass.indexOf("private fun migrateRemovedTagManagerAccess", start + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val body = textPass.substring(start, end)
+        val forbiddenJsonRules = listOf(
+            "model-render-buffer-color-signature",
+            "modelpart-render-color-arg",
+            "model-render-buffer-float-call"
+        ).filter { replacements.contains(""""id": "$it"""") }
+        val offenders = listOf(
+            "raw renderToBuffer prefilter" to body.contains("""source.contains("renderToBuffer(")"""),
+            "raw render prefilter" to body.contains("""source.contains(".render(")"""),
+            "raw direct regex replace" to Regex("""Regex\([\s\S]*?\)\s*\.\s*replace\(""").containsMatchIn(body)
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("renderToBuffer(")""") &&
+                body.contains("""executableCode.contains(".render(")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("FastColor.ARGB32.colorFromFloat"),
+            "Model render packed-color text migration must run through executable source filtering"
+        )
+        assertTrue(
+            forbiddenJsonRules.isEmpty() && offenders.isEmpty(),
+            "Model render packed-color migration must not be raw JSON/global regex replacement: json=$forbiddenJsonRules code=$offenders"
+        )
+    }
+
+    @Test
     fun `curative item effect migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
