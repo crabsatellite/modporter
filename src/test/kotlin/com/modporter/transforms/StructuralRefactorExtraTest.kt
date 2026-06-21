@@ -11049,6 +11049,40 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy restore migration ignores comments and strings`() {
+        val projectDir = createFile("RestoreSurface.java", """
+            package com.example;
+
+            public class RestoreSurface {
+                private static final String DOC = "holder.restore(true, false)";
+
+                /*
+                void docs(Holder holder) {
+                    holder.restore(true, false);
+                }
+                */
+                void real(Holder holder) {
+                    holder.restore(true, false);
+                }
+            }
+
+            class Holder {
+                void restore(boolean persist, boolean sync) {
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = projectDir.resolve("src/main/java/com/example/RestoreSurface.java").readText()
+        assertTrue(migrated.contains("holder.restore();"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "holder.restore(true, false)";"""), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("holder.restore(true, false);"), migrated)
+        assertFalse(commentBlock.contains("holder.restore();"), migrated)
+    }
+
+    @Test
     fun `migrates block entity fluid capability override to RegisterCapabilitiesEvent`() {
         val projectDir = createFile("ExampleMod.java", """
             package com.example;

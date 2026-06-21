@@ -3167,6 +3167,22 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy restore migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        assertTrue(
+            source.contains("""replaceExecutableRegex(result, Regex(""" + "\"\"\"" + """\.restore\("""),
+            "legacy restore migration must use executable Java rewriting"
+        )
+        assertTrue(
+            !source.contains("""result.replace(".restore(true, false)", ".restore()")"""),
+            "legacy restore migration must not rewrite comments or string literals with raw String.replace"
+        )
+    }
+
+    @Test
     fun `holder value accessor migration uses executable typed variables`() {
         val source = Path.of("")
             .toAbsolutePath()

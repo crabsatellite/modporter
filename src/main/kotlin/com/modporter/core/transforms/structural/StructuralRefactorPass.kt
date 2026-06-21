@@ -16652,7 +16652,7 @@ ${indent}}
 
         result = migrateUseOnContextDataComponentHasCalls(result)
         result = migrateThisStackUseDurationCalls(result)
-        result = result.replace(".restore(true, false)", ".restore()")
+        result = replaceExecutableRegex(result, Regex("""\.restore\(\s*true\s*,\s*false\s*\)""")) { ".restore()" }
 
         result = Regex(
             """public\s+@NotNull\s+ItemStack\s+pickupBlock\(@NotNull\s+LevelAccessor\s+level,\s*@NotNull\s+BlockPos\s+pos,\s*@NotNull\s+BlockState\s+state\)"""
