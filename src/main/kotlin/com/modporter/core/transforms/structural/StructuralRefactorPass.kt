@@ -15557,17 +15557,18 @@ ${indent}}
     }
 
     private fun migrateLegacyHeartTypeSheetCoordinatesSource(source: String): String {
-        if (!source.contains(".getX(") || !source.contains(".blit(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".getX(") || !executableCode.contains(".blit(")) return source
         val heartTypeReceivers = collectHeartTypeReceiverNames(source)
         if (heartTypeReceivers.isEmpty() &&
-            !Regex("""(?:net\.minecraft\.client\.gui\.)?Gui\.HeartType\.[A-Z][A-Z0-9_]*\.getX\s*\(""").containsMatchIn(source) &&
-            !Regex("""(?<![\w$])HeartType\.[A-Z][A-Z0-9_]*\.getX\s*\(""").containsMatchIn(source)
+            !Regex("""(?:net\.minecraft\.client\.gui\.)?Gui\.HeartType\.[A-Z][A-Z0-9_]*\.getX\s*\(""").containsMatchIn(executableCode) &&
+            !Regex("""(?<![\w$])HeartType\.[A-Z][A-Z0-9_]*\.getX\s*\(""").containsMatchIn(executableCode)
         ) {
             return source
         }
 
         var changed = false
-        var result = rewriteJavaInvocationArguments(source, "blit") { args ->
+        var result = rewriteExecutableJavaInvocationArguments(source, "blit") { args ->
             var argChanged = false
             val migratedArgs = args.map { arg ->
                 val replacement = replaceLegacyHeartTypeGetXCalls(arg, heartTypeReceivers)
@@ -15582,7 +15583,7 @@ ${indent}}
             }
         }
         if (!changed) return source
-        if (!result.contains("private static int modporterLegacyHeartTypeX(")) {
+        if (!maskJavaCommentsAndLiterals(result).contains("private static int modporterLegacyHeartTypeX(")) {
             result = insertBeforeLastClassBrace(result, legacyHeartTypeXHelperSource())
         }
         return result
@@ -15590,12 +15591,13 @@ ${indent}}
 
     private fun collectHeartTypeReceiverNames(source: String): Set<String> {
         val names = linkedSetOf<String>()
+        val executableCode = maskJavaCommentsAndLiterals(source)
         Regex("""\b(?:net\.minecraft\.client\.gui\.)?Gui\.HeartType\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(source)
+            .findAll(executableCode)
             .forEach { names += it.groupValues[1] }
-        if (source.contains("import net.minecraft.client.gui.Gui.HeartType;")) {
+        if (executableCode.contains("import net.minecraft.client.gui.Gui.HeartType;")) {
             Regex("""(?<![\w$.])HeartType\s+([A-Za-z_$][\w$]*)\b""")
-                .findAll(source)
+                .findAll(executableCode)
                 .forEach { names += it.groupValues[1] }
         }
         return names
@@ -15608,7 +15610,8 @@ ${indent}}
             """(?<![\w$])((?:net\.minecraft\.client\.gui\.)?Gui\.HeartType\.[A-Z][A-Z0-9_]*|HeartType\.[A-Z][A-Z0-9_]*|[A-Za-z_$][\w$]*)\.getX\s*\("""
         )
         while (true) {
-            val match = receiverPattern.find(result, cursor) ?: break
+            val executableExpression = maskJavaCommentsAndLiterals(result)
+            val match = receiverPattern.find(executableExpression, cursor) ?: break
             val receiver = match.groupValues[1]
             val isKnownHeartType = receiver in heartTypeReceivers ||
                 receiver.startsWith("Gui.HeartType.") ||
@@ -15618,8 +15621,8 @@ ${indent}}
                 cursor = match.range.last + 1
                 continue
             }
-            val openParen = result.indexOf('(', match.range.first)
-            val closeParen = if (openParen >= 0) findMatchingParen(result, openParen) else -1
+            val openParen = executableExpression.indexOf('(', match.range.first)
+            val closeParen = if (openParen >= 0) findMatchingParen(executableExpression, openParen) else -1
             if (openParen < 0 || closeParen < 0) {
                 cursor = match.range.last + 1
                 continue

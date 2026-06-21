@@ -29010,6 +29010,39 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy Gui HeartType sheet coordinate migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("HeartOverlayDocsOnly.java").writeText("""
+            package com.example;
+
+            public class HeartOverlayDocsOnly {
+                private static final String OLD_SAMPLE = "guiGraphics.blit(HEARTS, x, y, heartType.getX(halfHeart, blink), 0, 9, 9);";
+
+                /*
+                public void copied(GuiGraphics guiGraphics, Gui.HeartType heartType, int x, int y, boolean halfHeart, boolean blink) {
+                    guiGraphics.blit(HEARTS, x, y, heartType.getX(halfHeart, blink), 0, 9, 9);
+                }
+                */
+
+                public void render(GuiGraphics guiGraphics, int x, int y) {
+                    guiGraphics.blit(HEARTS, x, y, 0, 0, 9, 9);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("HeartOverlayDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-hearttype-legacy-sheet-coordinates" }, result.changes.toString())
+        assertTrue(migrated.contains("""private static final String OLD_SAMPLE = "guiGraphics.blit(HEARTS, x, y, heartType.getX(halfHeart, blink), 0, 9, 9);";"""), migrated)
+        assertTrue(migrated.contains("guiGraphics.blit(HEARTS, x, y, heartType.getX(halfHeart, blink), 0, 9, 9);"), migrated)
+        assertTrue(migrated.contains("guiGraphics.blit(HEARTS, x, y, 0, 0, 9, 9);"), migrated)
+        assertFalse(migrated.contains("modporterLegacyHeartTypeX("), migrated)
+        assertFalse(migrated.contains("private static int modporterLegacyHeartTypeX("), migrated)
+    }
+
+    @Test
     fun `migrates legacy add layer skin name loops to PlayerSkin models`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

@@ -3548,6 +3548,53 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy HeartType sheet coordinate migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyHeartTypeSheetCoordinatesSource")
+        assertTrue(start >= 0, "migrateLegacyHeartTypeSheetCoordinatesSource is missing")
+        val end = source.indexOf("private fun migrateLegacyProjectilePortalBranchSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getX prefilter" to body.contains("""source.contains(".getX(")"""),
+            "raw blit prefilter" to body.contains("""source.contains(".blit(")"""),
+            "raw direct HeartType scan" to body.contains("containsMatchIn(source)"),
+            "raw blit invocation rewrite" to body.contains("""rewriteJavaInvocationArguments(source, "blit")"""),
+            "raw receiver collection" to body.contains(".findAll(source)"),
+            "raw import scan" to body.contains("""source.contains("import net.minecraft.client.gui.Gui.HeartType;")"""),
+            "raw getX receiver scan" to body.contains("receiverPattern.find(result, cursor)"),
+            "raw getX paren matching" to body.contains("findMatchingParen(result, openParen)"),
+            "raw helper existence scan" to body.contains("""result.contains("private static int modporterLegacyHeartTypeX(")""")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".getX(")""") &&
+                body.contains("""executableCode.contains(".blit(")""") &&
+                body.contains("containsMatchIn(executableCode)") &&
+                body.contains("""rewriteExecutableJavaInvocationArguments(source, "blit")""") &&
+                body.contains("""maskJavaCommentsAndLiterals(result).contains("private static int modporterLegacyHeartTypeX(")""") &&
+                body.contains("private fun collectHeartTypeReceiverNames(source: String)") &&
+                body.contains(".findAll(executableCode)") &&
+                body.contains("""executableCode.contains("import net.minecraft.client.gui.Gui.HeartType;")""") &&
+                body.contains("val executableExpression = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("receiverPattern.find(executableExpression, cursor)") &&
+                body.contains("findMatchingParen(executableExpression, openParen)"),
+            "Legacy HeartType sheet coordinate migration must collect receivers and rewrite blit arguments from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy HeartType sheet coordinate migration must not treat comments or strings as source evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy add layer skin migrations use executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
