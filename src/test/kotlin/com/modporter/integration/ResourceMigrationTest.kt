@@ -592,6 +592,64 @@ class ResourceMigrationTest {
     }
 
     @Test
+    fun `custom recipe codec source index does not resolve globally unique invisible types`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java")
+        val registryDir = javaDir.resolve("resmod")
+        val foreignDir = javaDir.resolve("other")
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        registryDir.createDirectories()
+        foreignDir.createDirectories()
+        recipeDir.createDirectories()
+
+        registryDir.resolve("ModRecipeSerializers.java").writeText("""
+            package resmod;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModRecipeSerializers {
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS = DeferredRegister.create(Registries.RECIPE_SERIALIZER, "resmod");
+                public static final DeferredHolder<RecipeSerializer<?>, ForeignRecipe.Serializer> FOREIGN = RECIPE_SERIALIZERS.register("foreign", ForeignRecipe.Serializer::new);
+            }
+        """.trimIndent())
+        foreignDir.resolve("ForeignRecipe.java").writeText("""
+            package other;
+
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public final class ForeignRecipe {
+                public static class Serializer implements RecipeSerializer<ForeignRecipe> {
+                    private static final MapCodec<ForeignRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                        CompoundTag.CODEC.optionalFieldOf("tag").forGetter(recipe -> null)
+                    ).apply(instance, value -> null));
+                }
+            }
+        """.trimIndent())
+        recipeDir.resolve("foreign.json").writeText("""
+            {
+              "type": "resmod:foreign",
+              "tag": "{Value:1b}"
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val foreign = projectDir.resolve("src/generated/resources/data/resmod/recipe/foreign.json").readText()
+        assertFalse(
+            result.changes.any { it.ruleId == "res-recipe-snbt-compound-tag" },
+            "Recipe codec source lookup must follow Java visibility, not globally unique simple type names"
+        )
+        assertTrue(foreign.contains(""""tag": "{Value:1b}""""), foreign)
+        assertFalse(foreign.contains(""""tag": {"""), foreign)
+    }
+
+    @Test
     fun `custom recipe serializer registries do not resolve bare namespaces by global uniqueness`() {
         val projectDir = setupResourceProject()
         val javaDir = projectDir.resolve("src/main/java/resmod")

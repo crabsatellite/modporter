@@ -2324,6 +2324,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `resource java type resolution does not use global simple name fallback`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val resourceMigrator = projectRoot
+            .resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt")
+            .readText()
+        val start = resourceMigrator.indexOf("private fun resolveSimpleJavaType")
+        assertTrue(start >= 0, "resolveSimpleJavaType is missing")
+        val end = resourceMigrator.indexOf("\n    private fun ", start + 1).let {
+            if (it < 0) resourceMigrator.length else it
+        }
+        val body = resourceMigrator.substring(start, end)
+        val forbidden = listOf(
+            "global simple type index" to Regex("""\bbySimpleName\b"""),
+            "global unique simple type fallback" to Regex("""\bsimpleMatches\b"""),
+            "unique simple type fallback" to Regex("""singleOrNull\(\)""")
+        )
+        val offenders = forbidden
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "resolveSimpleJavaType contains $label" }
+
+        assertTrue(
+            body.contains("context.imports[simpleName]") &&
+                body.contains("index.byFqName[\"\${context.packageName}.\$simpleName\"]") &&
+                body.contains("context.wildcardImports") &&
+                Regex("""return\s+null\s*\}\s*$""").containsMatchIn(body),
+            "Resource Java type resolution must follow Java visibility through imports, package, and wildcard imports"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Resource Java type resolution must not resolve invisible types by project-global simple-name uniqueness: $offenders"
+        )
+    }
+
+    @Test
     fun `code awarded advancement detection uses executable source evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot

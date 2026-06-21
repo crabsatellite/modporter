@@ -1774,9 +1774,7 @@ class ResourceMigrationPass(
             .distinctBy { it.fqName }
         if (wildcardMatches.size == 1) return wildcardMatches.single()
 
-        val simpleMatches = index.bySimpleName[simpleName].orEmpty()
-            .distinctBy { it.fqName }
-        return simpleMatches.singleOrNull()
+        return null
     }
 
     private fun sanitizeJavaTypeReference(reference: String): String =
@@ -3020,7 +3018,6 @@ class ResourceMigrationPass(
         val sources: List<JavaSourceInfo>
     ) {
         val byFqName: Map<String, JavaSourceInfo> = sources.associateBy { it.fqName }
-        val bySimpleName: Map<String, List<JavaSourceInfo>> = sources.groupBy { it.simpleName }
     }
 
     private data class JsonElementMigration(val element: JsonElement, val changed: Boolean)
