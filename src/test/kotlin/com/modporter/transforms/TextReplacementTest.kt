@@ -3000,6 +3000,40 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `custom particle network migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            public class ParticleNetworkDocs {
+                /*
+                private <T extends ParticleOptions> T readParticle(ParticleType<T> particleType, FriendlyByteBuf buf) {
+                    return particleType.getDeserializer().fromNetwork(particleType, buf);
+                }
+
+                public void encode(FriendlyByteBuf buf) {
+                    queuedParticle.particleOptions.writeToNetwork(buf);
+                }
+                */
+                private static final String DOC = "ParticleOptions getDeserializer().fromNetwork writeToNetwork FriendlyByteBuf";
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "particle-network-streamcodec" }, result.changes.joinToString("\n"))
+        assertTrue(transformed.contains("FriendlyByteBuf buf"), transformed)
+        assertTrue(transformed.contains("particleType.getDeserializer().fromNetwork(particleType, buf);"), transformed)
+        assertTrue(transformed.contains("queuedParticle.particleOptions.writeToNetwork(buf);"), transformed)
+        assertFalse(transformed.contains("RegistryFriendlyByteBuf"), transformed)
+        assertFalse(transformed.contains("particleType.streamCodec()"), transformed)
+        assertFalse(transformed.contains("void writeParticle("), transformed)
+    }
+
+    @Test
     fun `loot datagen builders and global loot modifier generics migrate to 1_21 APIs`() {
         val projectDir = createTestFile("""
             package com.example;

@@ -3098,26 +3098,32 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
     }
 
     private fun migrateParticleNetworkCodecs(source: String): String {
-        if (!source.contains("ParticleOptions") ||
-            !source.contains("getDeserializer().fromNetwork") ||
-            !source.contains("writeToNetwork")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("ParticleOptions") ||
+            !executableCode.contains("getDeserializer().fromNetwork") ||
+            !executableCode.contains("writeToNetwork")) {
             return source
         }
 
         var result = source
-        result = Regex("""\bFriendlyByteBuf\b""").replace(result, "RegistryFriendlyByteBuf")
-        result = result.replace(
+        val afterReadMigration = replaceExecutableRegex(
+            result,
             Regex("""return\s+particleType\.getDeserializer\(\)\.fromNetwork\(\s*particleType\s*,\s*buf\s*\)\s*;"""),
-            "return particleType.streamCodec().decode(buf);"
-        )
-        result = Regex("""([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.particleOptions\.writeToNetwork\(\s*buf\s*\)\s*;""")
-            .replace(result, "writeParticle($1.particleOptions, buf);")
+        ) { "return particleType.streamCodec().decode(buf);" }
+        if (afterReadMigration == result) return source
+        result = afterReadMigration
+        result = replaceExecutableRegex(
+            result,
+            Regex("""([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.particleOptions\.writeToNetwork\(\s*buf\s*\)\s*;""")
+        ) { match -> "writeParticle(${match.groupValues[1]}.particleOptions, buf);" }
 
-        if (!result.contains("void writeParticle(")) {
+        result = replaceExecutableRegex(result, Regex("""\bFriendlyByteBuf\b""")) { "RegistryFriendlyByteBuf" }
+
+        if (!maskJavaCommentsAndLiterals(result).contains("void writeParticle(")) {
             val readParticlePattern = Regex(
                 """(?s)(private\s+<T\s+extends\s+ParticleOptions>\s+T\s+readParticle\s*\(\s*ParticleType<T>\s+particleType\s*,\s*RegistryFriendlyByteBuf\s+buf\s*\)\s*\{\s*return\s+particleType\.streamCodec\(\)\.decode\(buf\);\s*\})"""
             )
-            result = readParticlePattern.replace(result) { match ->
+            result = replaceExecutableRegex(result, readParticlePattern) { match ->
                 match.value + """
 
 

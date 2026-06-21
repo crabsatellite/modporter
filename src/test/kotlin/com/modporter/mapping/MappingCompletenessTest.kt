@@ -1099,6 +1099,45 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `particle network codec migration uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateParticleNetworkCodecs")
+        assertTrue(start >= 0, "migrateParticleNetworkCodecs is missing")
+        val end = source.indexOf("private fun migrateJadeTooltipElementHelper", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw ParticleOptions prefilter" to """source.contains("ParticleOptions")""",
+            "raw getDeserializer prefilter" to """source.contains("getDeserializer().fromNetwork")""",
+            "raw writeToNetwork prefilter" to """source.contains("writeToNetwork")""",
+            "raw FriendlyByteBuf replacement" to "Regex(\"\"\"\\bFriendlyByteBuf\\b\"\"\").replace(result",
+            "raw deserializer return replacement" to "result.replace(",
+            "raw writeToNetwork replacement" to ".replace(result, \"writeParticle",
+            "raw helper insertion" to "readParticlePattern.replace(result)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""!executableCode.contains("ParticleOptions")""") &&
+                body.contains("val afterReadMigration = replaceExecutableRegex(") &&
+                body.contains("if (afterReadMigration == result) return source") &&
+                body.contains("replaceExecutableRegex(result, Regex(\"\"\"\\bFriendlyByteBuf\\b\"\"\"))") &&
+                body.contains("!maskJavaCommentsAndLiterals(result).contains(\"void writeParticle(\")"),
+            "Particle network codec migration must prove and rewrite network serialization from executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Particle network codec migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `client only build detection ignores comments and strings`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
