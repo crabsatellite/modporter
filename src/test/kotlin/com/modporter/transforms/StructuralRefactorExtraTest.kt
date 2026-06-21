@@ -24711,6 +24711,51 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy projectile weapon migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DocsLauncherItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.ProjectileWeaponItem;
+            import net.minecraft.world.level.Level;
+
+            public class DocsLauncherItem extends ProjectileWeaponItem {
+                private static final String DOC = ".getProjectile( .shootFromRotation( .addFreshEntity(";
+
+                /*
+                public ItemStack finishUsingItem(ItemStack stack, Level level, LivingEntity user) {
+                    if (user instanceof Player player) {
+                        ItemStack ammoItem = player.getProjectile(stack);
+                        ExampleProjectile projectile = item.createProjectile(level, player);
+                        projectile.shootFromRotation(player, player.getXRot(), player.getYRot(), 0.0F, 2.5F, 0.7F);
+                        level.addFreshEntity(projectile);
+                    }
+                    return stack;
+                }
+                */
+
+                @Override
+                public ItemStack finishUsingItem(ItemStack stack, Level level, LivingEntity user) {
+                    return stack;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("DocsLauncherItem.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(migrated.contains("shootProjectile(LivingEntity shooter, Projectile projectile"), migrated)
+        assertFalse(migrated.contains("createProjectile(Level level, LivingEntity shooter"), migrated)
+        assertTrue(migrated.contains("private static final String DOC = \".getProjectile( .shootFromRotation( .addFreshEntity(\";"), migrated)
+        assertTrue(migrated.contains("public ItemStack finishUsingItem(ItemStack stack, Level level, LivingEntity user) {\n        return stack;"), migrated)
+    }
+
+    @Test
     fun `migrates legacy item extension and projectile api hooks by source shape`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

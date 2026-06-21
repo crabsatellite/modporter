@@ -32795,27 +32795,35 @@ ${indent}}
     )
 
     private fun migrateLegacyProjectileWeaponFinishUsingItemSource(source: String): String {
-        if (!source.contains("extends ProjectileWeaponItem") ||
-            !source.contains("finishUsingItem(") ||
-            !source.contains(".getProjectile(") ||
-            !source.contains(".shootFromRotation(") ||
-            !source.contains(".addFreshEntity(")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("extends ProjectileWeaponItem") ||
+            !executableCode.contains("finishUsingItem(") ||
+            !executableCode.contains(".getProjectile(") ||
+            !executableCode.contains(".shootFromRotation(") ||
+            !executableCode.contains(".addFreshEntity(")) {
             return source
         }
-        val methodText = javaDeclaredMethodText(source, "finishUsingItem") ?: return source
+        val method = javaMethodRanges(executableCode).singleOrNull { method ->
+            method.name == "finishUsingItem" &&
+                Regex("""\bItemStack\s+finishUsingItem\s*\(""").containsMatchIn(method.header)
+        } ?: return source
+        val methodText = source.substring(method.range)
         val shape = parseLegacyProjectileWeaponShape(methodText) ?: return source
-        var result = source.replace(methodText, modernProjectileWeaponFinishUsingItem(shape))
+        var result = source.replaceRange(method.range, modernProjectileWeaponFinishUsingItem(shape))
 
-        if (!result.contains("shootProjectile(LivingEntity shooter, Projectile projectile")) {
+        var resultCode = maskJavaCommentsAndLiterals(result)
+        if (!resultCode.contains("shootProjectile(LivingEntity shooter, Projectile projectile")) {
             result = insertBeforeLastClassBrace(result, modernProjectileWeaponShootProjectileMethod())
+            resultCode = maskJavaCommentsAndLiterals(result)
         }
-        if (!result.contains("createProjectile(Level level, LivingEntity shooter, ItemStack weapon, ItemStack ammo, boolean isCrit)")) {
+        if (!resultCode.contains("createProjectile(Level level, LivingEntity shooter, ItemStack weapon, ItemStack ammo, boolean isCrit)")) {
             result = insertBeforeLastClassBrace(result, modernProjectileWeaponCreateProjectileMethod(shape))
         }
         if (shape.customProjectileMethod != null) {
-            result = Regex(
+            val customProjectilePattern = Regex(
                 """public\s+${Regex.escape(shape.projectileType)}\s+${Regex.escape(shape.customProjectileMethod)}\s*\(\s*${Regex.escape(shape.projectileType)}\s+([A-Za-z_$][\w$]*)\s*\)"""
-            ).replace(result) { match ->
+            )
+            result = replaceExecutableRegex(result, customProjectilePattern) { match ->
                 "public ${shape.projectileType} ${shape.customProjectileMethod}(${shape.projectileType} ${match.groupValues[1]}, ItemStack projectileStack, ItemStack weaponStack)"
             }
         }
@@ -32831,45 +32839,49 @@ ${indent}}
     }
 
     private fun parseLegacyProjectileWeaponShape(methodText: String): LegacyProjectileWeaponShape? {
+        val methodCode = maskJavaCommentsAndLiterals(methodText)
         val id = """[A-Za-z_$][\w$]*"""
         val signature = Regex(
             """finishUsingItem\s*\(\s*ItemStack\s+($id)\s*,\s*Level\s+($id)\s*,\s*LivingEntity\s+($id)\s*\)"""
-        ).find(methodText) ?: return null
+        ).find(methodCode) ?: return null
         val weaponStack = signature.groupValues[1]
         val level = signature.groupValues[2]
         val user = signature.groupValues[3]
         val player = Regex("""\b${Regex.escape(user)}\s+instanceof\s+Player\s+($id)\b""")
-            .find(methodText)
+            .find(methodCode)
             ?.groupValues
             ?.get(1)
             ?: return null
         val ammoVariable = Regex("""\bItemStack\s+($id)\s*=\s*${Regex.escape(player)}\.getProjectile\(\s*${Regex.escape(weaponStack)}\s*\)""")
-            .find(methodText)
+            .find(methodCode)
             ?.groupValues
             ?.get(1)
             ?: return null
         val projectileItem = Regex(
             """\b($id)\s+($id)\s*=\s*\(\s*\1\s*\)\s*\(\s*${Regex.escape(ammoVariable)}\.getItem\(\)\s+instanceof\s+\1\s+$id\s*\?\s*$id\s*:\s*(.+?)\s*\)\s*;"""
-        ).find(methodText) ?: return null
+        ).find(methodCode) ?: return null
         val projectileItemType = projectileItem.groupValues[1]
         val projectileItemVariable = projectileItem.groupValues[2]
         val fallbackItemExpression = projectileItem.groupValues[3].trim()
         val projectileCreation = Regex(
             """\b($id)\s+($id)\s*=\s*${Regex.escape(projectileItemVariable)}\.(create$id)\s*\(\s*${Regex.escape(level)}\s*,\s*${Regex.escape(player)}\s*\)\s*;"""
-        ).find(methodText) ?: return null
+        ).find(methodCode) ?: return null
         val projectileType = projectileCreation.groupValues[1]
         val projectileVariable = projectileCreation.groupValues[2]
         val createMethod = projectileCreation.groupValues[3]
         val shoot = Regex(
             """\b${Regex.escape(projectileVariable)}\.shootFromRotation\(\s*${Regex.escape(player)}\s*,\s*${Regex.escape(player)}\.getXRot\(\)\s*,\s*${Regex.escape(player)}\.getYRot\(\)\s*,\s*0\.0F\s*,\s*([^,]+?)\s*,\s*([^)]+?)\s*\)\s*;"""
-        ).find(methodText) ?: return null
+        ).find(methodCode) ?: return null
         val customMethod = Regex(
             """${Regex.escape(projectileVariable)}\s*=\s*this\.($id)\s*\(\s*${Regex.escape(projectileVariable)}\s*\)\s*;"""
-        ).find(methodText)?.groupValues?.get(1)
+        ).find(methodCode)?.groupValues?.get(1)
         val playSoundStatement = Regex(
             """(?m)^[ \t]*${Regex.escape(level)}\.playSound\([^;]+;\s*$"""
-        ).find(methodText)?.value?.trim() ?: return null
-        if (!methodText.contains("$level.addFreshEntity($projectileVariable);")) return null
+        ).find(methodCode)
+            ?.range
+            ?.let { methodText.substring(it.first, it.last + 1).trim() }
+            ?: return null
+        if (!methodCode.contains("$level.addFreshEntity($projectileVariable);")) return null
         return LegacyProjectileWeaponShape(
             weaponStack = weaponStack,
             level = level,

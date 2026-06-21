@@ -2577,6 +2577,51 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy projectile weapon migration uses executable finishUsingItem method range`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyProjectileWeaponFinishUsingItemSource")
+        assertTrue(start >= 0, "migrateLegacyProjectileWeaponFinishUsingItemSource is missing")
+        val parserStart = source.indexOf("private fun parseLegacyProjectileWeaponShape", start + 1)
+        assertTrue(parserStart >= 0, "parseLegacyProjectileWeaponShape is missing")
+        val migrationBody = source.substring(start, parserStart)
+        val parserEnd = source.indexOf("private fun modernProjectileWeaponFinishUsingItem", parserStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val parserBody = source.substring(parserStart, parserEnd)
+        val offenders = listOf(
+            "raw ProjectileWeaponItem prefilter" to """source.contains("extends ProjectileWeaponItem")""",
+            "raw finishUsingItem extraction" to """javaDeclaredMethodText(source, "finishUsingItem")""",
+            "raw method replacement" to "source.replace(methodText",
+            "raw helper method existence check" to """result.contains("shootProjectile(LivingEntity shooter, Projectile projectile")""",
+            "raw custom projectile signature replacement" to ".replace(result) { match ->",
+            "raw parser method body" to ".find(methodText)",
+            "raw parser addFreshEntity check" to "methodText.contains("
+        )
+            .filter { (_, marker) -> migrationBody.contains(marker) || parserBody.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            migrationBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                migrationBody.contains("val method = javaMethodRanges(executableCode).singleOrNull") &&
+                migrationBody.contains("val methodText = source.substring(method.range)") &&
+                migrationBody.contains("source.replaceRange(method.range, modernProjectileWeaponFinishUsingItem(shape))") &&
+                migrationBody.contains("var resultCode = maskJavaCommentsAndLiterals(result)") &&
+                migrationBody.contains("replaceExecutableRegex(result, customProjectilePattern)") &&
+                parserBody.contains("val methodCode = maskJavaCommentsAndLiterals(methodText)") &&
+                parserBody.contains(".find(methodCode)") &&
+                parserBody.contains("methodCode.contains(\"${'$'}level.addFreshEntity(${'$'}projectileVariable);\")"),
+            "Legacy projectile weapon migration must parse and replace only executable finishUsingItem method code"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy projectile weapon migration must not use comments, strings, or raw methods as firing logic evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `loot condition codec migrations do not synthesize member names from json keys`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
