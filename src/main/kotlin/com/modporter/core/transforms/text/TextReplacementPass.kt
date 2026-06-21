@@ -1932,10 +1932,12 @@ ${codecFields.joinToString(",\n")}
     )
 
     private data class LegacyReferenceIndex<T>(
-        val byExact: Map<String, T>,
-        val bySimpleOwner: Map<String, T>,
-        val bySimpleField: Map<String, T>
+        val byExact: Map<String, T>
     )
+
+    private data class LegacyExpression(val text: String, val offset: Int)
+
+    private data class LegacySourceSpan(val text: String, val offset: Int)
 
     private data class LinearIntValue(val base: Int, val perLevelAboveFirst: Int)
 
@@ -2074,34 +2076,23 @@ ${codecFields.joinToString(",\n")}
         ownerPackage: (T) -> String
     ): LegacyReferenceIndex<T> {
         val byExact = linkedMapOf<String, T>()
-        val simpleOwnerCandidates = linkedMapOf<String, MutableList<T>>()
-        val simpleFieldCandidates = linkedMapOf<String, MutableList<T>>()
         refs.forEach { ref ->
             val field = fieldName(ref)
             val owner = ownerClass(ref)
             val pkg = ownerPackage(ref)
-            simpleOwnerCandidates.getOrPut("$owner.$field") { mutableListOf() } += ref
-            simpleFieldCandidates.getOrPut(field) { mutableListOf() } += ref
             if (pkg.isNotBlank()) {
                 byExact["$pkg.$owner.$field"] = ref
+            } else {
+                byExact["$owner.$field"] = ref
             }
         }
-        return LegacyReferenceIndex(
-            byExact = byExact,
-            bySimpleOwner = uniqueLegacyReferences(simpleOwnerCandidates),
-            bySimpleField = uniqueLegacyReferences(simpleFieldCandidates)
-        )
+        return LegacyReferenceIndex(byExact = byExact)
     }
-
-    private fun <T> uniqueLegacyReferences(candidates: Map<String, List<T>>): Map<String, T> =
-        candidates.mapNotNull { (name, refs) ->
-            val unique = refs.distinct()
-            if (unique.size == 1) name to unique.single() else null
-        }.toMap(linkedMapOf())
 
     private fun <T> resolveLegacyReferenceExpression(
         expression: String,
         source: String,
+        offset: Int,
         index: LegacyReferenceIndex<T>
     ): T? {
         val ref = expression.trim()
@@ -2119,7 +2110,12 @@ ${codecFields.joinToString(",\n")}
                 .distinct()
                 .singleOrNull()
                 ?.let { return it }
-            return index.bySimpleField[field]
+            val ownerClass = javaTypeNameContainingOffset(source, offset) ?: return null
+            index.byExact["$ownerClass.$field"]?.let { return it }
+            if (context.packageName.isNotBlank()) {
+                index.byExact["${context.packageName}.$ownerClass.$field"]?.let { return it }
+            }
+            return null
         }
 
         if (owner.contains('.')) {
@@ -2137,7 +2133,7 @@ ${codecFields.joinToString(",\n")}
             .distinct()
             .singleOrNull()
             ?.let { return it }
-        return index.bySimpleOwner[ref]
+        return null
     }
 
     private fun resolveLegacyClassReference(
@@ -2452,13 +2448,13 @@ ${codecFields.joinToString(",\n")}
             return null
         }
 
-        val rarity = resolveLegacyRarity(registration.constructorArgs, superArgs[0])
+        val rarity = resolveLegacyRarity(registration.constructorArgs, superArgs[0].text)
         if (rarity == null) {
             errors.add("Cannot derive custom enchantment data for ${registration.className}: rarity is unresolved")
             return null
         }
 
-        val slots = parseLegacyEquipmentSlots(superArgs[2])
+        val slots = parseLegacyEquipmentSlots(superArgs[2].text)
         if (slots.isEmpty()) {
             errors.add("Cannot derive custom enchantment data for ${registration.className}: equipment slots are unresolved")
             return null
@@ -2516,7 +2512,7 @@ ${codecFields.joinToString(",\n")}
     private fun deriveLegacyEnchantmentItemTarget(
         registration: LegacyCustomEnchantmentRegistration,
         source: String,
-        categoryExpression: String,
+        categoryExpression: LegacyExpression,
         categories: LegacyReferenceIndex<LegacyEnchantmentCategorySpec>,
         itemRegistryEntries: Map<String, List<String>>,
         slots: List<String>,
@@ -2533,7 +2529,7 @@ ${codecFields.joinToString(",\n")}
             return customItemLegacyTarget(registration, canEnchantItemClass, itemRegistryEntries, slots, errors)
         }
 
-        val category = categoryExpression.trim()
+        val category = categoryExpression.text.trim()
         if (category == "EnchantmentCategory.ARMOR" || category.endsWith(".EnchantmentCategory.ARMOR")) {
             return armorLegacyItemTarget(slots)
         }
@@ -2544,12 +2540,12 @@ ${codecFields.joinToString(",\n")}
             return LegacyItemTarget("#minecraft:enchantable/mining", null, slotGroupsForLegacySlots(slots, customHand = false), emptyList())
         }
 
-        val customCategory = resolveLegacyReferenceExpression(category, source, categories)
+        val customCategory = resolveLegacyReferenceExpression(category, source, categoryExpression.offset, categories)
         if (customCategory?.itemClassName != null) {
             return customItemLegacyTarget(registration, customCategory.itemClassName, itemRegistryEntries, slots, errors)
         }
 
-        errors.add("Cannot derive custom enchantment data for ${registration.className}: item support expression '$categoryExpression' is unresolved")
+        errors.add("Cannot derive custom enchantment data for ${registration.className}: item support expression '${categoryExpression.text}' is unresolved")
         return null
     }
 
@@ -2625,7 +2621,7 @@ ${codecFields.joinToString(",\n")}
         }
     }
 
-    private fun extractLegacyConstructorSuperArgs(source: String, className: String): List<String>? {
+    private fun extractLegacyConstructorSuperArgs(source: String, className: String): List<LegacyExpression>? {
         val constructor = Regex("""(?s)\b${Regex.escape(className.substringAfterLast('.'))}\s*\([^)]*\)\s*\{""").find(source) ?: return null
         val openBrace = source.indexOf('{', constructor.range.last)
         if (openBrace < 0) return null
@@ -2636,7 +2632,10 @@ ${codecFields.joinToString(",\n")}
         val openParen = body.indexOf('(', superCall.range.first)
         val closeParen = findMatchingDelimiter(body, openParen, '(', ')')
         if (closeParen < 0) return null
-        return splitTopLevelArguments(body.substring(openParen + 1, closeParen))
+        return splitTopLevelArgumentExpressions(
+            body.substring(openParen + 1, closeParen),
+            baseOffset = openBrace + 1 + openParen + 1
+        )
     }
 
     private fun resolveLegacyRarity(constructorArgs: List<String>, rarityExpression: String): String? {
@@ -2681,12 +2680,19 @@ ${codecFields.joinToString(",\n")}
     }
 
     private fun legacyMethodBody(source: String, methodName: String): String? {
+        return legacyMethodBodySpan(source, methodName)?.text
+    }
+
+    private fun legacyMethodBodySpan(source: String, methodName: String): LegacySourceSpan? {
         val declaration = findJavaMethodDeclaration(source, methodName) ?: return null
         val openBrace = source.indexOf('{', declaration.range.last)
         if (openBrace < 0) return null
         val closeBrace = findMatchingBrace(source, openBrace)
         if (closeBrace < 0) return null
-        return source.substring(openBrace + 1, closeBrace)
+        return LegacySourceSpan(
+            text = source.substring(openBrace + 1, closeBrace),
+            offset = openBrace + 1
+        )
     }
 
     private fun legacyBooleanReturn(source: String, methodName: String): Boolean? {
@@ -2774,14 +2780,20 @@ ${codecFields.joinToString(",\n")}
         errors: MutableList<String>,
         registration: LegacyCustomEnchantmentRegistration
     ): List<String>? {
-        val body = legacyMethodBody(source, "checkCompatibility") ?: return emptyList()
+        val bodySpan = legacyMethodBodySpan(source, "checkCompatibility") ?: return emptyList()
+        val body = bodySpan.text
         val results = linkedSetOf<String>()
         var unresolved = false
         Regex("""other\s*!=\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.get\(\)""")
             .findAll(body)
             .forEach { match ->
                 val expression = match.groupValues[1]
-                val ref = resolveLegacyReferenceExpression(expression, source, enchantmentRefs)
+                val ref = resolveLegacyReferenceExpression(
+                    expression,
+                    source,
+                    bodySpan.offset + match.range.first,
+                    enchantmentRefs
+                )
                 if (ref == null) {
                     unresolved = true
                     errors.add("Cannot derive custom enchantment data for ${registration.className}: exclusive enchantment reference '$expression' is unresolved")
@@ -2869,15 +2881,19 @@ ${codecFields.joinToString(",\n")}
             }
             ?: return null
         val helperName = helperCall.name
-        val helperBody = legacyMethodBody(source, helperName) ?: return null
+        val helperBodySpan = legacyMethodBodySpan(source, helperName) ?: return null
+        val helperBody = helperBodySpan.text
         val effectRef = Regex("""new\s+MobEffectInstance\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.get\(\)""")
             .find(helperBody)
-            ?.groupValues
-            ?.get(1)
             ?: return null
-        val effectId = resolveLegacyReferenceExpression(effectRef, source, registryEntries)?.id
+        val effectId = resolveLegacyReferenceExpression(
+            effectRef.groupValues[1],
+            source,
+            helperBodySpan.offset + effectRef.range.first,
+            registryEntries
+        )?.id
             ?: run {
-                errors.add("Cannot derive custom enchantment data for ${registration.className}: mob effect reference '$effectRef' is unresolved")
+                errors.add("Cannot derive custom enchantment data for ${registration.className}: mob effect reference '${effectRef.groupValues[1]}' is unresolved")
                 return null
             }
         val durationTicks = helperCall.arguments[1].trim().toDoubleOrNull() ?: return null
@@ -3375,7 +3391,11 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
     }
 
     private fun splitTopLevelArguments(source: String): List<String> {
-        val args = mutableListOf<String>()
+        return splitTopLevelArgumentExpressions(source, baseOffset = 0).map { it.text }
+    }
+
+    private fun splitTopLevelArgumentExpressions(source: String, baseOffset: Int): List<LegacyExpression> {
+        val args = mutableListOf<LegacyExpression>()
         var start = 0
         var parenDepth = 0
         var braceDepth = 0
@@ -3383,6 +3403,20 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         var inString = false
         var inChar = false
         var escaped = false
+
+        fun addArgument(end: Int) {
+            var trimmedStart = start
+            var trimmedEnd = end
+            while (trimmedStart < trimmedEnd && source[trimmedStart].isWhitespace()) trimmedStart++
+            while (trimmedEnd > trimmedStart && source[trimmedEnd - 1].isWhitespace()) trimmedEnd--
+            if (trimmedStart < trimmedEnd) {
+                args += LegacyExpression(
+                    text = source.substring(trimmedStart, trimmedEnd),
+                    offset = baseOffset + trimmedStart
+                )
+            }
+        }
+
         for (i in source.indices) {
             val c = source[i]
             if (inString) {
@@ -3415,13 +3449,12 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
                 '[' -> bracketDepth++
                 ']' -> bracketDepth--
                 ',' -> if (parenDepth == 0 && braceDepth == 0 && bracketDepth == 0) {
-                    args.add(source.substring(start, i).trim())
+                    addArgument(i)
                     start = i + 1
                 }
             }
         }
-        val tail = source.substring(start).trim()
-        if (tail.isNotEmpty()) args.add(tail)
+        addArgument(source.length)
         return args
     }
 

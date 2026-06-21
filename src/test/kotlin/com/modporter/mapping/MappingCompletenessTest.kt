@@ -2480,6 +2480,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `custom enchantment data migrations do not use global simple reference fallback`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private data class LegacyReferenceIndex")
+        assertTrue(start >= 0, "LegacyReferenceIndex is missing")
+        val end = source.indexOf("private fun resolveLegacyClassReference", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "simple owner fallback table" to Regex("""\bbySimpleOwner\b"""),
+            "simple field fallback table" to Regex("""\bbySimpleField\b"""),
+            "global unique reference helper" to Regex("""uniqueLegacyReferences"""),
+            "simple owner candidates" to Regex("""simpleOwnerCandidates"""),
+            "simple field candidates" to Regex("""simpleFieldCandidates""")
+        )
+        val offenders = forbidden
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "legacy reference resolver contains $label" }
+
+        assertTrue(
+            body.contains("javaTypeNameContainingOffset(source, offset)") &&
+                body.contains("context.staticFieldImports[field]") &&
+                body.contains("context.typeImports[owner]") &&
+                body.contains("context.wildcardImports"),
+            "Custom enchantment references must resolve through Java-visible owners, static imports, and explicit imports"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Custom enchantment references must not resolve from project-global unique field or owner names: $offenders"
+        )
+    }
+
+    @Test
     fun `custom enchantment data migrations do not infer declaration owners from java file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

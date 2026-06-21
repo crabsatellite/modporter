@@ -1635,6 +1635,65 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `custom enchantment data rejects bare category references from other owners`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModItems.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModItems {
+                public static final DeferredRegister<Item> ITEMS = DeferredRegister.create(ForgeRegistries.ITEMS, ExampleMod.MODID);
+                public static final DeferredHolder<Item, Item> BLOCK_AND_CHAIN = ITEMS.register("block_and_chain", () -> new ChainBlockItem());
+            }
+        """.trimIndent())
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> DESTRUCTION = ENCHANTMENTS.register("destruction", () -> new DestructionEnchantment(Enchantment.Rarity.RARE));
+                public static final EnchantmentCategory BLOCK_AND_CHAIN = EnchantmentCategory.create("example_block_and_chain", item -> item instanceof ChainBlockItem);
+            }
+        """.trimIndent())
+        srcDir.resolve("DestructionEnchantment.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+
+            public class DestructionEnchantment extends Enchantment {
+                public DestructionEnchantment(Rarity rarity) {
+                    super(rarity, BLOCK_AND_CHAIN, new EquipmentSlot[]{EquipmentSlot.MAINHAND});
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
+
+        assertTrue(
+            result.errors.any { it.contains("item support expression 'BLOCK_AND_CHAIN' is unresolved") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/destruction.json").exists())
+    }
+
+    @Test
     fun `legacy enchantment category runtime checks migrate to holder item support`() {
         val projectDir = createTestFile("""
             package com.example;
