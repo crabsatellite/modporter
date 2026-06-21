@@ -3242,23 +3242,26 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
     }
 
     private fun migrateJadeTooltipElementHelper(source: String): String {
-        if (!source.contains(".getElementHelper")) return source
-        if (!source.contains("import snownee.jade.api.ITooltip;") &&
-            !source.contains("snownee.jade.api.ITooltip")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".getElementHelper")) return source
+        if (!executableCode.contains("import snownee.jade.api.ITooltip;") &&
+            !executableCode.contains("snownee.jade.api.ITooltip")) {
             return source
         }
 
         val identifier = """[A-Za-z_$][\w$]*"""
         val tooltipVariables = Regex("""\b(?:snownee\.jade\.api\.)?ITooltip\s+($identifier)\b""")
-            .findAll(source)
+            .findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
         if (tooltipVariables.isEmpty()) return source
 
         var result = source
         for (variable in tooltipVariables) {
-            result = Regex("""\b${Regex.escape(variable)}\s*\.\s*getElementHelper\s*\(\s*\)""")
-                .replace(result, "IElementHelper.get()")
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b${Regex.escape(variable)}\s*\.\s*getElementHelper\s*\(\s*\)""")
+            ) { "IElementHelper.get()" }
         }
         return result
     }

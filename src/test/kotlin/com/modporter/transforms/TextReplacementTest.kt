@@ -797,6 +797,43 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `jade tooltip element helper migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import snownee.jade.api.ITooltip;
+
+            public class TestMod {
+                private static final String DOC = "tooltip.getElementHelper()";
+
+                /*
+                 public void docs(ITooltip tooltip, ItemStack stack) {
+                     tooltip.add(tooltip.getElementHelper().smallItem(stack));
+                 }
+                 */
+
+                public void appendTooltip(ITooltip tooltip, OtherHelper other, ItemStack stack) {
+                    tooltip.add(tooltip.getElementHelper().smallItem(stack));
+                    other.getElementHelper();
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("tooltip.add(IElementHelper.get().smallItem(stack));"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"tooltip.getElementHelper()\";"), transformed)
+        assertTrue(transformed.contains("tooltip.add(tooltip.getElementHelper().smallItem(stack));"), transformed)
+        assertTrue(transformed.contains("other.getElementHelper();"), transformed)
+        assertFalse(transformed.contains("DOC = \"IElementHelper.get()"), transformed)
+    }
+
+    @Test
     fun `lootr loader-specific init package migrates to neoforge namespace`() {
         val projectDir = createTestFile("""
             package com.example;

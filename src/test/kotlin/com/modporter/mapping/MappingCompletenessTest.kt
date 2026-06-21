@@ -1243,6 +1243,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `jade tooltip element helper migration uses executable source evidence`() {
+        val textPass = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = textPass.indexOf("private fun migrateJadeTooltipElementHelper")
+        assertTrue(start >= 0, "migrateJadeTooltipElementHelper is missing")
+        val end = textPass.indexOf("private data class NetworkHooksOpenScreenMigration", start + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val body = textPass.substring(start, end)
+        val offenders = listOf(
+            "raw getElementHelper prefilter" to body.contains("""source.contains(".getElementHelper")"""),
+            "raw ITooltip import prefilter" to body.contains("""source.contains("import snownee.jade.api.ITooltip;")"""),
+            "raw ITooltip fqcn prefilter" to body.contains("""source.contains("snownee.jade.api.ITooltip")"""),
+            "raw tooltip variable collection" to body.contains(".findAll(source)"),
+            "raw helper replacement" to body.contains(".replace(result")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".getElementHelper")""") &&
+                body.contains("""executableCode.contains("import snownee.jade.api.ITooltip;")""") &&
+                body.contains(".findAll(executableCode)") &&
+                body.contains("replaceExecutableRegex("),
+            "Jade tooltip helper migration must collect receivers and rewrite calls from executable Java source only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Jade tooltip helper migration must not rewrite comments or strings: $offenders"
+        )
+    }
+
+    @Test
     fun `client only build detection ignores comments and strings`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
