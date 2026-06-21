@@ -20827,12 +20827,13 @@ ${indent}}
     }
 
     private fun migrateLegacyTooltipPartHiding(source: String): String {
-        if (!source.contains(".hideTooltipPart(") || !source.contains("ItemStack.TooltipPart.ADDITIONAL")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".hideTooltipPart(") || !executableCode.contains("ItemStack.TooltipPart.ADDITIONAL")) return source
 
         var changed = false
-        var result = rewriteJavaCall(source, "hideTooltipPart") { receiver, args ->
+        var result = rewriteExecutableJavaCall(source, "hideTooltipPart") { receiver, args ->
             if (args.size != 1 || args[0].trim() != "ItemStack.TooltipPart.ADDITIONAL") {
-                return@rewriteJavaCall null
+                return@rewriteExecutableJavaCall null
             }
             changed = true
             "$receiver.set(DataComponents.HIDE_ADDITIONAL_TOOLTIP, Unit.INSTANCE)"

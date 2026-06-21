@@ -49,6 +49,36 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy tooltip part hiding ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TooltipDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+
+            public class TooltipDocs {
+                // stack.hideTooltipPart(ItemStack.TooltipPart.ADDITIONAL);
+                private static final String DOC = "stack.hideTooltipPart(ItemStack.TooltipPart.ADDITIONAL);";
+
+                public void hide(ItemStack stack) {
+                    stack.hideTooltipPart(ItemStack.TooltipPart.ADDITIONAL);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("TooltipDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(transformed.contains("import net.minecraft.core.component.DataComponents;"), transformed)
+        assertTrue(transformed.contains("import net.minecraft.util.Unit;"), transformed)
+        assertTrue(transformed.contains("stack.set(DataComponents.HIDE_ADDITIONAL_TOOLTIP, Unit.INSTANCE);"), transformed)
+        assertTrue(transformed.contains("// stack.hideTooltipPart(ItemStack.TooltipPart.ADDITIONAL);"), transformed)
+        assertTrue(transformed.contains("""private static final String DOC = "stack.hideTooltipPart(ItemStack.TooltipPart.ADDITIONAL);";"""), transformed)
+    }
+
+    @Test
     fun `migrates SavedData factory calls with static supplier methods`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

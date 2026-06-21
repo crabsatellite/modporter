@@ -2889,6 +2889,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `tooltip part hiding migration uses executable call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyTooltipPartHiding")
+        assertTrue(start >= 0, "migrateLegacyTooltipPartHiding is missing")
+        val end = source.indexOf("private fun parseJavaConstructorParameters", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw hideTooltipPart prefilter" to """source.contains(".hideTooltipPart(")""",
+            "raw tooltip part prefilter" to """source.contains("ItemStack.TooltipPart.ADDITIONAL")""",
+            "raw hideTooltipPart rewrite" to """rewriteJavaCall(source, "hideTooltipPart")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".hideTooltipPart(")""") &&
+                body.contains("""executableCode.contains("ItemStack.TooltipPart.ADDITIONAL")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "hideTooltipPart")""") &&
+                body.contains("DataComponents.HIDE_ADDITIONAL_TOOLTIP"),
+            "Tooltip part hiding migration must use executable call evidence and preserve real replacement semantics"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Tooltip part hiding migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `data result getOrThrow migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
