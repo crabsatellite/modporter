@@ -1115,6 +1115,92 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `mod bus event extraction ignores commented and text block handlers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ExampleMod.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                    modEventBus.register(this);
+                }
+
+                /*
+                @SubscribeEvent
+                public void commented(FMLCommonSetupEvent event) {
+                }
+                */
+
+                private static final String DOC = ""${'"'}
+                    @SubscribeEvent
+                    public void documented(FMLCommonSetupEvent event) {
+                    }
+                ""${'"'};
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.changes.none { it.ruleId == "struct-extract-mod-bus-events" })
+        assertTrue(migrated.contains("modEventBus.register(this);"), migrated)
+        assertTrue(migrated.contains("@SubscribeEvent"), migrated)
+        assertFalse(migrated.contains("public static class ModEvents"), migrated)
+    }
+
+    @Test
+    fun `mod bus event extraction ignores braces inside comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ExampleMod.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                    modEventBus.register(this);
+                }
+
+                @SubscribeEvent
+                public void setup(FMLCommonSetupEvent event) {
+                    String doc = "{";
+                    // { brace noise must not extend this method
+                    event.toString();
+                }
+
+                public void helper() {
+                    System.out.println("still here");
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-extract-mod-bus-events" })
+        assertTrue(migrated.contains("public static class ModEvents"), migrated)
+        assertTrue(migrated.contains("public static void setup(FMLCommonSetupEvent event)"), migrated)
+        assertTrue(migrated.contains("String doc = \"{\";"), migrated)
+        assertTrue(migrated.contains("public void helper()"), migrated)
+        assertFalse(migrated.contains("modEventBus.register(this);"), migrated)
+        assertFalse(migrated.contains("public void setup(FMLCommonSetupEvent event)"), migrated)
+    }
+
+    @Test
     fun `event bus subscriber methods become static for automatic registration`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

@@ -44289,12 +44289,14 @@ public class ${builder.className} implements RecipeBuilder {
             .toList()
             .forEach { file ->
                 val content = file.readText()
-                if (!content.contains("@Mod(") && !content.contains("@Mod\"")) return@forEach
-                if (!content.contains("@SubscribeEvent")) return@forEach
-                val code = maskJavaComments(content)
+                val executableContent = maskJavaCommentsAndLiterals(content)
+                if (!Regex("""@\s*Mod\s*\(""").containsMatchIn(executableContent)) return@forEach
+                if (!Regex("""@\s*SubscribeEvent\b""").containsMatchIn(executableContent)) return@forEach
+                val code = executableContent
                 val imports = javaNonStaticImports(code)
 
                 val lines = content.lines().toMutableList()
+                val executableLines = executableContent.lines()
                 val separator = if (content.contains("\r\n")) "\r\n" else "\n"
 
                 data class ExtractedMethod(val startLine: Int, val endLine: Int, val text: String, val isClientOnly: Boolean)
@@ -44302,15 +44304,15 @@ public class ${builder.className} implements RecipeBuilder {
 
                 var i = 0
                 while (i < lines.size) {
-                    if (lines[i].trimStart().startsWith("@SubscribeEvent")) {
+                    if (executableLines.getOrNull(i)?.trimStart()?.startsWith("@SubscribeEvent") == true) {
                         val annotLine = i
                         var methodLine = i + 1
-                        while (methodLine < lines.size && lines[methodLine].trimStart().startsWith("@")) {
+                        while (methodLine < executableLines.size && executableLines[methodLine].trimStart().startsWith("@")) {
                             methodLine++
                         }
-                        if (methodLine >= lines.size) { i++; continue }
+                        if (methodLine >= executableLines.size) { i++; continue }
 
-                        val methodDecl = lines[methodLine]
+                        val methodDecl = executableLines[methodLine]
 
                         // Determine if this is a mod-bus event
                         val eventType = Regex("""\(\s*(?:final\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\b""")
@@ -44322,12 +44324,12 @@ public class ${builder.className} implements RecipeBuilder {
                         if (isModBusEvent) {
                             val isClientOnly = eventType?.let { isKnownClientOnlyModBusEventParameterType(it, imports) } == true
 
-                            val openBraceIdx = (methodLine until lines.size).firstOrNull { lines[it].contains("{") }
+                            val openBraceIdx = (methodLine until executableLines.size).firstOrNull { executableLines[it].contains("{") }
                             if (openBraceIdx != null) {
                                 var depth = 0
                                 var methodEnd: Int = openBraceIdx
-                                for (j in openBraceIdx until lines.size) {
-                                    depth += lines[j].count { c -> c == '{' } - lines[j].count { c -> c == '}' }
+                                for (j in openBraceIdx until executableLines.size) {
+                                    depth += executableLines[j].count { c -> c == '{' } - executableLines[j].count { c -> c == '}' }
                                     if (depth <= 0) {
                                         methodEnd = j
                                         break
@@ -44397,19 +44399,28 @@ public class ${builder.className} implements RecipeBuilder {
                 }
 
                 // Remove modEventBus.register(this) since inner classes auto-register
-                val modBusRegIdx = lines.indexOfFirst { it.contains("modEventBus.register(this)") }
+                var currentExecutableLines = maskJavaCommentsAndLiterals(lines.joinToString(separator)).lines()
+                val modBusRegIdx = currentExecutableLines.indexOfFirst {
+                    Regex("""\bmodEventBus\s*\.\s*register\s*\(\s*this\s*\)""").containsMatchIn(it)
+                }
                 if (modBusRegIdx >= 0) {
                     lines.removeAt(modBusRegIdx)
                 }
 
                 // Check if outer class still has @SubscribeEvent methods; if not, remove @EventBusSubscriber
-                val hasRemainingSubscribeEvent = lines.any { line ->
+                currentExecutableLines = maskJavaCommentsAndLiterals(lines.joinToString(separator)).lines()
+                val hasRemainingSubscribeEvent = currentExecutableLines.any { line ->
                     val t = line.trimStart()
                     t.startsWith("@SubscribeEvent") && !t.contains("class ")
                 }
                 if (!hasRemainingSubscribeEvent) {
-                    val ebsIdx = lines.indexOfFirst { it.trimStart().startsWith("@EventBusSubscriber") && !it.contains("class ") }
-                    if (ebsIdx >= 0 && ebsIdx < lines.indexOfFirst { it.contains("public class ") || it.contains("public final class ") }) {
+                    val ebsIdx = currentExecutableLines.indexOfFirst {
+                        it.trimStart().startsWith("@EventBusSubscriber") && !it.contains("class ")
+                    }
+                    val classIdx = currentExecutableLines.indexOfFirst {
+                        it.contains("public class ") || it.contains("public final class ")
+                    }
+                    if (ebsIdx >= 0 && classIdx >= 0 && ebsIdx < classIdx) {
                         lines.removeAt(ebsIdx)
                     }
                 }
