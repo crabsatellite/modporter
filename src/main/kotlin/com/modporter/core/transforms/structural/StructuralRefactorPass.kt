@@ -25917,22 +25917,23 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         source: String,
         javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
     ): String {
-        if (!source.contains("RegistryAccess.EMPTY")) return source
-        var result = source
-        var cursor = 0
         val qualifiedEmpty = "net.minecraft.core.RegistryAccess.EMPTY"
-        while (cursor < result.length) {
-            val index = result.indexOf(qualifiedEmpty, cursor)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(qualifiedEmpty)) return source
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        var cursor = 0
+        while (cursor < executableCode.length) {
+            val index = executableCode.indexOf(qualifiedEmpty, cursor)
             if (index < 0) break
-            val replacement = registryAccessExpressionAt(result, index, javaInheritanceIndex)
+            val replacement = registryAccessExpressionAt(source, index, javaInheritanceIndex)
             if (replacement == null || replacement == qualifiedEmpty) {
                 cursor = index + qualifiedEmpty.length
                 continue
             }
-            result = result.substring(0, index) + replacement + result.substring(index + qualifiedEmpty.length)
-            cursor = index + replacement.length
+            edits += index until index + qualifiedEmpty.length to replacement
+            cursor = index + qualifiedEmpty.length
         }
-        return result
+        return applyStringEdits(source, edits)
     }
 
     private fun isRegistryAccessEmptyExpression(expression: String): Boolean =

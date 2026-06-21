@@ -3240,6 +3240,43 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `registry access empty fallback migration uses executable token evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateRegistryAccessEmptyFallbacks")
+        assertTrue(start >= 0, "migrateRegistryAccessEmptyFallbacks is missing")
+        val end = source.indexOf("private fun isRegistryAccessEmptyExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw RegistryAccess.EMPTY prefilter" to body.contains("""source.contains("RegistryAccess.EMPTY")"""),
+            "raw source scan" to body.contains("source.indexOf(qualifiedEmpty"),
+            "mutable result scan" to body.contains("result.indexOf(qualifiedEmpty"),
+            "raw result splice" to body.contains("result.substring(0, index) + replacement"),
+            "cursor advanced by replacement length" to body.contains("cursor = index + replacement.length")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("executableCode.contains(qualifiedEmpty)") &&
+                body.contains("executableCode.indexOf(qualifiedEmpty, cursor)") &&
+                body.contains("registryAccessExpressionAt(source, index") &&
+                body.contains("edits += index until index + qualifiedEmpty.length to replacement") &&
+                body.contains("return applyStringEdits(source, edits)"),
+            "RegistryAccess.EMPTY fallback migration must replace only executable token ranges"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "RegistryAccess.EMPTY fallback migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `game event listener migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

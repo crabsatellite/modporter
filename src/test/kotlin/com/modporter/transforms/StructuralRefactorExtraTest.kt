@@ -8690,6 +8690,45 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `registry access empty fallback migration ignores comments and string literals`() {
+        val projectDir = createFile("RegistryAccessEmptySurface.java", """
+            package com.example;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.item.ItemStack;
+
+            public class RegistryAccessEmptySurface {
+                public void save(RegistryAccess registryAccess, CompoundTag tag, NonNullList<ItemStack> items) {
+                    String doc = "net.minecraft.core.RegistryAccess.EMPTY";
+                    // ContainerHelper.saveAllItems(tag, items, net.minecraft.core.RegistryAccess.EMPTY);
+                    /*
+                     ContainerHelper.loadAllItems(tag, items, net.minecraft.core.RegistryAccess.EMPTY);
+                     */
+                    ContainerHelper.saveAllItems(tag, items, net.minecraft.core.RegistryAccess.EMPTY);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = tempDir.resolve("src/main/java/com/example/RegistryAccessEmptySurface.java").readText()
+
+        assertTrue(migrated.contains("ContainerHelper.saveAllItems(tag, items, registryAccess);"), migrated)
+        assertTrue(migrated.contains("String doc = \"net.minecraft.core.RegistryAccess.EMPTY\";"), migrated)
+        assertTrue(migrated.contains("// ContainerHelper.saveAllItems(tag, items, net.minecraft.core.RegistryAccess.EMPTY);"), migrated)
+        assertTrue(migrated.contains("ContainerHelper.loadAllItems(tag, items, net.minecraft.core.RegistryAccess.EMPTY);"), migrated)
+        assertFalse(
+            Regex("""(?m)^[ \t]*ContainerHelper\.saveAllItems\(tag, items, net\.minecraft\.core\.RegistryAccess\.EMPTY\);""")
+                .containsMatchIn(migrated),
+            migrated
+        )
+        assertFalse(migrated.contains("\"registryAccess\""), migrated)
+    }
+
+    @Test
     fun `migrates component json tree and removed Nitrogen Curios language helpers`() {
         val projectDir = createFile("LegacyLanguageProvider.java", """
             package com.example;
