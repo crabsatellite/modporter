@@ -3572,6 +3572,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy advancement rewards constructor migration uses executable constructor evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyLootAndRegistryAccess")
+        assertTrue(start >= 0, "migrateLegacyLootAndRegistryAccess is missing")
+        val end = source.indexOf("private fun migrateLegacyLootTableResourceLocationRegistry", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw AdvancementRewards constructor prefilter" to """result.contains("new AdvancementRewards(")""",
+            "raw AdvancementRewards constructor rewrite" to """rewriteJavaNew(result, "AdvancementRewards")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("maskJavaCommentsAndLiterals(result).contains(\"new AdvancementRewards(\")") &&
+                body.contains("""rewriteExecutableJavaNew(result, "AdvancementRewards")""") &&
+                body.contains("if (args.size != 4)") &&
+                body.contains("legacyResourceLocationArrayToList(args[1])") &&
+                body.contains("legacyResourceLocationArrayToList(args[2])"),
+            "Legacy AdvancementRewards constructor migration must locate constructors in executable Java and preserve loot/recipe argument semantics"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy AdvancementRewards constructor migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `map codec serialization migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

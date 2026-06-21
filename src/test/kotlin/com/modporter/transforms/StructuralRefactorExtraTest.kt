@@ -255,6 +255,43 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy advancement rewards constructor migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val sourceFile = srcDir.resolve("AdvancementRewardDocs.java")
+        sourceFile.writeText("""
+            package com.example;
+
+            import net.minecraft.advancements.AdvancementRewards;
+            import net.minecraft.resources.ResourceLocation;
+            import java.util.Optional;
+
+            public class AdvancementRewardDocs {
+                /*
+                public AdvancementRewards docsOnly() {
+                    return new AdvancementRewards(0, new ResourceLocation[]{ExampleLoot.ADVANCEMENT_REWARD}, new ResourceLocation[0], Optional.empty());
+                }
+                */
+                private static final String DOC = "new AdvancementRewards(0, new ResourceLocation[]{ExampleLoot.ADVANCEMENT_REWARD}, new ResourceLocation[0], Optional.empty())";
+
+                public AdvancementRewards keep(AdvancementRewards rewards) {
+                    return rewards;
+                }
+            }
+        """.trimIndent())
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = sourceFile.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertEquals(0, result.changeCount)
+        assertEquals(original, transformed)
+        assertFalse(transformed.contains("java.util.List.of"), transformed)
+        assertFalse(transformed.contains("ResourceKey.create(Registries.LOOT_TABLE"), transformed)
+    }
+
+    @Test
     fun `migrates legacy NbtUtils block position compound lists without changing storage shape`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

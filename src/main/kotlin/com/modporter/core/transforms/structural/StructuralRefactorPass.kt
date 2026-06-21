@@ -27223,9 +27223,9 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
             }
         }
 
-        if (result.contains("new AdvancementRewards(")) {
-            result = rewriteJavaNew(result, "AdvancementRewards") { args ->
-                if (args.size != 4) return@rewriteJavaNew null
+        if (maskJavaCommentsAndLiterals(result).contains("new AdvancementRewards(")) {
+            result = rewriteExecutableJavaNew(result, "AdvancementRewards") { args ->
+                if (args.size != 4) return@rewriteExecutableJavaNew null
                 val lootList = legacyResourceLocationArrayToList(args[1]) { entry ->
                     if (isLootTableResourceKeyExpression(entry, legacyLootTableResourceLocationReferences)) {
                         entry
@@ -27234,8 +27234,8 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
                         needsRegistries = true
                         "ResourceKey.create(Registries.LOOT_TABLE, $entry)"
                     }
-                } ?: return@rewriteJavaNew null
-                val recipeList = legacyResourceLocationArrayToList(args[2]) { it } ?: return@rewriteJavaNew null
+                } ?: return@rewriteExecutableJavaNew null
+                val recipeList = legacyResourceLocationArrayToList(args[2]) { it } ?: return@rewriteExecutableJavaNew null
                 "new AdvancementRewards(${args[0].trim()}, $lootList, $recipeList, ${args[3].trim()})"
             }
         }
