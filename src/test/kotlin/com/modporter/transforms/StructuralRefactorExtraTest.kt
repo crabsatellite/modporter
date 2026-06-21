@@ -12413,6 +12413,54 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `equipment slot receiver migration uses current method owner evidence`() {
+        val projectDir = createFile("EquipmentSlotOwnerSurface.java", """
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+
+            public class EquipmentSlotOwnerSurface extends Mob {
+                void playerOwner(Player player, ItemStack stack) {
+                    this.getEquipmentSlotForItem(stack);
+                }
+
+                void livingOwner(LivingEntity wearer, ItemStack stack) {
+                    this.getEquipmentSlotForItem(stack);
+                }
+
+                void ambiguous(Player left, Player right, ItemStack stack) {
+                    this.getEquipmentSlotForItem(stack);
+                }
+
+                void docs(Player player, ItemStack stack) {
+                    String doc = "this.getEquipmentSlotForItem(stack);";
+                    // this.getEquipmentSlotForItem(stack);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir.resolve("src/main/java/com/example/EquipmentSlotOwnerSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("player.getEquipmentSlotForItem(stack);"), migrated)
+        assertTrue(migrated.contains("wearer.getEquipmentSlotForItem(stack);"), migrated)
+        assertTrue(
+            migrated.contains(
+                "void ambiguous(Player left, Player right, ItemStack stack) {\n        this.getEquipmentSlotForItem(stack);"
+            ),
+            migrated
+        )
+        assertTrue(migrated.contains("""String doc = "this.getEquipmentSlotForItem(stack);";"""), migrated)
+        assertTrue(migrated.contains("// this.getEquipmentSlotForItem(stack);"), migrated)
+        assertFalse(migrated.contains("left.getEquipmentSlotForItem(stack);"), migrated)
+        assertFalse(migrated.contains("right.getEquipmentSlotForItem(stack);"), migrated)
+    }
+
+    @Test
     fun `record codec witness rewrites ignore comments and strings`() {
         val projectDir = createFile("RecordCodecWitnessSurface.java", """
             package com.example;

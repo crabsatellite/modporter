@@ -33366,12 +33366,7 @@ ${indent}}
 
         result = migrateLegacyProjectileWeaponFinishUsingItemSource(result)
 
-        val equipmentSlotOwner = Regex("""\bPlayer\s+($id)\b""").find(result)?.groupValues?.get(1)
-            ?: Regex("""\bLivingEntity\s+($id)\b""").find(result)?.groupValues?.get(1)
-        if (equipmentSlotOwner != null) {
-            result = Regex("""\bthis\.getEquipmentSlotForItem\(""")
-                .replace(result, "$equipmentSlotOwner.getEquipmentSlotForItem(")
-        }
+        result = migrateLegacyEquipmentSlotForItemReceivers(result)
 
         result = Regex(
             """(?s)if\s*\(\s*($id)\s+instanceof\s+Player\s+($id)\s*&&\s*!\2\.isCreative\(\)\s*\)\s*\{\s*($id)\.hurtAndBreak\(\s*([^,]+)\s*,\s*($id)\s*,\s*null\s*,\s*item\s*->\s*\{\s*}\s*\)\s*;\s*}"""
@@ -33596,6 +33591,36 @@ ${indent}}
             cursor = closeParen + 1
         }
         return found.toList()
+    }
+
+    private fun migrateLegacyEquipmentSlotForItemReceivers(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("this.getEquipmentSlotForItem(")) return source
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        val callPattern = Regex("""\bthis\.getEquipmentSlotForItem\(""")
+        javaMethodRangesIncludingDefault(executableCode).forEach { method ->
+            val methodText = executableCode.substring(method.range)
+            val owner = equipmentSlotOwnerParameter(methodText) ?: return@forEach
+            callPattern.findAll(methodText).forEach { match ->
+                edits += (method.range.first + match.range.first)..(method.range.first + match.range.last) to
+                    "$owner.getEquipmentSlotForItem("
+            }
+        }
+        return applyStringEdits(source, edits)
+    }
+
+    private fun equipmentSlotOwnerParameter(methodText: String): String? {
+        val parameters = javaMethodParameters(methodText)
+        val playerParameters = parameters
+            .filter { simpleJavaTypeName(it.type) == "Player" }
+            .map { it.name }
+            .distinct()
+        if (playerParameters.size == 1) return playerParameters.single()
+        val livingEntityParameters = parameters
+            .filter { simpleJavaTypeName(it.type) == "LivingEntity" }
+            .map { it.name }
+            .distinct()
+        return livingEntityParameters.singleOrNull()
     }
 
     private data class LegacyProjectileWeaponShape(

@@ -3789,6 +3789,56 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `equipment slot receiver migration uses method scoped owner evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val mainStart = source.indexOf("private fun migrateLegacyItemExtensionAndProjectileApis")
+        assertTrue(mainStart >= 0, "migrateLegacyItemExtensionAndProjectileApis is missing")
+        val mainEnd = source.indexOf("private fun migrateLegacyEquipmentSlotForItemReceivers", mainStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val mainBody = source.substring(mainStart, mainEnd)
+        val helperStart = source.indexOf("private fun migrateLegacyEquipmentSlotForItemReceivers")
+        assertTrue(helperStart >= 0, "migrateLegacyEquipmentSlotForItemReceivers is missing")
+        val helperEnd = source.indexOf("private data class LegacyProjectileWeaponShape", helperStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val helperBody = source.substring(helperStart, helperEnd)
+        val offenders = listOf(
+            "whole-file Player owner scan" to (mainBody.contains("Regex(\"\"\"\\bPlayer\\s+") || helperBody.contains("Regex(\"\"\"\\bPlayer\\s+")),
+            "whole-file LivingEntity owner scan" to (mainBody.contains("Regex(\"\"\"\\bLivingEntity\\s+") || helperBody.contains("Regex(\"\"\"\\bLivingEntity\\s+")),
+            "raw getEquipmentSlotForItem replacement in outer migration" to mainBody.contains("""Regex(""" + "\"\"\"" + """\bthis\.getEquipmentSlotForItem"""),
+            "full-source receiver replace" to (
+                mainBody.contains(".replace(result, \"\$equipmentSlotOwner.getEquipmentSlotForItem(\")") ||
+                    helperBody.contains(".replace(result, \"\$equipmentSlotOwner.getEquipmentSlotForItem(\")")
+                ),
+            "raw result scan" to (mainBody.contains(".find(result)?.groupValues?.get(1)") || helperBody.contains(".find(result)?.groupValues?.get(1)"))
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            mainBody.contains("result = migrateLegacyEquipmentSlotForItemReceivers(result)"),
+            "Legacy item extension migration must delegate equipment slot receiver rewrites"
+        )
+        assertTrue(
+            helperBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                helperBody.contains("javaMethodRangesIncludingDefault(executableCode)") &&
+                helperBody.contains("javaMethodParameters(methodText)") &&
+                helperBody.contains("simpleJavaTypeName(it.type) == \"Player\"") &&
+                helperBody.contains("simpleJavaTypeName(it.type) == \"LivingEntity\"") &&
+                helperBody.contains("applyStringEdits(source, edits)"),
+            "Equipment slot receiver migration must bind owner from executable current-method parameters"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Equipment slot receiver migration must not use whole-file Player/LivingEntity owner fallbacks: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy restore migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
