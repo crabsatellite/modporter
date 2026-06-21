@@ -2068,6 +2068,48 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `entity getLevel accessor migration uses executable structural evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateEntityLevelAccessorCalls")
+        assertTrue(start >= 0, "migrateEntityLevelAccessorCalls is missing")
+        val end = source.indexOf("private fun findMatchingBrace", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+
+        val offenders = listOf(
+            "raw this getLevel replacement" to body.contains("migrated.replace(\"this.getLevel()\", \"this.level()\")"),
+            "raw inheritance class scan" to body.contains("javaTopLevelTypeName(source) ?: return null"),
+            "raw inheritance import scan" to body.contains(".findAll(source)"),
+            "raw parent type scan" to body.contains(".find(source)?.groupValues?.get(1)"),
+            "raw package extraction" to body.contains("packageNameOf(source)"),
+            "raw getLevel declaration scan" to body.contains("containsMatchIn(source)"),
+            "raw variable getLevel replacement" to body.contains(".replace(result, \"${'$'}variable.level()\")")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("replaceExecutableRegex(\n                    migrated,\n                    Regex(\"\"\"(?<![\\w$])this\\.getLevel\\(\\)\"\"\")") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("javaTopLevelTypeName(executableCode)") &&
+                body.contains(".findAll(executableCode)") &&
+                body.contains(".find(executableCode)?.groupValues?.get(1)") &&
+                body.contains("packageNameOf(executableCode)") &&
+                body.contains("containsMatchIn(executableCode)") &&
+                body.contains("replaceExecutableRegex(\n                    result,\n                    Regex(\"\"\"(?<![\\w$])${'$'}{Regex.escape(variable)}\\.getLevel\\(\\)\"\"\")"),
+            "Entity#getLevel migration must use executable source for inheritance evidence and replacements"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Entity#getLevel migration must not use comments or strings as structural evidence or replacement targets: $offenders"
+        )
+    }
+
+    @Test
     fun `structural brace matching ignores Java comments and literals`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

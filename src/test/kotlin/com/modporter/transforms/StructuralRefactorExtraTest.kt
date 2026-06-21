@@ -6529,6 +6529,17 @@ class StructuralRefactorExtraTest {
                 }
 
                 public void tickMount(Entity entity, CommandSourceStack source) {
+                    String doc = "entity.getLevel() and this.getLevel()";
+                    String block = ${"\"\"\""}
+                        entity.getLevel()
+                        this.getLevel()
+                        ${"\"\"\""};
+                    // entity.getLevel().getGameTime();
+                    // this.getLevel().getGameTime();
+                    /*
+                     entity.getLevel().getGameTime();
+                     this.getLevel().getGameTime();
+                     */
                     this.getLevel().getGameTime();
                     entity.getLevel().getGameTime();
                     source.getLevel().getGameTime();
@@ -6554,6 +6565,15 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("source.getLevel().getGameTime();"), migrated)
         assertTrue(migrated.contains("duplicate.getLevel().getGameTime();"), migrated)
         assertTrue(migrated.contains("duplicate.getLevel();"), migrated)
+        assertTrue(migrated.contains("String doc = \"entity.getLevel() and this.getLevel()\";"), migrated)
+        assertTrue(
+            migrated.contains("String block = \"\"\"\n            entity.getLevel()\n            this.getLevel()"),
+            migrated
+        )
+        assertTrue(migrated.contains("// entity.getLevel().getGameTime();"), migrated)
+        assertTrue(migrated.contains("// this.getLevel().getGameTime();"), migrated)
+        assertTrue(migrated.contains("entity.getLevel().getGameTime();"), migrated)
+        assertTrue(migrated.contains("this.getLevel().getGameTime();"), migrated)
     }
 
     @Test

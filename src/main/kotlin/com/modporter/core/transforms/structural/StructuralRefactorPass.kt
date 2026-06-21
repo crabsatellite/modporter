@@ -41487,7 +41487,10 @@ $writeLines
 
             var migrated = original
             if (isEntityDerivedFqn(type.fqn) && !declaresGetLevelMethod(original)) {
-                migrated = migrated.replace("this.getLevel()", "this.level()")
+                migrated = replaceExecutableRegex(
+                    migrated,
+                    Regex("""(?<![\w$])this\.getLevel\(\)""")
+                ) { "this.level()" }
             }
 
             val entityVariables = collectEntityVariableNames(original, type, parser, ::isEntityTypeReference)
@@ -41515,11 +41518,12 @@ $writeLines
 
     private fun readJavaInheritanceType(file: Path): JavaInheritanceType? {
         val source = file.readText()
-        val className = javaTopLevelTypeName(source) ?: return null
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val className = javaTopLevelTypeName(executableCode) ?: return null
         val imports = linkedMapOf<String, String>()
         val wildcardImports = linkedSetOf<String>()
         Regex("""(?m)^[ \t]*import\s+(?!static\b)([\w.]+(?:\.\*)?)\s*;""")
-            .findAll(source)
+            .findAll(executableCode)
             .forEach { match ->
                 val importName = match.groupValues[1]
                 if (importName.endsWith(".*")) {
@@ -41531,10 +41535,10 @@ $writeLines
         val id = """[A-Za-z_$][\w$]*"""
         val parentType = Regex(
             """(?s)\bclass\s+${Regex.escape(className)}(?:\s*<[^>{};]+>)?\s+extends\s+($id(?:\.$id)*)"""
-        ).find(source)?.groupValues?.get(1)
+        ).find(executableCode)?.groupValues?.get(1)
         return JavaInheritanceType(
             file = file,
-            packageName = packageNameOf(source),
+            packageName = packageNameOf(executableCode),
             className = className,
             parentType = parentType,
             imports = imports,
@@ -41628,10 +41632,12 @@ $writeLines
         )
     }
 
-    private fun declaresGetLevelMethod(source: String): Boolean =
-        Regex(
+    private fun declaresGetLevelMethod(source: String): Boolean {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        return Regex(
             """(?m)^[ \t]*(?:@\w+(?:\([^)]*\))?\s*)*(?:(?:public|protected|private|static|final|abstract|synchronized|native)\s+)*(?:[A-Za-z_$][\w$]*(?:\s*<[^;{}()]*>)?(?:\s*\[\s*])?(?:\.[A-Za-z_$][\w$]*)*)\s+getLevel\s*\("""
-        ).containsMatchIn(source)
+        ).containsMatchIn(executableCode)
+    }
 
     private fun collectEntityVariableNames(
         source: String,
@@ -41656,8 +41662,9 @@ $writeLines
         }
 
         val id = """[A-Za-z_$][\w$]*"""
+        val executableCode = maskJavaCommentsAndLiterals(source)
         Regex("""\binstanceof\s+($id(?:\.$id)*)\s+($id)\b""")
-            .findAll(source)
+            .findAll(executableCode)
             .forEach { match ->
                 record(match.groupValues[2], match.groupValues[1])
             }
@@ -41672,8 +41679,10 @@ $writeLines
         entityVariables
             .sortedByDescending { it.length }
             .forEach { variable ->
-                result = Regex("""(?<![\w$])${Regex.escape(variable)}\.getLevel\(\)""")
-                    .replace(result, "$variable.level()")
+                result = replaceExecutableRegex(
+                    result,
+                    Regex("""(?<![\w$])${Regex.escape(variable)}\.getLevel\(\)""")
+                ) { "$variable.level()" }
             }
         return result
     }
