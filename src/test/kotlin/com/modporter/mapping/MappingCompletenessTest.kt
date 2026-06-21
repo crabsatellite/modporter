@@ -562,6 +562,52 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `nitrogen sync receiver owner accessors use Java visible FQN resolution`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun javaNonStaticWildcardImports")
+        assertTrue(start >= 0, "javaNonStaticWildcardImports is missing")
+        val end = source.indexOf("private fun rewriteNitrogenSyncCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val receiverStart = body.indexOf("private fun inferNitrogenReceiverOwnerEntityIds")
+        assertTrue(receiverStart >= 0, "inferNitrogenReceiverOwnerEntityIds is missing")
+        val receiverBody = body.substring(receiverStart)
+        val forbidden = listOf(
+            "simple name accessor map" to "typeName to accessors.single()",
+            "simple name receiver type alternation" to "val typeAlternation = ownerAccessors.keys"
+        )
+        val offenders = forbidden
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "Nitrogen sync receiver owner resolution contains $label" }
+            .plus(
+                if (Regex("""findAll\(source\)""").containsMatchIn(receiverBody)) {
+                    listOf("Nitrogen sync receiver owner resolution contains raw source receiver scan")
+                } else {
+                    emptyList()
+                }
+            )
+
+        assertTrue(
+            body.contains("val fqn = if (packageName.isBlank()) typeName else \"\$packageName.\$typeName\"") &&
+                body.contains("val knownTypes = ownerAccessors.keys") &&
+                body.contains("javaNonStaticWildcardImports(code)") &&
+                body.contains("resolveKnownJavaTypeReference(rawType, packageName, imports, wildcardImports, knownTypes)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(text)") &&
+                body.contains("return candidates.filter { it in knownTypes }.distinct().singleOrNull()"),
+            "Nitrogen sync receiver owner resolution must bind accessors by Java-visible FQN, not project-global simple names"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Nitrogen sync receiver owner resolution must not use simple-name or raw-source fallback matching: $offenders"
+        )
+    }
+
+    @Test
     fun `backpack container API migration binds inventory wrapper to slot constructor`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

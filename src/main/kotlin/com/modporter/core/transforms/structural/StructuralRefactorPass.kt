@@ -5823,6 +5823,12 @@ $helpers
         return imports
     }
 
+    private fun javaNonStaticWildcardImports(source: String): Set<String> =
+        Regex("""(?m)^[ \t]*import\s+(?!static\b)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.\*\s*;""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+
     private fun resolveJavaTypeReference(
         rawType: String,
         packageName: String,
@@ -5840,22 +5846,53 @@ $helpers
         return if (packageName.isBlank()) normalized else "$packageName.$normalized"
     }
 
+    private fun resolveKnownJavaTypeReference(
+        rawType: String,
+        packageName: String,
+        imports: Map<String, String>,
+        wildcardImports: Set<String>,
+        knownTypes: Set<String>
+    ): String? {
+        val normalized = normalizeJavaTypeReference(rawType) ?: return null
+        if (normalized.contains(".")) {
+            val firstSegment = normalized.substringBefore('.')
+            val candidates = linkedSetOf<String>()
+            imports[firstSegment]?.let { imported ->
+                candidates += "$imported.${normalized.substringAfter('.')}"
+            }
+            candidates += normalized
+            return candidates.filter { it in knownTypes }.distinct().singleOrNull()
+        }
+
+        val candidates = linkedSetOf<String>()
+        imports[normalized]?.let { candidates += it }
+        if (packageName.isNotBlank()) {
+            candidates += "$packageName.$normalized"
+        } else {
+            candidates += normalized
+        }
+        wildcardImports.forEach { wildcardPackage ->
+            candidates += "$wildcardPackage.$normalized"
+        }
+        return candidates.filter { it in knownTypes }.distinct().singleOrNull()
+    }
+
     private fun collectNitrogenSyncOwnerAccessors(javaFiles: List<Path>): Map<String, String> {
         val entityTypes = "(?:Player|ServerPlayer|Entity|LivingEntity|Mob|AbstractArrow|Projectile)"
         return javaFiles.mapNotNull { javaFile ->
             val text = javaFile.readText()
-            if (!text.contains("INBTSynchable")) return@mapNotNull null
-            val typeName = Regex("""\b(?:class|interface)\s+([A-Za-z_$][\w$]*)\b""")
-                .find(text)
-                ?.groupValues
-                ?.get(1)
-                ?: return@mapNotNull null
+            val code = maskJavaComments(text)
+            val executableCode = maskJavaCommentsAndLiterals(text)
+            if (!executableCode.contains("INBTSynchable")) return@mapNotNull null
+            val typeName = javaTopLevelTypeName(executableCode) ?: return@mapNotNull null
+            val packageName = packageNameOf(code)
+            val fqn = if (packageName.isBlank()) typeName else "$packageName.$typeName"
             val accessors = Regex("""\b(?:public\s+)?$entityTypes\s+(get[A-Za-z_$][\w$]*)\s*\(\s*\)\s*(?:;|\{)""")
-                .findAll(text)
+                .findAll(executableCode)
                 .map { it.groupValues[1] }
                 .distinct()
                 .toList()
-            if (accessors.size == 1) typeName to accessors.single() else null
+            if (accessors.size == 1) fqn to accessors.single() else null
         }.toMap()
     }
 
@@ -5895,16 +5932,24 @@ $helpers
 
     private fun inferNitrogenReceiverOwnerEntityIds(source: String, ownerAccessors: Map<String, String>): Map<String, String> {
         if (ownerAccessors.isEmpty()) return emptyMap()
-        val typeAlternation = ownerAccessors.keys.joinToString("|") { Regex.escape(it) }
+        val code = maskJavaComments(source)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val packageName = packageNameOf(code)
+        val imports = javaNonStaticImports(code)
+        val wildcardImports = javaNonStaticWildcardImports(code)
+        val knownTypes = ownerAccessors.keys
+        val typeReference = """[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*"""
         val receiverTypes = mutableMapOf<String, MutableSet<String>>()
-        fun record(receiver: String, typeName: String) {
-            receiverTypes.getOrPut(receiver) { mutableSetOf() }.add(typeName)
+        fun record(receiver: String, rawType: String) {
+            val resolvedType = resolveKnownJavaTypeReference(rawType, packageName, imports, wildcardImports, knownTypes)
+                ?: return
+            receiverTypes.getOrPut(receiver) { mutableSetOf() }.add(resolvedType)
         }
-        Regex("""\b($typeAlternation)\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(source)
+        Regex("""\b(?:final\s+)?($typeReference)\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(executableCode)
             .forEach { match -> record(match.groupValues[2], match.groupValues[1]) }
-        Regex("""\b($typeAlternation)\.get\s*\([^)]*\)\s*(?:\.resolve\s*\(\s*\))?\s*\.ifPresent\s*\(\s*\(?\s*([A-Za-z_$][\w$]*)""")
-            .findAll(source)
+        Regex("""\b($typeReference)\.get\s*\([^)]*\)\s*(?:\.resolve\s*\(\s*\))?\s*\.ifPresent\s*\(\s*\(?\s*([A-Za-z_$][\w$]*)""")
+            .findAll(executableCode)
             .forEach { match -> record(match.groupValues[2], match.groupValues[1]) }
         return receiverTypes.mapNotNull { (receiver, types) ->
             val typeName = types.singleOrNull() ?: return@mapNotNull null

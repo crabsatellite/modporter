@@ -4214,6 +4214,56 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `nitrogen sync receiver owner accessors are resolved by visible type not simple name`() {
+        val srcDir = tempDir.resolve("src/main/java")
+        val capabilityDir = srcDir.resolve("com/example/capability")
+        val otherDir = srcDir.resolve("com/other")
+        val ownerDir = srcDir.resolve("com/example")
+        capabilityDir.createDirectories()
+        otherDir.createDirectories()
+        ownerDir.createDirectories()
+        capabilityDir.resolve("SynchedData.java").writeText("""
+            package com.example.capability;
+
+            import com.aetherteam.nitrogen.capability.INBTSynchable;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.player.Player;
+
+            public interface SynchedData extends INBTSynchable<CompoundTag> {
+                Player getPlayer();
+            }
+        """.trimIndent())
+        otherDir.resolve("SynchedData.java").writeText("""
+            package com.other;
+
+            import com.aetherteam.nitrogen.capability.INBTSynchable;
+            import net.minecraft.nbt.CompoundTag;
+
+            public interface SynchedData extends INBTSynchable<CompoundTag> {
+            }
+        """.trimIndent())
+        ownerDir.resolve("SyncOwner.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.capability.INBTSynchable;
+            import com.other.SynchedData;
+
+            public class SyncOwner {
+                public void push(SynchedData data, boolean value) {
+                    data.setSynched(INBTSynchable.Direction.CLIENT, "setValue", value);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val owner = ownerDir.resolve("SyncOwner.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-attachment-api" })
+        assertTrue(owner.contains("data.setSynched(INBTSynchable.Direction.CLIENT, \"setValue\", value);"), owner)
+        assertFalse(owner.contains("data.getPlayer().getId()"), owner)
+    }
+
+    @Test
     fun `wraps attachment getData returns for legacy lazy optional getters`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
