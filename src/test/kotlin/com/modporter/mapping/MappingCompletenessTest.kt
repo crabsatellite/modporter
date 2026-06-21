@@ -3330,6 +3330,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `block entity serialization holder lookup migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateBlockEntitySerializationSource")
+        assertTrue(start >= 0, "migrateBlockEntitySerializationSource is missing")
+        val end = source.indexOf("private fun collectHolderLookupCompoundTagMethods", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val executableReplacementCount = Regex("""replaceExecutableRegex\(""").findAll(body).count()
+        val offenders = listOf(
+            "raw result regex replacement" to body.contains(".replace(result"),
+            "raw direct result replacement" to body.contains("result.replace("),
+            "raw packet signature scan" to body.contains(".find(result)"),
+            "raw packet getOrDefault prefilter" to body.contains("""result.contains("${'$'}packetName.getOrDefault(""")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            executableReplacementCount >= 12 &&
+                body.contains("replaceExecutableRegex(\n                method,") &&
+                body.contains("maskJavaCommentsAndLiterals(result)") &&
+                body.contains("val methodStart = result.indexOf(method)"),
+            "BlockEntity serialization migration must rewrite signatures and holder-lookup calls in executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "BlockEntity serialization migration must not use comments or strings as source evidence or replacement targets: $offenders"
+        )
+    }
+
+    @Test
     fun `command source stack level migration uses executable scoped evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

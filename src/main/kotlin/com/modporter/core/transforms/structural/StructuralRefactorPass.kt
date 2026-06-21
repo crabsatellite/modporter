@@ -15055,8 +15055,10 @@ ${entries.joinToString(",\n")}
         var result = source
         var needsHolderLookup = false
 
-        result = Regex("""(public|protected)\s+void\s+saveAdditional\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
-            .replace(result) { match ->
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(public|protected)\s+void\s+saveAdditional\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
+        ) { match ->
                 val visibility = match.groupValues[1]
                 val params = match.groupValues[2]
                 if (params.contains("HolderLookup.Provider")) {
@@ -15067,8 +15069,10 @@ ${entries.joinToString(",\n")}
                 }
             }
 
-        result = Regex("""protected\s+void\s+loadAdditional\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
-            .replace(result) { match ->
+        result = replaceExecutableRegex(
+            result,
+            Regex("""protected\s+void\s+loadAdditional\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
+        ) { match ->
                 val params = match.groupValues[1]
                 if (params.contains("HolderLookup.Provider")) {
                     match.value
@@ -15078,33 +15082,48 @@ ${entries.joinToString(",\n")}
                 }
             }
 
-        result = Regex("""public\s+void\s+load\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
-            .replace(result) { match ->
+        result = replaceExecutableRegex(
+            result,
+            Regex("""public\s+void\s+load\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
+        ) { match ->
                 val params = match.groupValues[1]
                 needsHolderLookup = true
                 "protected void loadAdditional($params, HolderLookup.Provider registries)"
             }
 
-        result = Regex("""super\.load\s*\(\s*(\w+)\s*\)\s*;""")
-            .replace(result) { match ->
+        result = replaceExecutableRegex(
+            result,
+            Regex("""super\.load\s*\(\s*(\w+)\s*\)\s*;""")
+        ) { match ->
                 needsHolderLookup = true
                 "super.loadAdditional(${match.groupValues[1]}, registries);"
             }
 
-        result = Regex("""public\s+((?:@[A-Za-z0-9_.]+\s+)*)(?:net\.minecraft\.nbt\.)?CompoundTag\s+getUpdateTag\s*\(\s*\)""")
-            .replace(result) { match ->
+        result = replaceExecutableRegex(
+            result,
+            Regex("""public\s+((?:@[A-Za-z0-9_.]+\s+)*)(?:net\.minecraft\.nbt\.)?CompoundTag\s+getUpdateTag\s*\(\s*\)""")
+        ) { match ->
                 needsHolderLookup = true
                 "public ${match.groupValues[1]}CompoundTag getUpdateTag(HolderLookup.Provider registries)"
             }
-        result = result.replace("super.getUpdateTag()", "super.getUpdateTag(registries)")
+        result = replaceExecutableRegex(result, Regex("""super\.getUpdateTag\(\)""")) {
+            "super.getUpdateTag(registries)"
+        }
         if (result.contains("getUpdateTag(HolderLookup.Provider registries)")) {
-            result = Regex("""saveAdditional\(\s*(\w+)\s*\)\s*;""")
-                .replace(result, "saveAdditional($1, registries);")
-            result = result.replace(".saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY)", ".saveWithoutMetadata(registries)")
+            result = replaceExecutableRegex(
+                result,
+                Regex("""saveAdditional\(\s*(\w+)\s*\)\s*;""")
+            ) { match -> "saveAdditional(${match.groupValues[1]}, registries);" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\.saveWithoutMetadata\(net\.minecraft\.core\.RegistryAccess\.EMPTY\)""")
+            ) { ".saveWithoutMetadata(registries)" }
         }
 
-        result = Regex("""public\s+void\s+handleUpdateTag\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
-            .replace(result) { match ->
+        result = replaceExecutableRegex(
+            result,
+            Regex("""public\s+void\s+handleUpdateTag\s*\(\s*([^)]*CompoundTag\s+\w+)\s*\)""")
+        ) { match ->
                 val params = match.groupValues[1]
                 if (params.contains("HolderLookup.Provider")) {
                     match.value
@@ -15113,60 +15132,81 @@ ${entries.joinToString(",\n")}
                     "public void handleUpdateTag($params, HolderLookup.Provider lookupProvider)"
                 }
             }
-        result = Regex("""super\.handleUpdateTag\s*\(\s*(\w+)\s*\)\s*;""")
-            .replace(result) { match ->
+        result = replaceExecutableRegex(
+            result,
+            Regex("""super\.handleUpdateTag\s*\(\s*(\w+)\s*\)\s*;""")
+        ) { match ->
                 needsHolderLookup = true
                 "super.handleUpdateTag(${match.groupValues[1]}, lookupProvider);"
             }
         javaMethodText(result, "handleUpdateTag")?.let { method ->
             val providerName = holderLookupProviderFromParameters(currentMethodParametersBeforeOffset(method, method.indexOf('{')))
                 ?: "lookupProvider"
-            val migratedMethod = Regex("""\b(?:this\.)?load\s*\(\s*(\w+)\s*\)\s*;""")
-                .replace(method) { match ->
+            val migratedMethod = replaceExecutableRegex(
+                method,
+                Regex("""\b(?:this\.)?load\s*\(\s*(\w+)\s*\)\s*;""")
+            ) { match ->
                     needsHolderLookup = true
                     "this.loadAdditional(${match.groupValues[1]}, $providerName);"
                 }
             if (migratedMethod != method) {
-                result = result.replace(method, migratedMethod)
+                val methodStart = result.indexOf(method)
+                if (methodStart >= 0) {
+                    result = result.substring(0, methodStart) + migratedMethod + result.substring(methodStart + method.length)
+                }
             }
         }
 
-        result = Regex(
-            """public\s+void\s+onDataPacket\s*\(\s*([^,)]*(?:net\.minecraft\.network\.)?Connection\s+)(\w+)\s*,\s*([^,)]*(?:net\.minecraft\.network\.protocol\.game\.)?ClientboundBlockEntityDataPacket\s+)(\w+)\s*\)"""
-        ).replace(result) { match ->
+        result = replaceExecutableRegex(
+            result,
+            Regex(
+                """public\s+void\s+onDataPacket\s*\(\s*([^,)]*(?:net\.minecraft\.network\.)?Connection\s+)(\w+)\s*,\s*([^,)]*(?:net\.minecraft\.network\.protocol\.game\.)?ClientboundBlockEntityDataPacket\s+)(\w+)\s*\)"""
+            )
+        ) { match ->
             needsHolderLookup = true
             "public void onDataPacket(${match.groupValues[1]}connection, ${match.groupValues[3]}${match.groupValues[4]}, HolderLookup.Provider lookupProvider)"
         }
 
         val packetName = Regex("""onDataPacket\s*\([^)]*ClientboundBlockEntityDataPacket\s+(\w+)""")
-            .find(result)
+            .find(maskJavaCommentsAndLiterals(result))
             ?.groupValues
             ?.get(1)
-        if (packetName != null && result.contains("$packetName.getOrDefault(")) {
-            result = Regex("""(?:net\.minecraft\.nbt\.)?CompoundTag\s+(\w+)\s*=\s*${Regex.escape(packetName)}\.getOrDefault\([^\r\n;]+CustomData\.EMPTY\)\.copyTag\(\)\s*;""")
-                .replace(result) { match ->
+        if (packetName != null && maskJavaCommentsAndLiterals(result).contains("$packetName.getOrDefault(")) {
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(?:net\.minecraft\.nbt\.)?CompoundTag\s+(\w+)\s*=\s*${Regex.escape(packetName)}\.getOrDefault\([^\r\n;]+CustomData\.EMPTY\)\.copyTag\(\)\s*;""")
+            ) { match ->
                     "CompoundTag ${match.groupValues[1]} = $packetName.getTag();"
                 }
         }
         javaMethodText(result, "onDataPacket")?.let { method ->
             val providerName = holderLookupProviderFromParameters(currentMethodParametersBeforeOffset(method, method.indexOf('{')))
                 ?: "lookupProvider"
-            val migratedMethod = Regex("""\b(?:this\.)?handleUpdateTag\s*\(\s*(\w+)\s*\)\s*;""")
-                .replace(method) { match ->
+            val migratedMethod = replaceExecutableRegex(
+                method,
+                Regex("""\b(?:this\.)?handleUpdateTag\s*\(\s*(\w+)\s*\)\s*;""")
+            ) { match ->
                     needsHolderLookup = true
                     "this.handleUpdateTag(${match.groupValues[1]}, $providerName);"
                 }
             if (migratedMethod != method) {
-                result = result.replace(method, migratedMethod)
+                val methodStart = result.indexOf(method)
+                if (methodStart >= 0) {
+                    result = result.substring(0, methodStart) + migratedMethod + result.substring(methodStart + method.length)
+                }
             }
         }
-        result = Regex("""if\s*\(\s*(\w+)\s*!=\s*null\s*\)\s*\{\s*\r?\n\s*(?:this\.)?load\s*\(\s*\1\s*\)\s*;""")
-            .replace(result) { match ->
+        result = replaceExecutableRegex(
+            result,
+            Regex("""if\s*\(\s*(\w+)\s*!=\s*null\s*\)\s*\{\s*\r?\n\s*(?:this\.)?load\s*\(\s*\1\s*\)\s*;""")
+        ) { match ->
                 val tagName = match.groupValues[1]
                 "if (!$tagName.isEmpty()) {\n            loadWithComponents($tagName, lookupProvider);"
             }
-        result = Regex("""if\s*\(\s*!(\w+)\.isEmpty\(\)\s*\)\s*\{\s*\r?\n\s*(?:this\.)?load\s*\(\s*\1\s*\)\s*;""")
-            .replace(result) { match ->
+        result = replaceExecutableRegex(
+            result,
+            Regex("""if\s*\(\s*!(\w+)\.isEmpty\(\)\s*\)\s*\{\s*\r?\n\s*(?:this\.)?load\s*\(\s*\1\s*\)\s*;""")
+        ) { match ->
                 val tagName = match.groupValues[1]
                 "if (!$tagName.isEmpty()) {\n            loadWithComponents($tagName, lookupProvider);"
             }

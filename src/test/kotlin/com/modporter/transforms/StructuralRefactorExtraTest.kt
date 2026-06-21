@@ -9437,7 +9437,18 @@ class StructuralRefactorExtraTest {
 
                 @Override
                 public @NotNull CompoundTag getUpdateTag() {
+                    String updateDoc = "super.getUpdateTag() saveAdditional(tag) saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY)";
+                    String updateBlock = ${"\"\"\""}
+                        super.getUpdateTag()
+                        saveAdditional(tag);
+                        this.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY)
+                        ${"\"\"\""};
+                    // super.getUpdateTag();
+                    // saveAdditional(tag);
+                    // this.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY);
                     CompoundTag tag = super.getUpdateTag();
+                    saveAdditional(tag);
+                    CompoundTag copy = this.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY);
                     return tag;
                 }
 
@@ -9471,15 +9482,24 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("CompoundTag tag = pkt.getTag();"))
         assertTrue(migrated.contains("ContainerHelper.saveAllItems(tag, this.items, registries);"))
         assertTrue(migrated.contains("ContainerHelper.loadAllItems(tag, this.items, registries);"))
+        assertTrue(migrated.contains("CompoundTag tag = super.getUpdateTag(registries);"), migrated)
+        assertTrue(migrated.contains("saveAdditional(tag, registries);"), migrated)
+        assertTrue(migrated.contains("CompoundTag copy = this.saveWithoutMetadata(registries);"), migrated)
         assertTrue(migrated.contains("Component.Serializer.toJson(this.name, registries)"))
         assertTrue(migrated.contains("Component.Serializer.fromJson(tag.getString(\"Name\"), registries)"))
         assertTrue(migrated.contains("""String serializerDoc = "Component.Serializer.toJson(this.name)";"""), migrated)
         assertTrue(migrated.contains("// Component.Serializer.toJson(this.name);"), migrated)
         assertTrue(migrated.contains("""String parserDoc = "Component.Serializer.fromJson(tag.getString(\"Name\"))";"""), migrated)
         assertTrue(migrated.contains("// Component.Serializer.fromJson(tag.getString(\"Name\"));"), migrated)
+        assertTrue(migrated.contains("""String updateDoc = "super.getUpdateTag() saveAdditional(tag) saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY)";"""), migrated)
+        assertTrue(migrated.contains("super.getUpdateTag()\n            saveAdditional(tag);\n            this.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY)"), migrated)
+        assertTrue(migrated.contains("// super.getUpdateTag();"), migrated)
+        assertTrue(migrated.contains("// saveAdditional(tag);"), migrated)
+        assertTrue(migrated.contains("// this.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY);"), migrated)
         assertTrue(migrated.contains("this.loadAdditional(tag, lookupProvider);"))
         assertTrue(migrated.contains("this.handleUpdateTag(tag, lookupProvider);"))
-        assertFalse(migrated.contains("RegistryAccess.EMPTY"))
+        assertFalse(migrated.contains("ContainerHelper.saveAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);"))
+        assertFalse(migrated.contains("ContainerHelper.loadAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);"))
     }
 
     @Test
