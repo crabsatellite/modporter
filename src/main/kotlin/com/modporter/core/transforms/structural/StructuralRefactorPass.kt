@@ -25351,25 +25351,30 @@ $signatureIndent}"""
     }
 
     private fun migrateLegacyBannerPatternConstructors(source: String): String {
-        if (!source.contains("BannerPattern") || !source.contains("new BannerPattern(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("BannerPattern") || !executableCode.contains("new BannerPattern(")) return source
         val namespaceExpression = bannerPatternDeferredRegisterNamespaceExpression(source) ?: return source
         var changed = false
-        val result = rewriteJavaNew(source, "BannerPattern") { args ->
-            if (args.size != 1) return@rewriteJavaNew null
+        val result = rewriteExecutableJavaNew(source, "BannerPattern") { args ->
+            if (args.size != 1) return@rewriteExecutableJavaNew null
             val translationKey = args[0].trim()
-            if (!Regex(""""(?:\\.|[^"\\])*"""").matches(translationKey)) return@rewriteJavaNew null
+            if (!Regex(""""(?:\\.|[^"\\])*"""").matches(translationKey)) return@rewriteExecutableJavaNew null
             changed = true
             "new BannerPattern(ResourceLocation.fromNamespaceAndPath($namespaceExpression, $translationKey), $translationKey)"
         }
         return if (changed) addImportIfMissing(result, "net.minecraft.resources.ResourceLocation") else source
     }
 
-    private fun bannerPatternDeferredRegisterNamespaceExpression(source: String): String? =
-        Regex("""DeferredRegister\.create\(\s*Registries\.BANNER_PATTERN\s*,\s*([^)]+?)\s*\)""")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
-            ?.trim()
+    private fun bannerPatternDeferredRegisterNamespaceExpression(source: String): String? {
+        val namespaces = mutableListOf<String>()
+        rewriteExecutableJavaCall(source, "create") { receiver, args ->
+            if (receiver == "DeferredRegister" && args.size == 2 && args[0].trim() == "Registries.BANNER_PATTERN") {
+                args[1].trim().takeIf { it.isNotEmpty() }?.let(namespaces::add)
+            }
+            null
+        }
+        return namespaces.distinct().singleOrNull()
+    }
 
     private fun migrateLegacyWallSignBlockCodecSource(source: String): String {
         if (!source.contains("extends WallSignBlock") || !source.contains("WoodType")) return source

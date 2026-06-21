@@ -4346,11 +4346,30 @@ class MappingCompletenessTest {
             if (it < 0) source.length else it
         }
         val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw BannerPattern prefilter" to Regex("""source\.contains\(\s*"BannerPattern"\s*\)"""),
+            "raw constructor prefilter" to Regex("""source\.contains\(\s*"new BannerPattern\("\s*\)"""),
+            "raw constructor rewrite" to Regex("""\brewriteJavaNew\s*\(\s*source\s*,\s*"BannerPattern""""),
+            "raw namespace scan" to Regex("""\.find\s*\(\s*source\s*\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "legacy BannerPattern constructor migration contains $label" }
 
         assertTrue(
-            body.contains("bannerPatternDeferredRegisterNamespaceExpression(source)") &&
-                body.contains("DeferredRegister\\.create\\(\\s*Registries\\.BANNER_PATTERN"),
-            "Legacy BannerPattern constructor migration must read namespace from the BANNER_PATTERN DeferredRegister"
+            offenders.isEmpty(),
+            "Legacy BannerPattern constructor migration must inspect executable Java code, not comments or string literals: $offenders"
+        )
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("executableCode.contains(\"BannerPattern\")") &&
+                body.contains("executableCode.contains(\"new BannerPattern(\")") &&
+                body.contains("rewriteExecutableJavaNew(source, \"BannerPattern\")") &&
+                body.contains("bannerPatternDeferredRegisterNamespaceExpression(source)") &&
+                body.contains("rewriteExecutableJavaCall(source, \"create\")") &&
+                body.contains("receiver == \"DeferredRegister\"") &&
+                body.contains("args[0].trim() == \"Registries.BANNER_PATTERN\"") &&
+                body.contains("namespaces.distinct().singleOrNull()"),
+            "Legacy BannerPattern constructor migration must read executable constructor calls and unambiguous namespace evidence from the BANNER_PATTERN DeferredRegister"
         )
         assertTrue(
             !body.contains("inferModAccess"),

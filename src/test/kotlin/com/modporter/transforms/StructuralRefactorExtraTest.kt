@@ -22633,16 +22633,85 @@ class StructuralRefactorExtraTest {
                 public static final Object EXAMPLE = new BannerPattern("ex");
             }
         """.trimIndent())
+        srcDir.resolve("AmbiguousBannerSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.entity.BannerPattern;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class AmbiguousBannerSurface {
+                public static final DeferredRegister<BannerPattern> FIRST_PATTERNS =
+                        DeferredRegister.create(Registries.BANNER_PATTERN, "first_namespace");
+                public static final DeferredRegister<BannerPattern> SECOND_PATTERNS =
+                        DeferredRegister.create(Registries.BANNER_PATTERN, "second_namespace");
+
+                public static final Object EXAMPLE =
+                        FIRST_PATTERNS.register("example", () -> new BannerPattern("ex"));
+            }
+        """.trimIndent())
 
         val result = StructuralRefactorPass().apply(tempDir)
         val registered = srcDir.resolve("BannerSurface.java").readText()
         val unregistered = srcDir.resolve("UnregisteredBannerSurface.java").readText()
+        val ambiguous = srcDir.resolve("AmbiguousBannerSurface.java").readText()
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
         assertTrue(registered.contains("new BannerPattern(ResourceLocation.fromNamespaceAndPath(\"registry_namespace\", \"ex\"), \"ex\")"), registered)
         assertFalse(registered.contains("ResourceLocation.fromNamespaceAndPath(\"main_mod\""), registered)
         assertTrue(unregistered.contains("new BannerPattern(\"ex\")"), unregistered)
         assertFalse(unregistered.contains("ResourceLocation.fromNamespaceAndPath"), unregistered)
+        assertTrue(ambiguous.contains("new BannerPattern(\"ex\")"), ambiguous)
+        assertFalse(ambiguous.contains("ResourceLocation.fromNamespaceAndPath"), ambiguous)
+    }
+
+    @Test
+    fun `legacy banner pattern constructor migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val commentedNamespace = srcDir.resolve("CommentedBannerNamespace.java")
+        commentedNamespace.writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BannerPattern;
+
+            public class CommentedBannerNamespace {
+                // public static final DeferredRegister<BannerPattern> BANNER_PATTERNS = DeferredRegister.create(Registries.BANNER_PATTERN, "commented_namespace");
+                public static final Object EXAMPLE = new BannerPattern("ex");
+            }
+        """.trimIndent())
+        val docs = srcDir.resolve("BannerPatternDocs.java")
+        docs.writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.entity.BannerPattern;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BannerPatternDocs {
+                public static final DeferredRegister<BannerPattern> BANNER_PATTERNS =
+                        DeferredRegister.create(Registries.BANNER_PATTERN, "registry_namespace");
+
+                // BANNER_PATTERNS.register("example", () -> new BannerPattern("ex"));
+                private static final String DOC = "new BannerPattern(\"ex\")";
+
+                public String keep() {
+                    return DOC;
+                }
+            }
+        """.trimIndent())
+        val originalCommented = commentedNamespace.readText()
+        val originalDocs = docs.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migratedCommented = commentedNamespace.readText()
+        val migratedDocs = docs.readText()
+
+        assertEquals(originalCommented, migratedCommented)
+        assertEquals(originalDocs, migratedDocs)
+        assertEquals(0, result.changeCount)
+        assertFalse(migratedCommented.contains("ResourceLocation.fromNamespaceAndPath"), migratedCommented)
+        assertFalse(migratedDocs.contains("ResourceLocation.fromNamespaceAndPath"), migratedDocs)
     }
 
     @Test
