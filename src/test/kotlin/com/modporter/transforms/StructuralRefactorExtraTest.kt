@@ -14607,6 +14607,48 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `cacheable function optional boundary migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("FunctionRecipeDocsOnly.java").writeText("""
+            package com.example;
+
+            import net.minecraft.commands.CacheableFunction;
+
+            public class FunctionRecipeDocsOnly {
+                private static final String DOC = "CacheableFunction function = recipe.getFunction(); BlockStateRecipeUtil.executeFunction(level, pos, function);";
+
+                /*
+                default boolean convert(Level level, BlockPos pos, BlockState newState, @Nullable CacheableFunction function) {
+                    BlockStateRecipeUtil.executeFunction(level, pos, function);
+                    return true;
+                }
+
+                default int freeze(AbstractBlockStateRecipe recipe) {
+                    CacheableFunction function = recipe.getFunction();
+                    return 1;
+                }
+                */
+
+                public void keep() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("FunctionRecipeDocsOnly.java").readText()
+
+        assertFalse(
+            result.changes.any { it.ruleId == "struct-vanilla-121-api" },
+            result.changes.toString() + "\n" + transformed
+        )
+        assertFalse(transformed.contains("import java.util.Optional;"), transformed)
+        assertTrue(transformed.contains("CacheableFunction function = recipe.getFunction();"), transformed)
+        assertTrue(transformed.contains("@Nullable CacheableFunction function"), transformed)
+        assertFalse(transformed.contains("Optional<CacheableFunction>"), transformed)
+    }
+
+    @Test
     fun `migrates nitrogen block state recipe codec and constructor boundaries`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

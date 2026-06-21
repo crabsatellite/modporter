@@ -8339,6 +8339,83 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `cacheable function optional boundary migration uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateCacheableFunctionOptionalBoundaries")
+        assertTrue(start >= 0, "migrateCacheableFunctionOptionalBoundaries is missing")
+        val end = source.indexOf("private fun migrateRecipeHolderAccess", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw CacheableFunction prefilter" to body.contains("""source.contains("CacheableFunction")"""),
+            "raw getFunction prefilter" to body.contains("""source.contains("getFunction()")"""),
+            "raw executeFunction prefilter" to body.contains("""source.contains("BlockStateRecipeUtil.executeFunction(")"""),
+            "raw assignment replacement" to body.contains(".replace(result)"),
+            "raw executeFunction postfilter" to body.contains("""result.contains("BlockStateRecipeUtil.executeFunction(")"""),
+            "raw Optional import insertion" to body.contains("""addImportIfMissing(result, "java.util.Optional")""")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("CacheableFunction")""") &&
+                body.contains("""executableCode.contains("getFunction()")""") &&
+                body.contains("""executableCode.contains("BlockStateRecipeUtil.executeFunction(")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("maskJavaCommentsAndLiterals(result)") &&
+                body.contains("""addExecutableImportIfMissing(result, "java.util.Optional")"""),
+            "CacheableFunction optional boundary migration must inspect and rewrite executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "CacheableFunction optional boundary migration must not migrate comments or strings: $offenders"
+        )
+    }
+
+    @Test
+    fun `nullable import cleanup uses executable annotation evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("val nullableExecutableCode = maskJavaCommentsAndLiterals(result)")
+        assertTrue(start >= 0, "Nullable import cleanup block is missing")
+        val end = source.indexOf("return result", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw nullable annotation scan" to body.contains("""result.contains("@Nullable")"""),
+            "raw JetBrains Nullable import scan" to body.contains("""result.contains("import org.jetbrains.annotations.Nullable;")"""),
+            "raw javax Nullable import scan" to body.contains("""result.contains("import javax.annotation.Nullable;")"""),
+            "raw javax Nullable import insertion" to body.contains("""addImportIfMissing(result, "javax.annotation.Nullable")"""),
+            "raw javax Nullable import removal" to body.contains("""removeImport(result, "javax.annotation.Nullable")""")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val nullableExecutableCode = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("""(?<![\w$])@Nullable(?![\w$])""") &&
+                body.contains("""nullableExecutableCode.contains("import org.jetbrains.annotations.Nullable;")""") &&
+                body.contains("""nullableExecutableCode.contains("import javax.annotation.Nullable;")""") &&
+                body.contains("""addExecutableImportIfMissing(result, "javax.annotation.Nullable")""") &&
+                body.contains("val nullableImportExecutableCode = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("""removeExecutableImport(result, "javax.annotation.Nullable")"""),
+            "Nullable import cleanup must use executable annotation/import evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Nullable import cleanup must not use comments or strings as annotation/import evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `nested simplechannel migration does not depend on fixed networking class names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

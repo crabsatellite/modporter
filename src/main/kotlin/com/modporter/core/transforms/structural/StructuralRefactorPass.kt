@@ -16816,13 +16816,16 @@ $migratedRecipes
         } else {
             withoutAttributeImport
         }
-        if (result.contains("@Nullable") &&
-            !result.contains("import org.jetbrains.annotations.Nullable;") &&
-            !result.contains("import javax.annotation.Nullable;")) {
-            result = addImportIfMissing(result, "javax.annotation.Nullable")
+        val nullableExecutableCode = maskJavaCommentsAndLiterals(result)
+        if (Regex("""(?<![\w$])@Nullable(?![\w$])""").containsMatchIn(nullableExecutableCode) &&
+            !nullableExecutableCode.contains("import org.jetbrains.annotations.Nullable;") &&
+            !nullableExecutableCode.contains("import javax.annotation.Nullable;")) {
+            result = addExecutableImportIfMissing(result, "javax.annotation.Nullable")
         }
-        if (result.contains("import org.jetbrains.annotations.Nullable;") && result.contains("import javax.annotation.Nullable;")) {
-            result = removeImport(result, "javax.annotation.Nullable")
+        val nullableImportExecutableCode = maskJavaCommentsAndLiterals(result)
+        if (nullableImportExecutableCode.contains("import org.jetbrains.annotations.Nullable;") &&
+            nullableImportExecutableCode.contains("import javax.annotation.Nullable;")) {
+            result = removeExecutableImport(result, "javax.annotation.Nullable")
         }
         return result
     }
@@ -37886,27 +37889,33 @@ ${indent}}
     }
 
     private fun migrateCacheableFunctionOptionalBoundaries(source: String): String {
-        if (!source.contains("CacheableFunction") ||
-            (!source.contains("getFunction()") && !source.contains("BlockStateRecipeUtil.executeFunction("))) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("CacheableFunction") ||
+            (!executableCode.contains("getFunction()") &&
+                !executableCode.contains("BlockStateRecipeUtil.executeFunction("))) {
             return source
         }
 
         var result = source
         var changed = false
-        result = Regex("""\bCacheableFunction\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\r\n]*\.getFunction\(\))\s*;""")
-            .replace(result) { match ->
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\bCacheableFunction\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\r\n]*\.getFunction\(\))\s*;""")
+        ) { match ->
+            changed = true
+            "Optional<CacheableFunction> ${match.groupValues[1]} = ${match.groupValues[2].trim()};"
+        }
+        if (maskJavaCommentsAndLiterals(result).contains("BlockStateRecipeUtil.executeFunction(")) {
+            result = replaceExecutableRegex(
+                result,
+                Regex("""@Nullable\s+CacheableFunction\s+([A-Za-z_$][\w$]*)""")
+            ) { match ->
                 changed = true
-                "Optional<CacheableFunction> ${match.groupValues[1]} = ${match.groupValues[2].trim()};"
+                "Optional<CacheableFunction> ${match.groupValues[1]}"
             }
-        if (result.contains("BlockStateRecipeUtil.executeFunction(")) {
-            result = Regex("""@Nullable\s+CacheableFunction\s+([A-Za-z_$][\w$]*)""")
-                .replace(result) { match ->
-                    changed = true
-                    "Optional<CacheableFunction> ${match.groupValues[1]}"
-                }
         }
         if (changed) {
-            result = addImportIfMissing(result, "java.util.Optional")
+            result = addExecutableImportIfMissing(result, "java.util.Optional")
         }
         return result
     }
