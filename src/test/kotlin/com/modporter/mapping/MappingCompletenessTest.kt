@@ -8378,6 +8378,50 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `recipe holder access migration binds declared names instead of fixed locals`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateRecipeHolderAccess")
+        assertTrue(start >= 0, "migrateRecipeHolderAccess is missing")
+        val end = source.indexOf("private fun migrateLegacyItemMaxDamageCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "fixed rm getRecipes prefilter" to body.contains("""source.contains("rm.getRecipes()")"""),
+            "fixed rm byKey prefilter" to body.contains("""source.contains("rm.byKey(")"""),
+            "fixed all collection replacement" to body.contains("""Collection<Recipe<?>> all = rm.getRecipes();"""),
+            "fixed recipe helper signature replacement" to body.contains("""private static Recipe<?> recipe("""),
+            "fixed r local replacement" to body.contains("""Recipe<?> r = recipe("""),
+            "fixed r receiver rewrite" to body.contains("""receiver == "r""""),
+            "fixed RegistryAccess ra rewrite" to body.contains("""RegistryAccess ra"""),
+            "raw RecipeHolder import insertion" to body.contains("""addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeHolder")""")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val recipeCollectionPattern = Regex(") &&
+                body.contains("val collectionNames = recipeCollectionPattern.findAll(executableCode)") &&
+                body.contains("val recipeHolderMethods = linkedSetOf<String>()") &&
+                body.contains("val methodPattern = Regex(") &&
+                body.contains("contains(\".byKey(\")") &&
+                body.contains("replaceExecutableRegex(result, recipeCollectionPattern)") &&
+                body.contains("val holderVariables = linkedSetOf<String>()") &&
+                body.contains("val registryAccessVariables = Regex(") &&
+                body.contains("""addExecutableImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeHolder")"""),
+            "Recipe holder access migration must bind RecipeManager lists, helper methods, holder locals, and RegistryAccess names from executable source"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Recipe holder access migration must not depend on fixed sample local names: $offenders"
+        )
+    }
+
+    @Test
     fun `nullable import cleanup uses executable annotation evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

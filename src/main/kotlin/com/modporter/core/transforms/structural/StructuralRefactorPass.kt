@@ -37921,28 +37921,109 @@ ${indent}}
     }
 
     private fun migrateRecipeHolderAccess(source: String): String {
-        if (!source.contains("RecipeManager") ||
-            (!source.contains("rm.getRecipes()") && !source.contains("rm.byKey("))) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("RecipeManager") ||
+            (!executableCode.contains(".getRecipes()") && !executableCode.contains(".byKey("))) {
             return source
         }
+
+        val id = """[A-Za-z_$][\w$]*"""
+        val recipeCollectionPattern = Regex(
+            """\b((?:java\.util\.)?Collection)\s*<\s*Recipe\s*<\s*\?\s*>\s*>\s+($id)\s*=\s*([^;]*\.getRecipes\(\))\s*;"""
+        )
+        val collectionNames = recipeCollectionPattern.findAll(executableCode)
+            .map { it.groupValues[2] }
+            .toMutableSet()
+        val recipeHolderMethods = linkedSetOf<String>()
+        val methodPattern = Regex(
+            """(?m)^([ \t]*(?:(?:public|protected|private|static|final)\s+)*)Recipe\s*<\s*\?\s*>\s+($id)\s*\([^;{}]*\)\s*\{"""
+        )
+        methodPattern.findAll(executableCode).forEach { match ->
+            val openBrace = executableCode.indexOf('{', match.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
+            if (openBrace >= 0 && closeBrace > openBrace &&
+                executableCode.substring(openBrace + 1, closeBrace).contains(".byKey(")) {
+                recipeHolderMethods += match.groupValues[2]
+            }
+        }
+        if (collectionNames.isEmpty() && recipeHolderMethods.isEmpty()) return source
+
         var result = source
-        result = result.replace("Collection<Recipe<?>> all = rm.getRecipes();", "Collection<RecipeHolder<?>> all = rm.getRecipes();")
-        result = Regex("""for\s*\(\s*Recipe<\?>\s+([A-Za-z_$][\w$]*)\s*:\s*all\s*\)\s*\{""")
-            .replace(result) { match ->
-                "for (RecipeHolder<?> holder : all) {\n                Recipe<?> ${match.groupValues[1]} = holder.value();"
+        var changed = false
+        result = replaceExecutableRegex(result, recipeCollectionPattern) { match ->
+            changed = true
+            "${match.groupValues[1]}<RecipeHolder<?>> ${match.groupValues[2]} = ${match.groupValues[3].trim()};"
+        }
+        for (collectionName in collectionNames) {
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(?m)^([ \t]*)for\s*\(\s*Recipe\s*<\s*\?\s*>\s+($id)\s*:\s*${Regex.escape(collectionName)}\s*\)\s*\{""")
+            ) { match ->
+                changed = true
+                val indent = match.groupValues[1]
+                val recipeVariable = match.groupValues[2]
+                val holderVariable = if (recipeVariable.endsWith("Holder")) {
+                    "${recipeVariable}ValueHolder"
+                } else {
+                    "${recipeVariable}Holder"
+                }
+                "${indent}for (RecipeHolder<?> $holderVariable : $collectionName) {\n" +
+                    "${indent}    Recipe<?> $recipeVariable = $holderVariable.value();"
             }
-        result = result.replace("private static Recipe<?> recipe(", "private static RecipeHolder<?> recipe(")
-        result = result.replace("Recipe<?> r = recipe(", "RecipeHolder<?> r = recipe(")
-        result = Regex("""\b([A-Za-z_$][\w$]*)\.getResultItem\(""")
-            .replace(result) { match ->
-                val receiver = match.groupValues[1]
-                if (receiver == "r") "$receiver.value().getResultItem(" else match.value
+        }
+        for (methodName in recipeHolderMethods) {
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(?m)^([ \t]*(?:(?:public|protected|private|static|final)\s+)*)Recipe\s*<\s*\?\s*>(\s+${Regex.escape(methodName)}\s*\()""")
+            ) { match ->
+                changed = true
+                "${match.groupValues[1]}RecipeHolder<?>${match.groupValues[2]}"
             }
-        result = result.replace("RegistryAccess ra", "HolderLookup.Provider ra")
-        result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeHolder")
-        if (result.contains("HolderLookup.Provider")) {
-            result = addImportIfMissing(result, "net.minecraft.core.HolderLookup")
-            result = removeImport(result, "net.minecraft.core.RegistryAccess")
+        }
+
+        val holderVariables = linkedSetOf<String>()
+        if (recipeHolderMethods.isNotEmpty()) {
+            val methodAlternation = recipeHolderMethods.joinToString("|") { Regex.escape(it) }
+            val assignmentPattern = Regex("""\bRecipe\s*<\s*\?\s*>\s+($id)\s*=\s*($methodAlternation)\s*\(""")
+            assignmentPattern.findAll(maskJavaCommentsAndLiterals(result)).forEach {
+                holderVariables += it.groupValues[1]
+            }
+            result = replaceExecutableRegex(result, assignmentPattern) { match ->
+                changed = true
+                "RecipeHolder<?> ${match.groupValues[1]} = ${match.groupValues[2]}("
+            }
+        }
+        for (variable in holderVariables) {
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b${Regex.escape(variable)}\.getResultItem\(""")
+            ) {
+                changed = true
+                "$variable.value().getResultItem("
+            }
+        }
+
+        val registryAccessVariables = Regex("""\.getResultItem\(\s*($id)\s*\)""")
+            .findAll(maskJavaCommentsAndLiterals(result))
+            .map { it.groupValues[1] }
+            .toSet()
+        for (variable in registryAccessVariables) {
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\bRegistryAccess\s+${Regex.escape(variable)}\b""")
+            ) {
+                changed = true
+                "HolderLookup.Provider $variable"
+            }
+        }
+        if (!changed) return source
+        result = addExecutableImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeHolder")
+        if (maskJavaCommentsAndLiterals(result).contains("HolderLookup.Provider")) {
+            result = addExecutableImportIfMissing(result, "net.minecraft.core.HolderLookup")
+            val withoutRegistryAccess = removeExecutableImport(result, "net.minecraft.core.RegistryAccess")
+            if (!Regex("""\bRegistryAccess\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutRegistryAccess))) {
+                result = withoutRegistryAccess
+            }
         }
         return result
     }

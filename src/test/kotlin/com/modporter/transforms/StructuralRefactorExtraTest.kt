@@ -11098,12 +11098,64 @@ class StructuralRefactorExtraTest {
         assertTrue(recipes.contains("import net.minecraft.world.item.crafting.RecipeHolder;"))
         assertTrue(recipes.contains("private static RecipeHolder<?> recipe("))
         assertTrue(recipes.contains("Collection<RecipeHolder<?>> all = rm.getRecipes();"))
-        assertTrue(recipes.contains("for (RecipeHolder<?> holder : all)"))
-        assertTrue(recipes.contains("Recipe<?> recipe = holder.value();"))
+        assertTrue(recipes.contains("for (RecipeHolder<?> recipeHolder : all)"))
+        assertTrue(recipes.contains("Recipe<?> recipe = recipeHolder.value();"))
         assertTrue(recipes.contains("RecipeHolder<?> r = recipe(helper, \"x\");"))
         assertTrue(recipes.contains("r.value().getResultItem(helper.getLevel().registryAccess())"))
         assertTrue(recipes.contains("HolderLookup.Provider ra"))
         assertTrue(trades.contains("new MerchantOffer(new net.minecraft.world.item.trading.ItemCost(item, count), java.util.Optional.empty(), coinStack, maxTrades, xp, 0.05F)"))
+    }
+
+    @Test
+    fun `recipe holder access migration binds arbitrary local names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RecipeHolderNames.java").writeText("""
+            package com.example;
+
+            import java.util.Collection;
+            import java.util.Set;
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeManager;
+
+            public class RecipeHolderNames {
+                private static Recipe<?> findRecipe(GameTestHelper helper, String path) {
+                    RecipeManager manager = helper.getLevel().getRecipeManager();
+                    return manager.byKey(null).orElse(null);
+                }
+
+                private static Set<Item> computeReachable(Set<Item> seed, RecipeManager manager, RegistryAccess access) {
+                    Collection<Recipe<?>> recipes = manager.getRecipes();
+                    for (Recipe<?> entry : recipes) {
+                        ItemStack result = entry.getResultItem(access);
+                    }
+                    return seed;
+                }
+
+                void test(GameTestHelper helper) {
+                    Recipe<?> selected = findRecipe(helper, "x");
+                    ItemStack out = selected.getResultItem(helper.getLevel().registryAccess());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("RecipeHolderNames.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, result.changes.toString())
+        assertTrue(migrated.contains("import net.minecraft.core.HolderLookup;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.item.crafting.RecipeHolder;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.core.RegistryAccess;"), migrated)
+        assertTrue(migrated.contains("private static RecipeHolder<?> findRecipe("), migrated)
+        assertTrue(migrated.contains("Collection<RecipeHolder<?>> recipes = manager.getRecipes();"), migrated)
+        assertTrue(migrated.contains("for (RecipeHolder<?> entryHolder : recipes)"), migrated)
+        assertTrue(migrated.contains("Recipe<?> entry = entryHolder.value();"), migrated)
+        assertTrue(migrated.contains("RecipeHolder<?> selected = findRecipe(helper, \"x\");"), migrated)
+        assertTrue(migrated.contains("selected.value().getResultItem(helper.getLevel().registryAccess())"), migrated)
+        assertTrue(migrated.contains("HolderLookup.Provider access"), migrated)
     }
 
     @Test
