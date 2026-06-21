@@ -2270,6 +2270,52 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `java type owner resolution does not fall back to previous declarations`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val sources = listOf(
+            "ResourceMigrator" to projectRoot
+                .resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt")
+                .readText(),
+            "TextReplacementPass" to projectRoot
+                .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+                .readText()
+        )
+
+        fun helperBody(source: String): String {
+            val start = source.indexOf("private fun javaTypeNameContainingOffset")
+            assertTrue(start >= 0, "javaTypeNameContainingOffset is missing")
+            val end = source.indexOf("\n    private fun ", start + 1).let {
+                if (it < 0) source.length else it
+            }
+            return source.substring(start, end)
+        }
+
+        val offenders = sources.flatMap { (label, source) ->
+            val body = helperBody(source)
+            listOf(
+                "takeWhile previous-type scan" to "takeWhile { it.range.first <= offset }",
+                "last declaration fallback" to "lastOrNull()",
+                "post-loop type lookup" to "return typePattern.findAll(source)"
+            )
+                .filter { (_, marker) -> body.contains(marker) }
+                .map { (reason, _) -> "$label contains $reason" }
+        }
+
+        assertTrue(
+            sources.all { (_, source) ->
+                val body = helperBody(source)
+                body.contains("offset in openBrace..closeBrace") &&
+                    Regex("""return\s+null\s*\}\s*$""").containsMatchIn(body)
+            },
+            "Java owner resolution must return a type only when the offset is inside that type body"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Java owner resolution must not assign orphaned declarations to the previous type: $offenders"
+        )
+    }
+
+    @Test
     fun `code awarded advancement detection uses executable source evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot

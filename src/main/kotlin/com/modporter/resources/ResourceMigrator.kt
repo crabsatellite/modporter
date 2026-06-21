@@ -637,11 +637,7 @@ class ResourceMigrationPass(
                 return match.groupValues[1]
             }
         }
-        return typePattern.findAll(source)
-            .takeWhile { it.range.first <= offset }
-            .lastOrNull()
-            ?.groupValues
-            ?.get(1)
+        return null
     }
 
     private fun resolveModIdExpression(expression: String, modIds: Map<String, String>): String? {

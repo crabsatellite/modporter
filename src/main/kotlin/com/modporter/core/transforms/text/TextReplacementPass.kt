@@ -2199,11 +2199,7 @@ ${codecFields.joinToString(",\n")}
                 return match.groupValues[1]
             }
         }
-        return typePattern.findAll(source)
-            .takeWhile { it.range.first <= offset }
-            .lastOrNull()
-            ?.groupValues
-            ?.get(1)
+        return null
     }
 
     private fun indexJavaClassSources(javaSources: List<Pair<Path, String>>): Map<String, List<Pair<Path, String>>> {
