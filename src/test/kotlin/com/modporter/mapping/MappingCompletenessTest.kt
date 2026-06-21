@@ -2786,6 +2786,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `game event listener migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyGameEventListenerSource")
+        assertTrue(start >= 0, "migrateLegacyGameEventListenerSource is missing")
+        val end = source.indexOf("private fun normaliseGameEventHolderComparison", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw GameEventListener prefilter" to """source.contains("GameEventListener")""",
+            "raw handleGameEvent prefilter" to """source.contains("handleGameEvent(")""",
+            "raw signature replacement" to ".replace(result)",
+            "raw holder variable collection" to ".findAll(result)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("GameEventListener")""") &&
+                body.contains("""executableCode.contains("handleGameEvent(")""") &&
+                body.contains("replaceExecutableRegex(result, Regex(") &&
+                body.contains(".findAll(maskJavaCommentsAndLiterals(result))"),
+            "GameEventListener migration must collect signatures and event variables from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "GameEventListener migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `resource mod id detection does not infer constant owners from file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot

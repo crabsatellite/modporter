@@ -8637,6 +8637,12 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.phys.Vec3;
 
             public class ListenerBE {
+                /*
+                public boolean handleGameEvent(ServerLevel docLevel, GameEvent documentedEvent, GameEvent.Context docContext, Vec3 docPos) {
+                    return documentedEvent == GameEvent.BLOCK_PLACE;
+                }
+                */
+
                 class Listener implements GameEventListener {
                     public PositionSource getListenerSource() {
                         return null;
@@ -8665,6 +8671,8 @@ class StructuralRefactorExtraTest {
         assertTrue(migrated.contains("boolean handleGameEvent(ServerLevel level, Holder<GameEvent> event, GameEvent.Context context, Vec3 pos)"))
         assertTrue(migrated.contains("event.is(ModGameEvents.FROZEN) || event.is(GameEvent.BLOCK_PLACE)"))
         assertTrue(migrated.contains("return !event.is(GameEvent.BLOCK_DESTROY);"))
+        assertTrue(migrated.contains("boolean handleGameEvent(ServerLevel docLevel, GameEvent documentedEvent, GameEvent.Context docContext, Vec3 docPos)"))
+        assertTrue(migrated.contains("return documentedEvent == GameEvent.BLOCK_PLACE;"))
         assertFalse(migrated.contains("event =="))
         assertFalse(migrated.contains("event !="))
     }

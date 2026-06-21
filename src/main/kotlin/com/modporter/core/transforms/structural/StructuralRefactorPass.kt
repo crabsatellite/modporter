@@ -25759,44 +25759,41 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         expression.trim() == "net.minecraft.core.RegistryAccess.EMPTY" || expression.trim() == "RegistryAccess.EMPTY"
 
     private fun migrateLegacyGameEventListenerSource(source: String): String {
-        if (!source.contains("GameEventListener") || !source.contains("handleGameEvent(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("GameEventListener") || !executableCode.contains("handleGameEvent(")) return source
         var result = source
         var changed = false
-        result = Regex(
+        result = replaceExecutableRegex(result, Regex(
             """boolean\s+handleGameEvent\s*\(\s*ServerLevel\s+([A-Za-z_$][\w$]*)\s*,\s*GameEvent\s+([A-Za-z_$][\w$]*)\s*,\s*GameEvent\.Context\s+([A-Za-z_$][\w$]*)\s*,\s*Vec3\s+([A-Za-z_$][\w$]*)\s*\)"""
-        ).replace(result) { match ->
+        )) { match ->
             changed = true
             "boolean handleGameEvent(ServerLevel ${match.groupValues[1]}, Holder<GameEvent> ${match.groupValues[2]}, GameEvent.Context ${match.groupValues[3]}, Vec3 ${match.groupValues[4]})"
         }
 
         val holderEventVariables = Regex("""\bHolder\s*<\s*GameEvent\s*>\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
+            .findAll(maskJavaCommentsAndLiterals(result))
             .map { it.groupValues[1] }
             .toSet()
         if (holderEventVariables.isEmpty()) return if (changed) addImportIfMissing(result, "net.minecraft.core.Holder") else result
 
         val eventConstant = """((?:[A-Za-z_$][\w$]*\.)+[A-Z0-9_$][A-Za-z0-9_$]*(?:\.get\(\))?)"""
         for (eventVariable in holderEventVariables) {
-            result = Regex("""\b${Regex.escape(eventVariable)}\s*==\s*$eventConstant""")
-                .replace(result) { match ->
-                    changed = true
-                    "${eventVariable}.is(${normaliseGameEventHolderComparison(match.groupValues[1])})"
-                }
-            result = Regex("""$eventConstant\s*==\s*\b${Regex.escape(eventVariable)}\b""")
-                .replace(result) { match ->
-                    changed = true
-                    "${eventVariable}.is(${normaliseGameEventHolderComparison(match.groupValues[1])})"
-                }
-            result = Regex("""\b${Regex.escape(eventVariable)}\s*!=\s*$eventConstant""")
-                .replace(result) { match ->
-                    changed = true
-                    "!${eventVariable}.is(${normaliseGameEventHolderComparison(match.groupValues[1])})"
-                }
-            result = Regex("""$eventConstant\s*!=\s*\b${Regex.escape(eventVariable)}\b""")
-                .replace(result) { match ->
-                    changed = true
-                    "!${eventVariable}.is(${normaliseGameEventHolderComparison(match.groupValues[1])})"
-                }
+            result = replaceExecutableRegex(result, Regex("""\b${Regex.escape(eventVariable)}\s*==\s*$eventConstant""")) { match ->
+                changed = true
+                "${eventVariable}.is(${normaliseGameEventHolderComparison(match.groupValues[1])})"
+            }
+            result = replaceExecutableRegex(result, Regex("""$eventConstant\s*==\s*\b${Regex.escape(eventVariable)}\b""")) { match ->
+                changed = true
+                "${eventVariable}.is(${normaliseGameEventHolderComparison(match.groupValues[1])})"
+            }
+            result = replaceExecutableRegex(result, Regex("""\b${Regex.escape(eventVariable)}\s*!=\s*$eventConstant""")) { match ->
+                changed = true
+                "!${eventVariable}.is(${normaliseGameEventHolderComparison(match.groupValues[1])})"
+            }
+            result = replaceExecutableRegex(result, Regex("""$eventConstant\s*!=\s*\b${Regex.escape(eventVariable)}\b""")) { match ->
+                changed = true
+                "!${eventVariable}.is(${normaliseGameEventHolderComparison(match.groupValues[1])})"
+            }
         }
 
         return if (changed) addImportIfMissing(result, "net.minecraft.core.Holder") else result
