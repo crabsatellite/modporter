@@ -4299,6 +4299,72 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `nitrogen sync packet attachment getter ignores local AttachmentType suppliers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("AttachmentType.java").writeText("""
+            package com.example;
+
+            public final class AttachmentType<T> {
+            }
+        """.trimIndent())
+        srcDir.resolve("LocalData.java").writeText("""
+            package com.example;
+
+            public interface LocalData {
+            }
+        """.trimIndent())
+        srcDir.resolve("LocalAttachments.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+
+            public final class LocalAttachments {
+                public static final Supplier<AttachmentType<LocalData>> LOCAL_DATA = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("LocalDataSyncPacket.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.capability.INBTSynchable;
+            import com.aetherteam.nitrogen.network.packet.SyncEntityPacket;
+            import net.minecraft.network.FriendlyByteBuf;
+            import oshi.util.tuples.Quartet;
+
+            public class LocalDataSyncPacket extends SyncEntityPacket<LocalData> {
+                public LocalDataSyncPacket(Quartet<Integer, String, INBTSynchable.Type, Object> values) {
+                    super(values);
+                }
+
+                public LocalDataSyncPacket(int entityID, String key, INBTSynchable.Type type, Object value) {
+                    super(entityID, key, type, value);
+                }
+
+                public static LocalDataSyncPacket decode(FriendlyByteBuf buf) {
+                    return new LocalDataSyncPacket(SyncEntityPacket.decodeEntityValues(buf));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val packet = srcDir.resolve("LocalDataSyncPacket.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-attachment-api" })
+        assertTrue(packet.contains("CustomPacketPayload.Type<LocalDataSyncPacket> TYPE"), packet)
+        assertFalse(packet.contains("getAttachment()"), packet)
+        assertFalse(packet.contains("LocalAttachments.LOCAL_DATA"), packet)
+    }
+
+    @Test
     fun `wraps attachment getData returns for legacy lazy optional getters`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

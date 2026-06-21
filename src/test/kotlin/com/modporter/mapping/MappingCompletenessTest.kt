@@ -644,6 +644,49 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `nitrogen attachment suppliers require resolved neoforge attachment type`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun collectNitrogenAttachmentSuppliers")
+        assertTrue(start >= 0, "collectNitrogenAttachmentSuppliers is missing")
+        val end = source.indexOf("private fun ensureNitrogenSyncPacketAttachmentGetter", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "raw AttachmentType marker" to """source.contains("AttachmentType<")""",
+            "raw source supplier scan" to Regex("""findAll\(source\)"""),
+            "unresolved attachment supplier add" to Regex("""fun\s+addSupplier\s*\(\s*typeName:\s*String,\s*fieldName:\s*String""")
+        )
+        val offenders = forbidden
+            .filter { (_, marker) ->
+                when (marker) {
+                    is String -> body.contains(marker)
+                    is Regex -> marker.containsMatchIn(body)
+                    else -> false
+                }
+            }
+            .map { (label, _) -> "Nitrogen attachment supplier collection contains $label" }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("if (!executableCode.contains(\"AttachmentType<\")) continue") &&
+                body.contains("val wildcardImports = javaNonStaticWildcardImports(code)") &&
+                body.contains("fun addSupplier(attachmentTypeRef: String, typeName: String, fieldName: String)") &&
+                body.contains("isNeoForgeAttachmentTypeReference(attachmentTypeRef, packageName, imports, wildcardImports)") &&
+                body.contains(".findAll(executableCode)") &&
+                source.contains("private fun isNeoForgeAttachmentTypeReference("),
+            "Nitrogen attachment supplier collection must prove AttachmentType resolves to NeoForge API"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Nitrogen attachment supplier collection must not trust raw source or unqualified AttachmentType names: $offenders"
+        )
+    }
+
+    @Test
     fun `backpack container API migration binds inventory wrapper to slot constructor`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

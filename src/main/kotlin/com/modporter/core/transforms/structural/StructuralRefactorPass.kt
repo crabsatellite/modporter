@@ -5641,14 +5641,19 @@ $helpers
 
     private fun collectNitrogenAttachmentSuppliers(javaFiles: List<Path>): Map<String, NitrogenAttachmentSupplier> {
         val suppliers = mutableListOf<NitrogenAttachmentSupplier>()
+        val typeReference = """[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*"""
         for (javaFile in javaFiles) {
             val source = javaFile.readText()
-            if (!source.contains("AttachmentType<")) continue
-            val packageName = packageNameOf(source)
-            val ownerType = javaTopLevelTypeName(source) ?: continue
-            val imports = javaNonStaticImports(source)
+            val code = maskJavaComments(source)
+            val executableCode = maskJavaCommentsAndLiterals(source)
+            if (!executableCode.contains("AttachmentType<")) continue
+            val packageName = packageNameOf(code)
+            val ownerType = javaTopLevelTypeName(executableCode) ?: continue
+            val imports = javaNonStaticImports(code)
+            val wildcardImports = javaNonStaticWildcardImports(code)
 
-            fun addSupplier(typeName: String, fieldName: String) {
+            fun addSupplier(attachmentTypeRef: String, typeName: String, fieldName: String) {
+                if (!isNeoForgeAttachmentTypeReference(attachmentTypeRef, packageName, imports, wildcardImports)) return
                 val resolvedType = resolveJavaTypeReference(typeName, packageName, imports) ?: return
                 suppliers += NitrogenAttachmentSupplier(
                     attachmentType = resolvedType,
@@ -5659,19 +5664,19 @@ $helpers
             }
 
             Regex(
-                """(?m)\bpublic\s+static\s+final\s+(?:java\.util\.function\.)?Supplier\s*<\s*(?:net\.neoforged\.neoforge\.attachment\.)?AttachmentType\s*<\s*([^<>]+)\s*>\s*>\s+([A-Za-z_$][\w$]*)\s*="""
-            ).findAll(source).forEach { match ->
-                addSupplier(match.groupValues[1], match.groupValues[2])
+                """(?m)\bpublic\s+static\s+final\s+(?:java\.util\.function\.)?Supplier\s*<\s*($typeReference)\s*<\s*([^<>]+)\s*>\s*>\s+([A-Za-z_$][\w$]*)\s*="""
+            ).findAll(executableCode).forEach { match ->
+                addSupplier(match.groupValues[1], match.groupValues[2], match.groupValues[3])
             }
             Regex(
-                """(?m)\bpublic\s+static\s+final\s+(?:net\.neoforged\.neoforge\.registries\.)?DeferredHolder\s*<\s*(?:net\.neoforged\.neoforge\.attachment\.)?AttachmentType\s*<\s*\?\s*>\s*,\s*(?:net\.neoforged\.neoforge\.attachment\.)?AttachmentType\s*<\s*([^<>]+)\s*>\s*>\s+([A-Za-z_$][\w$]*)\s*="""
-            ).findAll(source).forEach { match ->
-                addSupplier(match.groupValues[1], match.groupValues[2])
+                """(?m)\bpublic\s+static\s+final\s+(?:net\.neoforged\.neoforge\.registries\.)?DeferredHolder\s*<\s*$typeReference\s*<\s*\?\s*>\s*,\s*($typeReference)\s*<\s*([^<>]+)\s*>\s*>\s+([A-Za-z_$][\w$]*)\s*="""
+            ).findAll(executableCode).forEach { match ->
+                addSupplier(match.groupValues[1], match.groupValues[2], match.groupValues[3])
             }
             Regex(
-                """(?m)\bpublic\s+static\s+final\s+(?:net\.minecraftforge\.registries\.)?RegistryObject\s*<\s*(?:net\.neoforged\.neoforge\.attachment\.)?AttachmentType\s*<\s*([^<>]+)\s*>\s*>\s+([A-Za-z_$][\w$]*)\s*="""
-            ).findAll(source).forEach { match ->
-                addSupplier(match.groupValues[1], match.groupValues[2])
+                """(?m)\bpublic\s+static\s+final\s+(?:net\.minecraftforge\.registries\.)?RegistryObject\s*<\s*($typeReference)\s*<\s*([^<>]+)\s*>\s*>\s+([A-Za-z_$][\w$]*)\s*="""
+            ).findAll(executableCode).forEach { match ->
+                addSupplier(match.groupValues[1], match.groupValues[2], match.groupValues[3])
             }
         }
         return suppliers
@@ -5888,6 +5893,20 @@ $helpers
         }
         return candidates.filter { it in knownTypes }.distinct().singleOrNull()
     }
+
+    private fun isNeoForgeAttachmentTypeReference(
+        rawType: String,
+        packageName: String,
+        imports: Map<String, String>,
+        wildcardImports: Set<String>
+    ): Boolean =
+        resolveKnownJavaTypeReference(
+            rawType,
+            packageName,
+            imports,
+            wildcardImports,
+            setOf("net.neoforged.neoforge.attachment.AttachmentType")
+        ) == "net.neoforged.neoforge.attachment.AttachmentType"
 
     private fun collectNitrogenSyncOwnerAccessors(javaFiles: List<Path>): Map<String, String> {
         val entityTypes = "(?:Player|ServerPlayer|Entity|LivingEntity|Mob|AbstractArrow|Projectile)"
