@@ -3030,6 +3030,45 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `holder value accessor migration uses executable typed variables`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateHolderValueAccessorsSource")
+        assertTrue(start >= 0, "migrateHolderValueAccessorsSource is missing")
+        val end = source.indexOf("private fun migrateScreenBackgroundRenderedEventSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getEffect description replacement" to "result.replace(\".getEffect().getDescriptionId()\"",
+            "raw getModelName replacement" to "result.replace(\"${'$'}variable.getModelName()\"",
+            "hardcoded effectHolder assignment" to "MobEffect effect = effectHolder;",
+            "raw variable scan" to ".findAll(result)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("replaceExecutableRegex(") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("playerSkinVariables") &&
+                body.contains("mobEffectHolderVariables") &&
+                body.contains("Holder") &&
+                body.contains("MobEffect") &&
+                body.contains("Regex(\"\"\"\\b${'$'}{Regex.escape(variable)}\\.getModelName\\(\\)\"\"\")") &&
+                body.contains("Regex(\"\"\"\\bMobEffect\\s+([A-Za-z_") &&
+                body.contains("${'$'}{Regex.escape(variable)}\\s*;\"\"\")"),
+            "Holder value accessor migration must rewrite executable typed variables, not comments or hardcoded names"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Holder value accessor migration must not use raw whole-file replacements or hardcoded names: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy add layer skin migrations use executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

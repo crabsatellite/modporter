@@ -9666,6 +9666,58 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `holder value accessor migration ignores comments and strings`() {
+        val projectDir = createFile("HolderAccessDocs.java", """
+            package com.example;
+
+            import net.minecraft.client.player.AbstractClientPlayer;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+
+            public class HolderAccessDocs {
+                private static final String DOC = ".getEffect().getDescriptionId() client.getModelName() MobEffect effect = otherHolder;";
+
+                /*
+                void docs(Holder<MobEffect> otherHolder, MobEffectInstance instance, AbstractClientPlayer client) {
+                    String id = instance.getEffect().getDescriptionId();
+                    MobEffect effect = otherHolder;
+                    String model = client.getModelName();
+                }
+                */
+
+                void real(Holder<MobEffect> otherHolder, MobEffectInstance instance, AbstractClientPlayer client, TrophyType trophyType) {
+                    String id = instance.getEffect().getDescriptionId();
+                    MobEffect effect = otherHolder;
+                    String model = client.getModelName();
+                    String trophy = trophyType.getModelName();
+                }
+
+                static class TrophyType {
+                    String getModelName() {
+                        return "trophy";
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir.resolve("src/main/java/com/example/HolderAccessDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("""private static final String DOC = ".getEffect().getDescriptionId() client.getModelName() MobEffect effect = otherHolder;";"""), migrated)
+        assertTrue(migrated.contains("String id = instance.getEffect().value().getDescriptionId();"), migrated)
+        assertTrue(migrated.contains("MobEffect effect = otherHolder.value();"), migrated)
+        assertTrue(migrated.contains("String model = client.getSkin().model().id();"), migrated)
+        assertTrue(migrated.contains("String trophy = trophyType.getModelName();"), migrated)
+        assertTrue(
+            Regex("""/\*\s*void docs\(Holder<MobEffect> otherHolder, MobEffectInstance instance, AbstractClientPlayer client\)\s*\{\s*String id = instance\.getEffect\(\)\.getDescriptionId\(\);\s*MobEffect effect = otherHolder;\s*String model = client\.getModelName\(\);""", RegexOption.DOT_MATCHES_ALL)
+                .containsMatchIn(migrated),
+            migrated
+        )
+    }
+
+    @Test
     fun `migrates recipe book ghost recipe holder override without broad recipe rewrites`() {
         val projectDir = createFile("IncubatorRecipeBookComponent.java", """
             package com.example;

@@ -15393,16 +15393,33 @@ ${entries.joinToString(",\n")}
 
     private fun migrateHolderValueAccessorsSource(source: String): String {
         var result = source
-        result = result.replace(".getEffect().getDescriptionId()", ".getEffect().value().getDescriptionId()")
-        result = Regex("""\.getEffect\(\)\s*([!=]=)\s*((?:[A-Za-z_$][\w$]*\.)+[A-Z0-9_$]+)\.get\(\)""")
-            .replace(result) { match -> ".getEffect().value() ${match.groupValues[1]} ${match.groupValues[2]}.get()" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\.getEffect\(\)\.getDescriptionId\(\)""")
+        ) { ".getEffect().value().getDescriptionId()" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\.getEffect\(\)\s*([!=]=)\s*((?:[A-Za-z_$][\w$]*\.)+[A-Z0-9_$]+)\.get\(\)""")
+        ) { match -> ".getEffect().value() ${match.groupValues[1]} ${match.groupValues[2]}.get()" }
+        val executableCode = maskJavaCommentsAndLiterals(result)
         val playerSkinVariables = Regex(
             """\b(?:net\.minecraft\.client\.player\.)?(?:AbstractClientPlayer|LocalPlayer|RemotePlayer)\s+([A-Za-z_$][\w$]*)\b"""
-        ).findAll(result).map { it.groupValues[1] }.toSet()
+        ).findAll(executableCode).map { it.groupValues[1] }.toSet()
         for (variable in playerSkinVariables) {
-            result = result.replace("$variable.getModelName()", "$variable.getSkin().model().id()")
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b${Regex.escape(variable)}\.getModelName\(\)""")
+            ) { "$variable.getSkin().model().id()" }
         }
-        result = result.replace("MobEffect effect = effectHolder;", "MobEffect effect = effectHolder.value();")
+        val mobEffectHolderVariables = Regex(
+            """\b(?:net\.minecraft\.core\.)?Holder\s*<\s*(?:net\.minecraft\.world\.effect\.)?MobEffect\s*>\s+([A-Za-z_$][\w$]*)\b"""
+        ).findAll(executableCode).map { it.groupValues[1] }.toSet()
+        for (variable in mobEffectHolderVariables) {
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\bMobEffect\s+([A-Za-z_$][\w$]*)\s*=\s*${Regex.escape(variable)}\s*;""")
+            ) { match -> "MobEffect ${match.groupValues[1]} = $variable.value();" }
+        }
         return result
     }
 
