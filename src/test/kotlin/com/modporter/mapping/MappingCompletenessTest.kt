@@ -2492,6 +2492,46 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy passenger attachment migration uses executable method ranges`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyPassengerAttachmentOverrides")
+        assertTrue(start >= 0, "migrateLegacyPassengerAttachmentOverrides is missing")
+        val end = source.indexOf("private fun migrateLegacyEntityOverrideSignatures", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getPassengersRidingOffset prefilter" to """source.contains("getPassengersRidingOffset()")""",
+            "raw attachment point prefilter" to """source.contains("getPassengerAttachmentPoint(")""",
+            "raw offset method extraction" to """javaMethodText(source, "getPassengersRidingOffset")""",
+            "raw offset method replacement" to "source.replace(offsetMethod, replacement)",
+            "raw method removal" to "removeMethodByName(result",
+            "raw distance scan" to """.find(source)"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val methods = javaMethodRanges(executableCode)") &&
+				body.contains("val offsetMethodText = source.substring(offsetMethod.range)") &&
+				body.contains("val executableOffsetMethodText = executableCode.substring(offsetMethod.range)") &&
+				body.contains("if (riderPositionMethods.size > 1)") &&
+				body.contains("executableCode.substring(method.range)") &&
+				body.contains("javaMethodRangeWithTrailingLineBreak(source") &&
+				body.contains("applyStringEdits(source, edits)"),
+            "Legacy passenger attachment migration must edit executable Java method ranges"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy passenger attachment migration must not read comments, strings, or raw methods as migration evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `loot condition codec migrations do not synthesize member names from json keys`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

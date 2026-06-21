@@ -24296,21 +24296,43 @@ ${indent}}"""
     }
 
     private fun migrateLegacyPassengerAttachmentOverrides(source: String): String {
-        if (!source.contains("getPassengersRidingOffset()") || source.contains("getPassengerAttachmentPoint(")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("getPassengersRidingOffset()") ||
+            executableCode.contains("getPassengerAttachmentPoint(")) {
             return source
         }
-        val offsetMethod = javaMethodText(source, "getPassengersRidingOffset") ?: return source
+        val methods = javaMethodRanges(executableCode)
+        val offsetMethod = methods.singleOrNull { method ->
+            method.name == "getPassengersRidingOffset" &&
+                Regex("""\bdouble\s+getPassengersRidingOffset\s*\(\s*\)""").containsMatchIn(method.header)
+        } ?: return source
+        val offsetMethodText = source.substring(offsetMethod.range)
+        val executableOffsetMethodText = executableCode.substring(offsetMethod.range)
         val returnExpr = Regex("""return\s+(.+?);""", RegexOption.DOT_MATCHES_ALL)
-            .find(offsetMethod)
-            ?.groupValues
+            .find(executableOffsetMethodText)
+            ?.groups
             ?.get(1)
-            ?.trim()
+            ?.range
+            ?.let { offsetMethodText.substring(it.first, it.last + 1).trim() }
             ?: return source
         val yExpression = returnExpr.replace("super.getPassengersRidingOffset()", "dimensions.height()")
-        val distanceExpression = Regex("""float\s+distance\s*=\s*([0-9]+(?:\.[0-9]+)?[Ff]?)\s*;""")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
+		val riderPositionMethods = methods.filter { it.name == "getRiderPosition" }
+		if (riderPositionMethods.size > 1) {
+			return source
+		}
+		val riderPositionMethod = riderPositionMethods.singleOrNull()
+        val distanceExpression = riderPositionMethod
+            ?.let { method ->
+                Regex("""float\s+distance\s*=\s*([0-9]+(?:\.[0-9]+)?[Ff]?)\s*;""")
+                    .find(executableCode.substring(method.range))
+                    ?.groups
+                    ?.get(1)
+                    ?.range
+                    ?.let { range ->
+                        val absoluteRange = (method.range.first + range.first)..(method.range.first + range.last)
+                        source.substring(absoluteRange.first, absoluteRange.last + 1)
+                    }
+            }
             ?.let { if (it.endsWith("F", ignoreCase = true)) it.uppercase() else "${it}F" }
             ?: "0.0F"
         val replacement = """
@@ -24318,12 +24340,25 @@ protected Vec3 getPassengerAttachmentPoint(Entity entity, EntityDimensions dimen
 		return new Vec3(0.0F, $yExpression, $distanceExpression);
 	}
         """.trimIndent()
-        var result = source.replace(offsetMethod, replacement)
-        result = removeMethodByName(result, "positionRider")
-        result = removeMethodByName(result, "getRiderPosition")
+        val edits = mutableListOf(offsetMethod.range to replacement)
+        methods
+            .filter { it.name == "positionRider" }
+            .filter { executableCode.substring(it.range).contains("getRiderPosition(") }
+            .forEach { edits += javaMethodRangeWithTrailingLineBreak(source, it.range) to "" }
+        if (edits.any { it.first != offsetMethod.range } && riderPositionMethod != null) {
+            edits += javaMethodRangeWithTrailingLineBreak(source, riderPositionMethod.range) to ""
+        }
+        var result = applyStringEdits(source, edits)
         result = addImportIfMissing(result, "net.minecraft.world.entity.EntityDimensions")
         result = addImportIfMissing(result, "net.minecraft.world.phys.Vec3")
         return result
+    }
+
+    private fun javaMethodRangeWithTrailingLineBreak(source: String, range: IntRange): IntRange {
+        var end = range.last + 1
+        if (end < source.length && source[end] == '\r') end++
+        if (end < source.length && source[end] == '\n') end++
+        return range.first until end
     }
 
     private fun migrateLegacyEntityOverrideSignatures(

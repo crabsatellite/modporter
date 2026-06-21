@@ -12477,6 +12477,99 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy passenger attachment migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PassengerDocsEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.level.Level;
+
+            public class PassengerDocsEntity extends Entity {
+                /*
+                @Override
+                public double getPassengersRidingOffset() {
+                    return 9.0D;
+                }
+
+                private Vec3 getRiderPosition(Entity passenger) {
+                    float distance = 0.9F;
+                    return new Vec3(0.0F, 9.0D, distance);
+                }
+                */
+                private static final String DOC = "float distance = 0.9F;";
+
+                public PassengerDocsEntity(EntityType<?> type, Level level) {
+                    super(type, level);
+                }
+
+                @Override
+                public double getPassengersRidingOffset() {
+                    return 1.25D;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("PassengerDocsEntity.java").readText()
+        val realMethod = migrated.substring(
+            migrated.indexOf("protected Vec3 getPassengerAttachmentPoint"),
+            migrated.lastIndexOf("}")
+        )
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(realMethod.contains("return new Vec3(0.0F, 1.25D, 0.0F);"), migrated)
+        assertFalse(realMethod.contains("0.9F"), migrated)
+        assertTrue(migrated.contains("public double getPassengersRidingOffset() {\n        return 9.0D;"), migrated)
+        assertTrue(migrated.contains("private static final String DOC = \"float distance = 0.9F;\";"), migrated)
+    }
+
+    @Test
+    fun `legacy passenger attachment migration does not guess between overloaded rider helpers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AmbiguousPassengerEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.phys.Vec3;
+
+            public class AmbiguousPassengerEntity extends Entity {
+                public AmbiguousPassengerEntity(EntityType<?> type, Level level) {
+                    super(type, level);
+                }
+
+                @Override
+                public double getPassengersRidingOffset() {
+                    return 1.25D;
+                }
+
+                private Vec3 getRiderPosition(Entity passenger) {
+                    float distance = 0.35F;
+                    return new Vec3(0.0F, 1.25D, distance);
+                }
+
+                private Vec3 getRiderPosition(Entity passenger, float scale) {
+                    float distance = 0.75F;
+                    return new Vec3(0.0F, 1.25D, distance * scale);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("AmbiguousPassengerEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(migrated.contains("getPassengerAttachmentPoint("), migrated)
+        assertTrue(migrated.contains("public double getPassengersRidingOffset()"), migrated)
+        assertTrue(migrated.contains("private Vec3 getRiderPosition(Entity passenger, float scale)"), migrated)
+    }
+
+    @Test
     fun `migrates record accessors advancement strategy and synced data buffers`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
