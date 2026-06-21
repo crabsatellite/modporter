@@ -2538,6 +2538,40 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `network hooks open screen migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraftforge.network.NetworkHooks;
+
+            public class TestMod {
+                private static final String DOC = "NetworkHooks.openScreen(player, menu, payload)";
+
+                /*
+                 NetworkHooks.openScreen(player, menu, payload);
+                 */
+
+                public void open(ServerPlayer player, MenuProvider menu) {
+                    NetworkHooks.openScreen(player, menu);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(transformed.contains("(player).openMenu(menu);"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"NetworkHooks.openScreen(player, menu, payload)\";"), transformed)
+        assertTrue(transformed.contains("NetworkHooks.openScreen(player, menu, payload);"), transformed)
+        assertFalse(transformed.contains("import net.minecraftforge.network.NetworkHooks;"), transformed)
+        assertFalse(transformed.contains("DOC = \"(player).openMenu"), transformed)
+    }
+
+    @Test
     fun `network hooks open screen rejects untyped third argument instead of guessing`() {
         val projectDir = createTestFile("""
             package com.example;
@@ -2561,6 +2595,35 @@ class TextReplacementTest {
         assertTrue(transformed.contains("NetworkHooks.openScreen(player, menu, payload);"), transformed)
         assertTrue(transformed.contains("import net.neoforged.neoforge.network.NetworkHooks;") ||
             transformed.contains("import net.minecraftforge.network.NetworkHooks;"), transformed)
+    }
+
+    @Test
+    fun `network hooks open screen ignores commented third argument type evidence`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraftforge.network.NetworkHooks;
+
+            public class TestMod {
+                /*
+                 BlockPos payload;
+                 */
+
+                public void open(ServerPlayer player, MenuProvider menu, Object payload) {
+                    NetworkHooks.openScreen(player, menu, payload);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.errors.any { it.contains("Cannot safely migrate NetworkHooks.openScreen") }, result.errors.joinToString("\n"))
+        assertTrue(transformed.contains("NetworkHooks.openScreen(player, menu, payload);"), transformed)
+        assertFalse(transformed.contains("buf.writeBlockPos(payload)"), transformed)
     }
 
     @Test

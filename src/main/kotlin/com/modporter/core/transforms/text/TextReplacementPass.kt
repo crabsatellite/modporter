@@ -439,7 +439,7 @@ class TextReplacementPass(
                 result = removeImportLine(result, stale.removePrefix("import ").removeSuffix(";"))
             }
         }
-        if (!result.contains("NetworkHooks.")) {
+        if (!maskJavaCommentsAndLiterals(result).contains("NetworkHooks.")) {
             result = removeImportLine(result, "net.neoforged.neoforge.network.NetworkHooks")
             result = removeImportLine(result, "net.minecraftforge.network.NetworkHooks")
         }
@@ -3273,7 +3273,8 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
     )
 
     private fun migrateNetworkHooksOpenScreen(source: String, file: Path): NetworkHooksOpenScreenMigration {
-        if (!source.contains("NetworkHooks.openScreen")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("NetworkHooks.openScreen")) {
             return NetworkHooksOpenScreenMigration(source, emptyList(), emptyList())
         }
 
@@ -3285,14 +3286,14 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         val callName = "NetworkHooks.openScreen"
 
         while (true) {
-            val callStart = source.indexOf(callName, searchFrom)
+            val callStart = executableCode.indexOf(callName, searchFrom)
             if (callStart < 0) break
-            val openParen = source.indexOf('(', callStart + callName.length)
+            val openParen = executableCode.indexOf('(', callStart + callName.length)
             if (openParen < 0) {
                 errors.add("Cannot safely migrate NetworkHooks.openScreen in ${file}:${source.lineNumberAt(callStart)}: missing argument list")
                 break
             }
-            val closeParen = findMatchingDelimiter(source, openParen, '(', ')')
+            val closeParen = findMatchingDelimiter(executableCode, openParen, '(', ')')
             if (closeParen < 0) {
                 errors.add("Cannot safely migrate NetworkHooks.openScreen in ${file}:${source.lineNumberAt(callStart)}: unbalanced argument list")
                 break
@@ -3439,8 +3440,9 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         if (trimmed.contains("->") || trimmed.contains("::")) return true
         if (trimmed.startsWith("new Consumer") || trimmed.startsWith("new java.util.function.Consumer")) return true
         val identifier = Regex("""^[A-Za-z_$][\w$]*$""").matchEntire(trimmed)?.value ?: return false
+        val executableCode = maskJavaCommentsAndLiterals(source)
         return Regex("""\b(?:java\.util\.function\.)?Consumer\s*<[^;=]+>\s+${Regex.escape(identifier)}\b""")
-            .containsMatchIn(source)
+            .containsMatchIn(executableCode)
     }
 
     private fun isNetworkHooksBlockPosExtra(expression: String, source: String): Boolean {
@@ -3453,8 +3455,9 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
             return true
         }
         val identifier = Regex("""^[A-Za-z_$][\w$]*$""").matchEntire(trimmed)?.value ?: return false
+        val executableCode = maskJavaCommentsAndLiterals(source)
         return Regex("""\b(?:net\.minecraft\.core\.)?BlockPos\s+${Regex.escape(identifier)}\b""")
-            .containsMatchIn(source)
+            .containsMatchIn(executableCode)
     }
 
     private fun stripOuterParentheses(expression: String): String {

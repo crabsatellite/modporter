@@ -1279,6 +1279,66 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `network hooks open screen migration uses executable source evidence`() {
+        val textPass = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val cleanupStart = textPass.indexOf("private fun cleanupImports")
+        assertTrue(cleanupStart >= 0, "cleanupImports is missing")
+        val cleanupEnd = textPass.indexOf("private fun migrateRemainingRegistryObjectWildcardHolders", cleanupStart + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val cleanupBody = textPass.substring(cleanupStart, cleanupEnd)
+        val migrateStart = textPass.indexOf("private fun migrateNetworkHooksOpenScreen")
+        assertTrue(migrateStart >= 0, "migrateNetworkHooksOpenScreen is missing")
+        val migrateEnd = textPass.indexOf("private fun migrateInventoryRecipeHolderInterface", migrateStart + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val migrateBody = textPass.substring(migrateStart, migrateEnd)
+        val writerStart = textPass.indexOf("private fun isNetworkHooksExtraDataWriter")
+        assertTrue(writerStart >= 0, "isNetworkHooksExtraDataWriter is missing")
+        val writerEnd = textPass.indexOf("private fun isNetworkHooksBlockPosExtra", writerStart + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val writerBody = textPass.substring(writerStart, writerEnd)
+        val blockPosStart = textPass.indexOf("private fun isNetworkHooksBlockPosExtra")
+        assertTrue(blockPosStart >= 0, "isNetworkHooksBlockPosExtra is missing")
+        val blockPosEnd = textPass.indexOf("private fun stripOuterParentheses", blockPosStart + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val blockPosBody = textPass.substring(blockPosStart, blockPosEnd)
+        val offenders = listOf(
+            "raw openScreen prefilter" to migrateBody.contains("""source.contains("NetworkHooks.openScreen")"""),
+            "raw openScreen scan" to migrateBody.contains("source.indexOf(callName"),
+            "raw openScreen paren scan" to migrateBody.contains("source.indexOf('(', callStart"),
+            "raw openScreen delimiter scan" to migrateBody.contains("findMatchingDelimiter(source, openParen"),
+            "raw writer declaration scan" to writerBody.contains(".containsMatchIn(source)"),
+            "raw blockpos declaration scan" to blockPosBody.contains(".containsMatchIn(source)"),
+            "raw NetworkHooks import cleanup" to cleanupBody.contains("""!result.contains("NetworkHooks.")""")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            migrateBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                migrateBody.contains("""executableCode.contains("NetworkHooks.openScreen")""") &&
+                migrateBody.contains("executableCode.indexOf(callName, searchFrom)") &&
+                migrateBody.contains("findMatchingDelimiter(executableCode, openParen") &&
+                writerBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                writerBody.contains(".containsMatchIn(executableCode)") &&
+                blockPosBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                blockPosBody.contains(".containsMatchIn(executableCode)") &&
+                cleanupBody.contains("""maskJavaCommentsAndLiterals(result).contains("NetworkHooks.")"""),
+            "NetworkHooks.openScreen migration and cleanup must use executable Java source evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "NetworkHooks.openScreen migration must not use comments or strings as call/type evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `client only build detection ignores comments and strings`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
