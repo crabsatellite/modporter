@@ -27620,6 +27620,38 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `screen background rendered event migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DialogueDocsOnly.java").writeText("""
+            package com.example;
+
+            public class DialogueDocsOnly {
+                private static final String OLD_SIGNATURE = "renderBackground(GuiGraphics) posting ScreenEvent.BackgroundRendered";
+
+                /*
+                @Override
+                public void renderBackground(GuiGraphics guiGraphics) {
+                    NeoForge.EVENT_BUS.post(new ScreenEvent.BackgroundRendered(this, guiGraphics)).isCanceled();
+                }
+                */
+
+                public void keep() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("DialogueDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-screen-background-rendered-event" }, result.changes.toString())
+        assertTrue(source.contains("""private static final String OLD_SIGNATURE = "renderBackground(GuiGraphics) posting ScreenEvent.BackgroundRendered";"""), source)
+        assertTrue(source.contains("public void renderBackground(GuiGraphics guiGraphics)"), source)
+        assertTrue(source.contains("NeoForge.EVENT_BUS.post(new ScreenEvent.BackgroundRendered(this, guiGraphics)).isCanceled();"), source)
+        assertFalse(source.contains("public void renderBackground(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTicks)"), source)
+    }
+
+    @Test
     fun `migrates strict warning surfaces by source shape without mod specific rules`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

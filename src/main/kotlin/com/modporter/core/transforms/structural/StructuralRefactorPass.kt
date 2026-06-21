@@ -15499,8 +15499,9 @@ ${entries.joinToString(",\n")}
     }
 
     private fun migrateScreenBackgroundRenderedEventSource(source: String): String {
-        if (!source.contains("ScreenEvent.BackgroundRendered") ||
-            !source.contains("renderBackground(GuiGraphics")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("ScreenEvent.BackgroundRendered") ||
+            !executableCode.contains("renderBackground(GuiGraphics")) {
             return source
         }
 
@@ -15510,20 +15511,21 @@ ${entries.joinToString(",\n")}
             """(?m)^([ \t]*)@Override\s*\r?\n[ \t]*public\s+void\s+renderBackground\s*\(\s*GuiGraphics\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
         )
         while (true) {
-            val match = methodPattern.find(result, cursor) ?: break
+            val executableResult = maskJavaCommentsAndLiterals(result)
+            val match = methodPattern.find(executableResult, cursor) ?: break
             val indent = match.groupValues[1]
             val graphicsName = match.groupValues[2]
-            val openBrace = result.indexOf('{', match.range.last)
+            val openBrace = executableResult.indexOf('{', match.range.last)
             if (openBrace < 0) {
                 cursor = match.range.last + 1
                 continue
             }
-            val closeBrace = findMatchingBrace(result, openBrace)
+            val closeBrace = findMatchingBrace(executableResult, openBrace)
             if (closeBrace < 0) {
                 cursor = match.range.last + 1
                 continue
             }
-            val body = result.substring(openBrace + 1, closeBrace)
+            val body = executableResult.substring(openBrace + 1, closeBrace)
             val eventOnlyBody = Regex(
                 """(?s)^\s*(?:if\s*\([^{}]+\)\s*\{\s*)?NeoForge\.EVENT_BUS\.post\(\s*new\s+ScreenEvent\.BackgroundRendered\(\s*this\s*,\s*${Regex.escape(graphicsName)}\s*\)\s*\)(?:\.isCanceled\(\))*\s*;\s*(?:\}\s*)?$"""
             )

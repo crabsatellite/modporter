@@ -3509,6 +3509,45 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `screen background rendered migration uses executable method evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateScreenBackgroundRenderedEventSource")
+        assertTrue(start >= 0, "migrateScreenBackgroundRenderedEventSource is missing")
+        val end = source.indexOf("private fun migrateLegacyHeartTypeSheetCoordinatesSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw background event prefilter" to body.contains("""source.contains("ScreenEvent.BackgroundRendered")"""),
+            "raw renderBackground prefilter" to body.contains("""source.contains("renderBackground(GuiGraphics")"""),
+            "raw method scan" to body.contains("methodPattern.find(result, cursor)"),
+            "raw brace matching" to body.contains("findMatchingBrace(result, openBrace)"),
+            "raw event body check" to body.contains("val body = result.substring(openBrace + 1, closeBrace)")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("ScreenEvent.BackgroundRendered")""") &&
+                body.contains("""executableCode.contains("renderBackground(GuiGraphics")""") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("methodPattern.find(executableResult, cursor)") &&
+                body.contains("findMatchingBrace(executableResult, openBrace)") &&
+                body.contains("val body = executableResult.substring(openBrace + 1, closeBrace)") &&
+                body.contains("javaDeclarationStartWithLeadingMetadata(result, match.range.first)"),
+            "Screen background rendered migration must derive signatures and event-only bodies from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Screen background rendered migration must not treat comments or strings as migration evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy add layer skin migrations use executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
