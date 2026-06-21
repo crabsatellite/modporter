@@ -31844,11 +31844,12 @@ ${indent}}
     }
 
     private fun migrateAabbVec3EncapsulatingFullBlocks(source: String): String {
-        if (!source.contains("AABB.encapsulatingFullBlocks(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("AABB.encapsulatingFullBlocks(")) return source
         val declaredTypes = javaDeclaredSimpleTypeSets(source)
-        return rewriteJavaCall(source, "encapsulatingFullBlocks") { receiver, args ->
-            if (receiver != "AABB" || args.size != 2) return@rewriteJavaCall null
-            if (!args.all { isAabbVec3Expression(it, declaredTypes) }) return@rewriteJavaCall null
+        return rewriteExecutableJavaCall(source, "encapsulatingFullBlocks") { receiver, args ->
+            if (receiver != "AABB" || args.size != 2) return@rewriteExecutableJavaCall null
+            if (!args.all { isAabbVec3Expression(it, declaredTypes) }) return@rewriteExecutableJavaCall null
             "new AABB(${args[0].trim()}, ${args[1].trim()})"
         }
     }

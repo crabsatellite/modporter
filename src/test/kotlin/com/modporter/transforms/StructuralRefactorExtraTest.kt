@@ -79,6 +79,35 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `aabb vec3 encapsulating full blocks ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AabbDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.phys.AABB;
+            import net.minecraft.world.phys.Vec3;
+
+            public class AabbDocs {
+                // AABB.encapsulatingFullBlocks(min, max);
+                private static final String DOC = "AABB.encapsulatingFullBlocks(min, max);";
+
+                public AABB box(Vec3 min, Vec3 max) {
+                    return AABB.encapsulatingFullBlocks(min, max);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("AabbDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(transformed.contains("return new AABB(min, max);"), transformed)
+        assertTrue(transformed.contains("// AABB.encapsulatingFullBlocks(min, max);"), transformed)
+        assertTrue(transformed.contains("""private static final String DOC = "AABB.encapsulatingFullBlocks(min, max);";"""), transformed)
+    }
+
+    @Test
     fun `migrates SavedData factory calls with static supplier methods`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

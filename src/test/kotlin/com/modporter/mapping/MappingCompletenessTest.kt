@@ -2923,6 +2923,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `aabb vec3 encapsulating migration uses executable call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateAabbVec3EncapsulatingFullBlocks")
+        assertTrue(start >= 0, "migrateAabbVec3EncapsulatingFullBlocks is missing")
+        val end = source.indexOf("private fun javaDeclaredSimpleTypeSets", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw encapsulatingFullBlocks prefilter" to """source.contains("AABB.encapsulatingFullBlocks(")""",
+            "raw encapsulatingFullBlocks rewrite" to """rewriteJavaCall(source, "encapsulatingFullBlocks")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("AABB.encapsulatingFullBlocks(")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "encapsulatingFullBlocks")""") &&
+                body.contains("""receiver != "AABB"""") &&
+                body.contains("isAabbVec3Expression(it, declaredTypes)"),
+            "AABB Vec3 encapsulating migration must use executable call evidence and proven Vec3 arguments"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "AABB Vec3 encapsulating migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `data result getOrThrow migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
