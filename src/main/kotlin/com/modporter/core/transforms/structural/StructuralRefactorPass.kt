@@ -24587,9 +24587,12 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
     }
 
     private fun migrateLegacyEntityStepHeightOverrides(source: String): String {
-        if (!source.contains("getStepHeight(")) return source
-        return Regex("""\b(public|protected)\s+float\s+getStepHeight\s*\(\s*\)""")
-            .replace(source) { match -> "${match.groupValues[1]} float maxUpStep()" }
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("getStepHeight")) return source
+        return replaceExecutableRegex(
+            source,
+            Regex("""\b(public|protected)\s+float\s+getStepHeight\s*\(\s*\)""")
+        ) { match -> "${match.groupValues[1]} float maxUpStep()" }
     }
 
     private fun migrateLegacyEntityTypeAabbCalls(source: String): String {

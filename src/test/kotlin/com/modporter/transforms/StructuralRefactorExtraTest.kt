@@ -17228,6 +17228,41 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy entity step height override migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("StepHeightEntity.java").writeText("""
+            package com.example;
+
+            public class StepHeightEntity {
+                private static final String DOC = "public float getStepHeight()";
+
+                /*
+                 public float getStepHeight() {
+                     return 1.0F;
+                 }
+                 */
+
+                public float getStepHeight() {
+                    return 2.0F;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val entity = srcDir.resolve("StepHeightEntity.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(entity.contains("public float maxUpStep()"), entity)
+        assertTrue(entity.contains("""private static final String DOC = "public float getStepHeight()";"""), entity)
+        assertTrue(
+            Regex("""/\*\s*public float getStepHeight\(\)\s*\{\s*return 1\.0F;""", RegexOption.DOT_MATCHES_ALL)
+                .containsMatchIn(entity),
+            entity
+        )
+    }
+
+    @Test
     fun `migrates strict runtime compile API surfaces without mod-specific rules`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

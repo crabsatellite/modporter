@@ -2748,6 +2748,38 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy entity step height migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyEntityStepHeightOverrides")
+        assertTrue(start >= 0, "migrateLegacyEntityStepHeightOverrides is missing")
+        val end = source.indexOf("private fun migrateLegacyEntityTypeAabbCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getStepHeight prefilter" to """source.contains("getStepHeight(")""",
+            "raw signature replacement" to ".replace(source)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("getStepHeight")""") &&
+                body.contains("return replaceExecutableRegex(") &&
+                body.contains("""\b(public|protected)\s+float\s+getStepHeight"""),
+            "Legacy getStepHeight migration must inspect and rewrite executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy getStepHeight migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `production mod event bus listener migrations do not infer owners from java file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
