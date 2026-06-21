@@ -811,7 +811,7 @@ class MappingCompletenessTest {
     }
 
     @Test
-    fun `bucket pickup call site migration requires method scope before nullable player argument`() {
+    fun `bucket pickup call site migration requires source player evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
             .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
@@ -824,22 +824,24 @@ class MappingCompletenessTest {
         val body = source.substring(start, end)
         val offenders = listOf(
             "missing enclosing method falls back to null player" to "lastOrNull() ?: return \"null\"",
-            "out-of-scope method falls back to null player" to "if (closeBrace <= offset) return \"null\""
+            "out-of-scope method falls back to null player" to "if (closeBrace <= offset) return \"null\"",
+            "missing Player parameter falls back to nullable null" to "singlePlayerParameterName(method.groupValues[1]) ?: \"null\"",
+            "missing Player parameter in direct call migration falls back to nullable null" to "singlePlayerParameterName(match.groupValues[1]) ?: \"null\""
         )
             .filter { (_, marker) -> body.contains(marker) }
             .map { (label, _) -> label }
 
         assertTrue(
-            body.contains("private fun bucketPickupPlayerArgumentForEnclosingMethod(source: String, offset: Int): String?") &&
+                body.contains("private fun bucketPickupPlayerArgumentForEnclosingMethod(source: String, offset: Int): String?") &&
                 body.contains("lastOrNull() ?: return null") &&
                 body.contains("if (closeBrace <= offset) return null") &&
                 body.contains("if (playerArgument == null)") &&
-                body.contains("singlePlayerParameterName(method.groupValues[1]) ?: \"null\""),
-            "BucketPickup call-site migration may pass null only after proving an enclosing method with no Player parameter"
+                body.contains("return singlePlayerParameterName(method.groupValues[1])"),
+            "BucketPickup call-site migration must rewrite only when the current Java method exposes a Player or ServerPlayer parameter"
         )
         assertTrue(
             offenders.isEmpty(),
-            "BucketPickup call-site migration must not use nullable player as a fallback for missing method-scope evidence: $offenders"
+            "BucketPickup call-site migration must not use nullable null as a fallback for missing source Player evidence: $offenders"
         )
     }
 

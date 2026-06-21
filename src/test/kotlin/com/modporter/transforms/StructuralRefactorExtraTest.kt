@@ -19614,7 +19614,16 @@ class StructuralRefactorExtraTest {
                     bucketPickup.pickupBlock(level, pos, state);
                 }
 
+                void fromPlayerParameter(BucketPickup bucketPickup, Player player, LevelAccessor level, BlockPos pos, BlockState state) {
+                    bucketPickup.pickupBlock(level, pos, state);
+                }
+
                 void fromDeclaration(LevelAccessor level, BlockPos pos, BlockState state) {
+                    BucketPickup bucketPickup = null;
+                    bucketPickup.pickupBlock(level, pos, state);
+                }
+
+                void fromPlayerDeclaration(Player player, LevelAccessor level, BlockPos pos, BlockState state) {
                     BucketPickup bucketPickup = null;
                     bucketPickup.pickupBlock(level, pos, state);
                 }
@@ -19630,11 +19639,14 @@ class StructuralRefactorExtraTest {
         val migrated = srcDir.resolve("BucketPickupCalls.java").readText()
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertTrue(migrated.contains("ItemStack stack = bucketPickup.pickupBlock(null, level, pos, state);"))
+        assertTrue(migrated.contains("ItemStack stack = bucketPickup.pickupBlock(level, pos, state);"))
         assertTrue(migrated.contains("void fromPlayerPattern(Block block, Player player, LevelAccessor level, BlockPos pos, BlockState state) {\n        if (block instanceof BucketPickup bucketPickup) {\n            bucketPickup.pickupBlock(player, level, pos, state);"))
-        assertTrue(migrated.contains("void fromParameter(BucketPickup bucketPickup, LevelAccessor level, BlockPos pos, BlockState state) {\n        bucketPickup.pickupBlock(null, level, pos, state);"))
-        assertTrue(migrated.contains("BucketPickup bucketPickup = null;\n        bucketPickup.pickupBlock(null, level, pos, state);"))
+        assertTrue(migrated.contains("void fromParameter(BucketPickup bucketPickup, LevelAccessor level, BlockPos pos, BlockState state) {\n        bucketPickup.pickupBlock(level, pos, state);"))
+        assertTrue(migrated.contains("void fromPlayerParameter(BucketPickup bucketPickup, Player player, LevelAccessor level, BlockPos pos, BlockState state) {\n        bucketPickup.pickupBlock(player, level, pos, state);"))
+        assertTrue(migrated.contains("void fromDeclaration(LevelAccessor level, BlockPos pos, BlockState state) {\n        BucketPickup bucketPickup = null;\n        bucketPickup.pickupBlock(level, pos, state);"))
+        assertTrue(migrated.contains("void fromPlayerDeclaration(Player player, LevelAccessor level, BlockPos pos, BlockState state) {\n        BucketPickup bucketPickup = null;\n        bucketPickup.pickupBlock(player, level, pos, state);"))
         assertTrue(migrated.contains("Other bucketPickup = new Other();\n        bucketPickup.pickupBlock(level, pos, state);"))
+        assertFalse(migrated.contains("pickupBlock(null, level, pos, state);"), migrated)
     }
 
     @Test

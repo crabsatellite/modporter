@@ -31061,7 +31061,11 @@ ${indent}}
                 continue
             }
             val body = result.substring(openBrace + 1, closeBrace)
-            val playerArgument = singlePlayerParameterName(match.groupValues[1]) ?: "null"
+            val playerArgument = singlePlayerParameterName(match.groupValues[1])
+            if (playerArgument == null) {
+                cursor = closeBrace + 1
+                continue
+            }
             val migratedBody = migrateLegacyBucketPickupCallsForReceiver(body, receiver, playerArgument)
             if (migratedBody != body) {
                 result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
@@ -31084,7 +31088,11 @@ ${indent}}
                 continue
             }
             val body = result.substring(openBrace + 1, closeBrace)
-            val playerArgument = singlePlayerParameterName(match.groupValues[1]) ?: "null"
+            val playerArgument = singlePlayerParameterName(match.groupValues[1])
+            if (playerArgument == null) {
+                cursor = closeBrace + 1
+                continue
+            }
             val migratedBody = migrateLegacyBucketPickupLocalDeclarationBody(body, playerArgument)
             if (migratedBody != body) {
                 result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
@@ -31104,7 +31112,7 @@ ${indent}}
         val openBrace = method.range.last
         val closeBrace = findMatchingBrace(source, openBrace)
         if (closeBrace <= offset) return null
-        return singlePlayerParameterName(method.groupValues[1]) ?: "null"
+        return singlePlayerParameterName(method.groupValues[1])
     }
 
     private fun singlePlayerParameterName(parameters: String): String? {
