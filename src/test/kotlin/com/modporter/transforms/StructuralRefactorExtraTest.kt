@@ -14528,6 +14528,11 @@ class StructuralRefactorExtraTest {
                 public boolean fixed(Entity entity) {
                     return entity.dimensions.fixed;
                 }
+
+                public String documentation(Entity entity, EntityDimensions dimensions) {
+                    // entity.dimensions.width + dimensions.height
+                    return "entity.dimensions.width + dimensions.height";
+                }
             }
         """.trimIndent())
         srcDir.resolve("GroupedRequirements.java").writeText("""
@@ -14568,7 +14573,9 @@ class StructuralRefactorExtraTest {
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
         assertTrue(entityShape.contains("entity.dimensions.width() + dimensions.height()"))
         assertTrue(entityShape.contains("entity.dimensions.fixed()"))
-        assertTrue(!entityShape.contains(".dimensions.width "))
+        assertFalse(entityShape.contains("return entity.dimensions.width + dimensions.height;"))
+        assertTrue(entityShape.contains("// entity.dimensions.width + dimensions.height"))
+        assertTrue(entityShape.contains("return \"entity.dimensions.width + dimensions.height\";"))
         assertTrue(groupedRequirements.contains("public AdvancementRequirements create(Collection<String> strings)"))
         assertTrue(groupedRequirements.contains("return new AdvancementRequirements("))
         assertTrue(!groupedRequirements.contains("return new String[][]"))

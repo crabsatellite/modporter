@@ -4042,6 +4042,36 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `entity dimensions record accessor migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateEntityDimensionsRecordAccessors")
+        assertTrue(start >= 0, "migrateEntityDimensionsRecordAccessors is missing")
+        val end = source.indexOf("private fun migrateAdvancementRequirementsStrategySource", start + 1)
+        assertTrue(end > start, "migrateEntityDimensionsRecordAccessors boundary is missing")
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw direct dimensions accessor replacement" to ".replace(result) { match ->",
+            "raw declared EntityDimensions variable search" to ".findAll(result)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("replaceExecutableRegex(") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                body.contains(".findAll(executableResult)"),
+            "EntityDimensions record accessor migration must use executable source ranges for rewrites and declarations"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "EntityDimensions record accessor migration must not rewrite or infer from comments/strings: $offenders"
+        )
+    }
+
+    @Test
     fun `brewing recipe migration derives event recipes from executable source calls`() {
         val source = Path.of("")
             .toAbsolutePath()

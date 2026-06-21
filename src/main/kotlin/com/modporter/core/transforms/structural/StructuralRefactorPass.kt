@@ -20607,20 +20607,23 @@ $body
     }
 
     private fun migrateEntityDimensionsRecordAccessors(source: String): String {
-        var result = source
-        result = Regex(
-            """(\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*(?:\(\))?)*\.dimensions)\.(width|height|fixed)\b(?!\s*\()"""
-        ).replace(result) { match ->
+        var result = replaceExecutableRegex(
+            source,
+            Regex("""(\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*(?:\(\))?)*\.dimensions)\.(width|height|fixed)\b(?!\s*\()""")
+        ) { match ->
             "${match.groupValues[1]}.${match.groupValues[2]}()"
         }
 
+        val executableResult = maskJavaCommentsAndLiterals(result)
         val dimensionsVariables = Regex("""\bEntityDimensions\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
+            .findAll(executableResult)
             .map { it.groupValues[1] }
             .toSet()
         for (variable in dimensionsVariables) {
-            result = Regex("""\b${Regex.escape(variable)}\.(width|height|fixed)\b(?!\s*\()""")
-                .replace(result) { match -> "$variable.${match.groupValues[1]}()" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b${Regex.escape(variable)}\.(width|height|fixed)\b(?!\s*\()""")
+            ) { match -> "$variable.${match.groupValues[1]}()" }
         }
 
         return result
