@@ -6757,6 +6757,38 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy advancement fallback packet migration uses executable token ranges`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyAdvancementHolderApis")
+        assertTrue(start >= 0, "migrateLegacyAdvancementHolderApis is missing")
+        val end = source.indexOf("private fun migrateLegacyAdvancementParentLoop", start + 1)
+        assertTrue(end > start, "migrateLegacyAdvancementHolderApis boundary is missing")
+        val body = source.substring(start, end)
+        val fallbackMarker = """FALLBACK\s*:\s*new"""
+        val fallbackIndex = body.indexOf(fallbackMarker)
+        assertTrue(fallbackIndex >= 0, "fallback packet rewrite marker is missing")
+        val fallbackRewriteWindow = body.substring(maxOf(0, fallbackIndex - 120), minOf(body.length, fallbackIndex + 260))
+        val offenders = listOf(
+            "raw fallback packet regex rewrite" to fallbackRewriteWindow.contains(".replace(result)")
+        )
+            .filter { (_, present) -> present }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            fallbackRewriteWindow.contains("replaceExecutableRegex(") &&
+                fallbackRewriteWindow.contains(fallbackMarker),
+            "Legacy advancement fallback packet migration must rewrite only executable token ranges"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy advancement fallback packet migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy creative enchantment instance migration uses executable constructor and loop evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

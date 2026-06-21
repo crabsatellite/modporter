@@ -20714,12 +20714,14 @@ $body
         result = migrateLegacyAdvancementParentLoop(result)
         result = migrateLegacyDeferredRegistryEntryStream(result)
 
-        result = Regex("""([A-Za-z_$][\w$]*)\.FALLBACK\s*:\s*new\s+([A-Za-z_$][\w$]*Packet)\(""")
-            .replace(result) { match ->
-                val fallbackType = match.groupValues[1]
-                val packetType = match.groupValues[2]
-                "new $packetType($fallbackType.FALLBACK.title(), $fallbackType.FALLBACK.icon()) : new $packetType("
-            }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""([A-Za-z_$][\w$]*)\.FALLBACK\s*:\s*new\s+([A-Za-z_$][\w$]*Packet)\(""")
+        ) { match ->
+            val fallbackType = match.groupValues[1]
+            val packetType = match.groupValues[2]
+            "new $packetType($fallbackType.FALLBACK.title(), $fallbackType.FALLBACK.icon()) : new $packetType("
+        }
 
         if (result != source && result.contains("AdvancementHolder")) {
             result = addImportIfMissing(result, "net.minecraft.advancements.AdvancementHolder")

@@ -23404,10 +23404,13 @@ class StructuralRefactorExtraTest {
             import net.neoforged.neoforge.network.PacketDistributor;
 
             public class PortalSurface {
+                private static final String FALLBACK_DOC = "info == null ? MissingAdvancementToast.FALLBACK : new MissingAdvancementToastPacket(info.getTitle(), info.getIcon())";
+
                 public void send(ServerPlayer player, ResourceLocation id) {
                     Advancement requirement = PlayerHelper.getAdvancement(player, id);
                     if (requirement != null && !PlayerHelper.doesPlayerHaveRequiredAdvancement(player, requirement)) {
                         DisplayInfo info = requirement.getDisplay();
+                        // PacketDistributor.sendToPlayer(player, info == null ? MissingAdvancementToast.FALLBACK : new MissingAdvancementToastPacket(info.getTitle(), info.getIcon()));
                         PacketDistributor.sendToPlayer(player, info == null ? MissingAdvancementToast.FALLBACK : new MissingAdvancementToastPacket(info.getTitle(), info.getIcon()));
                     }
                 }
@@ -23428,6 +23431,8 @@ class StructuralRefactorExtraTest {
         assertTrue(portal.contains("AdvancementHolder requirement = PlayerHelper.getAdvancement(player, id);"))
         assertTrue(portal.contains("DisplayInfo info = requirement.value().display().orElse(null);"))
         assertTrue(portal.contains("info == null ? new MissingAdvancementToastPacket(MissingAdvancementToast.FALLBACK.title(), MissingAdvancementToast.FALLBACK.icon()) : new MissingAdvancementToastPacket(info.getTitle(), info.getIcon())"))
+        assertTrue(portal.contains("""private static final String FALLBACK_DOC = "info == null ? MissingAdvancementToast.FALLBACK : new MissingAdvancementToastPacket(info.getTitle(), info.getIcon())";"""), portal)
+        assertTrue(portal.contains("// PacketDistributor.sendToPlayer(player, info == null ? MissingAdvancementToast.FALLBACK : new MissingAdvancementToastPacket(info.getTitle(), info.getIcon()));"), portal)
         assertTrue(!portal.contains("requirement.getDisplay()"))
     }
 
