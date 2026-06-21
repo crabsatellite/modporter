@@ -2819,6 +2819,49 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy block valid spawn migration uses executable method and constructor evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyBlockValidSpawnOverrides")
+        assertTrue(start >= 0, "migrateLegacyBlockValidSpawnOverrides is missing")
+        val end = source.indexOf("private fun migrateLegacyBlockAndEntityCapabilityAccessors", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw isValidSpawn prefilter" to """source.contains("isValidSpawn(")""",
+            "raw EntityType prefilter" to """source.contains("EntityType<?>")""",
+            "raw method extraction" to """javaMethodText(source, "isValidSpawn")""",
+            "raw method removal" to """removeMethodByName(source, "isValidSpawn")""",
+            "raw constructor scan" to "constructorPattern.find(result)",
+            "raw isValidSpawn usage scan" to """containsMatchIn(result)"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("javaMethodRanges(executableCode)") &&
+                body.contains(".singleOrNull { it.name == \"isValidSpawn\"") &&
+                body.contains("val executableMethodText = executableCode.substring(method.range)") &&
+                body.contains("val returnRange = returnMatch.groups[1]?.range ?: return source") &&
+                body.contains("var result = source.removeRange(method.range.first, methodEnd)") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("constructorPattern.find(executableResult)") &&
+                body.contains("maskJavaCommentsAndLiterals(result)") &&
+                body.contains("maskJavaCommentsAndLiterals(withoutEntityType)") &&
+                body.contains("maskJavaCommentsAndLiterals(withoutSpawnPlacements)"),
+            "Legacy isValidSpawn migration must derive method removal, return expression, and constructor insertion from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy isValidSpawn migration must not use comments or strings as migration evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `production mod event bus listener migrations do not infer owners from java file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

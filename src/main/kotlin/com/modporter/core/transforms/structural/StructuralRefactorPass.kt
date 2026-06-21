@@ -24654,22 +24654,31 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
     }
 
     private fun migrateLegacyBlockValidSpawnOverrides(source: String): String {
-        if (!source.contains("isValidSpawn(") || !source.contains("EntityType<?>")) return source
-        val methodText = javaMethodText(source, "isValidSpawn") ?: return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("isValidSpawn") || !executableCode.contains("EntityType<?>")) return source
+        val method = javaMethodRanges(executableCode)
+            .singleOrNull { it.name == "isValidSpawn" && it.header.contains("EntityType<?>") }
+            ?: return source
+        val methodText = source.substring(method.range)
+        val executableMethodText = executableCode.substring(method.range)
         val signature = Regex(
             """(?s)(?:[ \t]*@\w+(?:\([^)]*\))?\s*\r?\n)*[ \t]*(?:public|protected)\s+boolean\s+isValidSpawn\s*\(\s*BlockState\s+([A-Za-z_$][\w$]*)\s*,\s*BlockGetter\s+([A-Za-z_$][\w$]*)\s*,\s*BlockPos\s+([A-Za-z_$][\w$]*)\s*,\s*EntityType<\?>\s+([A-Za-z_$][\w$]*)\s*\)"""
-        ).find(methodText) ?: return source
-        val returnExpr = Regex("""return\s+(.+?);""", RegexOption.DOT_MATCHES_ALL)
-            .find(methodText)
-            ?.groupValues
-            ?.get(1)
-            ?.trim()
+        ).find(executableMethodText) ?: return source
+        val returnMatch = Regex("""\breturn\s+(.+?);""", RegexOption.DOT_MATCHES_ALL)
+            .find(executableMethodText)
             ?: return source
-        var result = removeMethodByName(source, "isValidSpawn")
-        val constructorPattern = Regex("""\bsuper\(\s*([A-Za-z_$][\w$]*)\s*\)\s*;""")
-        val constructorSuper = constructorPattern.find(result) ?: return source
+        val returnRange = returnMatch.groups[1]?.range ?: return source
+        val returnExpr = methodText.substring(returnRange).trim()
+        var methodEnd = method.range.last + 1
+        if (methodEnd < source.length && source[methodEnd] == '\r') methodEnd++
+        if (methodEnd < source.length && source[methodEnd] == '\n') methodEnd++
+        var result = source.removeRange(method.range.first, methodEnd)
+        val executableResult = maskJavaCommentsAndLiterals(result)
+        val constructorPattern = Regex("""\bsuper\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*;""")
+        val constructorSuper = constructorPattern.find(executableResult) ?: return source
         val replacement = constructorSuper.let { match ->
-            val properties = match.groupValues[1]
+            val propertiesRange = match.groups[1]?.range ?: return source
+            val properties = result.substring(propertiesRange.first, propertiesRange.last + 1)
             val stateName = signature.groupValues[1]
             val getterName = signature.groupValues[2]
             val posName = signature.groupValues[3]
@@ -24677,12 +24686,10 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             "super($properties.isValidSpawn(($stateName, $getterName, $posName, $entityTypeName) -> $returnExpr));"
         }
         result = result.substring(0, constructorSuper.range.first) + replacement + result.substring(constructorSuper.range.last + 1)
-        if (!Regex("""\bisValidSpawn\s*\(""").containsMatchIn(result)) {
-            val withoutEntityType = removeImport(result, "net.minecraft.world.entity.EntityType")
-            result = if (!Regex("""\bEntityType\b""").containsMatchIn(withoutEntityType)) withoutEntityType else result
-            val withoutSpawnPlacements = removeImport(result, "net.minecraft.world.entity.SpawnPlacements")
-            result = if (!Regex("""\bSpawnPlacements\b""").containsMatchIn(withoutSpawnPlacements)) withoutSpawnPlacements else result
-        }
+        val withoutEntityType = removeImport(result, "net.minecraft.world.entity.EntityType")
+        result = if (!Regex("""\bEntityType\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutEntityType))) withoutEntityType else result
+        val withoutSpawnPlacements = removeImport(result, "net.minecraft.world.entity.SpawnPlacements")
+        result = if (!Regex("""\bSpawnPlacements\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutSpawnPlacements))) withoutSpawnPlacements else result
         return result
     }
 

@@ -17303,6 +17303,55 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy block valid spawn migration uses executable method and constructor evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("SpawnDocsBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class SpawnDocsBlock extends Block {
+                private static final String DOC = "isValidSpawn(BlockState state, BlockGetter getter, BlockPos pos, EntityType<?> entityType)";
+
+                /*
+                 super(fakeProperties);
+                 public boolean isValidSpawn(BlockState fakeState, BlockGetter fakeGetter, BlockPos fakePos, EntityType<?> fakeType) {
+                     return true;
+                 }
+                 */
+
+                public SpawnDocsBlock(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public boolean isValidSpawn(BlockState state, BlockGetter getter, BlockPos pos, EntityType<?> entityType) {
+                    return state.isAir() && getter != null;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("SpawnDocsBlock.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(
+            block.contains("super(properties.isValidSpawn((state, getter, pos, entityType) -> state.isAir() && getter != null));"),
+            block
+        )
+        assertFalse(block.contains("public boolean isValidSpawn(BlockState state"), block)
+        assertFalse(block.contains("import net.minecraft.world.entity.EntityType;"), block)
+        assertTrue(block.contains("public boolean isValidSpawn(BlockState fakeState"), block)
+        assertTrue(block.contains("""private static final String DOC = "isValidSpawn(BlockState state, BlockGetter getter, BlockPos pos, EntityType<?> entityType)";"""), block)
+        assertFalse(block.contains("fakeProperties.isValidSpawn"), block)
+    }
+
+    @Test
     fun `migrates strict runtime compile API surfaces without mod-specific rules`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
