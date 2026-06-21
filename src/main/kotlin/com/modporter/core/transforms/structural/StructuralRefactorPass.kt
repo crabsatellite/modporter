@@ -2077,17 +2077,18 @@ $registrations
     }
 
     private fun inferModAccess(source: String): ModAccess? {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val modIdExpression = Regex("""\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\.(?:MOD_ID|MODID|ID)\b""")
-            .find(source)
+            .find(executableCode)
             ?.value
             ?: return null
         val modClass = modIdExpression.substringBefore('.')
         val modImport = Regex("""(?m)^[ \t]*import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.${Regex.escape(modClass)})\s*;\s*$""")
-            .find(source)
+            .find(executableCode)
             ?.groupValues
             ?.get(1)
         val loggerExpression = Regex("""\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\.LOGGER\b""")
-            .find(source)
+            .find(executableCode)
             ?.value
         return ModAccess(modIdExpression, modImport, loggerExpression)
     }

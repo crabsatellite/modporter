@@ -14717,6 +14717,37 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `attribute modifier namespace ignores commented mod access`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AttributeShapes.java").writeText("""
+            package com.example;
+
+            import java.util.UUID;
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+
+            public class AttributeShapes {
+                // ExampleMod.MOD_ID documents the intended namespace in old notes.
+                private static final String DOC = "OtherMod.MOD_ID";
+                static final UUID REACH_MODIFIER = UUID.fromString("00000000-0000-0000-0000-000000000001");
+
+                void update(AttributeInstance instance) {
+                    instance.removeModifier(REACH_MODIFIER);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("AttributeShapes.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, result.changes.joinToString("\n"))
+        assertFalse(transformed.contains("ResourceLocation.fromNamespaceAndPath"), transformed)
+        assertTrue(transformed.contains("// ExampleMod.MOD_ID documents the intended namespace in old notes."), transformed)
+        assertTrue(transformed.contains("static final UUID REACH_MODIFIER = UUID.fromString"), transformed)
+        assertTrue(transformed.contains("instance.removeModifier(REACH_MODIFIER);"), transformed)
+    }
+
+    @Test
     fun `attribute modifier namespace uses declared mod type not java file name`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

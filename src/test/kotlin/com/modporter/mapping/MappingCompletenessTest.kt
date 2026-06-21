@@ -998,6 +998,37 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `structural mod access inference ignores comments and string literals`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun inferModAccess")
+        assertTrue(start >= 0, "inferModAccess is missing")
+        val end = source.indexOf("/**\n     * Transform packet classes", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw mod id expression scan" to ".find(source)",
+            "raw mod import scan" to "containsMatchIn(source)",
+            "raw logger scan" to ".findAll(source)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains(".find(executableCode)"),
+            "Structural mod access inference must derive mod id/import/logger references from executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Structural mod access inference must not treat comments or string literals as source evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `client only build detection ignores comments and strings`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
