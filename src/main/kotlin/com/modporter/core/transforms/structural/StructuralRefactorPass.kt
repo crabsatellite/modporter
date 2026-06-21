@@ -16536,10 +16536,9 @@ ${indent}}
             needsFastColor = true
         }
 
-        if (result.contains("event.getSkin(\"default\")") || result.contains("event.getSkin(\"slim\")")) {
-            result = result
-                .replace("event.getSkin(\"default\")", "event.getSkin(PlayerSkin.Model.WIDE)")
-                .replace("event.getSkin(\"slim\")", "event.getSkin(PlayerSkin.Model.SLIM)")
+        val skinModelCallMigrated = migrateLegacyPlayerSkinModelCallsSource(result)
+        if (skinModelCallMigrated != result) {
+            result = skinModelCallMigrated
             needsPlayerSkin = true
         }
         val skinLoopMigrated = migrateLegacyAddLayersSkinNameLoopsSource(result)
@@ -16687,23 +16686,54 @@ ${indent}}
         return result
     }
 
+    private fun migrateLegacyPlayerSkinModelCallsSource(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".getSkin(")) return source
+        val sourceCallPattern = Regex("""\b([A-Za-z_$][\w$]*)\.getSkin\(\s*"(default|slim)"\s*\)""")
+        val executableCallPattern = Regex("""\b([A-Za-z_$][\w$]*)\.getSkin\(\s*\)""")
+        val edits = sourceCallPattern.findAll(source).mapNotNull { match ->
+            val executableMatch = executableCallPattern.find(executableCode, match.range.first)
+                ?: return@mapNotNull null
+            if (executableMatch.range != match.range ||
+                executableMatch.groupValues[1] != match.groupValues[1]) {
+                return@mapNotNull null
+            }
+            val model = when (match.groupValues[2]) {
+                "default" -> "WIDE"
+                "slim" -> "SLIM"
+                else -> return@mapNotNull null
+            }
+            match.range to "${match.groupValues[1]}.getSkin(PlayerSkin.Model.$model)"
+        }.toList()
+        return applyStringEdits(source, edits)
+    }
+
     private fun migrateLegacyAddLayersSkinNameLoopsSource(source: String): String {
-        if (!source.contains(".getSkin(") || !source.contains("String")) return source
-        var result = source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".getSkin(") || !executableCode.contains("String")) return source
         var cursor = 0
-        val declarationPattern = Regex(
+        val sourceDeclarationPattern = Regex(
             """(?s)(?:final\s+)?String\s*\[\]\s+([A-Za-z_$][\w$]*)\s*=\s*(?:new\s+String\s*\[\]\s*)?\{\s*"default"\s*,\s*"slim"\s*}\s*;\s*for\s*\(\s*String\s+([A-Za-z_$][\w$]*)\s*:\s*\1\s*\)\s*\{"""
         )
+        val executableDeclarationPattern = Regex(
+            """(?s)(?:final\s+)?String\s*\[\]\s+([A-Za-z_$][\w$]*)\s*=\s*(?:new\s+String\s*\[\]\s*)?\{\s*,\s*}\s*;\s*for\s*\(\s*String\s+([A-Za-z_$][\w$]*)\s*:\s*\1\s*\)\s*\{"""
+        )
+        val edits = mutableListOf<Pair<IntRange, String>>()
         while (true) {
-            val match = declarationPattern.find(result, cursor) ?: break
+            val match = sourceDeclarationPattern.find(source, cursor) ?: break
+            val executableMatch = executableDeclarationPattern.find(executableCode, match.range.first)
+            if (executableMatch == null || executableMatch.range != match.range) {
+                cursor = match.range.last + 1
+                continue
+            }
             val loopVariable = match.groupValues[2]
-            val openBrace = result.indexOf('{', match.range.last)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            val openBrace = executableCode.indexOf('{', executableMatch.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
             if (openBrace < 0 || closeBrace < 0) {
                 cursor = match.range.last + 1
                 continue
             }
-            val body = result.substring(openBrace + 1, closeBrace)
+            val body = executableCode.substring(openBrace + 1, closeBrace)
             val eventVariable = Regex("""\b([A-Za-z_$][\w$]*)\.getSkin\(\s*${Regex.escape(loopVariable)}\s*\)""")
                 .find(body)
                 ?.groupValues
@@ -16713,10 +16743,10 @@ ${indent}}
                 continue
             }
             val replacement = "for (PlayerSkin.Model $loopVariable : $eventVariable.getSkins()) {"
-            result = result.substring(0, match.range.first) + replacement + result.substring(openBrace + 1)
-            cursor = match.range.first + replacement.length
+            edits += (match.range.first..openBrace) to replacement
+            cursor = closeBrace + 1
         }
-        return result
+        return applyStringEdits(source, edits)
     }
 
     private fun migrateJava21StrictWarningSource(source: String): String {

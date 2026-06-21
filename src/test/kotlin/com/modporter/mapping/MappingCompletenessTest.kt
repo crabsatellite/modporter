@@ -3030,6 +3030,48 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy add layer skin migrations use executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("val skinModelCallMigrated = migrateLegacyPlayerSkinModelCallsSource")
+        assertTrue(start >= 0, "legacy add layer skin migration call site is missing")
+        val end = source.indexOf("private fun migrateJava21StrictWarningSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw direct skin prefilter" to "result.contains(\"event.getSkin(\\\"default\\\")\")",
+            "raw direct skin replacement" to ".replace(\"event.getSkin(\\\"default\\\")\"",
+            "raw loop scan on result" to "declarationPattern.find(result, cursor)",
+            "raw loop brace matching" to "findMatchingBrace(result, openBrace)",
+            "raw loop body extraction" to "result.substring(openBrace + 1, closeBrace)",
+            "raw loop splice" to "result.substring(0, match.range.first)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("private fun migrateLegacyPlayerSkinModelCallsSource(source: String): String") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("sourceCallPattern.findAll(source)") &&
+                body.contains("executableCallPattern.find(executableCode, match.range.first)") &&
+                body.contains("private fun migrateLegacyAddLayersSkinNameLoopsSource(source: String): String") &&
+                body.contains("sourceDeclarationPattern.find(source, cursor)") &&
+                body.contains("executableDeclarationPattern.find(executableCode, match.range.first)") &&
+                body.contains("findMatchingBrace(executableCode, openBrace)") &&
+                body.contains("val body = executableCode.substring(openBrace + 1, closeBrace)") &&
+                body.contains("return applyStringEdits(source, edits)"),
+            "Legacy AddLayers skin migrations must verify executable source before rewriting direct calls or loops"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy AddLayers skin migrations must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `Java 21 redundant cast migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

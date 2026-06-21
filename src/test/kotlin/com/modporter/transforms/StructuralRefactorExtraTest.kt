@@ -28241,6 +28241,53 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy add layer skin migrations ignore comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AddLayersDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.renderer.entity.player.PlayerRenderer;
+            import net.neoforged.neoforge.client.event.EntityRenderersEvent;
+
+            public class AddLayersDocs {
+                private static final String DOC = "event.getSkin(\"default\") String[] types = {\"default\", \"slim\"};";
+
+                /*
+                public static void docs(EntityRenderersEvent.AddLayers event) {
+                    String[] types = new String[]{"default", "slim"};
+                    for (String type : types) {
+                        PlayerRenderer playerRenderer = event.getSkin(type);
+                    }
+                }
+                */
+
+                public static void add(EntityRenderersEvent.AddLayers event) {
+                    PlayerRenderer wide = event.getSkin("default");
+                    final String[] types = new String[]{"default", "slim"};
+                    for (String type : types) {
+                        PlayerRenderer playerRenderer = event.getSkin(type);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("AddLayersDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("""private static final String DOC = "event.getSkin(\"default\") String[] types = {\"default\", \"slim\"};";"""), migrated)
+        assertTrue(migrated.contains("""PlayerRenderer wide = event.getSkin(PlayerSkin.Model.WIDE);"""), migrated)
+        assertTrue(migrated.contains("for (PlayerSkin.Model type : event.getSkins()) {"), migrated)
+        assertTrue(migrated.contains("PlayerRenderer playerRenderer = event.getSkin(type);"), migrated)
+        assertTrue(
+            Regex("""/\*\s*public static void docs\(EntityRenderersEvent\.AddLayers event\)\s*\{\s*String\[] types = new String\[]\{"default", "slim"};\s*for \(String type : types\)""", RegexOption.DOT_MATCHES_ALL)
+                .containsMatchIn(migrated),
+            migrated
+        )
+    }
+
+    @Test
     fun `migrates ModifyBakingResult model entry loops to model resource locations`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
