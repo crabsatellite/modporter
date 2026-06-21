@@ -41942,6 +41942,12 @@ $writeLines
      */
     private fun migrateItemPickupEvent(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
+        data class PickupEventEdit(
+            val range: IntRange,
+            val replacement: String,
+            val description: String,
+            val ruleId: String
+        )
 
         val javaFiles = Files.walk(projectDir)
             .filter { it.extension == "java" }
@@ -41952,105 +41958,94 @@ $writeLines
 
         for (file in javaFiles) {
             val content = file.readText()
-            if (!content.contains("ItemEntityPickupEvent")) continue
+            val executableContent = maskJavaCommentsAndLiterals(content)
+            if (!executableContent.contains("ItemEntityPickupEvent")) continue
 
-            val lines = content.lines().toMutableList()
-            var modified = false
-            var inPickupMethod = false
-            var braceDepth = 0
-            var methodBraceStart = 0
+            val imports = javaNonStaticImports(executableContent)
+            val edits = mutableListOf<PickupEventEdit>()
 
-            for (i in lines.indices) {
-                val line = lines[i]
-                val trimmed = line.trim()
+            for (method in javaMethodRangesIncludingDefault(content)) {
+                val eventParameters = javaMethodParameters(method.header)
+                    .filter { isItemEntityPickupPreType(it.type, imports) }
+                if (eventParameters.isEmpty()) continue
 
-                // Detect method with ItemEntityPickupEvent.Pre parameter
-                if (trimmed.contains("ItemEntityPickupEvent.Pre") && trimmed.contains("(") &&
-                    (trimmed.contains("void ") || trimmed.contains("public ") || trimmed.contains("private ") || trimmed.contains("protected "))) {
-                    inPickupMethod = true
-                    braceDepth = 0
-                    // Count braces on this line
-                    for (ch in line) {
-                        if (ch == '{') braceDepth++
-                        if (ch == '}') braceDepth--
-                    }
-                    methodBraceStart = braceDepth
-                    continue
-                }
-
-                if (inPickupMethod) {
-                    for (ch in line) {
-                        if (ch == '{') braceDepth++
-                        if (ch == '}') braceDepth--
-                    }
-
-                    // Replace event.setCanceled(true) -> event.setCanPickup(TriState.FALSE)
-                    if (trimmed.contains(".setCanceled(true)")) {
-                        val oldLine = lines[i]
-                        lines[i] = line.replace(".setCanceled(true)", ".setCanPickup(TriState.FALSE)")
-                        modified = true
-                        changes.add(Change(
-                            file = file,
-                            line = i + 1,
-                            description = "ItemEntityPickupEvent: setCanceled(true) -> setCanPickup(TriState.FALSE)",
-                            before = oldLine.trim(),
-                            after = lines[i].trim(),
-                            confidence = Confidence.HIGH,
-                            ruleId = "struct-pickup-event-setcanpickup"
-                        ))
-                    }
-
-                    // Replace event.getEntity() -> event.getPlayer() within pickup event method
-                    if (trimmed.contains(".getEntity()")) {
-                        val oldLine = lines[i]
-                        lines[i] = line.replace(".getEntity()", ".getPlayer()")
-                        modified = true
-                        changes.add(Change(
-                            file = file,
-                            line = i + 1,
-                            description = "ItemEntityPickupEvent: getEntity() -> getPlayer()",
-                            before = oldLine.trim(),
-                            after = lines[i].trim(),
-                            confidence = Confidence.HIGH,
-                            ruleId = "struct-pickup-event-getplayer"
-                        ))
-                    }
-
-                    // End of method
-                    if (braceDepth <= 0) {
-                        inPickupMethod = false
-                    }
+                val executableMethod = executableContent.substring(method.range)
+                for (parameter in eventParameters) {
+                    val receiver = Regex.escape(parameter.name)
+                    Regex("""\b$receiver\s*\.\s*setCanceled\s*\(\s*true\s*\)""")
+                        .findAll(executableMethod)
+                        .forEach { match ->
+                            edits += PickupEventEdit(
+                                range = (method.range.first + match.range.first)..(method.range.first + match.range.last),
+                                replacement = "${parameter.name}.setCanPickup(TriState.FALSE)",
+                                description = "ItemEntityPickupEvent: setCanceled(true) -> setCanPickup(TriState.FALSE)",
+                                ruleId = "struct-pickup-event-setcanpickup"
+                            )
+                        }
+                    Regex("""\b$receiver\s*\.\s*getEntity\s*\(\s*\)""")
+                        .findAll(executableMethod)
+                        .forEach { match ->
+                            edits += PickupEventEdit(
+                                range = (method.range.first + match.range.first)..(method.range.first + match.range.last),
+                                replacement = "${parameter.name}.getPlayer()",
+                                description = "ItemEntityPickupEvent: getEntity() -> getPlayer()",
+                                ruleId = "struct-pickup-event-getplayer"
+                            )
+                        }
                 }
             }
 
-            // Add TriState import if setCanceled was replaced and import not present
-            if (modified) {
-                val hasTriStateImport = lines.any { it.contains("import net.neoforged.neoforge.common.util.TriState") }
-                if (!hasTriStateImport) {
-                    // Find last import line to insert after
-                    val lastImportIdx = lines.indexOfLast { it.trim().startsWith("import ") }
-                    if (lastImportIdx >= 0) {
-                        lines.add(lastImportIdx + 1, "import net.neoforged.neoforge.common.util.TriState;")
-                        changes.add(Change(
-                            file = file,
-                            line = lastImportIdx + 2,
-                            description = "Add TriState import for ItemEntityPickupEvent migration",
-                            before = "",
-                            after = "import net.neoforged.neoforge.common.util.TriState;",
-                            confidence = Confidence.HIGH,
-                            ruleId = "struct-pickup-event-tristate-import"
-                        ))
-                    }
+            if (edits.isEmpty()) continue
+
+            var migrated = content
+            for (edit in edits.sortedByDescending { it.range.first }) {
+                changes.add(Change(
+                    file = file,
+                    line = lineNumberAt(content, edit.range.first),
+                    description = edit.description,
+                    before = content.substring(edit.range).trim(),
+                    after = edit.replacement,
+                    confidence = Confidence.HIGH,
+                    ruleId = edit.ruleId
+                ))
+                migrated = migrated.replaceRange(edit.range, edit.replacement)
+            }
+
+            if (edits.any { it.ruleId == "struct-pickup-event-setcanpickup" } &&
+                !maskJavaCommentsAndLiterals(migrated).contains("import net.neoforged.neoforge.common.util.TriState;")) {
+                val withImport = addExecutableImportIfMissing(migrated, "net.neoforged.neoforge.common.util.TriState")
+                if (withImport != migrated) {
+                    changes.add(Change(
+                        file = file,
+                        line = lineNumberAt(withImport, withImport.indexOf("import net.neoforged.neoforge.common.util.TriState;")),
+                        description = "Add TriState import for ItemEntityPickupEvent migration",
+                        before = "",
+                        after = "import net.neoforged.neoforge.common.util.TriState;",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-pickup-event-tristate-import"
+                    ))
+                    migrated = withImport
                 }
             }
 
-            if (modified && !dryRun) {
-                val separator = if (content.contains("\r\n")) "\r\n" else "\n"
-                file.writeText(lines.joinToString(separator))
+            if (!dryRun) {
+                file.writeText(migrated)
             }
         }
 
         return changes
+    }
+
+    private fun isItemEntityPickupPreType(rawType: String, imports: Map<String, String>): Boolean {
+        val normalized = normalizeJavaTypeReference(rawType) ?: return false
+        val resolved = if (normalized.contains(".")) {
+            val firstSegment = normalized.substringBefore('.')
+            imports[firstSegment]?.let { imported -> "$imported.${normalized.substringAfter('.')}" } ?: normalized
+        } else {
+            imports[normalized] ?: normalized
+        }
+        return resolved == "ItemEntityPickupEvent.Pre" ||
+            resolved == "net.neoforged.neoforge.event.entity.player.ItemEntityPickupEvent.Pre"
     }
 
     /**

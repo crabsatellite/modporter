@@ -1434,6 +1434,57 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `item pickup event migration uses executable event receiver evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("PickupHooks.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.event.entity.player.ItemEntityPickupEvent;
+            import net.neoforged.neoforge.event.entity.player.ItemEntityPickupEvent.Pre;
+
+            public class PickupHooks {
+                @SubscribeEvent
+                public static void explicit(ItemEntityPickupEvent.Pre event, Other other) {
+                    String doc = "event.setCanceled(true); event.getEntity();";
+                    // event.setCanceled(true);
+                    other.getEntity();
+                    event.setCanceled(true);
+                    Object player = event.getEntity();
+                }
+
+                @SubscribeEvent
+                static void imported(Pre pickup) {
+                    pickup.setCanceled(true);
+                    Object player = pickup.getEntity();
+                }
+
+                static class Other {
+                    Object getEntity() {
+                        return new Object();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-pickup-event-setcanpickup" })
+        assertTrue(result.changes.any { it.ruleId == "struct-pickup-event-getplayer" })
+        assertTrue(migrated.contains("import net.neoforged.neoforge.common.util.TriState;"), migrated)
+        assertTrue(migrated.contains("event.setCanPickup(TriState.FALSE);"), migrated)
+        assertTrue(migrated.contains("Object player = event.getPlayer();"), migrated)
+        assertTrue(migrated.contains("pickup.setCanPickup(TriState.FALSE);"), migrated)
+        assertTrue(migrated.contains("Object player = pickup.getPlayer();"), migrated)
+        assertTrue(migrated.contains("""String doc = "event.setCanceled(true); event.getEntity();";"""), migrated)
+        assertTrue(migrated.contains("// event.setCanceled(true);"), migrated)
+        assertTrue(migrated.contains("other.getEntity();"), migrated)
+    }
+
+    @Test
     fun `empty subscriber cleanup ignores braces inside literals and comments`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
