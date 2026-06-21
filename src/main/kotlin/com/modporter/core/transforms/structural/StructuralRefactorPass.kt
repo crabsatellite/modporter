@@ -20178,14 +20178,14 @@ ${indent}}
                 .replace(result, factoryCall)
         }
         result = migrateLegacyItemUsedOnLocationTriggerConstructorReturns(result)
-        result = rewriteJavaNew(result, "ItemUsedOnLocationTrigger.TriggerInstance") { args ->
+        result = rewriteExecutableJavaNew(result, "ItemUsedOnLocationTrigger.TriggerInstance") { args ->
             if (args.size == 3 && legacyCriteriaTriggerExpression(args[0]) != null) {
                 "new ItemUsedOnLocationTrigger.TriggerInstance(${legacyOptionalContextAwarePredicate(args[1])}, ${legacyOptionalContextAwarePredicate(args[2])})"
             } else {
                 null
             }
         }
-        result = rewriteJavaNew(result, "PlayerTrigger.TriggerInstance") { args ->
+        result = rewriteExecutableJavaNew(result, "PlayerTrigger.TriggerInstance") { args ->
             val trigger = if (args.size == 2) legacyCriteriaTriggerExpression(args[0]) else null
             if (trigger != null) {
                 "$trigger.createCriterion(new PlayerTrigger.TriggerInstance(${legacyOptionalContextAwarePredicate(args[1])}))"
@@ -20193,7 +20193,7 @@ ${indent}}
                 null
             }
         }
-        result = rewriteJavaNew(result, "InventoryChangeTrigger.TriggerInstance") { args ->
+        result = rewriteExecutableJavaNew(result, "InventoryChangeTrigger.TriggerInstance") { args ->
             if (args.size == 5) {
                 "CriteriaTriggers.INVENTORY_CHANGED.createCriterion(new InventoryChangeTrigger.TriggerInstance(" +
                     "${legacyOptionalContextAwarePredicate(args[0])}, " +
@@ -20284,22 +20284,33 @@ ${indent}}
     }
 
     private fun migrateLegacyItemUsedOnLocationTriggerConstructorReturns(source: String): String {
-        if (!source.contains("new ItemUsedOnLocationTrigger.TriggerInstance(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("new ItemUsedOnLocationTrigger.TriggerInstance(")) return source
         var changed = false
-        var result = Regex("""(?m)^([ \t]*)return\s+new\s+ItemUsedOnLocationTrigger\.TriggerInstance\((.*)\)\s*;""")
-            .replace(source) { match ->
-                val args = splitTopLevelJavaArgs(match.groupValues[2])
-                val trigger = if (args.size == 3) legacyCriteriaTriggerExpression(args[0]) else null
-                if (trigger == null) {
-                    match.value
-                } else {
-                    changed = true
-                    "${match.groupValues[1]}return $trigger.createCriterion(new ItemUsedOnLocationTrigger.TriggerInstance(${legacyOptionalContextAwarePredicate(args[1])}, ${legacyOptionalContextAwarePredicate(args[2])}));"
-                }
+        val returnPattern = Regex("""(?m)^([ \t]*)return\s+new\s+ItemUsedOnLocationTrigger\.TriggerInstance\((.*)\)\s*;""")
+        var result = source
+        returnPattern.findAll(executableCode).toList().asReversed().forEach { match ->
+            val argsRange = match.groups[2]?.range ?: return@forEach
+            val args = splitTopLevelJavaArgs(source.substring(argsRange.first, argsRange.last + 1))
+            val trigger = if (args.size == 3) legacyCriteriaTriggerExpression(args[0]) else null
+            if (trigger != null) {
+                changed = true
+                val indentRange = match.groups[1]?.range
+                val indent = indentRange?.let { source.substring(it.first, it.last + 1) }.orEmpty()
+                val replacement = "${indent}return $trigger.createCriterion(new ItemUsedOnLocationTrigger.TriggerInstance(${legacyOptionalContextAwarePredicate(args[1])}, ${legacyOptionalContextAwarePredicate(args[2])}));"
+                result = result.substring(0, match.range.first) + replacement + result.substring(match.range.last + 1)
             }
+        }
         if (!changed) return source
-        result = Regex("""(?m)^([ \t]*(?:private|protected|public)\s+(?:static\s+)?)ItemUsedOnLocationTrigger\.TriggerInstance(\s+[A-Za-z_$][\w$]*\s*\()""")
-            .replace(result, "$1Criterion<ItemUsedOnLocationTrigger.TriggerInstance>$2")
+        val signaturePattern = Regex("""(?m)^([ \t]*(?:private|protected|public)\s+(?:static\s+)?)ItemUsedOnLocationTrigger\.TriggerInstance(\s+[A-Za-z_$][\w$]*\s*\()""")
+        signaturePattern.findAll(maskJavaCommentsAndLiterals(result)).toList().asReversed().forEach { match ->
+            val prefixRange = match.groups[1]?.range ?: return@forEach
+            val suffixRange = match.groups[2]?.range ?: return@forEach
+            val replacement = result.substring(prefixRange.first, prefixRange.last + 1) +
+                "Criterion<ItemUsedOnLocationTrigger.TriggerInstance>" +
+                result.substring(suffixRange.first, suffixRange.last + 1)
+            result = result.substring(0, match.range.first) + replacement + result.substring(match.range.last + 1)
+        }
         return result
     }
 

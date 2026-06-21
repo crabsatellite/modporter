@@ -3465,6 +3465,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy vanilla advancement criterion constructors use executable constructor evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyAdvancementDatagenSource")
+        assertTrue(start >= 0, "migrateLegacyAdvancementDatagenSource is missing")
+        val end = source.indexOf("private fun legacyCriteriaTriggerExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val constructors = listOf(
+            "ItemUsedOnLocationTrigger.TriggerInstance",
+            "PlayerTrigger.TriggerInstance",
+            "InventoryChangeTrigger.TriggerInstance"
+        )
+        val offenders = constructors
+            .filter { constructor -> body.contains("""rewriteJavaNew(result, "$constructor")""") }
+            .map { constructor -> "raw $constructor constructor rewrite" }
+
+        assertTrue(
+            constructors.all { constructor ->
+                body.contains("""rewriteExecutableJavaNew(result, "$constructor")""")
+            } &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("returnPattern.findAll(executableCode)") &&
+                body.contains("signaturePattern.findAll(maskJavaCommentsAndLiterals(result))"),
+            "Legacy vanilla advancement criterion constructor migrations must locate constructors and return helpers in executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy vanilla advancement criterion constructor migrations must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `map codec serialization migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

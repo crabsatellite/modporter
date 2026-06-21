@@ -6282,6 +6282,46 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy vanilla advancement criterion constructor migration ignores comments and string literals`() {
+        val sourceFile = createFile("AdvancementCriterionDocs.java", """
+            package com.example;
+
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.advancements.CriteriaTriggers;
+            import net.minecraft.advancements.critereon.ContextAwarePredicate;
+            import net.minecraft.advancements.critereon.InventoryChangeTrigger;
+            import net.minecraft.advancements.critereon.ItemPredicate;
+            import net.minecraft.advancements.critereon.ItemUsedOnLocationTrigger;
+            import net.minecraft.advancements.critereon.MinMaxBounds;
+            import net.minecraft.advancements.critereon.PlayerTrigger;
+
+            public class AdvancementCriterionDocs {
+                /*
+                private static ItemUsedOnLocationTrigger.TriggerInstance ignored(ContextAwarePredicate contextawarepredicate) {
+                    return new ItemUsedOnLocationTrigger.TriggerInstance(CriteriaTriggers.ITEM_USED_ON_BLOCK.getId(), ContextAwarePredicate.ANY, contextawarepredicate);
+                }
+                */
+                private static final String PLAYER_DOC = "new PlayerTrigger.TriggerInstance(CriteriaTriggers.SLEPT_IN_BED.getId(), ContextAwarePredicate.ANY)";
+                private static final String INVENTORY_DOC = "new InventoryChangeTrigger.TriggerInstance(ContextAwarePredicate.ANY, MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, new ItemPredicate[0])";
+
+                public Advancement keep(Advancement advancement) {
+                    return advancement;
+                }
+            }
+        """.trimIndent()).resolve("src/main/java/com/example/AdvancementCriterionDocs.java")
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("createCriterion(new PlayerTrigger.TriggerInstance"), migrated)
+        assertFalse(migrated.contains("CriteriaTriggers.INVENTORY_CHANGED.createCriterion"), migrated)
+        assertFalse(migrated.contains("Criterion<ItemUsedOnLocationTrigger.TriggerInstance> ignored"), migrated)
+    }
+
+    @Test
     fun `migrates transparent block beacon color and legacy plant APIs`() {
         val blockDir = tempDir.resolve("src/main/java/com/example/block")
         blockDir.createDirectories()
