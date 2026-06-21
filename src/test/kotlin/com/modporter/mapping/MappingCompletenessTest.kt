@@ -3987,6 +3987,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `nested simplechannel packet direction uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun nestedPacketDirection")
+        assertTrue(start >= 0, "nestedPacketDirection is missing")
+        val end = source.indexOf("private fun nestedSimpleChannelModIdExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw explicit direction scan" to """explicit.contains("PLAY_TO_CLIENT")""",
+            "raw payload variable scan" to ".findAll(source)",
+            "raw packet body scan" to "javaTypeBody(source, packetClassName)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val executableDirection = maskJavaCommentsAndLiterals(explicit)") &&
+                body.contains(".findAll(executableCode)") &&
+                body.contains("javaTypeBody(executableCode, packetClassName)"),
+            "Nested SimpleChannel direction inference must inspect executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Nested SimpleChannel direction inference must not use comments or strings as direction evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy simplechannel wrapper cleanup requires payload registration evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

@@ -1784,20 +1784,22 @@ ${indent}}
     }
 
     private fun nestedPacketDirection(source: String, packetClassName: String, directionArg: String?): String? {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         directionArg?.let { explicit ->
+            val executableDirection = maskJavaCommentsAndLiterals(explicit)
             return when {
-                explicit.contains("PLAY_TO_CLIENT") -> "playToClient"
-                explicit.contains("PLAY_TO_SERVER") -> "playToServer"
+                executableDirection.contains("PLAY_TO_CLIENT") -> "playToClient"
+                executableDirection.contains("PLAY_TO_SERVER") -> "playToServer"
                 else -> null
             }
         }
         val payloadVariables = Regex("""\b${Regex.escape(packetClassName)}\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+${Regex.escape(packetClassName)}\s*\(""")
-            .findAll(source)
+            .findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
         val payloadPattern = """(?:new\s+${Regex.escape(packetClassName)}\s*\(|${payloadVariables.joinToString("|") { Regex.escape(it) }.ifBlank { "(?!)" }})"""
         val sendStatements = Regex("""(?s)\b[A-Za-z_$][\w$]*\.send(?:To)?\s*\((.*?)\)\s*;""")
-            .findAll(source)
+            .findAll(executableCode)
             .map { it.value }
             .filter { Regex(payloadPattern).containsMatchIn(it) }
             .toList()
@@ -1815,7 +1817,7 @@ ${indent}}
         }.toSet()
         if (directions.size == 1) return directions.single()
 
-        val body = javaTypeBody(source, packetClassName)
+        val body = javaTypeBody(executableCode, packetClassName)
         if (body != null &&
             (body.contains("net.minecraft.client.") ||
                 body.contains("Minecraft.getInstance()") ||
