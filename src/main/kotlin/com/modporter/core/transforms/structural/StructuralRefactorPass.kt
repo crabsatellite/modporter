@@ -16681,17 +16681,10 @@ $migratedRecipes
                     """(\w+)\s*=\s*super\.finalizeSpawn\(\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*,\s*\1\s*,\s*(\w+)\s*\);"""
                 ).replace(result, "$1 = super.finalizeSpawn($2, $3, $4, $1);")
                 result = rewriteLegacyFinalizeSpawnCalls(result)
-                result = Regex(
-                    """([ \t]*)populateDefaultEquipmentSlots\(this\.random,\s*(\w+)\);\s*\r?\n[ \t]*populateDefaultEquipmentEnchantments\(this\.random,\s*\2\);"""
-                ).replace(result) { match ->
+                val finalizeEquipment = migrateLegacyFinalizeSpawnEquipmentRandomSource(result)
+                if (finalizeEquipment != result) {
                     needsRandomSource = true
-                    val indent = match.groupValues[1]
-                    val difficultyName = match.groupValues[2]
-                    val levelName = Regex("""finalizeSpawn\(\s*ServerLevelAccessor\s+(\w+)""")
-                        .find(result)?.groupValues?.get(1) ?: "level"
-                    "${indent}RandomSource randomsource = $levelName.getRandom();\n" +
-                        "${indent}populateDefaultEquipmentSlots(randomsource, $difficultyName);\n" +
-                        "${indent}populateDefaultEquipmentEnchantments($levelName, randomsource, $difficultyName);"
+                    result = finalizeEquipment
                 }
                 val withoutCompoundImport = removeImport(result, "net.minecraft.nbt.CompoundTag")
                 if (!withoutCompoundImport.contains("CompoundTag")) {
@@ -24046,6 +24039,37 @@ ${indent}}"""
             result = addImportIfMissing(result, "net.minecraft.world.level.ServerLevelAccessor")
         }
         return result
+    }
+
+    private fun migrateLegacyFinalizeSpawnEquipmentRandomSource(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("finalizeSpawn(") ||
+            !executableCode.contains("populateDefaultEquipmentSlots(this.random")) {
+            return source
+        }
+        val id = """[A-Za-z_$][\w$]*"""
+        val signature = Regex(
+            """finalizeSpawn\s*\(\s*ServerLevelAccessor\s+($id)\s*,\s*DifficultyInstance\s+($id)\b"""
+        )
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        javaMethodRangesIncludingDefault(executableCode).forEach { method ->
+            if (method.name != "finalizeSpawn") return@forEach
+            val methodText = executableCode.substring(method.range)
+            val signatureMatch = signature.find(methodText) ?: return@forEach
+            val levelName = signatureMatch.groupValues[1]
+            val difficultyName = signatureMatch.groupValues[2]
+            val equipmentCalls = Regex(
+                """([ \t]*)populateDefaultEquipmentSlots\(this\.random,\s*${Regex.escape(difficultyName)}\);\s*\r?\n[ \t]*populateDefaultEquipmentEnchantments\(this\.random,\s*${Regex.escape(difficultyName)}\);"""
+            )
+            equipmentCalls.findAll(methodText).forEach { match ->
+                val indent = match.groupValues[1]
+                edits += (method.range.first + match.range.first)..(method.range.first + match.range.last) to
+                    "${indent}RandomSource randomsource = $levelName.getRandom();\n" +
+                    "${indent}populateDefaultEquipmentSlots(randomsource, $difficultyName);\n" +
+                    "${indent}populateDefaultEquipmentEnchantments($levelName, randomsource, $difficultyName);"
+            }
+        }
+        return applyStringEdits(source, edits)
     }
 
     private fun removeLegacyFinalizeSpawnTagGuards(source: String, tagNames: Set<String>): String {

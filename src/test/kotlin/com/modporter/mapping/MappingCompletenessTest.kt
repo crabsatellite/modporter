@@ -3383,6 +3383,55 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `finalize spawn equipment random migration uses method scoped accessor evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val migrationStart = source.indexOf("""if (result.contains("@Nullable CompoundTag")""")
+        assertTrue(migrationStart >= 0, "legacy finalizeSpawn migration block is missing")
+        val migrationEnd = source.indexOf("result = migrateLegacyFinalizeSpawnMixinDescriptors", migrationStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val migrationBody = source.substring(migrationStart, migrationEnd)
+        val helperStart = source.indexOf("private fun migrateLegacyFinalizeSpawnEquipmentRandomSource")
+        assertTrue(helperStart >= 0, "migrateLegacyFinalizeSpawnEquipmentRandomSource is missing")
+        val helperEnd = source.indexOf("private fun removeLegacyFinalizeSpawnTagGuards", helperStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val helperBody = source.substring(helperStart, helperEnd)
+        val offenders = listOf(
+            "default level fallback" to (migrationBody.contains("?: \"level\"") || helperBody.contains("?: \"level\"")),
+            "global finalizeSpawn level scan" to (
+                migrationBody.contains("Regex(\"\"\"finalizeSpawn\\(\\s*ServerLevelAccessor") ||
+                    migrationBody.contains("find(result)?.groupValues?.get(1)")
+                ),
+            "raw equipment replacement in outer block" to migrationBody.contains("""populateDefaultEquipmentSlots\(this\.random""")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            migrationBody.contains("val finalizeEquipment = migrateLegacyFinalizeSpawnEquipmentRandomSource(result)") &&
+                migrationBody.contains("result = finalizeEquipment"),
+            "Legacy finalizeSpawn migration must delegate equipment random rewrites to method-scoped helper"
+        )
+        assertTrue(
+            helperBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                helperBody.contains("javaMethodRangesIncludingDefault(executableCode)") &&
+                helperBody.contains("""if (method.name != "finalizeSpawn")""") &&
+                helperBody.contains("val methodText = executableCode.substring(method.range)") &&
+                helperBody.contains("signature.find(methodText)") &&
+                helperBody.contains("applyStringEdits(source, edits)"),
+            "FinalizeSpawn equipment random migration must bind ServerLevelAccessor/DifficultyInstance from the current method"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "FinalizeSpawn equipment random migration must not use file-level level fallbacks: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy pack metadata accessors use executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

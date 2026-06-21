@@ -13716,6 +13716,59 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `finalize spawn equipment random migration uses current method accessor`() {
+        val projectDir = createFile("MultiFinalizeSpawnEntities.java", """
+            package com.example;
+
+            import javax.annotation.Nullable;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.DifficultyInstance;
+            import net.minecraft.world.entity.MobSpawnType;
+            import net.minecraft.world.entity.SpawnGroupData;
+            import net.minecraft.world.level.ServerLevelAccessor;
+
+            public class MultiFinalizeSpawnEntities {
+                static class First {
+                    Object random;
+
+                    @Override
+                    public SpawnGroupData finalizeSpawn(ServerLevelAccessor firstLevel, DifficultyInstance firstDifficulty,
+                            MobSpawnType spawnType, @Nullable SpawnGroupData spawnData, @Nullable CompoundTag firstTag) {
+                        spawnData = super.finalizeSpawn(firstLevel, firstDifficulty, spawnType, spawnData, firstTag);
+                        populateDefaultEquipmentSlots(this.random, firstDifficulty);
+                        populateDefaultEquipmentEnchantments(this.random, firstDifficulty);
+                        return spawnData;
+                    }
+                }
+
+                static class Second {
+                    Object random;
+
+                    @Override
+                    public SpawnGroupData finalizeSpawn(ServerLevelAccessor secondLevel, DifficultyInstance secondDifficulty,
+                            MobSpawnType spawnType, @Nullable SpawnGroupData spawnData, @Nullable CompoundTag secondTag) {
+                        spawnData = super.finalizeSpawn(secondLevel, secondDifficulty, spawnType, spawnData, secondTag);
+                        populateDefaultEquipmentSlots(this.random, secondDifficulty);
+                        populateDefaultEquipmentEnchantments(this.random, secondDifficulty);
+                        return spawnData;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val transformed = tempDir.resolve("src/main/java/com/example/MultiFinalizeSpawnEntities.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("RandomSource randomsource = firstLevel.getRandom();"), transformed)
+        assertTrue(transformed.contains("populateDefaultEquipmentEnchantments(firstLevel, randomsource, firstDifficulty);"), transformed)
+        assertTrue(transformed.contains("RandomSource randomsource = secondLevel.getRandom();"), transformed)
+        assertTrue(transformed.contains("populateDefaultEquipmentEnchantments(secondLevel, randomsource, secondDifficulty);"), transformed)
+        assertFalse(transformed.contains("populateDefaultEquipmentEnchantments(firstLevel, randomsource, secondDifficulty);"), transformed)
+        assertFalse(transformed.contains("populateDefaultEquipmentEnchantments(secondLevel, randomsource, firstDifficulty);"), transformed)
+    }
+
+    @Test
     fun `migrates legacy finalize spawn mixin descriptors`() {
         val projectDir = createFile("ForgeEventFactoryMixin.java", """
             package com.example.mixin;
