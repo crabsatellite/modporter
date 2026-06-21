@@ -723,7 +723,11 @@ class MappingCompletenessTest {
         val body = source.substring(start, end)
         val offenders = listOf(
             "file-level BackpackSlot guard" to """original.contains("new BackpackSlot(")""",
-            "file-level BackpackSlot negated guard" to """!original.contains("new BackpackSlot(")"""
+            "file-level BackpackSlot negated guard" to """!original.contains("new BackpackSlot(")""",
+            "raw InventoryIIH import prefilter" to """original.contains("org.violetmoon.quark.base.util.InventoryIIH")""",
+            "raw wrapper declaration prefilter" to "wrapperDeclaration.containsMatchIn(original)",
+            "raw BackpackSlot consumer scan" to ".containsMatchIn(original)",
+            "raw source wrapper replacement" to "wrapperDeclaration.replace(original)"
         )
             .filter { (_, marker) -> body.contains(marker) }
             .map { (label, _) -> "backpack container migration contains $label" }
@@ -731,7 +735,11 @@ class MappingCompletenessTest {
         assertTrue(
             body.contains("Regex.escape(wrapperName)") &&
                 body.contains("BackpackSlot") &&
-                body.contains("backpackSlotConsumesWrapper"),
+                body.contains("backpackSlotConsumesWrapper") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(original)") &&
+                body.contains("wrapperDeclaration.findAll(executableCode)") &&
+                body.contains("containsMatchIn(executableCode)") &&
+                body.contains("modified.substring(0, range.first)"),
             "Backpack container migration must prove the declared wrapper variable is passed to BackpackSlot"
         )
         assertTrue(

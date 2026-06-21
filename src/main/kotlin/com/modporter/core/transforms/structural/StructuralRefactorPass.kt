@@ -6130,25 +6130,28 @@ $helpers
 
         for (javaFile in javaFiles) {
             val original = javaFile.readText()
-            if (!original.contains("org.violetmoon.quark.base.util.InventoryIIH") ||
-                !wrapperDeclaration.containsMatchIn(original)) {
+            val executableCode = maskJavaCommentsAndLiterals(original)
+            if (!executableCode.contains("org.violetmoon.quark.base.util.InventoryIIH") ||
+                !wrapperDeclaration.containsMatchIn(executableCode)) {
                 continue
             }
 
-            var changed = false
-            var modified = wrapperDeclaration.replace(original) { match ->
+            val replacements = wrapperDeclaration.findAll(executableCode).mapNotNull { match ->
                 val wrapperName = match.groupValues[2]
                 val backpackSlotConsumesWrapper = Regex(
                     """\bnew\s+(?:org\.violetmoon\.quark\.addons\.oddities\.inventory\.slot\.)?BackpackSlot\s*\(\s*${Regex.escape(wrapperName)}\b"""
-                ).containsMatchIn(original)
+                ).containsMatchIn(executableCode)
                 if (!backpackSlotConsumesWrapper) {
-                    match.value
+                    null
                 } else {
-                    changed = true
-                    "${match.groupValues[1]}BackpackContainer $wrapperName = new BackpackContainer("
+                    match.range to "${match.groupValues[1]}BackpackContainer $wrapperName = new BackpackContainer("
                 }
+            }.toList()
+            if (replacements.isEmpty()) continue
+            var modified = original
+            for ((range, replacement) in replacements.asReversed()) {
+                modified = modified.substring(0, range.first) + replacement + modified.substring(range.last + 1)
             }
-            if (!changed) continue
             modified = removeImport(modified, "org.violetmoon.quark.base.util.InventoryIIH")
             modified = addImportIfMissing(modified, "org.violetmoon.quark.addons.oddities.inventory.BackpackContainer")
             modified = cleanupRedundantBlankLines(modified)

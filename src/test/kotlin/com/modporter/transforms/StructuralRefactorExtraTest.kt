@@ -24261,6 +24261,39 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `backpack InventoryIIH wrapper migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BackpackInventoryDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import org.violetmoon.quark.addons.oddities.inventory.slot.BackpackSlot;
+            import org.violetmoon.quark.base.util.InventoryIIH;
+
+            public class BackpackInventoryDocs {
+                /*
+                InventoryIIH inv = new InventoryIIH(backpack);
+                return new BackpackSlot(inv, 0, 8, 18);
+                */
+                private static final String SAMPLE = "InventoryIIH inv = new InventoryIIH(backpack); new BackpackSlot(inv, 0, 8, 18);";
+
+                public Object create(ItemStack backpack) {
+                    return backpack;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("BackpackInventoryDocs.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-quark-backpack-container-121" })
+        assertTrue(source.contains("InventoryIIH inv = new InventoryIIH(backpack);"), source)
+        assertTrue(source.contains("new BackpackSlot(inv, 0, 8, 18);"), source)
+        assertFalse(source.contains("BackpackContainer inv"), source)
+    }
+
+    @Test
     fun `migrates screen background rendered event overrides to new renderBackground signature`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
