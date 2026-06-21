@@ -19786,6 +19786,108 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy mob custom damage source attack migration uses executable doHurtTarget evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AttackDocsMob.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.level.Level;
+
+            public class AttackDocsMob extends Mob {
+                /*
+                public boolean doHurtTarget(Entity fake) {
+                    float f = (float) this.getAttributeValue(Attributes.ATTACK_DAMAGE);
+                    float f1 = (float) this.getAttributeValue(Attributes.ATTACK_KNOCKBACK);
+                    if (fake instanceof LivingEntity living) {
+                        f += EnchantmentHelper.getDamageBonus(this.getMainHandItem(), living.getMobType());
+                        f1 += (float) EnchantmentHelper.getKnockbackBonus(this);
+                    }
+                    int i = EnchantmentHelper.getFireAspect(this);
+                    if (i > 0) {
+                        fake.igniteForSeconds(i * 4);
+                    }
+                    boolean flag = fake.hurt(this.damageSources().mobAttack(this), f);
+                    if (flag) {
+                        this.doEnchantDamageEffects(this, fake);
+                    }
+                    return flag;
+                }
+                */
+                private static final String DOC = "public boolean doHurtTarget(Entity fake)";
+
+                public AttackDocsMob(EntityType<? extends Mob> type, Level level) {
+                    super(type, level);
+                }
+
+                @Override
+                public boolean doHurtTarget(Entity entity) {
+                    float f = (float) this.getAttributeValue(Attributes.ATTACK_DAMAGE);
+                    float f1 = (float) this.getAttributeValue(Attributes.ATTACK_KNOCKBACK);
+                    if (entity instanceof LivingEntity living) {
+                        f += EnchantmentHelper.getDamageBonus(this.getMainHandItem(), living.getMobType());
+                        f1 += (float) EnchantmentHelper.getKnockbackBonus(this);
+                    }
+
+                    int i = EnchantmentHelper.getFireAspect(this);
+                    if (i > 0) {
+                        entity.igniteForSeconds(i * 4);
+                    }
+
+                    boolean flag = entity.hurt(this.damageSources().mobAttack(this), f);
+                    if (flag) {
+                        if (f1 > 0.0F && entity instanceof LivingEntity living) {
+                            living.knockback(f1 * 0.5F, net.minecraft.util.Mth.sin(this.getYRot() * net.minecraft.util.Mth.DEG_TO_RAD), -net.minecraft.util.Mth.cos(this.getYRot() * net.minecraft.util.Mth.DEG_TO_RAD));
+                        }
+
+                        if (entity instanceof Player player) {
+                            this.maybeDisableShield(player, this.getMainHandItem(), player.isUsingItem() ? player.getUseItem() : ItemStack.EMPTY);
+                        }
+
+                        this.doEnchantDamageEffects(this, entity);
+                        this.setLastHurtMob(entity);
+                    }
+
+                    return flag;
+                }
+
+                public void after() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("AttackDocsMob.java").readText()
+        val realMethod = migrated.substring(
+            migrated.indexOf("@Override"),
+            migrated.indexOf("public void after")
+        )
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.world.damagesource.DamageSource;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.server.level.ServerLevel;"), migrated)
+        assertTrue(realMethod.contains("DamageSource damagesource = this.damageSources().mobAttack(this);"), realMethod)
+        assertTrue(realMethod.contains("boolean flag = entity.hurt(damagesource, f);"), realMethod)
+        assertTrue(realMethod.contains("float f1 = this.getKnockback(entity, damagesource);"), realMethod)
+        assertTrue(realMethod.contains("EnchantmentHelper.doPostAttackEffects(serverlevel1, entity, damagesource);"), realMethod)
+        assertFalse(realMethod.contains("getDamageBonus"), realMethod)
+        assertFalse(realMethod.contains("getKnockbackBonus"), realMethod)
+        assertFalse(realMethod.contains("getFireAspect"), realMethod)
+        assertFalse(realMethod.contains("maybeDisableShield"), realMethod)
+        assertFalse(realMethod.contains("doEnchantDamageEffects(this, entity)"), realMethod)
+        assertTrue(migrated.contains("public boolean doHurtTarget(Entity fake)"), migrated)
+        assertTrue(migrated.contains("private static final String DOC = \"public boolean doHurtTarget(Entity fake)\";"), migrated)
+    }
+
+    @Test
     fun `migrates crafting menu recipe holder and input boundaries`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

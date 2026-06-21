@@ -23249,58 +23249,67 @@ ${indent}}"""
     }
 
     private fun migrateLegacyMobCustomDamageSourceAttacks(source: String): String {
-        if (!source.contains("boolean doHurtTarget(Entity entity)") ||
-            !source.contains("EnchantmentHelper.getDamageBonus(") ||
-            !source.contains("EnchantmentHelper.getKnockbackBonus(") ||
-            !source.contains("EnchantmentHelper.getFireAspect(") ||
-            !source.contains("doEnchantDamageEffects(")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("doHurtTarget") ||
+            !executableCode.contains("EnchantmentHelper.getDamageBonus(") ||
+            !executableCode.contains("EnchantmentHelper.getKnockbackBonus(") ||
+            !executableCode.contains("EnchantmentHelper.getFireAspect(") ||
+            !executableCode.contains("doEnchantDamageEffects(")) {
             return source
         }
 
-        val methodText = javaMethodText(source, "doHurtTarget") ?: return source
+        val method = javaMethodRanges(executableCode)
+            .singleOrNull { candidate ->
+                candidate.name == "doHurtTarget" &&
+                    Regex("""\bboolean\s+doHurtTarget\s*\(\s*(?:net\.minecraft\.world\.entity\.)?Entity\s+[A-Za-z_$][\w$]*\s*\)""")
+                        .containsMatchIn(candidate.header)
+            }
+            ?: return source
+        val methodText = source.substring(method.range)
+        val executableMethodText = executableCode.substring(method.range)
         val hurtCall = Regex("""boolean\s+([A-Za-z_$][\w$]*)\s*=\s*entity\.hurt\(\s*(.+?)\s*,\s*f\s*\);""")
-            .find(methodText)
+            .find(executableMethodText)
             ?: return source
         val flagVar = hurtCall.groupValues[1]
-        val damageSourceExpr = hurtCall.groupValues[2].trim()
-        var replacement = methodText
+        val damageSourceRange = hurtCall.groups[2]?.range ?: return source
+        val damageSourceExpr = methodText.substring(damageSourceRange.first, damageSourceRange.last + 1).trim()
+        val edits = mutableListOf<Pair<IntRange, String>>()
 
         val oldEnchantmentBlock = Regex(
             """(?s)\s*float\s+f1\s*=\s*\(float\)\s*this\.getAttributeValue\(Attributes\.ATTACK_KNOCKBACK\);\s*if\s*\(\s*entity\s+instanceof\s+LivingEntity\s+[A-Za-z_$][\w$]*\s*\)\s*\{.*?EnchantmentHelper\.getKnockbackBonus\(this\).*?\}\s*int\s+[A-Za-z_$][\w$]*\s*=\s*EnchantmentHelper\.getFireAspect\(this\);\s*if\s*\(\s*[A-Za-z_$][\w$]*\s*>\s*0\s*\)\s*\{\s*entity\.igniteForSeconds\([^;]+;\s*\}\s*"""
         )
-        replacement = oldEnchantmentBlock.replace(
-            replacement,
-            """
+        val oldEnchantmentMatch = oldEnchantmentBlock.find(executableMethodText) ?: return source
+        edits += oldEnchantmentMatch.range to """
 		DamageSource damagesource = $damageSourceExpr;
 		if (this.level() instanceof ServerLevel serverlevel) {
 			f = EnchantmentHelper.modifyDamage(serverlevel, this.getWeaponItem(), entity, damagesource, f);
 		}
 
             """.trimIndent().prependIndent("\t\t").removePrefix("\t\t")
-        )
-        if (replacement == methodText) return source
-
-        replacement = replacement.replace(hurtCall.value, "boolean $flagVar = entity.hurt(damagesource, f);")
-        replacement = Regex("""if\s*\(\s*$flagVar\s*\)\s*\{\s*\r?\n\s*if\s*\(\s*f1\s*>""")
-            .replace(replacement) { match ->
-                match.value.replace(
-                    "if (f1 >",
-                    "float f1 = this.getKnockback(entity, damagesource);\n\t\t\tif (f1 >"
-                )
-            }
-        replacement = Regex(
-            """(?s)\s*if\s*\(\s*entity\s+instanceof\s+Player\s+[A-Za-z_$][\w$]*\s*\)\s*\{\s*this\.maybeDisableShield\(.*?\);\s*\}\s*"""
-        ).replace(replacement, "\n")
-        replacement = Regex("""this\.doEnchantDamageEffects\(\s*this\s*,\s*entity\s*\)\s*;""")
+        edits += hurtCall.range to "boolean $flagVar = entity.hurt(damagesource, f);"
+        val knockbackGate = Regex("""if\s*\(\s*${Regex.escape(flagVar)}\s*\)\s*\{\s*\r?\n\s*if\s*\(\s*f1\s*>""")
+            .find(executableMethodText)
+            ?: return source
+        edits += knockbackGate.range to methodText.substring(knockbackGate.range.first, knockbackGate.range.last + 1)
             .replace(
-                replacement,
-                """if (this.level() instanceof ServerLevel serverlevel1) {
+                Regex("""if\s*\(\s*f1\s*>"""),
+                "float f1 = this.getKnockback(entity, damagesource);\n\t\t\tif (f1 >"
+            )
+        val shieldBlock = Regex(
+            """(?s)\s*if\s*\(\s*entity\s+instanceof\s+Player\s+[A-Za-z_$][\w$]*\s*\)\s*\{\s*this\.maybeDisableShield\(.*?\);\s*\}\s*"""
+        ).find(executableMethodText) ?: return source
+        edits += shieldBlock.range to "\n"
+        val postAttack = Regex("""this\.doEnchantDamageEffects\(\s*this\s*,\s*entity\s*\)\s*;""")
+            .find(executableMethodText)
+            ?: return source
+        edits += postAttack.range to """if (this.level() instanceof ServerLevel serverlevel1) {
 				EnchantmentHelper.doPostAttackEffects(serverlevel1, entity, damagesource);
 			}"""
-            )
+        val replacement = applyStringEdits(methodText, edits)
 
-        var result = source.replace(methodText, replacement)
+        var result = source.substring(0, method.range.first) + replacement + source.substring(method.range.last + 1)
         result = addImportIfMissing(result, "net.minecraft.server.level.ServerLevel")
+        result = addImportIfMissing(result, "net.minecraft.world.damagesource.DamageSource")
         return result
     }
 

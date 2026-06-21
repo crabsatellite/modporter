@@ -2453,6 +2453,45 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy mob custom damage source attack migration uses executable doHurtTarget method range`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyMobCustomDamageSourceAttacks")
+        assertTrue(start >= 0, "migrateLegacyMobCustomDamageSourceAttacks is missing")
+        val end = source.indexOf("private fun migrateLegacyMobCustomDamageSourceUtilityAttacks", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw doHurtTarget prefilter" to """source.contains("boolean doHurtTarget(Entity entity)")""",
+            "raw getDamageBonus prefilter" to """source.contains("EnchantmentHelper.getDamageBonus(")""",
+            "raw method extraction" to """javaMethodText(source, "doHurtTarget")""",
+            "raw method replacement" to "source.replace(methodText, replacement)",
+            "raw method pattern search" to "find(methodText)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("javaMethodRanges(executableCode)") &&
+                body.contains("val methodText = source.substring(method.range)") &&
+                body.contains("val executableMethodText = executableCode.substring(method.range)") &&
+                body.contains("oldEnchantmentBlock.find(executableMethodText)") &&
+                body.contains("applyStringEdits(methodText, edits)") &&
+                body.contains("source.substring(0, method.range.first) + replacement + source.substring(method.range.last + 1)") &&
+                body.contains("addImportIfMissing(result, \"net.minecraft.world.damagesource.DamageSource\")"),
+            "Legacy mob damage-source attack migration must edit the executable doHurtTarget method range"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy mob damage-source attack migration must not use comments, strings, or raw method text as evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `loot condition codec migrations do not synthesize member names from json keys`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
