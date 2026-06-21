@@ -19,7 +19,7 @@ class PipelineResultTest {
                 PassResult("AST Transform", listOf(
                     Change(Path.of("b.java"), 1, "d", "b", "a", Confidence.MEDIUM, "r3"),
                 )),
-                PassResult("Structural Refactor", emptyList(), errors = listOf("err1")),
+                PassResult("Structural Refactor", emptyList(), errors = listOf("err1"), skipped = listOf("skip1.java")),
             ),
             dryRun = false
         )
@@ -27,8 +27,9 @@ class PipelineResultTest {
         val summary = result.summary()
         assertTrue(summary.contains("Text Replacement: 2 changes"))
         assertTrue(summary.contains("AST Transform: 1 changes"))
-        assertTrue(summary.contains("Structural Refactor: 0 changes"))
+        assertTrue(summary.contains("Structural Refactor: 0 changes, 1 skipped"))
         assertTrue(summary.contains("Total changes: 3"))
+        assertTrue(summary.contains("Total skipped: 1"))
         assertTrue(summary.contains("Total errors: 1"))
         assertTrue(!summary.contains("DRY RUN"))
     }
@@ -55,6 +56,7 @@ class PipelineResultTest {
             dryRun = false
         )
         assertEquals(3, result.totalChanges)
+        assertEquals(0, result.totalSkipped)
         assertEquals(0, result.totalErrors)
     }
 
@@ -68,6 +70,7 @@ class PipelineResultTest {
             dryRun = false
         )
         assertEquals(0, result.totalChanges)
+        assertEquals(0, result.totalSkipped)
         assertEquals(3, result.totalErrors)
     }
 
@@ -91,6 +94,7 @@ class PipelineResultTest {
         val result = PassResult("Test", emptyList(), skipped = listOf("skipped1.java", "skipped2.java"))
         assertEquals(0, result.changeCount)
         assertEquals(2, result.skipped.size)
+        assertEquals(2, PipelineResult(listOf(result), dryRun = false).totalSkipped)
     }
 
     @Test

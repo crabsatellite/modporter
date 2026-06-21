@@ -54,6 +54,10 @@ class Pipeline(
                 logger.warn { "Pass '${pass.name}' had ${filtered.errors.size} errors" }
                 filtered.errors.forEach { logger.warn { "  - $it" } }
             }
+            if (filtered.skipped.isNotEmpty()) {
+                logger.warn { "Pass '${pass.name}' skipped ${filtered.skipped.size} source shapes" }
+                filtered.skipped.forEach { logger.warn { "  - $it" } }
+            }
         }
 
         return PipelineResult(results, dryRun, pipelineName)
@@ -70,16 +74,19 @@ data class PipelineResult(
 ) {
     val totalChanges get() = passResults.sumOf { it.changeCount }
     val totalErrors get() = passResults.sumOf { it.errors.size }
+    val totalSkipped get() = passResults.sumOf { it.skipped.size }
 
     fun summary(): String = buildString {
         appendLine("═══════════════════════════════════════════")
         appendLine("  $pipelineName Pipeline ${if (dryRun) "(DRY RUN)" else ""} Summary")
         appendLine("═══════════════════════════════════════════")
         for (result in passResults) {
-            appendLine("  ${result.passName}: ${result.changeCount} changes")
+            val skippedText = if (result.skipped.isNotEmpty()) ", ${result.skipped.size} skipped" else ""
+            appendLine("  ${result.passName}: ${result.changeCount} changes$skippedText")
         }
         appendLine("───────────────────────────────────────────")
         appendLine("  Total changes: $totalChanges")
+        appendLine("  Total skipped: $totalSkipped")
         appendLine("  Total errors: $totalErrors")
         appendLine("═══════════════════════════════════════════")
     }
