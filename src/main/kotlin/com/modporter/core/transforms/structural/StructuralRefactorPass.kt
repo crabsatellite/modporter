@@ -23325,16 +23325,17 @@ ${indent}}"""
     }
 
     private fun rewriteLegacyFinalizeSpawnCalls(source: String): String {
-        if (!source.contains(".finalizeSpawn(") ||
-            !source.contains("SpawnGroupData") ||
-            !source.contains("MobSpawnType")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".finalizeSpawn(") ||
+            !executableCode.contains("SpawnGroupData") ||
+            !executableCode.contains("MobSpawnType")) {
             return source
         }
 
-        return rewriteJavaCall(source, "finalizeSpawn") { receiver, args ->
-            if (args.size != 5) return@rewriteJavaCall null
+        return rewriteExecutableJavaCall(source, "finalizeSpawn") { receiver, args ->
+            if (args.size != 5) return@rewriteExecutableJavaCall null
             val tagArg = args[4]
-            if (!tagArg.matches(Regex("""[A-Za-z_$][\w$]*"""))) return@rewriteJavaCall null
+            if (!tagArg.matches(Regex("""[A-Za-z_$][\w$]*"""))) return@rewriteExecutableJavaCall null
             "$receiver.finalizeSpawn(${args.take(4).joinToString(", ")})"
         }
     }
@@ -33021,8 +33022,9 @@ ${indent}}
     }
 
     private fun migrateClientLevelEntityInsertionCalls(source: String): String {
-        if (!source.contains(".putNonPlayerEntity(")) return source
-        return rewriteJavaCall(source, "putNonPlayerEntity") { receiver, args ->
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".putNonPlayerEntity(")) return source
+        return rewriteExecutableJavaCall(source, "putNonPlayerEntity") { receiver, args ->
             if (receiver.isBlank() || args.size != 2) {
                 null
             } else {

@@ -2956,6 +2956,76 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `client level entity insertion migration uses executable call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateClientLevelEntityInsertionCalls")
+        assertTrue(start >= 0, "migrateClientLevelEntityInsertionCalls is missing")
+        val end = source.indexOf("private fun migrateLegacyResourceLocationValidationSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw putNonPlayerEntity prefilter" to """source.contains(".putNonPlayerEntity(")""",
+            "raw putNonPlayerEntity rewrite" to """rewriteJavaCall(source, "putNonPlayerEntity")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".putNonPlayerEntity(")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "putNonPlayerEntity")""") &&
+                body.contains("args.size != 2") &&
+                body.contains(".addEntity("),
+            "ClientLevel entity insertion migration must inspect executable calls and preserve two-argument replacement semantics"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "ClientLevel entity insertion migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy finalize spawn call migration uses executable call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun rewriteLegacyFinalizeSpawnCalls")
+        assertTrue(start >= 0, "rewriteLegacyFinalizeSpawnCalls is missing")
+        val end = source.indexOf("private fun migrateLegacyFinalizeSpawnMixinDescriptors", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw finalizeSpawn prefilter" to """source.contains(".finalizeSpawn(")""",
+            "raw SpawnGroupData prefilter" to """source.contains("SpawnGroupData")""",
+            "raw MobSpawnType prefilter" to """source.contains("MobSpawnType")""",
+            "raw finalizeSpawn rewrite" to """rewriteJavaCall(source, "finalizeSpawn")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".finalizeSpawn(")""") &&
+                body.contains("""executableCode.contains("SpawnGroupData")""") &&
+                body.contains("""executableCode.contains("MobSpawnType")""") &&
+                body.contains("""rewriteExecutableJavaCall(source, "finalizeSpawn")""") &&
+                body.contains("args.size != 5") &&
+                body.contains("args.take(4)"),
+            "Legacy finalizeSpawn call migration must inspect executable calls and preserve five-argument tag removal semantics"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy finalizeSpawn call migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `data result getOrThrow migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

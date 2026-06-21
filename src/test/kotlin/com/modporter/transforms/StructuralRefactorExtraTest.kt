@@ -108,6 +108,40 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy finalize spawn call migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("FinalizeSpawnDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.DifficultyInstance;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.entity.MobSpawnType;
+            import net.minecraft.world.entity.SpawnGroupData;
+            import net.minecraft.world.level.ServerLevelAccessor;
+
+            public class FinalizeSpawnDocs {
+                // mob.finalizeSpawn(level, difficulty, spawnType, spawnData, tag);
+                private static final String DOC = "mob.finalizeSpawn(level, difficulty, spawnType, spawnData, tag);";
+
+                public SpawnGroupData call(Mob mob, ServerLevelAccessor level, DifficultyInstance difficulty,
+                        MobSpawnType spawnType, SpawnGroupData spawnData, CompoundTag tag) {
+                    return mob.finalizeSpawn(level, difficulty, spawnType, spawnData, tag);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("FinalizeSpawnDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(transformed.contains("return mob.finalizeSpawn(level, difficulty, spawnType, spawnData);"), transformed)
+        assertTrue(transformed.contains("// mob.finalizeSpawn(level, difficulty, spawnType, spawnData, tag);"), transformed)
+        assertTrue(transformed.contains("""private static final String DOC = "mob.finalizeSpawn(level, difficulty, spawnType, spawnData, tag);";"""), transformed)
+    }
+
+    @Test
     fun `migrates SavedData factory calls with static supplier methods`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -23280,6 +23314,9 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.entity.Entity;
 
             public class ClientEntityInserter {
+                // level.putNonPlayerEntity(0, entity);
+                private static final String DOC = "level.putNonPlayerEntity(0, entity);";
+
                 public void add(ClientLevel level, Entity entity) {
                     level.putNonPlayerEntity(0, entity);
                 }
@@ -23340,6 +23377,8 @@ class StructuralRefactorExtraTest {
         assertTrue(lootDatagen.contains("NestedLootTable.lootTableReference(holder.lootTable);"))
         assertTrue(!lootDatagen.contains("ResourceKey.create(Registries.LOOT_TABLE, holder.lootTable)"))
         assertTrue(clientEntity.contains("level.addEntity(entity);"))
+        assertTrue(clientEntity.contains("// level.putNonPlayerEntity(0, entity);"))
+        assertTrue(clientEntity.contains("""private static final String DOC = "level.putNonPlayerEntity(0, entity);";"""))
         assertTrue(enchantment.contains("return !enchantment.is(BANNED);"))
         assertTrue(enchantment.contains("if (enchantment.is(BANNED))"))
         assertTrue(!enchantment.contains("BuiltInRegistries.ENCHANTMENT"))
