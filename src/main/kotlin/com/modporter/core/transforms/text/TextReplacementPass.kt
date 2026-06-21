@@ -986,9 +986,10 @@ $streamFields,
     private fun collectLegacyDyeableLeatherItemClasses(javaFiles: List<Path>): Set<String> =
         javaFiles.mapNotNull { file ->
             val source = runCatching { file.readText() }.getOrNull() ?: return@mapNotNull null
+            val executableCode = maskJavaCommentsAndLiterals(source)
             Regex(
                 """(?s)\bclass\s+([A-Za-z_$][\w$]*)\b[^{;]*\bimplements\b[^{;]*\b(?:net\.minecraft\.world\.item\.)?DyeableLeatherItem\b"""
-            ).findAll(source).map { it.groupValues[1] }.toList()
+            ).findAll(executableCode).map { it.groupValues[1] }.toList()
         }.flatten().toSet()
 
     private fun migrateDyeableLeatherItemColors(
@@ -1071,12 +1072,16 @@ $streamFields,
         return result
     }
 
-    private fun migrateDyeableLeatherGetColorCallSites(source: String): String =
-        Regex(
+    private fun migrateDyeableLeatherGetColorCallSites(source: String): String {
+        val pattern = Regex(
             """\(\(\s*(?:net\.minecraft\.world\.item\.)?DyeableLeatherItem\s*\)\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.getItem\(\)\s*\)\.getColor\(\s*\1\s*\)"""
-        ).replace(source) { match ->
-            "DyedItemColor.getOrDefault(${match.groupValues[1]}, DyedItemColor.LEATHER_COLOR)"
+        )
+        return replaceExecutableRegex(source, pattern) { match ->
+            val originalMatch = pattern.matchEntire(match.value)
+                ?: return@replaceExecutableRegex match.value
+            "DyedItemColor.getOrDefault(${originalMatch.groupValues[1]}, DyedItemColor.LEATHER_COLOR)"
         }
+    }
 
     private fun migrateDyeableLeatherInstanceofGetColorCallSites(
         source: String,

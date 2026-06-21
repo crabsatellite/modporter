@@ -4536,6 +4536,87 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `dyeable leather external cast color migration ignores comments and string literals`() {
+        val clientDir = tempDir.resolve("src/main/java/com/example/client")
+        clientDir.createDirectories()
+        clientDir.resolve("ColorResolver.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.world.item.DyeableLeatherItem;
+            import net.minecraft.world.item.ItemStack;
+
+            public class ColorResolver {
+                private static final String DOC = "((DyeableLeatherItem) stack.getItem()).getColor(stack)";
+
+                /*
+                 return ((DyeableLeatherItem) stack.getItem()).getColor(stack);
+                 */
+
+                public int color(ItemStack stack, int tintIndex) {
+                    return tintIndex > 0 ? -1 : ((DyeableLeatherItem) stack.getItem()).getColor(stack);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(tempDir)
+
+        val transformed = clientDir.resolve("ColorResolver.java").readText()
+
+        assertTrue(transformed.contains("return tintIndex > 0 ? -1 : DyedItemColor.getOrDefault(stack, DyedItemColor.LEATHER_COLOR);"), transformed)
+        assertTrue(transformed.contains("import net.minecraft.world.item.component.DyedItemColor;"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"((DyeableLeatherItem) stack.getItem()).getColor(stack)\";"), transformed)
+        assertTrue(transformed.contains("return ((DyeableLeatherItem) stack.getItem()).getColor(stack);"), transformed)
+        assertFalse(transformed.contains("DOC = \"DyedItemColor.getOrDefault"), transformed)
+        assertFalse(transformed.contains("import net.minecraft.world.item.DyeableLeatherItem;"), transformed)
+    }
+
+    @Test
+    fun `dyeable leather class collection ignores commented declarations`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val itemDir = srcDir.resolve("item")
+        val clientDir = srcDir.resolve("client")
+        itemDir.createDirectories()
+        clientDir.createDirectories()
+        itemDir.resolve("Docs.java").writeText("""
+            package com.example.item;
+
+            public class Docs {
+                /*
+                 public class FakeLeatherItem extends GlovesItem implements DyeableLeatherItem {
+                 }
+                 */
+            }
+        """.trimIndent())
+        clientDir.resolve("ColorResolver.java").writeText("""
+            package com.example.client;
+
+            import com.example.item.FakeLeatherItem;
+            import net.minecraft.world.item.ItemStack;
+
+            public class ColorResolver {
+                public int color(ItemStack stack) {
+                    if (stack.getItem() instanceof FakeLeatherItem fake) {
+                        return fake.getColor(stack);
+                    }
+                    return 0xFFFFFF;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(tempDir)
+
+        val transformed = clientDir.resolve("ColorResolver.java").readText()
+
+        assertTrue(transformed.contains("return fake.getColor(stack);"), transformed)
+        assertFalse(transformed.contains("DyedItemColor.getOrDefault"), transformed)
+        assertFalse(transformed.contains("import net.minecraft.world.item.component.DyedItemColor;"), transformed)
+    }
+
+    @Test
     fun `tier sorting registry custom tiers migrate to simple tier incorrect block tags`() {
         val projectDir = createTestFile("""
             package com.example.util;

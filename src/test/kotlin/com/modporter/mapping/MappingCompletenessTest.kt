@@ -4546,6 +4546,45 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `dyeable leather external color migration uses executable source evidence`() {
+        val textPass = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val collectStart = textPass.indexOf("private fun collectLegacyDyeableLeatherItemClasses")
+        assertTrue(collectStart >= 0, "collectLegacyDyeableLeatherItemClasses is missing")
+        val collectEnd = textPass.indexOf("private fun migrateDyeableLeatherItemColors", collectStart + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val collectBody = textPass.substring(collectStart, collectEnd)
+        val callSiteStart = textPass.indexOf("private fun migrateDyeableLeatherGetColorCallSites")
+        assertTrue(callSiteStart >= 0, "migrateDyeableLeatherGetColorCallSites is missing")
+        val callSiteEnd = textPass.indexOf("private fun migrateDyeableLeatherInstanceofGetColorCallSites", callSiteStart + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val callSiteBody = textPass.substring(callSiteStart, callSiteEnd)
+        val offenders = listOf(
+            "raw legacy class collection" to collectBody.contains(".findAll(source)"),
+            "raw cast call-site replacement" to callSiteBody.contains(".replace(source)")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            collectBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                collectBody.contains(".findAll(executableCode)") &&
+                callSiteBody.contains("replaceExecutableRegex(") &&
+                callSiteBody.contains("match.value") &&
+                callSiteBody.contains("matchEntire(match.value)"),
+            "Dyeable leather external color migration must use executable Java source for class evidence and cast call-sites"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Dyeable leather external color migration must not derive evidence from comments or rewrite comments/strings: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy enchantment category runtime migration uses executable source evidence`() {
         val textPass = Path.of("")
             .toAbsolutePath()
