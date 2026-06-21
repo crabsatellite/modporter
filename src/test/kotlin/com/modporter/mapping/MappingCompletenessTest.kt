@@ -4408,6 +4408,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `inventory recipe holder interface migration uses executable source evidence`() {
+        val textPass = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = textPass.indexOf("private fun migrateInventoryRecipeHolderInterface")
+        assertTrue(start >= 0, "migrateInventoryRecipeHolderInterface is missing")
+        val end = textPass.indexOf("private fun migrateModelRenderPackedColorText", start + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val body = textPass.substring(start, end)
+        val offenders = listOf(
+            "raw import prefilter" to body.contains("source.contains(oldImport)"),
+            "raw import replace" to body.contains(".replace(oldImport"),
+            "raw implements replacement" to Regex("""Regex\([\s\S]*?implements[\s\S]*?\)\s*\.\s*replace\(""").containsMatchIn(body)
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("executableCode.contains(oldImport)") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("import[ \\t]+net\\.minecraft\\.world\\.inventory\\.RecipeHolder") &&
+                body.contains("""\bRecipeHolder\b""") &&
+                body.contains("RecipeCraftingHolder"),
+            "Inventory RecipeHolder interface migration must rewrite only executable import and implements clauses"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Inventory RecipeHolder interface migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `curative item effect migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

@@ -2138,6 +2138,13 @@ class TextReplacementTest {
 
             import net.minecraft.world.inventory.RecipeHolder;
 
+            // import net.minecraft.world.inventory.RecipeHolder;
+            // public class Docs implements RecipeHolder {}
+            public class Documentation {
+                public static final String IMPORT_DOC = "import net.minecraft.world.inventory.RecipeHolder;";
+                public static final String IMPLEMENTS_DOC = "public class Docs implements RecipeHolder {}";
+            }
+
             public class MenuBackedBlockEntity implements RecipeHolder {
             }
         """.trimIndent())
@@ -2151,6 +2158,12 @@ class TextReplacementTest {
         assertTrue(transformed.contains("import net.minecraft.world.inventory.RecipeCraftingHolder;"))
         assertFalse(transformed.contains("import net.minecraft.world.item.crafting.RecipeHolder;"))
         assertTrue(transformed.contains("implements RecipeCraftingHolder"))
+        assertTrue(transformed.contains("// import net.minecraft.world.inventory.RecipeHolder;"), transformed)
+        assertTrue(transformed.contains("// public class Docs implements RecipeHolder {}"), transformed)
+        assertTrue(transformed.contains("public static final String IMPORT_DOC = \"import net.minecraft.world.inventory.RecipeHolder;\";"), transformed)
+        assertTrue(transformed.contains("public static final String IMPLEMENTS_DOC = \"public class Docs implements RecipeHolder {}\";"), transformed)
+        assertFalse(transformed.contains("// public class Docs implements RecipeCraftingHolder"), transformed)
+        assertFalse(transformed.contains("IMPLEMENTS_DOC = \"public class Docs implements RecipeCraftingHolder"), transformed)
     }
 
     @Test

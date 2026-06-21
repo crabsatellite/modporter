@@ -3269,13 +3269,18 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
 
     private fun migrateInventoryRecipeHolderInterface(source: String): String {
         val oldImport = "import net.minecraft.world.inventory.RecipeHolder;"
-        if (!source.contains(oldImport)) return source
-        return source
-            .replace(oldImport, "import net.minecraft.world.inventory.RecipeCraftingHolder;")
-            .let { result ->
-                Regex("""(implements\s+[^{;\r\n]*?)\bRecipeHolder\b""")
-                    .replace(result) { match -> "${match.groupValues[1]}RecipeCraftingHolder" }
-            }
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(oldImport)) return source
+        var result = replaceExecutableRegex(
+            source,
+            Regex("""(?m)^([ \t]*)import[ \t]+net\.minecraft\.world\.inventory\.RecipeHolder;[ \t]*(\r?\n)?""")
+        ) { match ->
+            "${match.groupValues[1]}import net.minecraft.world.inventory.RecipeCraftingHolder;${match.groupValues[2]}"
+        }
+        result = replaceExecutableRegex(result, Regex("""(implements\s+[^{;\r\n]*?)\bRecipeHolder\b""")) { match ->
+            "${match.groupValues[1]}RecipeCraftingHolder"
+        }
+        return result
     }
 
     private fun migrateModelRenderPackedColorText(source: String): String {
