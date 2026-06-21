@@ -2996,6 +2996,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `saddleable equipSaddle signature migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateSaddleableEquipSaddleSignature")
+        assertTrue(start >= 0, "migrateSaddleableEquipSaddleSignature is missing")
+        val end = source.indexOf("private fun migrateMthTrigonometryFloatArguments", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw equipSaddle prefilter" to """source.contains("equipSaddle(")""",
+            "raw SoundSource prefilter" to """source.contains("SoundSource")""",
+            "raw signature replacement" to ").replace(source) { match ->"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("equipSaddle(")""") &&
+                body.contains("""executableCode.contains("SoundSource")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("addImportIfMissing(result, \"net.minecraft.world.item.ItemStack\")"),
+            "Saddleable equipSaddle signature migration must inspect and rewrite executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Saddleable equipSaddle signature migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy entity type AABB migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

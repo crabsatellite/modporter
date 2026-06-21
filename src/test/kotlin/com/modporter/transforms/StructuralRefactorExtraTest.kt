@@ -15898,6 +15898,40 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `saddleable equip saddle signature migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DocumentedMount.java").writeText("""
+            package com.example;
+
+            import net.minecraft.sounds.SoundSource;
+
+            public class DocumentedMount {
+                private static final String DOC = "public void equipSaddle(SoundSource soundCategory)";
+
+                /*
+                public void equipSaddle(SoundSource soundCategory) {
+                    play(soundCategory);
+                }
+                */
+
+                public void keep(SoundSource soundCategory) {
+                    play(soundCategory);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val mount = srcDir.resolve("DocumentedMount.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(mount.contains("private static final String DOC = \"public void equipSaddle(SoundSource soundCategory)\";"), mount)
+        assertTrue(mount.contains("public void equipSaddle(SoundSource soundCategory)"), mount)
+        assertFalse(mount.contains("equipSaddle(ItemStack stack"), mount)
+        assertFalse(mount.contains("import net.minecraft.world.item.ItemStack;"), mount)
+    }
+
+    @Test
     fun `migrates legacy packet registrations and common 1_21 compile surfaces`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val networkDir = srcDir.resolve("network")

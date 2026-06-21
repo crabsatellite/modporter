@@ -17090,11 +17090,13 @@ ${indent}}
     }
 
     private fun migrateSaddleableEquipSaddleSignature(source: String): String {
-        if (!source.contains("equipSaddle(") || !source.contains("SoundSource")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("equipSaddle(") || !executableCode.contains("SoundSource")) return source
         var changed = false
-        val result = Regex(
-            """public\s+void\s+equipSaddle\(\s*((?:@(?:[\w.]+\.)?Nullable\s+)?)((?:net\.minecraft\.sounds\.)?SoundSource)\s+([A-Za-z_$][\w$]*)\s*\)"""
-        ).replace(source) { match ->
+        val result = replaceExecutableRegex(
+            source,
+            Regex("""public\s+void\s+equipSaddle\(\s*((?:@(?:[\w.]+\.)?Nullable\s+)?)((?:net\.minecraft\.sounds\.)?SoundSource)\s+([A-Za-z_$][\w$]*)\s*\)""")
+        ) { match ->
             changed = true
             val nullable = match.groupValues[1]
             val soundType = match.groupValues[2]
