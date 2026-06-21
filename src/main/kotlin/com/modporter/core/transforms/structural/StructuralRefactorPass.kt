@@ -35737,22 +35737,30 @@ ${indent}}
     }
 
     private fun migrateItemStackHoverNameSource(source: String): String {
-        if (!source.contains(".setHoverName(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".setHoverName(")) return source
 
         var result = source
         var changed = false
-        result = Regex(
-            """(?m)^([ \t]*)ItemStack\s+([A-Za-z_$][\w$]*)\s*=\s*(new\s+ItemStack\s*\([^;\r\n]*\))\.setHoverName\((.*)\)\s*;[ \t]*$"""
-        ).replace(result) { match ->
+        val beforeAssignmentRewrite = result
+        result = replaceExecutableRegex(
+            result,
+            Regex(
+                """(?m)^([ \t]*)ItemStack\s+([A-Za-z_$][\w$]*)\s*=\s*(new\s+ItemStack\s*\([^;\r\n]*\))\.setHoverName\((.*)\)\s*;[ \t]*$"""
+            )
+        ) { match ->
             changed = true
             val indent = match.groupValues[1]
             val variable = match.groupValues[2]
-            val stackExpression = match.groupValues[3].trim()
-            val nameExpression = match.groupValues[4].trim()
+            fun originalGroup(index: Int): String =
+                match.groups[index]?.range?.let { beforeAssignmentRewrite.substring(it.first, it.last + 1) }
+                    ?: match.groupValues[index]
+            val stackExpression = originalGroup(3).trim()
+            val nameExpression = originalGroup(4).trim()
             "${indent}ItemStack $variable = $stackExpression;\n" +
                 "${indent}$variable.set(DataComponents.CUSTOM_NAME, $nameExpression);"
         }
-        result = rewriteJavaCall(result, "setHoverName") { receiver, args ->
+        result = rewriteExecutableJavaCall(result, "setHoverName") { receiver, args ->
             if (args.size != 1) {
                 null
             } else {

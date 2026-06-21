@@ -4216,6 +4216,44 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `item stack hover name migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateItemStackHoverNameSource")
+        assertTrue(start >= 0, "migrateItemStackHoverNameSource is missing")
+        val end = source.indexOf("private fun migrateFriendlyByteBufAmbiguousMethodReferencesSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw setHoverName prefilter" to body.contains("""source.contains(".setHoverName(")"""),
+            "raw setHoverName call rewrite" to body.contains("""rewriteJavaCall(result, "setHoverName")"""),
+            "masked assignment argument reuse" to body.contains("val nameExpression = match.groupValues[4].trim()"),
+            "raw assignment replacement" to body.contains(".replace(result)")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".setHoverName(")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("val beforeAssignmentRewrite = result") &&
+                body.contains("match.groups[index]?.range") &&
+                body.contains("beforeAssignmentRewrite.substring") &&
+                body.contains("""rewriteExecutableJavaCall(result, "setHoverName")""") &&
+                body.contains("DataComponents.CUSTOM_NAME"),
+            "ItemStack hover name migration must derive matches from executable Java while preserving original argument text"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "ItemStack hover name migration must not rewrite comments or string literals or reuse masked captures: $offenders"
+        )
+    }
+
+    @Test
     fun `curative item effect migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

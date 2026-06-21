@@ -22648,9 +22648,13 @@ class StructuralRefactorExtraTest {
                  */
                 private static final String WRITE_DOC = "buf.writeMap(glows, FriendlyByteBuf::writeUUID, DeveloperGlow::write);";
                 private static final String READ_DOC = "return buf.readMap(FriendlyByteBuf::readUUID, DeveloperGlow::read);";
+                // ItemStack stack = new ItemStack(Items.DIAMOND).setHoverName(Component.literal("named"));
+                // stack.setHoverName(Component.literal("comment"));
+                private static final String HOVER_ASSIGNMENT_DOC = "ItemStack stack = new ItemStack(Items.DIAMOND).setHoverName(Component.literal(\"named\"));";
+                private static final String HOVER_CALL_DOC = "stack.setHoverName(Component.literal(\"doc\"));";
 
                 public void keep() {
-                    System.out.println(CREATIVE_DOC + WRITE_DOC + READ_DOC);
+                    System.out.println(CREATIVE_DOC + WRITE_DOC + READ_DOC + HOVER_ASSIGNMENT_DOC + HOVER_CALL_DOC);
                 }
             }
         """.trimIndent())
@@ -22664,6 +22668,7 @@ class StructuralRefactorExtraTest {
         assertFalse(migrated.contains("insertAfter("), migrated)
         assertFalse(migrated.contains("buffer.writeUUID(value)"), migrated)
         assertFalse(migrated.contains("buffer.readUUID()"), migrated)
+        assertFalse(migrated.contains("set(DataComponents.CUSTOM_NAME"), migrated)
     }
 
     @Test
