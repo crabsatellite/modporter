@@ -3595,6 +3595,48 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy projectile portal branch removal uses executable branch evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyProjectilePortalBranchSource")
+        assertTrue(start >= 0, "migrateLegacyProjectilePortalBranchSource is missing")
+        val end = source.indexOf("private fun migrateColoredCutoutModelCopyLayerRenderSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw handleInsidePortal prefilter" to body.contains("""source.contains("handleInsidePortal(")"""),
+            "raw TheEndGatewayBlockEntity prefilter" to body.contains("""source.contains("TheEndGatewayBlockEntity.teleportEntity")"""),
+            "raw HitResult prefilter" to body.contains("""source.contains("HitResult.Type.BLOCK")"""),
+            "raw block hit scan" to body.contains("blockHitPattern.find(result, cursor)"),
+            "raw branch brace lookup" to body.contains("result.indexOf('{', match.range.last)"),
+            "raw branch brace matching" to body.contains("findMatchingBrace(result, openBrace)"),
+            "raw branch body evidence" to body.contains("val body = result.substring(openBrace + 1, closeBrace)")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("handleInsidePortal(")""") &&
+                body.contains("""executableCode.contains("TheEndGatewayBlockEntity.teleportEntity")""") &&
+                body.contains("""executableCode.contains("HitResult.Type.BLOCK")""") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("blockHitPattern.find(executableResult, cursor)") &&
+                body.contains("executableResult.indexOf('{', match.range.last)") &&
+                body.contains("findMatchingBrace(executableResult, openBrace)") &&
+                body.contains("val body = executableResult.substring(openBrace + 1, closeBrace)"),
+            "Legacy projectile portal branch removal must locate removable branches from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy projectile portal branch removal must not delete branches using comments or strings as evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy add layer skin migrations use executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

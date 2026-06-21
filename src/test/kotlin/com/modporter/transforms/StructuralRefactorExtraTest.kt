@@ -29224,6 +29224,48 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy projectile portal branch removal ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LegacyProjectileDocsOnly.java").writeText("""
+            package com.example;
+
+            public class LegacyProjectileDocsOnly {
+                private static final String OLD_BRANCH = "if (result.getType() == HitResult.Type.BLOCK) { handleInsidePortal(pos); TheEndGatewayBlockEntity.teleportEntity(level, pos, state, entity, gateway); }";
+
+                /*
+                if (result.getType() == HitResult.Type.BLOCK) {
+                    if (state.is(Blocks.NETHER_PORTAL)) {
+                        this.handleInsidePortal(pos);
+                    } else if (state.is(Blocks.END_GATEWAY)) {
+                        if (TheEndGatewayBlockEntity.canEntityTeleport(this)) {
+                            TheEndGatewayBlockEntity.teleportEntity(level, pos, state, this, gateway);
+                        }
+                    }
+                }
+                */
+
+                public void tick(HitResult result) {
+                    if (result.getType() == HitResult.Type.BLOCK) {
+                        this.onHit(result);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LegacyProjectileDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-projectile-legacy-portal-branch" }, result.changes.toString())
+        assertTrue(migrated.contains("private static final String OLD_BRANCH"), migrated)
+        assertTrue(migrated.contains("this.handleInsidePortal(pos);"), migrated)
+        assertTrue(migrated.contains("TheEndGatewayBlockEntity.teleportEntity(level, pos, state, this, gateway);"), migrated)
+        assertTrue(migrated.contains("public void tick(HitResult result)"), migrated)
+        assertTrue(migrated.contains("if (result.getType() == HitResult.Type.BLOCK)"), migrated)
+        assertTrue(migrated.contains("this.onHit(result);"), migrated)
+    }
+
+    @Test
     fun `migrates colored cutout layer helper RGB floats to packed color`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

@@ -15680,9 +15680,10 @@ ${indent}}
 """.trimEnd()
 
     private fun migrateLegacyProjectilePortalBranchSource(source: String): String {
-        if (!source.contains("handleInsidePortal(") ||
-            !source.contains("TheEndGatewayBlockEntity.teleportEntity") ||
-            !source.contains("HitResult.Type.BLOCK")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("handleInsidePortal(") ||
+            !executableCode.contains("TheEndGatewayBlockEntity.teleportEntity") ||
+            !executableCode.contains("HitResult.Type.BLOCK")) {
             return source
         }
 
@@ -15690,14 +15691,15 @@ ${indent}}
         var cursor = 0
         val blockHitPattern = Regex("""if\s*\(\s*[A-Za-z_$][\w$]*\.getType\(\)\s*==\s*HitResult\.Type\.BLOCK\s*\)\s*\{""")
         while (true) {
-            val match = blockHitPattern.find(result, cursor) ?: break
-            val openBrace = result.indexOf('{', match.range.last)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            val executableResult = maskJavaCommentsAndLiterals(result)
+            val match = blockHitPattern.find(executableResult, cursor) ?: break
+            val openBrace = executableResult.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableResult, openBrace) else -1
             if (openBrace < 0 || closeBrace < 0) {
                 cursor = match.range.last + 1
                 continue
             }
-            val body = result.substring(openBrace + 1, closeBrace)
+            val body = executableResult.substring(openBrace + 1, closeBrace)
             val isLegacyPortalBranch = body.contains("Blocks.NETHER_PORTAL") &&
                 body.contains("handleInsidePortal(") &&
                 body.contains("Blocks.END_GATEWAY") &&
