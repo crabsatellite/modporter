@@ -4264,6 +4264,41 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `nitrogen sync packet detection rejects local INBTSynchable names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("INBTSynchable.java").writeText("""
+            package com.example;
+
+            public interface INBTSynchable {
+                enum Type {
+                    BOOLEAN
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LocalSync.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.network.BasePacket;
+
+            public class LocalSync implements INBTSynchable {
+                public BasePacket getSyncPacket(String key, INBTSynchable.Type type, Object value) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val localSync = srcDir.resolve("LocalSync.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-attachment-api" })
+        assertTrue(localSync.contains("import net.minecraft.network.protocol.common.custom.CustomPacketPayload;"), localSync)
+        assertTrue(localSync.contains("public CustomPacketPayload getSyncPacket(String key, INBTSynchable.Type type, Object value)"), localSync)
+        assertFalse(localSync.contains("import com.aetherteam.nitrogen.network.packet.SyncPacket;"), localSync)
+        assertFalse(localSync.contains("public SyncPacket getSyncPacket(int entityID,"), localSync)
+    }
+
+    @Test
     fun `wraps attachment getData returns for legacy lazy optional getters`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

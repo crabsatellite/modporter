@@ -608,6 +608,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `nitrogen synchable detection requires resolved API owners`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun hasNitrogenAttachmentSyncPacketMethod")
+        assertTrue(start >= 0, "hasNitrogenAttachmentSyncPacketMethod is missing")
+        val end = source.indexOf("private fun extractJavaTopLevelSuperTypes", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "raw INBTSynchable source marker" to """source.contains("INBTSynchable")""",
+            "simple-name INBTSynchable fallback" to """substringAfterLast('.') == "INBTSynchable"""",
+            "unbounded supertype resolver in synchable closure" to "resolveJavaTypeReference(superType, type.packageName, type.imports)"
+        )
+        val offenders = forbidden
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "Nitrogen synchable detection contains $label" }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("extractJavaTopLevelSuperTypes(executableCode)") &&
+                body.contains("resolveKnownJavaTypeReference(superType, packageName, imports, wildcardImports, nitrogenSynchableTypes)") &&
+                body.contains("wildcardImports = javaNonStaticWildcardImports(code)") &&
+                body.contains("resolveKnownJavaTypeReference(") &&
+                body.contains("resolved in synchableTypes"),
+            "Nitrogen synchable detection must resolve Java-visible API owners instead of trusting simple names or raw markers"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Nitrogen synchable detection must not infer API identity from local simple names: $offenders"
+        )
+    }
+
+    @Test
     fun `backpack container API migration binds inventory wrapper to slot constructor`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

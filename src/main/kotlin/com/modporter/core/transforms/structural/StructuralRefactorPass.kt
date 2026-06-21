@@ -5602,16 +5602,18 @@ $helpers
     }
 
     private fun hasNitrogenAttachmentSyncPacketMethod(source: String, nitrogenSynchableTypes: Set<String>): Boolean {
-        if (!source.contains("getSyncPacket(")) return false
+        val code = maskJavaComments(source)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("getSyncPacket(")) return false
         val hasMatchingSignature = Regex(
             """\bgetSyncPacket\s*\(\s*String\s+[A-Za-z_$][\w$]*\s*,\s*(?:INBTSynchable\.)?Type\s+[A-Za-z_$][\w$]*\s*,\s*Object\s+[A-Za-z_$][\w$]*\s*\)"""
-        ).containsMatchIn(source)
+        ).containsMatchIn(executableCode)
         if (!hasMatchingSignature) return false
-        if (source.contains("INBTSynchable")) return true
-        val packageName = packageNameOf(source)
-        val imports = javaNonStaticImports(source)
-        return extractJavaTopLevelSuperTypes(source).any { superType ->
-            resolveJavaTypeReference(superType, packageName, imports) in nitrogenSynchableTypes
+        val packageName = packageNameOf(code)
+        val imports = javaNonStaticImports(code)
+        val wildcardImports = javaNonStaticWildcardImports(code)
+        return extractJavaTopLevelSuperTypes(executableCode).any { superType ->
+            resolveKnownJavaTypeReference(superType, packageName, imports, wildcardImports, nitrogenSynchableTypes) in nitrogenSynchableTypes
         }
     }
 
@@ -5756,19 +5758,23 @@ $helpers
             val fqn: String,
             val packageName: String,
             val imports: Map<String, String>,
+            val wildcardImports: Set<String>,
             val superTypes: List<String>
         )
 
         val types = javaFiles.mapNotNull { javaFile ->
             val source = javaFile.readText()
-            val typeName = javaTopLevelTypeName(source) ?: return@mapNotNull null
-            val packageName = packageNameOf(source)
+            val code = maskJavaComments(source)
+            val executableCode = maskJavaCommentsAndLiterals(source)
+            val typeName = javaTopLevelTypeName(executableCode) ?: return@mapNotNull null
+            val packageName = packageNameOf(code)
             val fqn = if (packageName.isBlank()) typeName else "$packageName.$typeName"
             TypeInfo(
                 fqn = fqn,
                 packageName = packageName,
-                imports = javaNonStaticImports(source),
-                superTypes = extractJavaTopLevelSuperTypes(source)
+                imports = javaNonStaticImports(code),
+                wildcardImports = javaNonStaticWildcardImports(code),
+                superTypes = extractJavaTopLevelSuperTypes(executableCode)
             )
         }
         val synchableTypes = linkedSetOf(
@@ -5781,8 +5787,14 @@ $helpers
             for (type in types) {
                 if (type.fqn in synchableTypes) continue
                 val implementsSynchable = type.superTypes.any { superType ->
-                    val resolved = resolveJavaTypeReference(superType, type.packageName, type.imports)
-                    resolved in synchableTypes || superType.substringBefore('<').substringAfterLast('.') == "INBTSynchable"
+                    val resolved = resolveKnownJavaTypeReference(
+                        superType,
+                        type.packageName,
+                        type.imports,
+                        type.wildcardImports,
+                        synchableTypes
+                    )
+                    resolved in synchableTypes
                 }
                 if (implementsSynchable) {
                     synchableTypes += type.fqn
