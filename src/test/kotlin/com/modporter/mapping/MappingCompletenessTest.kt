@@ -430,25 +430,37 @@ class MappingCompletenessTest {
         val ruleIdPrefixes = surfaces.flatMap { surface ->
             surface.ruleIdPrefixes.map { prefix -> prefix to surface }
         }
+        val undeclaredThirdPartyRuleIdTokens = undeclaredThirdPartySentinels
+            .map { root ->
+                root.trimEnd('.', ':')
+                    .substringAfterLast('.')
+                    .substringAfterLast(':')
+                    .lowercase()
+                    .replace('_', '-')
+            }
+            .filter { token -> token.any { it.isLetter() } }
+            .distinct()
 
         val ruleIdOffenders = productionFiles
             .flatMap { file ->
                 val relative = projectRoot.relativize(file).invariantSeparatorsPathString
-                Regex(""""((?:struct|res|build)-[a-z0-9]+-[^"]*)"""")
+                Regex(""""([^"]+)"""")
                     .findAll(file.readText())
                     .map { it.groupValues[1] }
-                    .filter { ruleId ->
-                        listOf("nitrogen", "cumulus", "curios", "farmersdelight", "quark", "mmlib").any { ruleId.contains("-$it-") }
-                    }
                     .flatMap { ruleId ->
                         val declaringSurfaces = ruleIdPrefixes
                             .filter { (prefix, _) -> ruleId.startsWith(prefix) }
                             .map { (_, surface) -> surface }
                         when {
-                            declaringSurfaces.isEmpty() ->
-                                listOf("$relative contains undeclared third-party API rule id $ruleId")
-                            declaringSurfaces.none { surface -> relative in surface.allowedFiles } ->
+                            declaringSurfaces.isNotEmpty() &&
+                                declaringSurfaces.none { surface -> relative in surface.allowedFiles } ->
                                 listOf("$relative contains third-party API rule id $ruleId outside declared API-surface files")
+                            declaringSurfaces.isEmpty() && undeclaredThirdPartyRuleIdTokens.any { token ->
+                                ruleId.startsWith("$token-") ||
+                                    ruleId.contains("-$token-") ||
+                                    ruleId.contains("-$token")
+                            } ->
+                                listOf("$relative contains undeclared third-party API rule id $ruleId")
                             else -> emptyList()
                         }
                     }
