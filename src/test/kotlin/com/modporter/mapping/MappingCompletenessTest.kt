@@ -2683,6 +2683,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `painting variant accessor migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyPaintingVariantAccessors")
+        assertTrue(start >= 0, "migrateLegacyPaintingVariantAccessors is missing")
+        val end = source.indexOf("private fun migrateLegacyPaintingVariantRegistrySource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw PaintingVariant prefilter" to """source.contains("PaintingVariant")""",
+            "raw variable collection" to ".findAll(source)",
+            "raw width replacement" to """.replace("${'$'}variable.getWidth()", "${'$'}variable.width()")""",
+            "raw height replacement" to """.replace("${'$'}variable.getHeight()", "${'$'}variable.height()")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains(".findAll(executableCode)") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("""${'$'}{Regex.escape(variable)}\.getWidth\(\)""") &&
+                body.contains("""${'$'}{Regex.escape(variable)}\.getHeight\(\)"""),
+            "PaintingVariant accessor migration must collect declarations and rewrite calls from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "PaintingVariant accessor migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `resource mod id detection does not infer constant owners from file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot

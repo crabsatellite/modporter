@@ -23911,6 +23911,39 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `painting variant accessor migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PaintingVariantDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.decoration.PaintingVariant;
+
+            public class PaintingVariantDocs {
+                public boolean real(PaintingVariant art, int width, int height) {
+                    return art.getWidth() >= width && art.getHeight() >= height;
+                }
+
+                /*
+                art.getWidth();
+                art.getHeight();
+                */
+                private static final String SAMPLE = "art.getWidth() art.getHeight()";
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("PaintingVariantDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(source.contains("return art.width() >= width && art.height() >= height;"), source)
+        assertTrue(source.contains("art.getWidth();"), source)
+        assertTrue(source.contains("art.getHeight();"), source)
+        assertTrue(source.contains("""private static final String SAMPLE = "art.getWidth() art.getHeight()";"""), source)
+    }
+
+    @Test
     fun `migrates Cumulus menu registry classes to entrypoint callbacks from source shape`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

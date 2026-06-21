@@ -33238,18 +33238,24 @@ ${indent}}
     }
 
     private fun migrateLegacyPaintingVariantAccessors(source: String): String {
-        if (!source.contains("PaintingVariant")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("PaintingVariant")) return source
         val variables = Regex("""\bPaintingVariant\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(source)
+            .findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
         if (variables.isEmpty()) return source
 
         var result = source
         variables.forEach { variable ->
-            result = result
-                .replace("$variable.getWidth()", "$variable.width()")
-                .replace("$variable.getHeight()", "$variable.height()")
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b${Regex.escape(variable)}\.getWidth\(\)""")
+            ) { "$variable.width()" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b${Regex.escape(variable)}\.getHeight\(\)""")
+            ) { "$variable.height()" }
         }
         return result
     }
