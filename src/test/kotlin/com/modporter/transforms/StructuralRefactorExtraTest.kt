@@ -26041,6 +26041,38 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `attachment getData ifPresent migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AttachmentIfPresentDocs.java").writeText("""
+            package com.example;
+
+            public class AttachmentIfPresentDocs {
+                /*
+                level.getData(ExampleAttachments.TIME.get()).ifPresent((time) -> {
+                    time.sync(level);
+                });
+                */
+                private static final String SAMPLE = "level.getData(ExampleAttachments.TIME.get()).ifPresent((time) -> { time.sync(level); });";
+
+                public void real(Level level) {
+                    Object data = level.getData(ExampleAttachments.TIME.get());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("AttachmentIfPresentDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(source.contains("level.getData(ExampleAttachments.TIME.get()).ifPresent((time) -> {"), source)
+        assertTrue(source.contains("private static final String SAMPLE"), source)
+        assertFalse(source.contains("hasData(ExampleAttachments.TIME.get())"), source)
+        assertFalse(source.contains("var time = level.getData"), source)
+    }
+
+    @Test
     fun `player clone capability lifecycle wrappers are removed only when copyFrom preserves data copy`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

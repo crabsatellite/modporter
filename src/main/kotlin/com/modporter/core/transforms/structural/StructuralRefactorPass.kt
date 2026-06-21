@@ -33397,47 +33397,55 @@ ${indent}}
     }
 
     private fun migrateAttachmentGetDataIfPresentSource(source: String): String {
-        if (!source.contains(".getData(") || !source.contains(".ifPresent(")) return source
+        val initialExecutableCode = maskJavaCommentsAndLiterals(source)
+        if (!initialExecutableCode.contains(".getData(") || !initialExecutableCode.contains(".ifPresent(")) return source
         val receiverPattern = Regex("""((?:this|super|[A-Za-z_$][\w$]*)(?:\.[A-Za-z_$][\w$]*(?:\([^;\r\n{}]*\))?)*)\.getData\s*\(""")
         var result = source
         var cursor = 0
         var changed = false
         while (true) {
-            val match = receiverPattern.find(result, cursor) ?: break
-            val receiver = match.groupValues[1]
-            val dataOpen = result.indexOf('(', match.range.last - 1)
-            val dataClose = if (dataOpen >= 0) findMatchingParen(result, dataOpen) else -1
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val match = receiverPattern.find(executableCode, cursor) ?: break
+            val receiverRange = match.groups[1]?.range
+            if (receiverRange == null) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val receiver = result.substring(receiverRange.first, receiverRange.last + 1)
+            val dataOpen = executableCode.indexOf('(', match.range.last - 1)
+            val dataClose = if (dataOpen >= 0) findMatchingParen(executableCode, dataOpen) else -1
             if (dataClose < 0) {
                 cursor = match.range.last + 1
                 continue
             }
             var afterData = dataClose + 1
-            while (afterData < result.length && result[afterData].isWhitespace()) afterData++
-            if (!result.startsWith(".ifPresent", afterData)) {
+            while (afterData < executableCode.length && executableCode[afterData].isWhitespace()) afterData++
+            if (!executableCode.startsWith(".ifPresent", afterData)) {
                 cursor = dataClose + 1
                 continue
             }
-            val ifPresentOpen = result.indexOf('(', afterData)
-            val ifPresentClose = if (ifPresentOpen >= 0) findMatchingParen(result, ifPresentOpen) else -1
+            val ifPresentOpen = executableCode.indexOf('(', afterData)
+            val ifPresentClose = if (ifPresentOpen >= 0) findMatchingParen(executableCode, ifPresentOpen) else -1
             if (ifPresentClose < 0) {
                 cursor = afterData + 1
                 continue
             }
             var statementEnd = ifPresentClose + 1
-            while (statementEnd < result.length && result[statementEnd].isWhitespace()) statementEnd++
-            if (statementEnd >= result.length || result[statementEnd] != ';') {
+            while (statementEnd < executableCode.length && executableCode[statementEnd].isWhitespace()) statementEnd++
+            if (statementEnd >= executableCode.length || executableCode[statementEnd] != ';') {
                 cursor = ifPresentClose + 1
                 continue
             }
 
             val lambda = result.substring(ifPresentOpen + 1, ifPresentClose)
-            val lambdaMatch = Regex("""^\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*->\s*\{""").find(lambda)
+            val lambdaCode = executableCode.substring(ifPresentOpen + 1, ifPresentClose)
+            val lambdaMatch = Regex("""^\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*->\s*\{""").find(lambdaCode)
             if (lambdaMatch == null) {
                 cursor = ifPresentClose + 1
                 continue
             }
-            val lambdaBrace = lambda.indexOf('{', lambdaMatch.range.last)
-            val lambdaBraceClose = if (lambdaBrace >= 0) findMatchingBrace(lambda, lambdaBrace) else -1
+            val lambdaBrace = lambdaCode.indexOf('{', lambdaMatch.range.last)
+            val lambdaBraceClose = if (lambdaBrace >= 0) findMatchingBrace(lambdaCode, lambdaBrace) else -1
             if (lambdaBrace < 0 || lambdaBraceClose < 0) {
                 cursor = ifPresentClose + 1
                 continue

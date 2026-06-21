@@ -2574,6 +2574,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `attachment getData ifPresent migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateAttachmentGetDataIfPresentSource")
+        assertTrue(start >= 0, "migrateAttachmentGetDataIfPresentSource is missing")
+        val end = source.indexOf("private fun migrateLegacyEntityCapabilityOptionalChains", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getData prefilter" to """source.contains(".getData(")""",
+            "raw ifPresent prefilter" to """source.contains(".ifPresent(")""",
+            "raw receiver scan" to "receiverPattern.find(result, cursor)",
+            "raw matching paren scan" to "findMatchingParen(result",
+            "raw ifPresent token scan" to "result.startsWith(\".ifPresent\""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val initialExecutableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("receiverPattern.find(executableCode, cursor)") &&
+                body.contains("findMatchingParen(executableCode") &&
+                body.contains("val lambdaCode = executableCode.substring"),
+            "Attachment getData ifPresent migration must prove calls from executable Java before rewriting"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Attachment getData ifPresent migration must not use comments or strings as source evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `resource mod id detection does not infer constant owners from file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot
