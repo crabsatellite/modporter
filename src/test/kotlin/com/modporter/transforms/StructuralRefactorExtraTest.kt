@@ -14888,6 +14888,124 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `nitrogen block property pair runtime migration uses executable calls`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BlockPropertyPairRuntime.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import java.util.Map;
+            import java.util.function.Predicate;
+            import javax.annotation.Nullable;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.block.LiquidBlock;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeInput;
+            import net.minecraft.world.level.biome.Biome;
+            import net.minecraft.world.level.block.state.properties.Property;
+
+            public class BlockPropertyPairRuntime<T, P extends Predicate<T>> implements Recipe<RecipeInput> {
+                protected final ResourceLocation id;
+                @Nullable
+                private final ResourceKey<Biome> biomeKey;
+                @Nullable
+                private final TagKey<Biome> biomeTag;
+                protected final BlockStateIngredient bypassBlock;
+                private final BlockPropertyPair pair;
+
+                public BlockPropertyPairRuntime(ResourceLocation id, @Nullable ResourceKey<Biome> biomeKey, @Nullable TagKey<Biome> biomeTag, BlockStateIngredient bypassBlock, BlockPropertyPair pair) {
+                    this.id = id;
+                    this.biomeKey = biomeKey;
+                    this.biomeTag = biomeTag;
+                    this.bypassBlock = bypassBlock;
+                    this.pair = pair;
+                }
+
+                @Nullable
+                public ResourceKey<Biome> getBiomeKey() {
+                    return this.biomeKey;
+                }
+
+                @Nullable
+                public TagKey<Biome> getBiomeTag() {
+                    return this.biomeTag;
+                }
+
+                public BlockStateIngredient getBypassBlock() {
+                    return this.bypassBlock;
+                }
+
+                public Object fluidHolder(LiquidBlock liquid) {
+                    return liquid.getFluid();
+                }
+
+                public void visit() {
+                    for (Map.Entry<Property<?>, Comparable<?>> entry : pair.properties().entrySet()) {
+                        use(entry);
+                    }
+                }
+
+                private void use(Object value) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("BlockPropertyPairRuntime.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, result.changes.toString())
+        assertTrue(migrated.contains("return liquid.fluid.builtInRegistryHolder();"), migrated)
+        assertTrue(migrated.contains("if (pair.properties().isPresent())"), migrated)
+        assertTrue(migrated.contains("for (Map.Entry<Property<?>, Comparable<?>> entry : pair.properties().get().entrySet())"), migrated)
+        assertFalse(migrated.contains("return liquid.getFluid();"), migrated)
+        assertFalse(migrated.contains("pair.properties().entrySet()"), migrated)
+    }
+
+    @Test
+    fun `nitrogen block property pair runtime migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BlockPropertyPairRuntimeDocsOnly.java").writeText("""
+            package com.example;
+
+            public class BlockPropertyPairRuntimeDocsOnly {
+                private static final String DOC = "BlockPropertyPair pair; LiquidBlock liquid; liquid.getFluid(); for (Map.Entry<Property<?>, Comparable<?>> entry : pair.properties().entrySet()) { use(entry); }";
+
+                /*
+                import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+                import net.minecraft.world.level.block.LiquidBlock;
+
+                Object fluidHolder(LiquidBlock liquid) {
+                    return liquid.getFluid();
+                }
+
+                void visit(BlockPropertyPair pair) {
+                    for (Map.Entry<Property<?>, Comparable<?>> entry : pair.properties().entrySet()) {
+                        use(entry);
+                    }
+                }
+                */
+
+                public void keep() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("BlockPropertyPairRuntimeDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, result.changes.toString())
+        assertTrue(migrated.contains("liquid.getFluid();"), migrated)
+        assertTrue(migrated.contains("pair.properties().entrySet()"), migrated)
+        assertFalse(migrated.contains("liquid.fluid.builtInRegistryHolder()"), migrated)
+        assertFalse(migrated.contains("pair.properties().isPresent()"), migrated)
+    }
+
+    @Test
     fun `migrates ingredient network codecs with receiver type evidence`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

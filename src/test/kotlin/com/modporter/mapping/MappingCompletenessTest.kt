@@ -8422,6 +8422,46 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `nitrogen block property pair runtime migration uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateNitrogenBlockPropertyPairRuntimeAccess")
+        assertTrue(start >= 0, "migrateNitrogenBlockPropertyPairRuntimeAccess is missing")
+        val end = source.indexOf("private fun migrateRecipeDisplayRecipeIdWithoutHolderSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw BlockPropertyPair prefilter" to body.contains("""source.contains("BlockPropertyPair")"""),
+            "raw getFluid scan" to body.contains("""result.contains(".getFluid()")"""),
+            "raw LiquidBlock scan" to body.contains("""result.contains("LiquidBlock")"""),
+            "raw getFluid replacement" to body.contains(""".replace(result)"""),
+            "raw loop scan" to body.contains("loopPattern.find(result"),
+            "raw brace matching" to body.contains("findMatchingBrace(result, openBrace)")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("BlockPropertyPair")""") &&
+                body.contains("""executableCode.contains(".getFluid()")""") &&
+                body.contains("""executableCode.contains("LiquidBlock")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("loopPattern.find(executableResult, cursor)") &&
+                body.contains("findMatchingBrace(executableResult, openBrace)"),
+            "Nitrogen BlockPropertyPair runtime migration must inspect and rewrite executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Nitrogen BlockPropertyPair runtime migration must not use comments or strings as evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `nullable import cleanup uses executable annotation evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

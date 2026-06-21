@@ -37660,15 +37660,18 @@ public class $className extends PlacementBanBuilder {
             ?.get(1)
 
     private fun migrateNitrogenBlockPropertyPairRuntimeAccess(source: String): String {
-        if (!source.contains("BlockPropertyPair")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("BlockPropertyPair")) return source
         var result = source
         var changed = false
-        if (result.contains(".getFluid()") && result.contains("LiquidBlock")) {
-            result = Regex("""\b([A-Za-z_$][\w$]*)\.getFluid\(\)""")
-                .replace(result) { match ->
-                    changed = true
-                    "${match.groupValues[1]}.fluid.builtInRegistryHolder()"
-                }
+        if (executableCode.contains(".getFluid()") && executableCode.contains("LiquidBlock")) {
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b([A-Za-z_$][\w$]*)\.getFluid\(\)""")
+            ) { match ->
+                changed = true
+                "${match.groupValues[1]}.fluid.builtInRegistryHolder()"
+            }
         }
         val id = """[A-Za-z_$][\w$]*"""
         val loopPattern = Regex(
@@ -37676,9 +37679,10 @@ public class $className extends PlacementBanBuilder {
         )
         var cursor = 0
         while (true) {
-            val match = loopPattern.find(result, cursor) ?: break
-            val openBrace = result.indexOf('{', match.range.last - 1)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            val executableResult = maskJavaCommentsAndLiterals(result)
+            val match = loopPattern.find(executableResult, cursor) ?: break
+            val openBrace = executableResult.indexOf('{', match.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableResult, openBrace) else -1
             if (openBrace < 0 || closeBrace < 0) {
                 cursor = match.range.last + 1
                 continue
