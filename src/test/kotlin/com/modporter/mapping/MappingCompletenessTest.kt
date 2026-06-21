@@ -3087,7 +3087,7 @@ class MappingCompletenessTest {
             .readText()
         val start = source.indexOf("private fun migrateUseOnContextDataComponentHasCalls")
         assertTrue(start >= 0, "migrateUseOnContextDataComponentHasCalls is missing")
-        val end = source.indexOf("private fun migrateLegacyAddLayersSkinNameLoopsSource", start + 1).let {
+        val end = source.indexOf("private fun migrateThisStackUseDurationCalls", start + 1).let {
             if (it < 0) source.length else it
         }
         val body = source.substring(start, end)
@@ -3112,6 +3112,57 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty(),
             "UseOnContext item component migration must not use whole-file fallbacks or raw source replacements: $offenders"
+        )
+    }
+
+    @Test
+    fun `this stack use duration migration uses method local living entity evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateThisStackUseDurationCalls")
+        assertTrue(start >= 0, "migrateThisStackUseDurationCalls is missing")
+        val end = source.indexOf("private fun migrateLegacyAddLayersSkinNameLoopsSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val genericStart = source.indexOf("private fun migrateItemUseDurationCalls")
+        assertTrue(genericStart >= 0, "migrateItemUseDurationCalls is missing")
+        val genericEnd = source.indexOf("private fun migrateArmorMaterialHolderFields", genericStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val genericBody = source.substring(genericStart, genericEnd)
+        val offenders = listOf(
+            "whole-file LivingEntity living fallback" to """result.contains("LivingEntity living")""",
+            "whole-file LivingEntity entity fallback" to """result.contains("LivingEntity entity")""",
+            "raw getUseDuration replacement against full source" to """result = Regex(""" + "\"\"\"" + """\bthis\.getUseDuration""",
+            "raw getUseDuration method-call migration" to """migrateMethodCalls(result, ".getUseDuration")""",
+            "non-executable getUseDuration rewrite" to """rewriteJavaCall(result, "getUseDuration")"""
+        )
+            .filter { (_, marker) -> source.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("javaMethodRangesIncludingDefault(executableCode)") &&
+                body.contains("val parameterList = method.header.substring(openParen + 1, closeParen)") &&
+                body.contains(".singleOrNull()") &&
+                body.contains("source.substring(absoluteRange) != match.value") &&
+                body.contains("return applyStringEdits(source, edits)"),
+            "this.getUseDuration(stack) migration must bind the LivingEntity parameter from the same executable method"
+        )
+        assertTrue(
+            genericBody.contains("val executableCode = maskJavaCommentsAndLiterals(result)") &&
+                genericBody.contains("findExpressionReceiverStart(executableCode, tokenIndex)") &&
+                genericBody.contains("migratedItemUseDurationCall(") &&
+                genericBody.contains("singleLivingEntityParameterAt(executableCode, callOffset)") &&
+                genericBody.contains("if (receiver == \"this\" && stackArg == \"stack\")"),
+            "generic getUseDuration migration must locate executable calls and bind this.getUseDuration(stack) structurally"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "this.getUseDuration(stack) migration must not use whole-file LivingEntity fallbacks or raw replacements: $offenders"
         )
     }
 

@@ -16651,16 +16651,7 @@ ${indent}}
         }
 
         result = migrateUseOnContextDataComponentHasCalls(result)
-        result = Regex("""\bthis\.getUseDuration\(\s*stack\s*\)""")
-            .replace(result) {
-                if (result.contains("LivingEntity living")) {
-                    "this.getUseDuration(stack, living)"
-                } else if (result.contains("LivingEntity entity")) {
-                    "this.getUseDuration(stack, entity)"
-                } else {
-                    it.value
-                }
-            }
+        result = migrateThisStackUseDurationCalls(result)
         result = result.replace(".restore(true, false)", ".restore()")
 
         result = Regex(
@@ -16777,6 +16768,32 @@ ${indent}}
                 val absoluteRange = (method.range.first + match.range.first)..(method.range.first + match.range.last)
                 if (source.substring(absoluteRange) != match.value) return@forEach
                 edits += absoluteRange to "$contextParameter.getItemInHand().has(${match.groupValues[1]})"
+            }
+        }
+        return applyStringEdits(source, edits)
+    }
+
+    private fun migrateThisStackUseDurationCalls(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("this.getUseDuration(") || !executableCode.contains("LivingEntity")) return source
+        val livingParameterPattern = Regex("""(?:@[A-Za-z_$][\w$.]*(?:\([^)]*\))?\s+)*(?:final\s+)?(?:LivingEntity|net\.minecraft\.world\.entity\.LivingEntity)\s+([A-Za-z_$][\w$]*)\b""")
+        val useDurationPattern = Regex("""\bthis\.getUseDuration\(\s*stack\s*\)""")
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        for (method in javaMethodRangesIncludingDefault(executableCode)) {
+            val openParen = method.header.indexOf('(')
+            val closeParen = method.header.lastIndexOf(')')
+            if (openParen < 0 || closeParen <= openParen) continue
+            val parameterList = method.header.substring(openParen + 1, closeParen)
+            val livingParameter = livingParameterPattern.findAll(parameterList)
+                .map { it.groupValues[1] }
+                .distinct()
+                .singleOrNull()
+                ?: continue
+            val methodText = executableCode.substring(method.range)
+            useDurationPattern.findAll(methodText).forEach { match ->
+                val absoluteRange = (method.range.first + match.range.first)..(method.range.first + match.range.last)
+                if (source.substring(absoluteRange) != match.value) return@forEach
+                edits += absoluteRange to "this.getUseDuration(stack, $livingParameter)"
             }
         }
         return applyStringEdits(source, edits)
@@ -32522,29 +32539,89 @@ ${indent}}
 
     private fun migrateItemUseDurationCalls(source: String): String {
         if (!source.contains(".getUseDuration(")) return source
-        var result = Regex("""\b([A-Za-z_$][\w$]*)\.getUseItem\(\)\.getUseDuration\(\s*\)""")
-            .replace(source) { match ->
-                val living = match.groupValues[1]
-                "$living.getUseItem().getUseDuration($living)"
+        var result = source
+        var cursor = 0
+        val token = ".getUseDuration("
+        while (true) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenIndex = executableCode.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + "getUseDuration".length + 1
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
             }
-        result = migrateMethodCalls(result, ".getUseDuration") { args ->
-            when (args.size) {
-                0 -> listOf("null")
-                1 -> listOf(args[0], "null")
-                else -> args
+            val receiverStart = findExpressionReceiverStart(executableCode, tokenIndex)
+            if (receiverStart < 0 || receiverStart >= tokenIndex) {
+                cursor = closeParen + 1
+                continue
             }
-        }
-        val itemStackVariables = Regex("""\bItemStack\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
-            .map { it.groupValues[1] }
-            .toSet()
-        result = rewriteJavaCall(result, "getUseDuration") { receiver, args ->
-            if (args.size != 2 || args[1].trim() != "null") return@rewriteJavaCall null
-            val simpleReceiver = receiver.removePrefix("this.").trim()
-            val isItemStackReceiver = simpleReceiver in itemStackVariables || receiver.endsWith(".getUseItem()")
-            if (isItemStackReceiver) "$receiver.getUseDuration(${args[0].trim()})" else null
+            val receiver = result.substring(receiverStart, tokenIndex).trim()
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            val itemStackVariables = Regex("""\bItemStack\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(executableCode)
+                .map { it.groupValues[1] }
+                .toSet()
+            val replacement = migratedItemUseDurationCall(
+                executableCode = executableCode,
+                callOffset = tokenIndex,
+                receiver = receiver,
+                args = args,
+                itemStackVariables = itemStackVariables
+            )
+            if (replacement == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            result = result.substring(0, receiverStart) + replacement + result.substring(closeParen + 1)
+            cursor = receiverStart + replacement.length
         }
         return result
+    }
+
+    private fun migratedItemUseDurationCall(
+        executableCode: String,
+        callOffset: Int,
+        receiver: String,
+        args: List<String>,
+        itemStackVariables: Set<String>
+    ): String? {
+        if (receiver.endsWith(".getUseItem()") && args.isEmpty()) {
+            val living = receiver.removeSuffix(".getUseItem()").trim()
+            return "$receiver.getUseDuration($living)"
+        }
+        val simpleReceiver = receiver.removePrefix("this.").trim()
+        if (simpleReceiver in itemStackVariables || receiver.endsWith(".getUseItem()")) return null
+        return when (args.size) {
+            0 -> "$receiver.getUseDuration(null)"
+            1 -> {
+                val stackArg = args[0].trim()
+                if (receiver == "this" && stackArg == "stack") {
+                    val living = singleLivingEntityParameterAt(executableCode, callOffset) ?: return null
+                    "$receiver.getUseDuration($stackArg, $living)"
+                } else {
+                    "$receiver.getUseDuration($stackArg, null)"
+                }
+            }
+            else -> null
+        }
+    }
+
+    private fun singleLivingEntityParameterAt(executableCode: String, offset: Int): String? {
+        val method = javaMethodRangesIncludingDefault(executableCode).firstOrNull { offset in it.range } ?: return null
+        val openParen = method.header.indexOf('(')
+        val closeParen = method.header.lastIndexOf(')')
+        if (openParen < 0 || closeParen <= openParen) return null
+        return singleLivingEntityParameter(method.header.substring(openParen + 1, closeParen))
+    }
+
+    private fun singleLivingEntityParameter(parameterList: String): String? {
+        val livingParameterPattern = Regex("""(?:@[A-Za-z_$][\w$.]*(?:\([^)]*\))?\s+)*(?:final\s+)?(?:LivingEntity|net\.minecraft\.world\.entity\.LivingEntity)\s+([A-Za-z_$][\w$]*)\b""")
+        return livingParameterPattern.findAll(parameterList)
+            .map { it.groupValues[1] }
+            .distinct()
+            .singleOrNull()
     }
 
     private fun migrateArmorMaterialHolderFields(source: String): String {

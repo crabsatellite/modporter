@@ -10997,6 +10997,58 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `this stack use duration migration uses method local living entity evidence`() {
+        val projectDir = createFile("UseDurationItem.java", """
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+
+            public class UseDurationItem extends Item {
+                private static final String DOC = "this.getUseDuration(stack)";
+
+                public UseDurationItem(Properties properties) {
+                    super(properties);
+                }
+
+                /*
+                public int docs(ItemStack stack, LivingEntity living) {
+                    return this.getUseDuration(stack);
+                }
+                */
+                public int unrelatedLiving(ItemStack stack, LivingEntity living) {
+                    return 0;
+                }
+
+                public int currentEntity(ItemStack stack, LivingEntity entity, int timeLeft) {
+                    return this.getUseDuration(stack) - timeLeft;
+                }
+
+                public int noEntity(ItemStack stack) {
+                    return this.getUseDuration(stack);
+                }
+
+                public int ambiguous(ItemStack stack, LivingEntity firstTarget, LivingEntity entity) {
+                    return this.getUseDuration(stack);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = projectDir.resolve("src/main/java/com/example/UseDurationItem.java").readText()
+        assertTrue(migrated.contains("return this.getUseDuration(stack, entity) - timeLeft;"), migrated)
+        assertFalse(migrated.contains("return this.getUseDuration(stack, living) - timeLeft;"), migrated)
+        assertTrue(migrated.contains("public int noEntity(ItemStack stack) {\n        return this.getUseDuration(stack);"), migrated)
+        assertTrue(migrated.contains("public int ambiguous(ItemStack stack, LivingEntity firstTarget, LivingEntity entity) {\n        return this.getUseDuration(stack);"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "this.getUseDuration(stack)";"""), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("return this.getUseDuration(stack);"), migrated)
+        assertFalse(commentBlock.contains("this.getUseDuration(stack, living)"), migrated)
+    }
+
+    @Test
     fun `migrates block entity fluid capability override to RegisterCapabilitiesEvent`() {
         val projectDir = createFile("ExampleMod.java", """
             package com.example;
