@@ -4783,6 +4783,49 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `mob effect holder migration scopes executable method evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateMobEffectHolderCallsSource")
+        assertTrue(start >= 0, "migrateMobEffectHolderCallsSource is missing")
+        val end = source.indexOf("private fun migrateHolderValueAccessorsSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw source prefilter" to body.contains("""source.contains("MobEffect")"""),
+            "raw holder variable scan" to body.contains(".findAll(result)"),
+            "raw wrapAsHolder replacement" to body.contains("""result.replace("BuiltInRegistries.MOB_EFFECT.wrapAsHolder("""),
+            "whole-file holder api parameter scan" to body.contains("containsMatchIn(result)"),
+            "raw BuiltInRegistries import usage scan" to body.contains("""result.contains("BuiltInRegistries.MOB_EFFECT")""")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("MobEffect")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains(".findAll(maskJavaCommentsAndLiterals(result))") &&
+                body.contains("for (method in javaMethodRangesIncludingDefault(result).asReversed())") &&
+                body.contains("val methodText = result.substring(method.range)") &&
+                body.contains("javaMethodParameters(methodText)") &&
+                body.contains("""simpleJavaTypeName(it.type) == "MobEffect"""") &&
+                body.contains("val executableMethodText = maskJavaCommentsAndLiterals(methodText)") &&
+                body.contains("containsMatchIn(executableMethodText)") &&
+                body.contains("result = result.replaceRange(method.range, migratedMethod)") &&
+                body.contains("""maskJavaCommentsAndLiterals(result).contains("BuiltInRegistries.MOB_EFFECT")"""),
+            "MobEffect holder migration must derive holder parameters from executable current-method evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "MobEffect holder migration must not rewrite comments or use whole-file same-name parameter inference: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy game event constructor migration uses executable call and constructor evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

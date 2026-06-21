@@ -9425,6 +9425,70 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `mob effect holder migration scopes executable evidence and ignores docs`() {
+        val projectDir = createFile("ScopedMobEffectUse.java", """
+            package com.example;
+
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.entity.player.Player;
+
+            public class ScopedMobEffectUse {
+                private static final String DOC = "MobEffect cold = ExternalEffects.COLD_RESISTANCE.get(); BuiltInRegistries.MOB_EFFECT.wrapAsHolder(cold)";
+
+                /*
+                void commented(Player player, MobEffect effect) {
+                    MobEffect cold = ExternalEffects.COLD_RESISTANCE.get();
+                    player.hasEffect(cold);
+                    player.hasEffect(effect);
+                    effect.getCategory();
+                }
+                */
+                void real(Player player) {
+                    MobEffect cold = ExternalEffects.COLD_RESISTANCE.get();
+                    if (player.hasEffect(cold)) {
+                        MobEffectInstance current = player.getEffect(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(cold));
+                    }
+                    player.addEffect(new MobEffectInstance(cold, 100));
+                }
+
+                void holderParameter(Player player, MobEffect effect) {
+                    if (player.hasEffect(effect)) {
+                        effect.getCategory();
+                    }
+                }
+
+                void sameNamedParameterWithoutHolderEvidence(Player player, MobEffect effect) {
+                    Object untouched = effect;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/ScopedMobEffectUse.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-mobeffect-holder-direct" })
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.core.registries.BuiltInRegistries;"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "MobEffect cold = ExternalEffects.COLD_RESISTANCE.get(); BuiltInRegistries.MOB_EFFECT.wrapAsHolder(cold)";"""), migrated)
+        assertTrue(migrated.contains("Holder<MobEffect> cold = ExternalEffects.COLD_RESISTANCE;"), migrated)
+        val realBody = migrated.substringAfter("void real(Player player)").substringBefore("void holderParameter")
+        assertTrue(realBody.contains("player.getEffect(cold)"), migrated)
+        assertTrue(realBody.contains("new MobEffectInstance(cold, 100)"), migrated)
+        assertFalse(realBody.contains("BuiltInRegistries.MOB_EFFECT.wrapAsHolder(cold)"), migrated)
+        assertTrue(migrated.contains("void holderParameter(Player player, Holder<MobEffect> effect)"), migrated)
+        assertTrue(migrated.contains("effect.value().getCategory();"), migrated)
+        assertTrue(migrated.contains("void sameNamedParameterWithoutHolderEvidence(Player player, MobEffect effect)"), migrated)
+        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
+        assertTrue(commentBlock.contains("MobEffect cold = ExternalEffects.COLD_RESISTANCE.get();"), migrated)
+        assertTrue(commentBlock.contains("player.hasEffect(effect);"), migrated)
+        assertTrue(commentBlock.contains("effect.getCategory();"), migrated)
+        assertFalse(commentBlock.contains("Holder<MobEffect>"), migrated)
+        assertFalse(commentBlock.contains("effect.value().getCategory();"), migrated)
+    }
+
+    @Test
     fun `migrates item and fluid custom child tags to CustomData components`() {
         val projectDir = createFile("CustomFluidNBTHelper.java", """
             package com.example;

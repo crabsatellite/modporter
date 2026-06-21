@@ -15312,93 +15312,125 @@ ${entries.joinToString(",\n")}
     }
 
     private fun migrateMobEffectHolderCallsSource(source: String): String {
-        if (!source.contains("MobEffect") &&
-            !source.contains("hasEffect(") &&
-            !source.contains("getEffect(") &&
-            !source.contains("removeEffect(") &&
-            !source.contains("addEffect(")
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("MobEffect") &&
+            !executableCode.contains("hasEffect(") &&
+            !executableCode.contains("getEffect(") &&
+            !executableCode.contains("removeEffect(") &&
+            !executableCode.contains("addEffect(")
         ) return source
 
         val holderConstant = """(?:[A-Za-z_$][\w$]*\.)+[A-Z0-9_$]+"""
         var result = source
 
-        result = Regex("""\bMobEffect\s+(\w+)\s*=\s*($holderConstant)\.get\(\)\s*;""")
-            .replace(result) { match ->
-                "Holder<MobEffect> ${match.groupValues[1]} = ${match.groupValues[2]};"
-            }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\bMobEffect\s+(\w+)\s*=\s*($holderConstant)\.get\(\)\s*;""")
+        ) { match ->
+            "Holder<MobEffect> ${match.groupValues[1]} = ${match.groupValues[2]};"
+        }
 
         val holderVariables = Regex("""\bHolder\s*<\s*MobEffect\s*>\s+(\w+)\s*=""")
-            .findAll(result)
+            .findAll(maskJavaCommentsAndLiterals(result))
             .map { it.groupValues[1] }
             .toSet()
         val mobEffectVariables = Regex("""\bMobEffect\s+(\w+)\s*=""")
-            .findAll(result)
+            .findAll(maskJavaCommentsAndLiterals(result))
             .map { it.groupValues[1] }
             .toSet()
 
-        result = Regex("""(new\s+MobEffectInstance\s*\(\s*)((?:[A-Za-z_$][\w$]*\.)+[A-Z0-9_$]+)\.get\(\)""")
-            .replace(result, "$1$2")
-        result = Regex("""(\.\s*(?:hasEffect|getEffect|removeEffect)\s*\(\s*)((?:[A-Za-z_$][\w$]*\.)+[A-Z0-9_$]+)\.get\(\)(\s*\))""")
-            .replace(result, "$1$2$3")
-        result = Regex("""(new\s+ClientboundRemoveMobEffectPacket\s*\(\s*(?:[^()]|\([^()]*\))*?,\s*)($holderConstant)\.get\(\)(\s*\))""")
-            .replace(result, "$1$2$3")
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(new\s+MobEffectInstance\s*\(\s*)((?:[A-Za-z_$][\w$]*\.)+[A-Z0-9_$]+)\.get\(\)""")
+        ) { match ->
+            "${match.groupValues[1]}${match.groupValues[2]}"
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(\.\s*(?:hasEffect|getEffect|removeEffect)\s*\(\s*)((?:[A-Za-z_$][\w$]*\.)+[A-Z0-9_$]+)\.get\(\)(\s*\))""")
+        ) { match ->
+            "${match.groupValues[1]}${match.groupValues[2]}${match.groupValues[3]}"
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(new\s+ClientboundRemoveMobEffectPacket\s*\(\s*(?:[^()]|\([^()]*\))*?,\s*)($holderConstant)\.get\(\)(\s*\))""")
+        ) { match ->
+            "${match.groupValues[1]}${match.groupValues[2]}${match.groupValues[3]}"
+        }
 
         holderVariables.forEach { variable ->
-            result = result.replace("BuiltInRegistries.MOB_EFFECT.wrapAsHolder($variable)", variable)
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\bBuiltInRegistries\.MOB_EFFECT\.wrapAsHolder\(\s*${Regex.escape(variable)}\s*\)""")
+            ) { variable }
         }
         for (variable in mobEffectVariables) {
             val varPattern = Regex.escape(variable)
-            result = Regex("""(new\s+MobEffectInstance\s*\(\s*)$varPattern\b""")
-                .replace(result, "$1BuiltInRegistries.MOB_EFFECT.wrapAsHolder($variable)")
-            result = Regex("""(\.\s*(?:hasEffect|getEffect|removeEffect)\s*\(\s*)$varPattern(\s*\))""")
-                .replace(result, "$1BuiltInRegistries.MOB_EFFECT.wrapAsHolder($variable)$2")
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(new\s+MobEffectInstance\s*\(\s*)$varPattern\b""")
+            ) { match ->
+                "${match.groupValues[1]}BuiltInRegistries.MOB_EFFECT.wrapAsHolder($variable)"
+            }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(\.\s*(?:hasEffect|getEffect|removeEffect)\s*\(\s*)$varPattern(\s*\))""")
+            ) { match ->
+                "${match.groupValues[1]}BuiltInRegistries.MOB_EFFECT.wrapAsHolder($variable)${match.groupValues[2]}"
+            }
         }
 
-        val holderParamNames = Regex(
-            """(?m)^([ \t]*(?:public|private|protected)\s+(?:static\s+)?[\w<>\[\].?]+\s+\w+\s*\([^)]*)\bMobEffect\s+([A-Za-z_$][\w$]*)([^)]*\)\s*\{)"""
-        )
-            .findAll(result)
-            .mapNotNull { match ->
-                val paramName = match.groupValues[2]
-                val paramPattern = Regex.escape(paramName)
-                val passedToHolderApi =
-                    Regex("""\b(?:hasEffect|getEffect|removeEffect)\s*\(\s*$paramPattern\s*\)""").containsMatchIn(result) ||
-                        Regex("""new\s+MobEffectInstance\s*\(\s*$paramPattern\b""").containsMatchIn(result)
-                if (passedToHolderApi) paramName else null
-            }
-            .toSet()
+        var holderParamChanged = false
+        for (method in javaMethodRangesIncludingDefault(result).asReversed()) {
+            val methodText = result.substring(method.range)
+            val mobEffectParams = javaMethodParameters(methodText)
+                .filter { simpleJavaTypeName(it.type) == "MobEffect" }
+            if (mobEffectParams.isEmpty()) continue
 
-        if (holderParamNames.isNotEmpty()) {
-            result = Regex(
-                """(?m)^([ \t]*(?:public|private|protected)\s+(?:static\s+)?[\w<>\[\].?]+\s+\w+\s*\([^)]*)\bMobEffect\s+([A-Za-z_$][\w$]*)([^)]*\)\s*\{)"""
-            ).replace(result) { match ->
-                val paramName = match.groupValues[2]
-                if (paramName in holderParamNames) {
-                    "${match.groupValues[1]}Holder<MobEffect> $paramName${match.groupValues[3]}"
-                } else {
-                    match.value
+            val executableMethodText = maskJavaCommentsAndLiterals(methodText)
+            val holderParamNames = mobEffectParams
+                .mapNotNull { param ->
+                    val paramName = param.name
+                    val paramPattern = Regex.escape(paramName)
+                    val passedToHolderApi =
+                        Regex("""\b(?:hasEffect|getEffect|removeEffect)\s*\(\s*$paramPattern\s*\)""").containsMatchIn(executableMethodText) ||
+                            Regex("""new\s+MobEffectInstance\s*\(\s*$paramPattern\b""").containsMatchIn(executableMethodText)
+                    if (passedToHolderApi) paramName else null
                 }
-            }
+                .toSet()
+            if (holderParamNames.isEmpty()) continue
+
+            var migratedMethod = methodText
             for (paramName in holderParamNames) {
                 val paramPattern = Regex.escape(paramName)
-                result = Regex("""\b$paramPattern\.getDescriptionId\(\)""")
-                    .replace(result, "$paramName.value().getDescriptionId()")
-                result = Regex("""\b$paramPattern\.getCategory\(\)""")
-                    .replace(result, "$paramName.value().getCategory()")
+                migratedMethod = replaceExecutableRegex(
+                    migratedMethod,
+                    Regex("""\bMobEffect\s+$paramPattern\b""")
+                ) { "Holder<MobEffect> $paramName" }
+                migratedMethod = replaceExecutableRegex(
+                    migratedMethod,
+                    Regex("""\b$paramPattern\.getDescriptionId\(\)""")
+                ) { "$paramName.value().getDescriptionId()" }
+                migratedMethod = replaceExecutableRegex(
+                    migratedMethod,
+                    Regex("""\b$paramPattern\.getCategory\(\)""")
+                ) { "$paramName.value().getCategory()" }
+            }
+            if (migratedMethod != methodText) {
+                result = result.replaceRange(method.range, migratedMethod)
+                holderParamChanged = true
             }
         }
 
         if (result != source) {
-            if (holderVariables.isNotEmpty() || result.contains("Holder<MobEffect>")) {
+            val resultExecutableCode = maskJavaCommentsAndLiterals(result)
+            if (holderVariables.isNotEmpty() || holderParamChanged || resultExecutableCode.contains("Holder<MobEffect>")) {
                 result = addImportIfMissing(result, "net.minecraft.core.Holder")
             }
             if (mobEffectVariables.isNotEmpty()) {
                 result = addImportIfMissing(result, "net.minecraft.core.registries.BuiltInRegistries")
             }
-            if (holderParamNames.isNotEmpty()) {
-                result = addImportIfMissing(result, "net.minecraft.core.Holder")
-            }
-            if (!result.contains("BuiltInRegistries.MOB_EFFECT")) {
+            if (!maskJavaCommentsAndLiterals(result).contains("BuiltInRegistries.MOB_EFFECT")) {
                 result = removeImport(result, "net.minecraft.core.registries.BuiltInRegistries")
             }
         }
@@ -17730,7 +17762,7 @@ $migratedRecipes
 
     private fun javaMethodParameters(methodText: String): List<JavaParameter> {
         val paramsText = Regex(
-            """(?s)\b(?:public|protected|private|static|final|synchronized|default|abstract|\s)+[A-Za-z_$][\w$<>\[\].?,\s]*\s+[A-Za-z_$][\w$]*\s*\(([^{};]*)\)\s*(?:throws\s+[^{]+)?\{"""
+            """(?s)^\s*(?:@\w+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:(?:public|protected|private|static|final|synchronized|default|abstract)\s+)*(?:<[^>{};]+>\s*)?[A-Za-z_$][\w$<>\[\].?,\s]*\s+[A-Za-z_$][\w$]*\s*\(([^{};]*)\)\s*(?:throws\s+[^{]+)?\{"""
         ).find(methodText)?.groupValues?.get(1) ?: return emptyList()
         return splitTopLevelJavaArgs(paramsText).mapNotNull { rawParam ->
             val cleaned = rawParam
