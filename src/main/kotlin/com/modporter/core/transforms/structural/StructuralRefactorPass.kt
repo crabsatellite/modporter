@@ -193,7 +193,7 @@ class StructuralRefactorPass : Pass {
         // CapabilityManager + AttachCapabilitiesEvent to NeoForge EntityCapability
         // registrations while preserving LazyOptional call chains.
         try {
-            val customEntityCapabilityChanges = migrateCustomEntityCapabilities(projectDir, dryRun)
+            val customEntityCapabilityChanges = migrateCustomEntityCapabilities(projectDir, dryRun, errors)
             changes.addAll(customEntityCapabilityChanges)
         } catch (e: Exception) {
             errors.add("Custom entity capability migration error: ${e.message}")
@@ -5097,7 +5097,40 @@ $itemArguments
         val modIdExpression: String
     )
 
-    private fun migrateCustomEntityCapabilities(projectDir: Path, dryRun: Boolean): List<Change> {
+    private fun attachmentRegisterModIdExpression(
+        capabilityFile: Path,
+        levelCapabilities: List<LegacyLevelCapability>,
+        entityAttachmentCapabilities: List<LegacyEntityCapability>,
+        errors: MutableList<String>
+    ): String? {
+        val namespaceExpressions = (
+            levelCapabilities.map { it.modIdExpression } +
+                entityAttachmentCapabilities.mapNotNull { it.modIdExpression }
+            )
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        if (namespaceExpressions.size == 1) return namespaceExpressions.single()
+
+        val relative = capabilityFile.toString().replace('\\', '/')
+        if (namespaceExpressions.isEmpty()) {
+            errors.add("Cannot migrate attachment capabilities in $relative: no source namespace expression")
+        } else {
+            errors.add(
+                "Cannot migrate attachment capabilities in $relative: multiple namespace expressions " +
+                    namespaceExpressions.joinToString(", ") +
+                    " require separate attachment DeferredRegisters"
+            )
+        }
+        return null
+    }
+
+    private fun migrateCustomEntityCapabilities(
+        projectDir: Path,
+        dryRun: Boolean,
+        errors: MutableList<String>
+    ): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return emptyList()
         val javaFiles = Files.walk(srcDir)
@@ -5167,9 +5200,20 @@ $itemArguments
             }
             val levelCapabilities = levelCapabilitySpecs.values.toList()
             val attachmentCapabilitiesPresent = entityAttachmentCapabilities.isNotEmpty() || levelCapabilities.isNotEmpty()
+            if (entityCapabilities.isEmpty() && entityAttachmentCapabilities.isEmpty() && levelCapabilities.isEmpty()) continue
+            val attachmentRegisterModRef = if (attachmentCapabilitiesPresent) {
+                attachmentRegisterModIdExpression(
+                    capabilityFile,
+                    levelCapabilities,
+                    entityAttachmentCapabilities,
+                    errors
+                ) ?: continue
+            } else {
+                null
+            }
+
             entityCapabilityNames.addAll(entityCapabilities.map { it.fieldName })
             entityAttachmentNames.addAll(entityAttachmentCapabilities.map { it.fieldName })
-            if (entityCapabilities.isEmpty() && entityAttachmentCapabilities.isEmpty() && levelCapabilities.isEmpty()) continue
 
             var modified = original
             for (capability in declarations) {
@@ -5203,10 +5247,8 @@ $itemArguments
             if (attachmentCapabilitiesPresent && !modified.contains("DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES")) {
                 val firstField = Regex("""(?m)^[ \t]*public\s+static\s+final\s+(?:Supplier<AttachmentType<[^>]+>>|EntityCapability<[^;]+>)\s+[A-Za-z_$][\w$]*\s*=""")
                     .find(modified)
-                val modRef = levelCapabilities.firstOrNull()?.modIdExpression
-                    ?: entityAttachmentCapabilities.firstNotNullOf { it.modIdExpression }
                 val registerField = """
-	public static final DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES = DeferredRegister.create(NeoForgeRegistries.ATTACHMENT_TYPES, $modRef);
+	public static final DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES = DeferredRegister.create(NeoForgeRegistries.ATTACHMENT_TYPES, $attachmentRegisterModRef);
 
 """.trimStart()
                 if (firstField != null) {

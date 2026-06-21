@@ -2295,6 +2295,46 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `custom entity attachment register namespace is not selected by capability order`() {
+        val structuralPass = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val helperStart = structuralPass.indexOf("private fun attachmentRegisterModIdExpression")
+        assertTrue(helperStart >= 0, "attachmentRegisterModIdExpression is missing")
+        val helperEnd = structuralPass.indexOf("\n    private fun migrateCustomEntityCapabilities", helperStart)
+        assertTrue(helperEnd > helperStart, "attachmentRegisterModIdExpression boundary is missing")
+        val helperBody = structuralPass.substring(helperStart, helperEnd)
+        val migrationStart = structuralPass.indexOf("private fun migrateCustomEntityCapabilities")
+        assertTrue(migrationStart >= 0, "migrateCustomEntityCapabilities is missing")
+        val migrationEnd = structuralPass.indexOf("\n    private fun findCapabilityImplementations", migrationStart)
+        assertTrue(migrationEnd > migrationStart, "migrateCustomEntityCapabilities boundary is missing")
+        val migrationBody = structuralPass.substring(migrationStart, migrationEnd)
+        val offenders = listOf(
+            "level capability first namespace" to "levelCapabilities.firstOrNull()?.modIdExpression",
+            "entity attachment first namespace" to "entityAttachmentCapabilities.firstNotNullOf { it.modIdExpression }"
+        )
+            .filter { (_, marker) -> migrationBody.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            helperBody.contains("namespaceExpressions.size == 1") &&
+                helperBody.contains("multiple namespace expressions") &&
+                helperBody.contains("errors.add("),
+            "Attachment DeferredRegister namespace selection must hard gate unless all source namespace expressions match"
+        )
+        assertTrue(
+            migrationBody.contains("attachmentRegisterModIdExpression(") &&
+                migrationBody.contains("?: continue"),
+            "Custom entity capability migration must skip ambiguous attachment namespace files instead of choosing an ordered candidate"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Attachment DeferredRegister namespace must not be selected from the first capability: $offenders"
+        )
+    }
+
+    @Test
     fun `common LazyOptional import bridge uses required source mod ids`() {
         val structuralPass = Path.of("")
             .toAbsolutePath()

@@ -4563,6 +4563,131 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `custom entity attachment migration rejects mixed namespace deferred registers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val capabilityDir = srcDir.resolve("capability")
+        capabilityDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public class ExampleMod {
+                public static final String MOD_ID = "examplemod";
+            }
+        """.trimIndent())
+        srcDir.resolve("OtherMod.java").writeText("""
+            package com.example;
+
+            public class OtherMod {
+                public static final String MOD_ID = "othermod";
+            }
+        """.trimIndent())
+        capabilityDir.resolve("FirstData.java").writeText("""
+            package com.example.capability;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.neoforged.neoforge.common.util.INBTSerializable;
+
+            public interface FirstData extends INBTSerializable<CompoundTag> {
+            }
+        """.trimIndent())
+        capabilityDir.resolve("SecondData.java").writeText("""
+            package com.example.capability;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.neoforged.neoforge.common.util.INBTSerializable;
+
+            public interface SecondData extends INBTSerializable<CompoundTag> {
+            }
+        """.trimIndent())
+        capabilityDir.resolve("FirstDataCapability.java").writeText("""
+            package com.example.capability;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.player.Player;
+
+            public class FirstDataCapability implements FirstData {
+                public FirstDataCapability(Player player) {
+                }
+
+                public CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider) {
+                    return new CompoundTag();
+                }
+
+                public void deserializeNBT(net.minecraft.core.HolderLookup.Provider provider, CompoundTag tag) {
+                }
+            }
+        """.trimIndent())
+        capabilityDir.resolve("SecondDataCapability.java").writeText("""
+            package com.example.capability;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.player.Player;
+
+            public class SecondDataCapability implements SecondData {
+                public SecondDataCapability(Player player) {
+                }
+
+                public CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider) {
+                    return new CompoundTag();
+                }
+
+                public void deserializeNBT(net.minecraft.core.HolderLookup.Provider provider, CompoundTag tag) {
+                }
+            }
+        """.trimIndent())
+        capabilityDir.resolve("ExampleCapabilities.java").writeText("""
+            package com.example.capability;
+
+            import com.example.ExampleMod;
+            import com.example.OtherMod;
+            import com.example.compat.Capability;
+            import com.example.compat.CapabilityManager;
+            import com.example.compat.CapabilityProvider;
+            import com.example.compat.CapabilityToken;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.player.Player;
+            import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
+            import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
+
+            public class ExampleCapabilities {
+                public static final Capability<FirstData> FIRST_DATA = CapabilityManager.get(new CapabilityToken<>() {});
+                public static final Capability<SecondData> SECOND_DATA = CapabilityManager.get(new CapabilityToken<>() {});
+
+                public static void register(RegisterCapabilitiesEvent event) {
+                    event.register(FirstData.class);
+                    event.register(SecondData.class);
+                }
+
+                public static void attachEntityCapabilities(AttachCapabilitiesEvent<Entity> event) {
+                    if (event.getObject() instanceof Player player) {
+                        event.addCapability(ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, "first_data"), new CapabilityProvider(ExampleCapabilities.FIRST_DATA, new FirstDataCapability(player)));
+                        event.addCapability(ResourceLocation.fromNamespaceAndPath(OtherMod.MOD_ID, "second_data"), new CapabilityProvider(ExampleCapabilities.SECOND_DATA, new SecondDataCapability(player)));
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val capabilities = capabilityDir.resolve("ExampleCapabilities.java").readText()
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Cannot migrate attachment capabilities") &&
+                    it.contains("multiple namespace expressions") &&
+                    it.contains("ExampleMod.MOD_ID") &&
+                    it.contains("OtherMod.MOD_ID")
+            },
+            "Expected mixed namespace hard gate, got: ${result.errors}"
+        )
+        assertTrue(result.changes.none { it.ruleId == "struct-custom-entity-capabilities" }, "changes=${result.changes}")
+        assertTrue(capabilities.contains("CapabilityManager.get(new CapabilityToken<>() {})"), capabilities)
+        assertTrue(capabilities.contains("AttachCapabilitiesEvent<Entity>"), capabilities)
+        assertFalse(capabilities.contains("DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES"), capabilities)
+        assertFalse(capabilities.contains("NeoForgeRegistries.ATTACHMENT_TYPES, ExampleMod.MOD_ID"), capabilities)
+    }
+
+    @Test
     fun `nitrogen sync client receiver does not borrow owner entity id from enclosing class`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
