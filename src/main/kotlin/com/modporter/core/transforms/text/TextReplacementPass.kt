@@ -673,12 +673,15 @@ class TextReplacementPass(
     }
 
     private fun migrateRemainingRegistryObjectWildcardHolders(source: String): String {
-        if (!source.contains("RegistryObject<")) return source
-        return Regex("""RegistryObject\s*<\s*\?\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>""")
-            .replace(source) { match ->
-                val type = match.groupValues[1]
-                "DeferredHolder<$type, ? extends $type>"
-            }
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("RegistryObject<")) return source
+        return replaceExecutableRegex(
+            source,
+            Regex("""RegistryObject\s*<\s*\?\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>""")
+        ) { match ->
+            val type = match.groupValues[1]
+            "DeferredHolder<$type, ? extends $type>"
+        }
     }
 
     private fun migrateParticleOptionsCodecs(source: String): String {

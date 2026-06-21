@@ -4443,6 +4443,38 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `registry object wildcard holder migration uses executable source evidence`() {
+        val textPass = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = textPass.indexOf("private fun migrateRemainingRegistryObjectWildcardHolders")
+        assertTrue(start >= 0, "migrateRemainingRegistryObjectWildcardHolders is missing")
+        val end = textPass.indexOf("private fun migrateParticleOptionsCodecs", start + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val body = textPass.substring(start, end)
+        val offenders = listOf(
+            "raw RegistryObject prefilter" to body.contains("""source.contains("RegistryObject<")"""),
+            "raw wildcard replacement" to Regex("""Regex\([\s\S]*?RegistryObject[\s\S]*?\)\s*\.\s*replace\(source""").containsMatchIn(body)
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("RegistryObject<")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("DeferredHolder<\$type, ? extends \$type>"),
+            "RegistryObject wildcard holder migration must inspect executable Java source only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "RegistryObject wildcard holder migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `curative item effect migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

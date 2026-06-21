@@ -2050,6 +2050,36 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `registry object wildcard holder migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.neoforged.neoforge.registries.RegistryObject;
+
+            public class TestMod {
+                // RegistryObject<? extends Foo> docs;
+                private static final String DOC = "RegistryObject<? extends Foo>";
+
+                void make(RegistryObject<? extends Foo> foo) {
+                    foo.get();
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("void make(DeferredHolder<Foo, ? extends Foo> foo)"), transformed)
+        assertTrue(transformed.contains("// RegistryObject<? extends Foo> docs;"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"RegistryObject<? extends Foo>\";"), transformed)
+        assertFalse(transformed.contains("// DeferredHolder<Foo, ? extends Foo> docs;"), transformed)
+        assertFalse(transformed.contains("DOC = \"DeferredHolder<Foo, ? extends Foo>\""), transformed)
+    }
+
+    @Test
     fun `recipe holder network open and fuel APIs migrate to 1_21 surfaces`() {
         val projectDir = createTestFile("""
             package com.example;
