@@ -130,6 +130,56 @@ class CliTest {
     }
 
     @Test
+    fun `auto pipeline detection ignores comments and string literals`() {
+        val projectDir = tempDir.resolve("commentonly")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CommentOnly.java").writeText("""
+            package com.example;
+
+            public class CommentOnly {
+                // import net.minecraftforge.common.MinecraftForge;
+                private static final String DOC = "MinecraftForge.EVENT_BUS";
+                private static final String BLOCK = ""${'"'}
+                    FMLJavaModLoadingContext.get().getModEventBus()
+                    ForgeRegistries.ITEMS
+                ""${'"'};
+            }
+        """.trimIndent())
+
+        val error = assertFailsWith<UsageError> {
+            AnalyzeCommand().parse(listOf("--src", projectDir.toString()))
+        }
+
+        assertTrue(error.message?.contains("No pipeline detected") == true)
+    }
+
+    @Test
+    fun `auto pipeline detection scans beyond first twenty Java files`() {
+        val projectDir = tempDir.resolve("largemod")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        repeat(24) { index ->
+            srcDir.resolve("Plain${index.toString().padStart(2, '0')}.java").writeText("""
+                package com.example;
+                public class Plain${index.toString().padStart(2, '0')} {}
+            """.trimIndent())
+        }
+        srcDir.resolve("ForgeEvidence.java").writeText("""
+            package com.example;
+            import net.minecraftforge.common.MinecraftForge;
+            public class ForgeEvidence {
+                void init() { MinecraftForge.EVENT_BUS.register(this); }
+            }
+        """.trimIndent())
+
+        val reportPath = tempDir.resolve("large-analyze-report.md")
+        AnalyzeCommand().parse(listOf("--src", projectDir.toString(), "--report", reportPath.toString()))
+
+        assertTrue(reportPath.exists(), "Analyze should detect the pipeline from evidence after the first 20 files")
+    }
+
+    @Test
     fun `port command with dry-run does not modify source`() {
         val projectDir = setupMiniMod()
         val originalContent = projectDir.resolve("src/main/java/com/example/Mini.java").readText()

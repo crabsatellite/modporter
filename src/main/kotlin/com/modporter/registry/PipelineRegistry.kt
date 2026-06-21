@@ -36,23 +36,88 @@ object PipelineRegistry {
             Files.walk(projectDir.resolve("src/main/java"))
                 .filter { it.toString().endsWith(".java") }
                 .toList()
-                .take(20) // Sample first 20 files for speed
         } else {
             emptyList()
         }
 
         if (javaFiles.isEmpty()) return null
 
-        val sampleContent = javaFiles.joinToString("\n") { it.toFile().readText() }
+        val executableContent = javaFiles.joinToString("\n") { file ->
+            maskJavaCommentsAndLiterals(file.toFile().readText())
+        }
 
         // Score each pipeline by how many detection patterns match
         return pipelines.values
             .map { def ->
-                val score = def.detectionPatterns.count { pattern -> sampleContent.contains(pattern) }
+                val score = def.detectionPatterns.count { pattern -> executableContent.contains(pattern) }
                 def to score
             }
             .filter { it.second > 0 }
             .maxByOrNull { it.second }
             ?.first
+    }
+
+    private fun maskJavaCommentsAndLiterals(source: String): String {
+        val out = StringBuilder(source.length)
+        var i = 0
+        while (i < source.length) {
+            when {
+                source.startsWith("//", i) -> {
+                    out.append("  ")
+                    i += 2
+                    while (i < source.length && source[i] != '\n' && source[i] != '\r') {
+                        out.append(' ')
+                        i++
+                    }
+                }
+                source.startsWith("/*", i) -> {
+                    out.append("  ")
+                    i += 2
+                    while (i < source.length && !source.startsWith("*/", i)) {
+                        out.append(if (source[i] == '\n' || source[i] == '\r') source[i] else ' ')
+                        i++
+                    }
+                    if (i < source.length) {
+                        out.append("  ")
+                        i += 2
+                    }
+                }
+                source.startsWith("\"\"\"", i) -> {
+                    out.append("   ")
+                    i += 3
+                    while (i < source.length && !source.startsWith("\"\"\"", i)) {
+                        out.append(if (source[i] == '\n' || source[i] == '\r') source[i] else ' ')
+                        i++
+                    }
+                    if (i < source.length) {
+                        out.append("   ")
+                        i += 3
+                    }
+                }
+                source[i] == '"' || source[i] == '\'' -> {
+                    val quote = source[i]
+                    out.append(' ')
+                    i++
+                    var escaped = false
+                    while (i < source.length) {
+                        val ch = source[i]
+                        out.append(if (ch == '\n' || ch == '\r') ch else ' ')
+                        i++
+                        if (escaped) {
+                            escaped = false
+                        } else if (ch == '\\') {
+                            escaped = true
+                        } else if (ch == quote) {
+                            break
+                        }
+                    }
+                }
+                else -> {
+                    out.append(source[i])
+                    i++
+                }
+            }
+        }
+        return out.toString()
     }
 }
