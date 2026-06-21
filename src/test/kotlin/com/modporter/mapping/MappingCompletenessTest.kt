@@ -1998,7 +1998,10 @@ class MappingCompletenessTest {
             "type-name elvis file fallback" to Regex("""javaTypeNameContainingOffset\([^)]*\)\s*\?:\s*[^;\r\n]*file"""),
             "bare @Mod file owner fallback" to Regex("""ids\.putIfAbsent\([^,\r\n]*className"""),
             "raw source package scan" to Regex("""\.find\(content\)"""),
-            "raw source constant scan" to Regex("""\.findAll\(content\)""")
+            "raw source constant scan" to Regex("""\.findAll\(content\)"""),
+            "global simple mod id table" to Regex("""\bsimpleValues\b"""),
+            "global unique bare mod id" to Regex("""values\.size\s*==\s*1"""),
+            "bare mod id table entry" to Regex("""ids\[\s*name\s*]""")
         )
         val offenders = forbidden
             .filter { (_, pattern) -> pattern.containsMatchIn(body) }
@@ -2221,7 +2224,10 @@ class MappingCompletenessTest {
         val body = resourceMigrator.substring(start, end)
         val forbidden = listOf(
             "raw source constant scan" to "sources.forEach { source ->",
-            "unfiltered constant scan" to "constantPattern.findAll(source).forEach"
+            "unfiltered constant scan" to "constantPattern.findAll(source).forEach",
+            "global simple string table" to "simpleValues",
+            "global unique bare string constant" to "values.size == 1",
+            "bare string constant table entry" to "constants[name]"
         )
         val offenders = forbidden
             .filter { (_, marker) -> body.contains(marker) }

@@ -152,6 +152,69 @@ class ResourceMigrationTest {
     }
 
     @Test
+    fun `custom enchantment resource keys resolve bare mod ids from call site owner`() {
+        val projectDir = tempDir.resolve("owner-local-enchantment-modid")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+
+            public final class ModEnchantments {
+                public static final String MODID = "example";
+                public static final net.minecraft.resources.ResourceKey<Enchantment> FIRE_REACT =
+                        net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,
+                                net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(MODID, "fire_react"));
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any { it.contains("Missing source-derived data-driven custom enchantment JSON for 'example:fire_react'") },
+            result.errors.joinToString("\n")
+        )
+        assertTrue(result.changes.any { it.ruleId == "res-custom-enchantment-data" })
+    }
+
+    @Test
+    fun `custom enchantment resource keys do not resolve bare mod ids by global uniqueness`() {
+        val projectDir = tempDir.resolve("global-bare-enchantment-modid")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+
+            public final class ModEnchantments {
+                public static final net.minecraft.resources.ResourceKey<Enchantment> FIRE_REACT =
+                        net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,
+                                net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(MODID, "fire_react"));
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertFalse(
+            result.changes.any { it.ruleId == "res-custom-enchantment-data" },
+            "Bare mod ids must resolve from the call-site owner, not from globally unique constants"
+        )
+        assertFalse(
+            result.errors.any { it.contains("Missing source-derived data-driven custom enchantment JSON") },
+            result.errors.joinToString("\n")
+        )
+    }
+
+    @Test
     fun `custom enchantment resource keys do not infer mod id owner from java file names`() {
         val projectDir = tempDir.resolve("ambiguous-enchantment-modid")
         val srcDir = projectDir.resolve("src/main/java/com/example")
@@ -526,6 +589,68 @@ class ResourceMigrationTest {
         assertTrue(renamed.contains(""""tag": {"""), renamed)
         assertTrue(renamed.contains(""""Value": 1"""), renamed)
         assertFalse(renamed.contains(""""tag": "{Value:1b}""""), renamed)
+    }
+
+    @Test
+    fun `custom recipe serializer registries do not resolve bare namespaces by global uniqueness`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/resmod")
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        javaDir.createDirectories()
+        recipeDir.createDirectories()
+
+        javaDir.resolve("ResMod.java").writeText("""
+            package resmod;
+
+            public final class ResMod {
+                public static final String MODID = "resmod";
+            }
+        """.trimIndent())
+        javaDir.resolve("ModRecipeSerializers.java").writeText("""
+            package resmod;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModRecipeSerializers {
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS = DeferredRegister.create(Registries.RECIPE_SERIALIZER, MODID);
+                public static final DeferredHolder<RecipeSerializer<?>, IncubationRecipe.Serializer> INCUBATION = RECIPE_SERIALIZERS.register("incubation", IncubationRecipe.Serializer::new);
+            }
+        """.trimIndent())
+        javaDir.resolve("IncubationRecipe.java").writeText("""
+            package resmod;
+
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public final class IncubationRecipe {
+                public static class Serializer implements RecipeSerializer<IncubationRecipe> {
+                    private static final MapCodec<IncubationRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                        CompoundTag.CODEC.optionalFieldOf("tag").forGetter(recipe -> null)
+                    ).apply(instance, value -> null));
+                }
+            }
+        """.trimIndent())
+        recipeDir.resolve("incubation.json").writeText("""
+            {
+              "type": "resmod:incubation",
+              "tag": "{Hungry:1b}"
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val incubation = projectDir.resolve("src/generated/resources/data/resmod/recipe/incubation.json").readText()
+        assertFalse(
+            result.changes.any { it.ruleId == "res-recipe-snbt-compound-tag" },
+            "Bare serializer registry namespaces must resolve from the declaration owner, not from globally unique constants"
+        )
+        assertTrue(incubation.contains(""""tag": "{Hungry:1b}""""), incubation)
+        assertFalse(incubation.contains(""""tag": {"""), incubation)
     }
 
     @Test
@@ -2036,6 +2161,46 @@ class ResourceMigrationTest {
         assertTrue(
             result.errors.any {
                 it.contains("Cannot resolve Nitrogen fuel texture namespace expression 'MissingMod.MODID'")
+            },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(result.changes.any { it.ruleId == "res-nitrogen-fuel-icon-sprite" })
+        assertFalse(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_icon.png").exists())
+    }
+
+    @Test
+    fun `legacy Nitrogen fuel sprite generation rejects bare namespace constants from other owners`() {
+        val projectDir = tempDir.resolve("nitrogenfuel-global-bare-namespace")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val textureDir = projectDir.resolve("src/main/resources/assets/example/textures/gui/menu")
+        srcDir.createDirectories()
+        textureDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleFuelCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleFuelCategory extends AbstractFuelCategory {
+                public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath(MODID, "textures/gui/menu/altar.png");
+            }
+        """.trimIndent())
+
+        val source = BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB)
+        ImageIO.write(source, "png", textureDir.resolve("altar.png").toFile())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Cannot resolve Nitrogen fuel texture namespace expression 'MODID'")
             },
             result.errors.joinToString("\n")
         )

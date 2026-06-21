@@ -483,18 +483,29 @@ class ResourceMigrationPass(
         for ((_, content) in javaSources) {
             val code = maskJavaComments(content)
             val executableCode = maskJavaCommentsAndLiterals(content)
-            keyPattern.findAll(code)
-                .filter { match ->
-                    val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
-                    executableSegment.contains("ResourceKey") &&
-                        executableSegment.contains("Enchantment") &&
-                        executableSegment.contains("ResourceLocation") &&
-                        executableSegment.contains("fromNamespaceAndPath")
+            val packageName = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""")
+                .find(code)
+                ?.groupValues
+                ?.get(1)
+                .orEmpty()
+            for (match in keyPattern.findAll(code)) {
+                val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                if (!executableSegment.contains("ResourceKey") ||
+                    !executableSegment.contains("Enchantment") ||
+                    !executableSegment.contains("ResourceLocation") ||
+                    !executableSegment.contains("fromNamespaceAndPath")
+                ) {
+                    continue
                 }
-                .forEach { match ->
-                    val modId = resolveModIdExpression(match.groupValues[2], modIds) ?: return@forEach
-                    enchantmentKeys.add(CustomEnchantmentKey(modId, match.groupValues[3]))
-                }
+                val modId = resolveModIdExpression(
+                    match.groupValues[2],
+                    modIds,
+                    code,
+                    match.range.first,
+                    packageName
+                ) ?: continue
+                enchantmentKeys.add(CustomEnchantmentKey(modId, match.groupValues[3]))
+            }
         }
 
         if (enchantmentKeys.isEmpty()) return
@@ -577,7 +588,6 @@ class ResourceMigrationPass(
 
     private fun detectJavaModIds(javaSources: List<Pair<Path, String>>): Map<String, String> {
         val ids = mutableMapOf<String, String>()
-        val simpleValues = linkedMapOf<String, MutableSet<String>>()
         for ((_, content) in javaSources) {
             val code = maskJavaComments(content)
             val executableCode = maskJavaCommentsAndLiterals(content)
@@ -598,7 +608,6 @@ class ResourceMigrationPass(
                 .forEach { match ->
                     val ownerClass = javaTypeNameContainingOffset(code, match.range.first)
                         ?: return@forEach
-                    simpleValues.getOrPut(match.groupValues[1]) { linkedSetOf() } += match.groupValues[2]
                     ids["$ownerClass.${match.groupValues[1]}"] = match.groupValues[2]
                     if (packageName.isNotBlank()) {
                         ids["$packageName.$ownerClass.${match.groupValues[1]}"] = match.groupValues[2]
@@ -618,11 +627,6 @@ class ResourceMigrationPass(
                     }
                 }
         }
-        simpleValues.forEach { (name, values) ->
-            if (values.size == 1) {
-                ids[name] = values.single()
-            }
-        }
         return ids
     }
 
@@ -640,12 +644,23 @@ class ResourceMigrationPass(
         return null
     }
 
-    private fun resolveModIdExpression(expression: String, modIds: Map<String, String>): String? {
+    private fun resolveModIdExpression(
+        expression: String,
+        modIds: Map<String, String>,
+        source: String,
+        offset: Int,
+        packageName: String
+    ): String? {
         val trimmed = expression.trim()
         if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
             return trimmed.trim('"')
         }
-        return modIds[trimmed]
+        if (trimmed.contains('.')) {
+            return modIds[trimmed]
+        }
+        val owner = javaTypeNameContainingOffset(source, offset) ?: return null
+        return modIds["$owner.$trimmed"]
+            ?: packageName.takeIf { it.isNotBlank() }?.let { modIds["$it.$owner.$trimmed"] }
     }
 
     private data class CustomEnchantmentKey(val modId: String, val name: String)
@@ -1500,17 +1515,20 @@ class ResourceMigrationPass(
         )
         for (source in sources) {
             if (!source.executableCode.contains("DeferredRegister") || !source.executableCode.contains("RecipeSerializer")) continue
-            createPattern.findAll(source.code)
-                .filter { match ->
-                    val executableSegment = source.executableCode.substring(match.range.first, match.range.last + 1)
-                    executableSegment.contains("DeferredRegister") &&
-                        executableSegment.contains("create")
+            for (match in createPattern.findAll(source.code)) {
+                val executableSegment = source.executableCode.substring(match.range.first, match.range.last + 1)
+                if (!executableSegment.contains("DeferredRegister") || !executableSegment.contains("create")) {
+                    continue
                 }
-                .forEach { match ->
-                    val namespace = resolveJavaStringExpression(match.groupValues[2].trim(), stringConstants)
-                        ?: return@forEach
-                    registries[match.groupValues[1]] = namespace
-                }
+                val namespace = resolveJavaStringExpression(
+                    match.groupValues[2].trim(),
+                    stringConstants,
+                    source.code,
+                    match.range.first,
+                    source.packageName
+                ) ?: continue
+                registries[match.groupValues[1]] = namespace
+            }
         }
         return registries
     }
@@ -3316,46 +3334,57 @@ class ResourceMigrationPass(
             """\bResourceLocation\s+[A-Za-z_$][\w$]*\s*=\s*$resourceLocationExpression\s*\(\s*([^,\r\n]+?)\s*,\s*"textures/gui/menu/([^"]+?)\.png"\s*\)\s*;"""
         )
 
-        commentMaskedSources.forEach { (javaFile, source) ->
+        for ((javaFile, source) in commentMaskedSources) {
             if (!containsNitrogenFuelCategoryApiUse(source)) {
-                return@forEach
+                continue
             }
             val executableSource = executableMaskedSources.getValue(javaFile)
-            texturePattern.findAll(source)
-                .filter { match ->
-                    val executableSegment = executableSource.substring(match.range.first, match.range.last + 1)
-                    executableSegment.contains("ResourceLocation") &&
-                        (executableSegment.contains("fromNamespaceAndPath") ||
-                            executableSegment.contains("new ResourceLocation"))
+            val packageName = Regex("""(?m)^\s*package\s+([\w.]+)\s*;""")
+                .find(source)
+                ?.groupValues
+                ?.get(1)
+                .orEmpty()
+            for (match in texturePattern.findAll(source)) {
+                val executableSegment = executableSource.substring(match.range.first, match.range.last + 1)
+                if (!executableSegment.contains("ResourceLocation") ||
+                    (!executableSegment.contains("fromNamespaceAndPath") &&
+                        !executableSegment.contains("new ResourceLocation"))
+                ) {
+                    continue
                 }
-                .forEach { match ->
-                    val namespaceExpression = match.groupValues[1].trim()
-                    val namespace = resolveJavaStringExpression(namespaceExpression, stringConstants)
-                    if (namespace == null) {
-                        errors.add(
-                            "Cannot resolve Nitrogen fuel texture namespace expression '$namespaceExpression' " +
-                                "for textures/gui/menu/${match.groupValues[2]}.png"
-                        )
-                        return@forEach
-                    }
-                    val textureTail = match.groupValues[2]
-                    val spriteStem = textureTail
-                        .substringAfterLast('/')
-                        .replace(Regex("""[^A-Za-z0-9_]+"""), "_")
-                        .trim('_')
-                    if (spriteStem.isBlank()) {
-                        errors.add(
-                            "Cannot derive Nitrogen fuel sprite name from legacy texture path " +
-                                "textures/gui/menu/$textureTail.png"
-                        )
-                        return@forEach
-                    }
-                    specs += NitrogenFuelSpriteSpec(
-                        namespace = namespace,
-                        menuTexturePath = "textures/gui/menu/$textureTail.png",
-                        spriteStem = spriteStem
+                val namespaceExpression = match.groupValues[1].trim()
+                val namespace = resolveJavaStringExpression(
+                    namespaceExpression,
+                    stringConstants,
+                    source,
+                    match.range.first,
+                    packageName
+                )
+                if (namespace == null) {
+                    errors.add(
+                        "Cannot resolve Nitrogen fuel texture namespace expression '$namespaceExpression' " +
+                            "for textures/gui/menu/${match.groupValues[2]}.png"
                     )
+                    continue
                 }
+                val textureTail = match.groupValues[2]
+                val spriteStem = textureTail
+                    .substringAfterLast('/')
+                    .replace(Regex("""[^A-Za-z0-9_]+"""), "_")
+                    .trim('_')
+                if (spriteStem.isBlank()) {
+                    errors.add(
+                        "Cannot derive Nitrogen fuel sprite name from legacy texture path " +
+                            "textures/gui/menu/$textureTail.png"
+                    )
+                    continue
+                }
+                specs += NitrogenFuelSpriteSpec(
+                    namespace = namespace,
+                    menuTexturePath = "textures/gui/menu/$textureTail.png",
+                    spriteStem = spriteStem
+                )
+            }
         }
         return specs
     }
@@ -3379,7 +3408,6 @@ class ResourceMigrationPass(
 
     private fun collectJavaStringConstants(sources: Iterable<String>): Map<String, String> {
         val constants = linkedMapOf<String, String>()
-        val simpleValues = linkedMapOf<String, MutableSet<String>>()
         val packagePattern = Regex("""(?m)^package\s+([\w.]+)\s*;""")
         val constantPattern = Regex(
             """\b(?:public|protected|private)?\s*static\s+final\s+String\s+([A-Za-z_$][\w$]*)\s*=\s*"([^"]+)""""
@@ -3400,7 +3428,6 @@ class ResourceMigrationPass(
                     val name = match.groupValues[1]
                     val value = match.groupValues[2]
                     val className = javaTypeNameContainingOffset(source, match.range.first)
-                    simpleValues.getOrPut(name) { linkedSetOf() } += value
                     if (className != null) {
                         constants["$className.$name"] = value
                         if (packageName.isNotBlank()) {
@@ -3409,20 +3436,26 @@ class ResourceMigrationPass(
                     }
                 }
         }
-        simpleValues.forEach { (name, values) ->
-            if (values.size == 1) {
-                constants[name] = values.single()
-            }
-        }
         return constants
     }
 
-    private fun resolveJavaStringExpression(expression: String, constants: Map<String, String>): String? {
+    private fun resolveJavaStringExpression(
+        expression: String,
+        constants: Map<String, String>,
+        source: String,
+        offset: Int,
+        packageName: String
+    ): String? {
         val trimmed = expression.trim()
         if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
             return trimmed.trim('"')
         }
-        return constants[trimmed]
+        if (trimmed.contains('.')) {
+            return constants[trimmed]
+        }
+        val owner = javaTypeNameContainingOffset(source, offset) ?: return null
+        return constants["$owner.$trimmed"]
+            ?: packageName.takeIf { it.isNotBlank() }?.let { constants["$it.$owner.$trimmed"] }
     }
 
     private fun maskJavaComments(source: String): String {
