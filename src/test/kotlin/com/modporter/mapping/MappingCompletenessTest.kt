@@ -3711,6 +3711,50 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `JEI recipe category background migration uses executable method ranges`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateJeiRecipeCategoryBackgroundApi")
+        assertTrue(start >= 0, "migrateJeiRecipeCategoryBackgroundApi is missing")
+        val end = source.indexOf("private fun migrateRequiredRemovalWarningAnnotations", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw JEI prefilter" to """source.contains("IRecipeCategory<")""",
+            "raw background method extraction" to """javaDeclaredMethodText(source, "getBackground")""",
+            "raw background field check" to "containsMatchIn(source)",
+            "raw background method removal" to "source.replace(backgroundMethod",
+            "raw getIcon extraction" to """javaDeclaredMethodText(result, "getIcon")""",
+            "raw draw extraction" to """javaDeclaredMethodText(result, "draw")""",
+            "raw draw method offset" to "result.indexOf(drawMethod)",
+            "raw setRecipe extraction" to """javaDeclaredMethodText(result, "setRecipe")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val backgroundMethod = javaMethodRanges(executableCode).singleOrNull") &&
+                body.contains("val executableBackgroundMethodText = executableCode.substring(backgroundMethod.range)") &&
+                body.contains("source.removeRange(backgroundMethod.range)") &&
+                body.contains("var resultExecutableCode = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("javaMethodRanges(resultExecutableCode).firstOrNull { it.name == \"getIcon\" }") &&
+                body.contains("javaMethodRanges(resultExecutableCode).firstOrNull { it.name == \"draw\" }") &&
+                body.contains("val executableDrawMethodText = resultExecutableCode.substring(drawMethod.range)") &&
+                body.contains("result.replaceRange(it.range, sizeMethods + \"\\n\\n\" + result.substring(it.range))") &&
+                body.contains("result.replaceRange(it.range, draw + \"\\n\\n\" + result.substring(it.range))"),
+            "JEI recipe category background migration must locate and edit executable Java methods only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "JEI recipe category background migration must not use comments or strings as API evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `painting variant accessor migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

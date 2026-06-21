@@ -16926,16 +16926,21 @@ ${indent}}
     }
 
     private fun migrateJeiRecipeCategoryBackgroundApi(source: String): String {
-        if (!source.contains("IRecipeCategory<") || !source.contains("getBackground()")) return source
-        val backgroundMethod = javaDeclaredMethodText(source, "getBackground") ?: return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("IRecipeCategory<") || !executableCode.contains("getBackground()")) return source
+        val backgroundMethod = javaMethodRanges(executableCode).singleOrNull { method ->
+            method.name == "getBackground" &&
+                Regex("""\bIDrawable\s+getBackground\s*\(\s*\)""").containsMatchIn(method.header)
+        } ?: return source
+        val executableBackgroundMethodText = executableCode.substring(backgroundMethod.range)
         val backgroundField = Regex("""return\s+(?:this\.)?([A-Za-z_$][\w$]*)\s*;""")
-            .find(backgroundMethod)
+            .find(executableBackgroundMethodText)
             ?.groupValues
             ?.get(1)
             ?: return source
-        if (!Regex("""\bIDrawable\s+$backgroundField\b""").containsMatchIn(source)) return source
+        if (!Regex("""\bIDrawable\s+$backgroundField\b""").containsMatchIn(executableCode)) return source
 
-        var result = source.replace(backgroundMethod, "")
+        var result = source.removeRange(backgroundMethod.range)
         val sizeMethods = """
 
 	@Override
@@ -16948,37 +16953,45 @@ ${indent}}
 		return this.$backgroundField.getHeight();
 	}
 """.trimEnd()
-        if (!Regex("""\bint\s+getWidth\s*\(""").containsMatchIn(result)) {
-            result = javaDeclaredMethodText(result, "getIcon")
-                ?.let { iconMethod -> result.replace(iconMethod, sizeMethods + "\n\n" + iconMethod) }
+        var resultExecutableCode = maskJavaCommentsAndLiterals(result)
+        if (!Regex("""\bint\s+getWidth\s*\(""").containsMatchIn(resultExecutableCode)) {
+            val iconMethod = javaMethodRanges(resultExecutableCode).firstOrNull { it.name == "getIcon" }
+            result = iconMethod
+                ?.let { result.replaceRange(it.range, sizeMethods + "\n\n" + result.substring(it.range)) }
                 ?: insertBeforeLastClassBrace(result, "\n$sizeMethods\n")
+            resultExecutableCode = maskJavaCommentsAndLiterals(result)
         }
 
-        val drawMethod = javaDeclaredMethodText(result, "draw")
+        val drawMethod = javaMethodRanges(resultExecutableCode).firstOrNull { it.name == "draw" }
         result = if (drawMethod != null) {
+            val drawMethodText = result.substring(drawMethod.range)
+            val executableDrawMethodText = resultExecutableCode.substring(drawMethod.range)
             val graphicsName = Regex("""\bGuiGraphics\s+([A-Za-z_$][\w$]*)\b""")
-                .find(drawMethod)
+                .find(executableDrawMethodText)
                 ?.groupValues
                 ?.get(1)
-            if (graphicsName != null && !drawMethod.contains("$backgroundField.draw($graphicsName)")) {
-                val openBrace = drawMethod.indexOf('{')
-                val absoluteStart = result.indexOf(drawMethod)
-                val insertAt = absoluteStart + openBrace + 1
-                val indent = Regex("""(?m)^([ \t]*)[^\r\n]*\{""")
-                    .find(drawMethod)
-                    ?.groupValues
-                    ?.get(1)
-                    ?.plus("\t")
-                    ?: "\t\t"
-                result.substring(0, insertAt) +
-                    "\n${indent}this.$backgroundField.draw($graphicsName);" +
-                    result.substring(insertAt)
+            if (graphicsName != null && !executableDrawMethodText.contains("$backgroundField.draw($graphicsName)")) {
+                val openBrace = result.indexOf('{', drawMethod.range.first)
+                if (openBrace >= 0 && openBrace <= drawMethod.range.last) {
+                    val insertAt = openBrace + 1
+                    val indent = Regex("""(?m)^([ \t]*)[^\r\n]*\{""")
+                        .find(drawMethodText)
+                        ?.groupValues
+                        ?.get(1)
+                        ?.plus("\t")
+                        ?: "\t\t"
+                    result.substring(0, insertAt) +
+                        "\n${indent}this.$backgroundField.draw($graphicsName);" +
+                        result.substring(insertAt)
+                } else {
+                    result
+                }
             } else {
                 result
             }
         } else {
             val recipeType = Regex("""implements\s+IRecipeCategory\s*<\s*([^>{}]+)\s*>""")
-                .find(result)
+                .find(resultExecutableCode)
                 ?.groupValues
                 ?.get(1)
                 ?.trim()
@@ -16990,8 +17003,10 @@ ${indent}}
 		this.$backgroundField.draw(graphics);
 	}
 """.trimEnd()
-            result = javaDeclaredMethodText(result, "setRecipe")
-                ?.let { setRecipe -> result.replace(setRecipe, draw + "\n\n" + setRecipe) }
+            resultExecutableCode = maskJavaCommentsAndLiterals(result)
+            val setRecipeMethod = javaMethodRanges(resultExecutableCode).firstOrNull { it.name == "setRecipe" }
+            result = setRecipeMethod
+                ?.let { result.replaceRange(it.range, draw + "\n\n" + result.substring(it.range)) }
                 ?: insertBeforeLastClassBrace(result, "\n$draw\n")
             result = addImportIfMissing(result, "mezz.jei.api.gui.ingredient.IRecipeSlotsView")
             result = addImportIfMissing(result, "net.minecraft.client.gui.GuiGraphics")

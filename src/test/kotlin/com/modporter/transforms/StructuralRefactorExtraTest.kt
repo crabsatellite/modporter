@@ -27131,6 +27131,58 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `JEI recipe category background migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DocumentedCategory.java").writeText("""
+            package com.example;
+
+            import mezz.jei.api.gui.builder.IRecipeLayoutBuilder;
+            import mezz.jei.api.gui.drawable.IDrawable;
+            import mezz.jei.api.recipe.IFocusGroup;
+            import mezz.jei.api.recipe.RecipeType;
+            import mezz.jei.api.recipe.category.IRecipeCategory;
+            import net.minecraft.network.chat.Component;
+
+            public class DocumentedCategory implements IRecipeCategory<DocumentedCategory.Recipe> {
+                private final IDrawable background;
+                private static final String DOC = "public IDrawable getBackground() { return this.background; }";
+
+                /*
+                public IDrawable getBackground() {
+                    return this.background;
+                }
+                */
+
+                public DocumentedCategory(IDrawable background) {
+                    this.background = background;
+                }
+
+                @Override
+                public RecipeType<Recipe> getRecipeType() { return null; }
+
+                @Override
+                public Component getTitle() { return Component.empty(); }
+
+                @Override
+                public void setRecipe(IRecipeLayoutBuilder builder, Recipe recipe, IFocusGroup focuses) {}
+
+                public record Recipe() {}
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val category = srcDir.resolve("DocumentedCategory.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(category.contains("public int getWidth()"), category)
+        assertFalse(category.contains("public int getHeight()"), category)
+        assertFalse(category.contains("this.background.draw("), category)
+        assertTrue(category.contains("private static final String DOC = \"public IDrawable getBackground() { return this.background; }\";"), category)
+        assertTrue(category.contains("public IDrawable getBackground() {\n        return this.background;"), category)
+    }
+
+    @Test
     fun `Curios helper and inventory optional migrations ignore comments and strings`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
