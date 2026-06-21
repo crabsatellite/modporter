@@ -4698,6 +4698,59 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `custom data component child tag migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateCustomDataComponentsSource")
+        assertTrue(start >= 0, "migrateCustomDataComponentsSource is missing")
+        val end = source.indexOf("private fun migrateBrewingRecipeRegistrationSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw item getTagElement prefilter" to body.contains("""result.contains("stack.getTagElement(")"""),
+            "raw item removeTagKey prefilter" to body.contains("""result.contains("stack.removeTagKey(")"""),
+            "raw custom data prefilter" to body.contains("""result.contains("DataComponents.CUSTOM_DATA")"""),
+            "raw getTagElement replacement" to body.contains(".replace(\"stack.getTagElement("),
+            "raw removeTagKey replacement" to body.contains(".replace(\"stack.removeTagKey("),
+            "raw fluid getChildTag replacement" to body.contains(".replace(Regex(\"\"\"CompoundTag\\s+(\\w+)"),
+            "raw setFluidId body replacement" to body.contains("replaceMethodBody(result, \"setFluidId"),
+            "raw import insertion" to body.contains("addImportIfMissing(result,"),
+            "raw item helper presence scan" to body.contains("""source.contains("getCustomDataChild(ItemStack stack")"""),
+            "raw fluid helper presence scan" to body.contains("""source.contains("getFluidCustomDataChild(FluidStack stack")""")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("var executableCode = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("""executableCode.contains("stack.getTagElement(")""") &&
+                body.contains("""executableCode.contains("stack.removeTagKey(")""") &&
+                body.contains("""executableCode.contains("DataComponents.CUSTOM_DATA")""") &&
+                body.contains("replaceExecutableRegex(result, Regex(Regex.escape(legacyCustomFluidTagCopy)))") &&
+                body.contains("""\bstack\.getTagElement\s*\(""") &&
+                body.contains("""\bstack\.removeTagKey\s*\(""") &&
+                body.contains("replaceExecutableMethodBody(result, \"setFluidId") &&
+                body.contains("""addExecutableImportIfMissing(result, "net.minecraft.core.component.DataComponents")""") &&
+                body.contains("""executableCode.contains("FluidStack")""") &&
+                body.contains("""executableCode.contains(".getOrCreateChildTag(")""") &&
+                body.contains("""executableCode.contains(".getChildTag(")""") &&
+                body.contains("maskJavaCommentsAndLiterals(source).contains(\"getCustomDataChild(ItemStack stack\")") &&
+                body.contains("maskJavaCommentsAndLiterals(source).contains(\"getFluidCustomDataChild(FluidStack stack\")") &&
+                source.contains("private fun replaceExecutableMethodBody(source: String, methodName: String, replacement: String)") &&
+                source.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                source.contains("findMatchingBrace(executableCode, openBrace)"),
+            "CustomData child tag migration must rewrite executable ItemStack/FluidStack tag APIs and methods only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "CustomData child tag migration must not use comments or strings as API evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `painting variant accessor migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

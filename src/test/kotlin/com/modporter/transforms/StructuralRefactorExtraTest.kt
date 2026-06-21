@@ -9650,6 +9650,53 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `custom data child tag migration ignores comments and strings`() {
+        val projectDir = createFile("CustomDataDocsOnly.java", """
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.fluids.FluidStack;
+
+            public class CustomDataDocsOnly {
+                private static final String ITEM_DOC = "CompoundTag tag = stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag().getCompound(TAG_CUSTOM_FLUID); stack.getTagElement(TAG_CUSTOM_FLUID); stack.removeTagKey(TAG_CUSTOM_FLUID);";
+                private static final String FLUID_DOC = "CompoundTag customFluidTag = stack.getChildTag(CustomFluidNBTHelper.TAG_CUSTOM_FLUID);";
+
+                /*
+                CompoundTag tag = stack.getTagElement(TAG_CUSTOM_FLUID);
+                stack.removeTagKey(TAG_CUSTOM_FLUID);
+                CompoundTag customFluidTag = stack.getChildTag(CustomFluidNBTHelper.TAG_CUSTOM_FLUID);
+                */
+
+                public static void setFluidId(ItemStack stack, ResourceLocation fluidId) {
+                    stack.toString();
+                }
+
+                public static void setFluidId(FluidStack stack, ResourceLocation fluidId) {
+                    stack.toString();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/CustomDataDocsOnly.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-custom-data-components" }, result.changes.toString())
+        assertFalse(migrated.contains("import net.minecraft.core.component.DataComponents;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.world.item.component.CustomData;"), migrated)
+        assertFalse(migrated.contains("import java.util.function.Consumer;"), migrated)
+        assertFalse(migrated.contains("updateCustomDataChild("), migrated)
+        assertFalse(migrated.contains("updateFluidCustomDataChild("), migrated)
+        assertFalse(migrated.contains("getCustomDataChild(ItemStack stack"), migrated)
+        assertFalse(migrated.contains("getFluidCustomDataChild(FluidStack stack"), migrated)
+        assertTrue(migrated.contains("public static void setFluidId(ItemStack stack, ResourceLocation fluidId) {\n        stack.toString();\n    }"), migrated)
+        assertTrue(migrated.contains("public static void setFluidId(FluidStack stack, ResourceLocation fluidId) {\n        stack.toString();\n    }"), migrated)
+        assertTrue(migrated.contains("private static final String ITEM_DOC"), migrated)
+        assertTrue(migrated.contains("CompoundTag tag = stack.getTagElement(TAG_CUSTOM_FLUID);"), migrated)
+        assertTrue(migrated.contains("CompoundTag customFluidTag = stack.getChildTag(CustomFluidNBTHelper.TAG_CUSTOM_FLUID);"), migrated)
+    }
+
+    @Test
     fun `migrates brewing registration to NeoForge brewing event`() {
         val projectDir = createFile("BrewingSurface.java", """
             package com.example;

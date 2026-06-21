@@ -15849,17 +15849,22 @@ ${indent}}
     private fun migrateCustomDataComponentsSource(source: String): String {
         var result = source
 
-        if (result.contains("stack.getTagElement(") || result.contains("stack.removeTagKey(") ||
-            result.contains("DataComponents.CUSTOM_DATA") && result.contains(".copyTag().getCompound(")) {
-            result = result
-                .replace(
-                    "CompoundTag tag = stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag().getCompound(TAG_CUSTOM_FLUID);",
-                    "CompoundTag tag = getCustomDataChild(stack, TAG_CUSTOM_FLUID);"
-                )
-                .replace("stack.getTagElement(", "getCustomDataChild(stack, ")
-                .replace("stack.removeTagKey(", "removeCustomDataChild(stack, ")
+        var executableCode = maskJavaCommentsAndLiterals(result)
+        if (executableCode.contains("stack.getTagElement(") || executableCode.contains("stack.removeTagKey(") ||
+            executableCode.contains("DataComponents.CUSTOM_DATA") && executableCode.contains(".copyTag().getCompound(")) {
+            val legacyCustomFluidTagCopy =
+                "CompoundTag tag = stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag().getCompound(TAG_CUSTOM_FLUID);"
+            result = replaceExecutableRegex(result, Regex(Regex.escape(legacyCustomFluidTagCopy))) {
+                "CompoundTag tag = getCustomDataChild(stack, TAG_CUSTOM_FLUID);"
+            }
+            result = replaceExecutableRegex(result, Regex("""\bstack\.getTagElement\s*\(""")) {
+                "getCustomDataChild(stack, "
+            }
+            result = replaceExecutableRegex(result, Regex("""\bstack\.removeTagKey\s*\(""")) {
+                "removeCustomDataChild(stack, "
+            }
 
-            result = replaceMethodBody(result, "setFluidId", """
+            result = replaceExecutableMethodBody(result, "setFluidId", """
                 public static void setFluidId(ItemStack stack, ResourceLocation fluidId) {
                     updateCustomDataChild(stack, TAG_CUSTOM_FLUID, tag -> {
                         tag.putString(TAG_FLUID_ID, fluidId.toString());
@@ -15872,20 +15877,23 @@ ${indent}}
                 }
             """.trimIndent())
 
-            result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
-            result = addImportIfMissing(result, "net.minecraft.world.item.component.CustomData")
-            result = addImportIfMissing(result, "java.util.function.Consumer")
+            result = addExecutableImportIfMissing(result, "net.minecraft.core.component.DataComponents")
+            result = addExecutableImportIfMissing(result, "net.minecraft.world.item.component.CustomData")
+            result = addExecutableImportIfMissing(result, "java.util.function.Consumer")
             result = addItemStackCustomDataHelpers(result)
         }
 
-        if (result.contains("FluidStack") &&
-            (result.contains(".getOrCreateChildTag(") || result.contains(".getChildTag("))) {
-            result = result
-                .replace(Regex("""CompoundTag\s+(\w+)\s*=\s*stack\.getChildTag\(([^)]+)\);""")) { match ->
-                    "CompoundTag ${match.groupValues[1]} = getFluidCustomDataChild(stack, ${match.groupValues[2]});"
-                }
+        executableCode = maskJavaCommentsAndLiterals(result)
+        if (executableCode.contains("FluidStack") &&
+            (executableCode.contains(".getOrCreateChildTag(") || executableCode.contains(".getChildTag("))) {
+            result = replaceExecutableRegex(
+                result,
+                Regex("""CompoundTag\s+(\w+)\s*=\s*stack\.getChildTag\(([^)]+)\);""")
+            ) { match ->
+                "CompoundTag ${match.groupValues[1]} = getFluidCustomDataChild(stack, ${match.groupValues[2]});"
+            }
 
-            result = replaceMethodBody(result, "setFluidId", """
+            result = replaceExecutableMethodBody(result, "setFluidId", """
                 public static void setFluidId(FluidStack stack, ResourceLocation fluidId) {
                     if (stack == null || stack.isEmpty() || fluidId == null || !isDynamicCustomFluid(stack)) {
                         return;
@@ -15896,9 +15904,9 @@ ${indent}}
                 }
             """.trimIndent())
 
-            result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
-            result = addImportIfMissing(result, "net.minecraft.world.item.component.CustomData")
-            result = addImportIfMissing(result, "java.util.function.Consumer")
+            result = addExecutableImportIfMissing(result, "net.minecraft.core.component.DataComponents")
+            result = addExecutableImportIfMissing(result, "net.minecraft.world.item.component.CustomData")
+            result = addExecutableImportIfMissing(result, "java.util.function.Consumer")
             result = addFluidStackCustomDataHelpers(result)
         }
 
@@ -15906,7 +15914,7 @@ ${indent}}
     }
 
     private fun addItemStackCustomDataHelpers(source: String): String {
-        if (source.contains("getCustomDataChild(ItemStack stack")) return source
+        if (maskJavaCommentsAndLiterals(source).contains("getCustomDataChild(ItemStack stack")) return source
         val helpers = """
 
     private static CompoundTag getCustomDataChild(ItemStack stack, String key) {
@@ -15934,7 +15942,7 @@ ${indent}}
     }
 
     private fun addFluidStackCustomDataHelpers(source: String): String {
-        if (source.contains("getFluidCustomDataChild(FluidStack stack")) return source
+        if (maskJavaCommentsAndLiterals(source).contains("getFluidCustomDataChild(FluidStack stack")) return source
         val helpers = """
 
     private static CompoundTag getFluidCustomDataChild(FluidStack stack, String key) {
@@ -40861,6 +40869,17 @@ $writeLines
         val openBrace = source.indexOf('{', match.range.first)
         if (openBrace < 0) return source
         val closeBrace = findMatchingBrace(source, openBrace)
+        if (closeBrace < 0) return source
+        return source.substring(0, match.range.first) + replacement + source.substring(closeBrace + 1)
+    }
+
+    private fun replaceExecutableMethodBody(source: String, methodName: String, replacement: String): String {
+        val pattern = Regex("""(?m)(?:@\w+(?:\([^)]*\))?\s*)*(?:public|private|protected)\s+(?:static\s+)?[\w<>\[\].?]+\s+${Regex.escape(methodName)}\s*\(""")
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val match = pattern.find(executableCode) ?: return source
+        val openBrace = executableCode.indexOf('{', match.range.first)
+        if (openBrace < 0) return source
+        val closeBrace = findMatchingBrace(executableCode, openBrace)
         if (closeBrace < 0) return source
         return source.substring(0, match.range.first) + replacement + source.substring(closeBrace + 1)
     }
