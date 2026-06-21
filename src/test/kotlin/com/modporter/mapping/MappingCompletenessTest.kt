@@ -2257,7 +2257,9 @@ class MappingCompletenessTest {
         val body = resourceMigrator.substring(start, end)
         val forbidden = listOf(
             "fallback class name" to Regex("""fallbackClassName"""),
-            "file-name class fallback" to Regex("""javaTypeNameContainingOffset\([^)]*\)\s*\?:\s*[^;\r\n]*fileName""")
+            "file-name class fallback" to Regex("""javaTypeNameContainingOffset\([^)]*\)\s*\?:\s*[^;\r\n]*fileName"""),
+            "global simple constant table" to Regex("""\bsimpleValues\b"""),
+            "bare constant lookup table entry" to Regex("""constants\[\s*name\s*]""")
         )
         val offenders = forbidden
             .filter { (_, pattern) -> pattern.containsMatchIn(body) }
@@ -2265,7 +2267,7 @@ class MappingCompletenessTest {
 
         assertTrue(
             offenders.isEmpty(),
-            "Code-awarded advancement detection must use source-declared constant owners, not file-name fallback inference: $offenders"
+            "Code-awarded advancement detection must use call-site owners, not file-name or global-unique constant inference: $offenders"
         )
     }
 
@@ -2342,6 +2344,8 @@ class MappingCompletenessTest {
                 body.contains("constantPattern.findAll(code)") &&
                 body.contains("javaTypeNameContainingOffset(code, match.range.first)") &&
                 body.contains("callPattern.findAll(code)") &&
+                body.contains("rawId.contains(\".\") -> constants[rawId]") &&
+                body.contains("constants[\"\$owner.\$rawId\"]") &&
                 body.contains("executableCode") &&
                 body.contains("contains(\"tryAwardAdvancement\")"),
             "Code-awarded advancement detection must derive values from comment-masked code and prove declarations/calls from executable Java"

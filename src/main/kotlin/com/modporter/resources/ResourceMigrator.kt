@@ -3611,7 +3611,6 @@ class ResourceMigrationPass(
                         ?.get(1)
                         .orEmpty()
                     val constants = linkedMapOf<String, String>()
-                    val simpleValues = linkedMapOf<String, MutableSet<String>>()
                     constantPattern.findAll(code)
                         .filter { match ->
                             val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
@@ -3624,7 +3623,6 @@ class ResourceMigrationPass(
                             val name = match.groupValues[1]
                             val value = match.groupValues[2]
                             val className = javaTypeNameContainingOffset(code, match.range.first)
-                            simpleValues.getOrPut(name) { linkedSetOf() } += value
                             if (className != null) {
                                 constants["$className.$name"] = value
                                 if (packageName.isNotBlank()) {
@@ -3632,11 +3630,6 @@ class ResourceMigrationPass(
                                 }
                             }
                         }
-                    simpleValues.forEach { (name, values) ->
-                        if (values.size == 1) {
-                            constants[name] = values.single()
-                        }
-                    }
 
                     callPattern.findAll(code)
                         .filter { match ->
@@ -3648,7 +3641,11 @@ class ResourceMigrationPass(
                             val rawId = match.groupValues[1].trim()
                             val advancementId = when {
                                 rawId.startsWith("\"") && rawId.endsWith("\"") -> rawId.trim('"')
-                                else -> constants[rawId]
+                                rawId.contains(".") -> constants[rawId]
+                                else -> javaTypeNameContainingOffset(code, match.range.first)?.let { owner ->
+                                    constants["$owner.$rawId"]
+                                        ?: if (packageName.isNotBlank()) constants["$packageName.$owner.$rawId"] else null
+                                }
                             } ?: return@forEach
                             val criterion = match.groupValues[2]
                             result.getOrPut(advancementId) { linkedSetOf() }.add(criterion)
