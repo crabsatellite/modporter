@@ -26073,6 +26073,39 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `entity capability optional chain migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CapabilityOptionalDocs.java").writeText("""
+            package com.example;
+
+            public class CapabilityOptionalDocs {
+                /*
+                return living.getCapability(Capabilities.ItemHandler.ENTITY).map(inv -> {
+                    int slots = inv.getSlots();
+                    return slots > count;
+                }).orElse(false);
+                */
+                private static final String SAMPLE = "return living.getCapability(Capabilities.ItemHandler.ENTITY).map(inv -> { return inv.getSlots() > count; }).orElse(false);";
+
+                public boolean real(LivingEntity living, int count) {
+                    return living.getCapability(Capabilities.ItemHandler.ENTITY) != null;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("CapabilityOptionalDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(source.contains("return living.getCapability(Capabilities.ItemHandler.ENTITY).map(inv -> {"), source)
+        assertTrue(source.contains("private static final String SAMPLE"), source)
+        assertFalse(source.contains("var inv = living.getCapability"), source)
+        assertFalse(source.contains("if (inv == null)"), source)
+    }
+
+    @Test
     fun `player clone capability lifecycle wrappers are removed only when copyFrom preserves data copy`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

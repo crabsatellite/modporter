@@ -2610,6 +2610,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `entity capability optional chain migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyEntityCapabilityOptionalChains")
+        assertTrue(start >= 0, "migrateLegacyEntityCapabilityOptionalChains is missing")
+        val end = source.indexOf("private fun migratePlayerCloneCapabilityLifecycleSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getCapability prefilter" to """source.contains(".getCapability(")""",
+            "raw map prefilter" to """source.contains(".map(")""",
+            "raw orElse prefilter" to """source.contains(".orElse(")""",
+            "raw whole-source replace" to "pattern.replace(source)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("pattern.findAll(executableCode)") &&
+                body.contains("source.substring(capabilityCallRange.first") &&
+                body.contains("source.substring(bodyRange.first") &&
+                body.contains("applyStringEdits(source, edits)"),
+            "Entity capability optional-chain migration must match executable Java while preserving original replacement text"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Entity capability optional-chain migration must not use comments or strings as source evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `resource mod id detection does not infer constant owners from file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot

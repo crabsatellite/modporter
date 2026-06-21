@@ -33470,17 +33470,25 @@ ${indent}}
     }
 
     private fun migrateLegacyEntityCapabilityOptionalChains(source: String): String {
-        if (!source.contains(".getCapability(") || !source.contains(".map(") || !source.contains(".orElse(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".getCapability(") ||
+            !executableCode.contains(".map(") ||
+            !executableCode.contains(".orElse(")) {
+            return source
+        }
         val pattern = Regex(
             """(?ms)^([ \t]*)return\s+([^\r\n;]+?\.getCapability\((?:[^()]|\([^()]*\))*\))\.map\(\s*([A-Za-z_$][\w$]*)\s*->\s*\{(.*?)\}\s*\)\.orElse\(\s*([^;\r\n]+?)\s*\)\s*;"""
         )
-        return pattern.replace(source) { match ->
+        val edits = pattern.findAll(executableCode).mapNotNull { match ->
             val indent = match.groupValues[1]
-            val capabilityCall = match.groupValues[2].trim()
+            val capabilityCallRange = match.groups[2]?.range ?: return@mapNotNull null
+            val capabilityCall = source.substring(capabilityCallRange.first, capabilityCallRange.last + 1).trim()
             val variable = match.groupValues[3]
-            val body = match.groupValues[4].trim('\n', '\r')
-            val fallback = match.groupValues[5].trim()
-            """
+            val bodyRange = match.groups[4]?.range ?: return@mapNotNull null
+            val body = source.substring(bodyRange.first, bodyRange.last + 1).trim('\n', '\r')
+            val fallbackRange = match.groups[5]?.range ?: return@mapNotNull null
+            val fallback = source.substring(fallbackRange.first, fallbackRange.last + 1).trim()
+            match.range to """
 ${indent}var $variable = $capabilityCall;
 ${indent}if ($variable == null) {
 ${indent}	return $fallback;
@@ -33489,7 +33497,8 @@ ${indent}{
 $body
 ${indent}}
             """.trimIndent()
-        }
+        }.toList()
+        return applyStringEdits(source, edits)
     }
 
     private fun migratePlayerCloneCapabilityLifecycleSource(source: String): String {
