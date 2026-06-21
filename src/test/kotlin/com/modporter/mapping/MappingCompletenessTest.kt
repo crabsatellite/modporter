@@ -5093,6 +5093,65 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `top level packet payload migration does not infer direction from names or client references`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val staticStart = source.indexOf("private fun staticPacketCandidate")
+        assertTrue(staticStart >= 0, "staticPacketCandidate is missing")
+        val staticEnd = source.indexOf("private fun packetReceptionDirection", staticStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val staticBody = source.substring(staticStart, staticEnd)
+        val directionStart = source.indexOf("private fun packetReceptionDirection")
+        assertTrue(directionStart >= 0, "packetReceptionDirection is missing")
+        val directionEnd = source.indexOf("private fun simpleChannelNamespaceExpression", directionStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val directionBody = source.substring(directionStart, directionEnd)
+        val migrationStart = source.indexOf("private fun transformPacketClasses")
+        assertTrue(migrationStart >= 0, "transformPacketClasses is missing")
+        val migrationEnd = source.indexOf("if (packetClasses.isEmpty())", migrationStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val registrationBody = source.substring(migrationStart, migrationEnd)
+        val combined = listOf(staticBody, directionBody, registrationBody).joinToString("\n")
+        val offenders = listOf(
+            "S2C class-name direction" to """className.startsWith("S2C")""",
+            "ToClient class-name direction" to """className.contains("ToClient")""",
+            "Minecraft client reference direction" to """packetContent.contains("Minecraft.getInstance()")""",
+            "ClientLevel reference direction" to """packetContent.contains("ClientLevel")""",
+            "Dist client reference direction" to """packetContent.contains("Dist.CLIENT")""",
+            "client import direction" to """containsMatchIn(packetContent)""",
+            "raw registerMessage prefilter" to """content.contains(".registerMessage(")""",
+            "raw registerMessage scan" to "findAll(content)",
+            "raw registration paren match" to "findMatchingParen(content, openParen)",
+            "raw packet constructor scan" to ".find(packetContent)"
+        )
+            .filter { (_, marker) -> combined.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            staticBody.contains("val executableCode = maskJavaCommentsAndLiterals(content)") &&
+                staticBody.contains("packetReceptionDirection(executableCode)") &&
+                directionBody.contains("hasClientReceptionGuard && !hasServerReceptionGuard -> true") &&
+                directionBody.contains("hasServerReceptionGuard && !hasClientReceptionGuard -> false") &&
+                registrationBody.contains("val executableContent = maskJavaCommentsAndLiterals(content)") &&
+                registrationBody.contains("findAll(executableContent)") &&
+                registrationBody.contains("findMatchingParen(executableContent, openParen)") &&
+                registrationBody.contains("val executablePacketContent = maskJavaCommentsAndLiterals(packetContent)") &&
+                registrationBody.contains("?: packetReceptionDirection(executablePacketContent)") &&
+                registrationBody.contains("?: return@registrations"),
+            "Top-level packet payload migration must use explicit registration direction or executable reception-side guards"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Top-level packet payload migration must not infer direction from class names, client references, or comments: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy advancement trigger migration does not depend on fixed project class names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

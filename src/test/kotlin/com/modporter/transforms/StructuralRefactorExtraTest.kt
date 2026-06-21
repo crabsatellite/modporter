@@ -1593,7 +1593,8 @@ class StructuralRefactorExtraTest {
 
                 public static void register() {
                     int id = 0;
-                    INSTANCE.registerMessage(id++, PacketPing.class, PacketPing::encode, PacketPing::decode, PacketPing.Handler::handle);
+                    INSTANCE.registerMessage(id++, PacketPing.class, PacketPing::encode, PacketPing::decode, PacketPing.Handler::handle,
+                            java.util.Optional.of(net.minecraftforge.network.NetworkDirection.PLAY_TO_CLIENT));
                 }
             }
         """.trimIndent())
@@ -1659,7 +1660,8 @@ class StructuralRefactorExtraTest {
                 private void commonSetup(FMLCommonSetupEvent event) {
                     channel = NetworkRegistry.newSimpleChannel(ResourceLocation.fromNamespaceAndPath(MODID, "main"), () -> PROTOCOL_VERSION, PROTOCOL_VERSION::equals, PROTOCOL_VERSION::equals);
                     int packetIndex = 0;
-                    channel.registerMessage(packetIndex++, PacketPing.class, PacketPing::encode, PacketPing::decode, PacketPing.Handler::handle);
+                    channel.registerMessage(packetIndex++, PacketPing.class, PacketPing::encode, PacketPing::decode, PacketPing.Handler::handle,
+                            java.util.Optional.of(net.minecraftforge.network.NetworkDirection.PLAY_TO_CLIENT));
                     Registry.afterNetwork();
                 }
             }
@@ -1892,6 +1894,82 @@ class StructuralRefactorExtraTest {
         assertTrue(!packet.contains("ctx.get()"))
         assertTrue(!packet.contains("setPacketHandled"))
         assertTrue(!packet.contains("java.util.function.Supplier"))
+    }
+
+    @Test
+    fun `top level packet migration does not infer direction from packet class names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                }
+            }
+        """.trimIndent())
+        networkDir.resolve("S2CStatusPacket.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraftforge.network.NetworkEvent;
+            import java.util.function.Supplier;
+
+            public class S2CStatusPacket {
+                public static void encode(S2CStatusPacket packet, FriendlyByteBuf buf) {
+                }
+
+                public static S2CStatusPacket decode(FriendlyByteBuf buf) {
+                    return new S2CStatusPacket();
+                }
+
+                public static void handle(S2CStatusPacket packet, Supplier<NetworkEvent.Context> ctx) {
+                    ctx.get().setPacketHandled(true);
+                }
+            }
+        """.trimIndent())
+        networkDir.resolve("NetworkHandler.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            public class NetworkHandler {
+                private static final String PROTOCOL_VERSION = "1";
+                public static final SimpleChannel INSTANCE = NetworkRegistry.newSimpleChannel(
+                    new ResourceLocation("example", "main"),
+                    () -> PROTOCOL_VERSION,
+                    PROTOCOL_VERSION::equals,
+                    PROTOCOL_VERSION::equals
+                );
+
+                public static void register() {
+                    int id = 0;
+                    INSTANCE.registerMessage(id++, S2CStatusPacket.class,
+                            S2CStatusPacket::encode,
+                            S2CStatusPacket::decode,
+                            S2CStatusPacket::handle);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val packet = networkDir.resolve("S2CStatusPacket.java").readText()
+        val networkHandler = networkDir.resolve("NetworkHandler.java").readText()
+
+        assertTrue(result.changes.none { it.ruleId.startsWith("struct-packet-payload") }, "changes=${result.changes}")
+        assertFalse(networkDir.resolve("ModNetwork.java").exists())
+        assertTrue(packet.contains("public class S2CStatusPacket"))
+        assertFalse(packet.contains("implements CustomPacketPayload"), packet)
+        assertTrue(networkHandler.contains("INSTANCE.registerMessage"), networkHandler)
     }
 
     @Test
@@ -15289,8 +15367,10 @@ class StructuralRefactorExtraTest {
 
                 public static void init() {
                     int id = 0;
-                    CHANNEL.registerMessage(id++, DemoPacket.class, DemoPacket::encode, DemoPacket::new, DemoPacket.Handler::onMessage);
-                    CHANNEL.registerMessage(id++, RegistryPacket.class, RegistryPacket::encode, RegistryPacket::new, RegistryPacket.Handler::onMessage);
+                    CHANNEL.registerMessage(id++, DemoPacket.class, DemoPacket::encode, DemoPacket::new, DemoPacket.Handler::onMessage,
+                            java.util.Optional.of(net.minecraftforge.network.NetworkDirection.PLAY_TO_CLIENT));
+                    CHANNEL.registerMessage(id++, RegistryPacket.class, RegistryPacket::encode, RegistryPacket::new, RegistryPacket.Handler::onMessage,
+                            java.util.Optional.of(net.minecraftforge.network.NetworkDirection.PLAY_TO_CLIENT));
                 }
             }
         """.trimIndent())
@@ -15902,7 +15982,7 @@ class StructuralRefactorExtraTest {
         assertTrue(packet.contains("implements CustomPacketPayload"))
         assertTrue(packet.contains("StreamCodec.of((buf, packet) -> packet.encode(buf), DemoPacket::new)"))
         assertTrue(registryPacket.contains("StreamCodec<RegistryFriendlyByteBuf, RegistryPacket>"))
-        assertTrue(network.contains("registrar.playBidirectional("))
+        assertTrue(network.contains("registrar.playToClient("))
         assertTrue(handler.contains("public static void init()"))
         assertTrue(!handler.contains("SimpleChannel"))
         assertTrue(common.contains("PacketDistributor.sendToPlayersTrackingEntity(entity, new DemoPacket(1))"))

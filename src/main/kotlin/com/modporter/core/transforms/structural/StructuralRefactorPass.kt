@@ -1365,14 +1365,14 @@ ${indent}}
         val encodeParamName: String,
         val encodeBufferName: String,
         val handlerRef: String,
-        val isPlayToClient: Boolean,
+        val isPlayToClient: Boolean?,
         val bufferType: String,
         val streamCodecExpression: String
     ) {
         fun toPacketInfo(
             namespaceExpression: String,
             handlerRef: String = this.handlerRef,
-            isPlayToClient: Boolean = this.isPlayToClient,
+            isPlayToClient: Boolean,
             registrationMethod: String? = null
         ): PacketClassInfo =
             PacketClassInfo(
@@ -1408,38 +1408,22 @@ ${indent}}
     }
 
     private fun staticPacketCandidate(file: Path, content: String): PacketClassCandidate? {
+        val executableCode = maskJavaCommentsAndLiterals(content)
         val encodeMatch = Regex(
             """public\s+static\s+void\s+encode\s*\(\s*(\w+)\s+(\w+)\s*,\s*FriendlyByteBuf\s+(\w+)\s*\)"""
-        ).find(content) ?: return null
+        ).find(executableCode) ?: return null
         val decodeMatch = Regex(
             """public\s+static\s+(\w+)\s+decode\s*\(\s*FriendlyByteBuf\s+\w+\s*\)"""
-        ).find(content) ?: return null
+        ).find(executableCode) ?: return null
         val className = encodeMatch.groupValues[1]
         if (className != decodeMatch.groupValues[1]) return null
         if (file.fileName.toString() != "$className.java") return null
 
-        val pkg = Regex("""package\s+([\w.]+)\s*;""").find(content)?.groupValues?.get(1) ?: ""
-        val hasClientReceptionGuard = Regex(
-            """\.getDirection\(\)\.getReceptionSide\(\)\.isClient\(\)"""
-        ).containsMatchIn(content)
-        val hasServerReceptionGuard = Regex(
-            """\.getDirection\(\)\.getReceptionSide\(\)\.isServer\(\)"""
-        ).containsMatchIn(content)
-        val isPlayToClient = when {
-            hasClientReceptionGuard -> true
-            hasServerReceptionGuard -> false
-            else -> className.startsWith("S2C") ||
-                className.contains("ToClient") ||
-                content.contains("PLAY_TO_CLIENT") ||
-                content.contains("ClientPacketHandler") ||
-                content.contains("DistExecutor") ||
-                content.contains("Dist.CLIENT") ||
-                content.contains("FMLLoader.getDist() == Dist.CLIENT") ||
-                Regex("""import\s+[\w.]+\.client\.""").containsMatchIn(content)
-        }
+        val pkg = Regex("""package\s+([\w.]+)\s*;""").find(executableCode)?.groupValues?.get(1) ?: ""
+        val isPlayToClient = packetReceptionDirection(executableCode)
         val nestedHandler = Regex(
             """static\s+class\s+(\w+)[\s\S]*?static\s+void\s+handle\s*\("""
-        ).find(content)
+        ).find(executableCode)
         val handlerRef = if (nestedHandler != null) {
             "$className.${nestedHandler.groupValues[1]}::handle"
         } else {
@@ -1458,6 +1442,20 @@ ${indent}}
         )
     }
 
+    private fun packetReceptionDirection(executableCode: String): Boolean? {
+        val hasClientReceptionGuard = Regex(
+            """\.getDirection\(\)\.getReceptionSide\(\)\.isClient\(\)"""
+        ).containsMatchIn(executableCode)
+        val hasServerReceptionGuard = Regex(
+            """\.getDirection\(\)\.getReceptionSide\(\)\.isServer\(\)"""
+        ).containsMatchIn(executableCode)
+        return when {
+            hasClientReceptionGuard && !hasServerReceptionGuard -> true
+            hasServerReceptionGuard && !hasClientReceptionGuard -> false
+            else -> null
+        }
+    }
+
     private fun simpleChannelNamespaceExpression(source: String, channelName: String): String? {
         val args = simpleChannelCreationArgs(source, channelName) ?: return null
         val idExpression = args.firstOrNull()?.trim()?.takeIf { it.isNotBlank() } ?: return null
@@ -1465,15 +1463,16 @@ ${indent}}
     }
 
     private fun simpleChannelCreationArgs(source: String, channelName: String): List<String>? {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val escaped = Regex.escape(channelName)
         val patterns = listOf(
             Regex("""\b(?:SimpleChannel|EventNetworkChannel)\s+$escaped\s*=\s*NetworkRegistry\.newSimpleChannel\s*\("""),
             Regex("""\b$escaped\s*=\s*NetworkRegistry\.newSimpleChannel\s*\(""")
         )
         for (pattern in patterns) {
-            val match = pattern.find(source) ?: continue
-            val openParen = source.indexOf('(', match.range.first)
-            val closeParen = if (openParen >= 0) findMatchingParen(source, openParen) else -1
+            val match = pattern.find(executableCode) ?: continue
+            val openParen = executableCode.indexOf('(', match.range.first)
+            val closeParen = if (openParen >= 0) findMatchingParen(executableCode, openParen) else -1
             if (openParen >= 0 && closeParen > openParen) {
                 return splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
             }
@@ -2124,26 +2123,28 @@ $registrations
             .filter { it.toString().endsWith(".java") }
             .forEach registrationFiles@{ file ->
                 val content = file.readText()
-                if (!content.contains(".registerMessage(") || !content.contains("SimpleChannel")) return@registrationFiles
+                val executableContent = maskJavaCommentsAndLiterals(content)
+                if (!executableContent.contains(".registerMessage(") || !executableContent.contains("SimpleChannel")) return@registrationFiles
 
                 Regex("""\b([A-Za-z_$][\w$]*)\.registerMessage\s*\(""")
-                    .findAll(content)
+                    .findAll(executableContent)
                     .forEach registrations@{ registration ->
                         val channelName = registration.groupValues[1]
                         val namespaceExpression = simpleChannelNamespaceExpression(content, channelName) ?: return@registrations
-                        val openParen = content.indexOf('(', registration.range.first)
-                        val closeParen = if (openParen >= 0) findMatchingParen(content, openParen) else -1
+                        val openParen = executableContent.indexOf('(', registration.range.first)
+                        val closeParen = if (openParen >= 0) findMatchingParen(executableContent, openParen) else -1
                         if (openParen < 0 || closeParen <= openParen) return@registrations
                         val args = splitTopLevelJavaArgs(content.substring(openParen + 1, closeParen))
                         if (args.size < 5) return@registrations
                         val className = args[1].trim().removeSuffix(".class").substringAfterLast('.')
-                        if (className.isBlank() || !existingPacketClasses.add(className)) return@registrations
+                        if (className.isBlank() || className in existingPacketClasses) return@registrations
                         val packetFile = Files.walk(srcDir)
                             .filter { it.fileName.toString() == "$className.java" }
                             .findFirst()
                             .orElse(null)
                             ?: return@registrations
                         val packetContent = packetFile.readText()
+                        val executablePacketContent = maskJavaCommentsAndLiterals(packetContent)
                         val handlerRef = payloadHandlerLambda(args[4].trim())
                         val directionText = args.drop(5).joinToString(",")
                         val explicitRegistrationMethod = when {
@@ -2158,22 +2159,26 @@ $registrations
                         }
                         val candidate = packetCandidates[className]
                         if (candidate != null) {
+                            val isPlayToClient = explicitClientDirection
+                                ?: candidate.isPlayToClient
+                                ?: return@registrations
                             packetClasses.add(candidate.toPacketInfo(
                                 namespaceExpression = namespaceExpression,
                                 handlerRef = handlerRef,
-                                isPlayToClient = explicitClientDirection ?: candidate.isPlayToClient,
+                                isPlayToClient = isPlayToClient,
                                 registrationMethod = explicitRegistrationMethod
                             ))
+                            existingPacketClasses += className
                             return@registrations
                         }
 
                         val constructorBufferType = Regex(
                             """public\s+${Regex.escape(className)}\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+\w+\s*\)"""
-                        ).find(packetContent)?.groupValues?.get(1)
+                        ).find(executablePacketContent)?.groupValues?.get(1)
                             ?: return@registrations
                         val encodeBufferType = Regex(
                             """\bvoid\s+encode\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+([A-Za-z_$][\w$]*)\s*\)"""
-                        ).find(packetContent)?.groupValues?.get(1)
+                        ).find(executablePacketContent)?.groupValues?.get(1)
                             ?: return@registrations
                         val bufferType = if (constructorBufferType == "RegistryFriendlyByteBuf" ||
                             encodeBufferType == "RegistryFriendlyByteBuf") {
@@ -2181,13 +2186,10 @@ $registrations
                         } else {
                             "FriendlyByteBuf"
                         }
-                        val pkg = Regex("""package\s+([\w.]+)\s*;""").find(packetContent)?.groupValues?.get(1) ?: ""
-                        val inferredClientDirection = className.startsWith("S2C") ||
-                            className.contains("ToClient") ||
-                            packetContent.contains("Minecraft.getInstance()") ||
-                            packetContent.contains("ClientLevel") ||
-                            packetContent.contains("Dist.CLIENT") ||
-                            Regex("""import\s+[\w.]+\.client\.""").containsMatchIn(packetContent)
+                        val pkg = Regex("""package\s+([\w.]+)\s*;""").find(executablePacketContent)?.groupValues?.get(1) ?: ""
+                        val isPlayToClient = explicitClientDirection
+                            ?: packetReceptionDirection(executablePacketContent)
+                            ?: return@registrations
                         packetClasses.add(PacketClassInfo(
                             packetFile,
                             className,
@@ -2195,12 +2197,13 @@ $registrations
                             className.replaceFirstChar { it.lowercase() },
                             "buf",
                             handlerRef,
-                            explicitClientDirection ?: inferredClientDirection,
+                            isPlayToClient,
                             bufferType,
                             "StreamCodec.of((buf, packet) -> packet.encode(buf), $className::new)",
                             namespaceExpression,
-                            explicitRegistrationMethod ?: "playBidirectional"
+                            explicitRegistrationMethod
                         ))
+                        existingPacketClasses += className
                     }
             }
 
