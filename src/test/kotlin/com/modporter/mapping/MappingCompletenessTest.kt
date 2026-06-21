@@ -364,28 +364,17 @@ class MappingCompletenessTest {
             "src/main/resources/mappings/forge2neo/api-surfaces.json",
             "src/main/resources/mappings/forge2neo/neoforge-deps.json"
         )
-        val thirdPartyRoots = listOf(
-            "cn.mcmod_mmf.mmlib.",
-            "cn.mcmod_mmf.mysterious_mountain_lib:",
-            "com.aetherteam.",
-            "com.blamejared.crafttweaker",
-            "com.simibubi.create",
-            "curse.maven:",
-            "dev.engine-room.flywheel",
+        val declaredThirdPartyRoots = surfaces
+            .flatMap { it.markers }
+            .distinct()
+        val undeclaredThirdPartySentinels = listOf(
+            "alexsmobs.",
+            "alexscaves.",
             "farmersdelight:",
-            "maven.modrinth:",
-            "mezz.jei.",
-            "mezz.jei:",
-            "net.createmod.ponder",
-            "noobanidus.mods.lootr.",
-            "org.valkyrienskies",
-            "org.violetmoon.",
-            "sereneseasons.",
-            "squeek.appleskin",
-            "top.theillusivec4.",
-            "top.theillusivec4:",
-            "terrablender",
-            "vazkii.botania"
+            "twilightforest.",
+            "twilightforest:",
+            "team-twilight:",
+            "vazkii.patchouli"
         )
 
         val productionFiles = scannedRoots
@@ -420,7 +409,7 @@ class MappingCompletenessTest {
             .flatMap { file ->
                 val relative = projectRoot.relativize(file).invariantSeparatorsPathString
                 val text = file.readText()
-                thirdPartyRoots
+                undeclaredThirdPartySentinels
                     .filter { root -> text.contains(root) && surfacesDeclaring(root).isEmpty() }
                     .map { root -> "$relative contains undeclared third-party API marker $root" }
             }
@@ -466,7 +455,23 @@ class MappingCompletenessTest {
                     .toList()
             }
 
-        val offenders = allowedFileOffenders + undeclaredRootOffenders + markerScopeOffenders + ruleIdOffenders
+        val duplicateMarkerOffenders = surfaces
+            .flatMap { surface -> surface.markers.map { marker -> marker to surface.id } }
+            .groupBy({ it.first }, { it.second })
+            .filterValues { ids -> ids.distinct().size > 1 }
+            .map { (marker, ids) -> "API surface marker $marker is declared by multiple surfaces ${ids.distinct()}" }
+
+        val ambiguousMarkerOffenders = declaredThirdPartyRoots
+            .map { marker -> marker to surfacesDeclaring(marker).map { it.id }.distinct() }
+            .filter { (_, ids) -> ids.size > 1 }
+            .map { (marker, ids) -> "API surface marker $marker has ambiguous ownership $ids" }
+
+        val offenders = allowedFileOffenders +
+            undeclaredRootOffenders +
+            markerScopeOffenders +
+            ruleIdOffenders +
+            duplicateMarkerOffenders +
+            ambiguousMarkerOffenders
         assertTrue(
             offenders.isEmpty(),
             "Third-party API migrations must stay inside declared API surfaces, not ad hoc mod-specific rules: $offenders"
