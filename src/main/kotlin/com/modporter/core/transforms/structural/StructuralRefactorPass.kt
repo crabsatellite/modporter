@@ -40081,30 +40081,8 @@ $encodeLines
         source: String,
         className: String,
         transform: (args: List<String>) -> String?
-    ): String {
-        var result = source
-        var cursor = 0
-        val token = "new $className("
-        while (true) {
-            val tokenIndex = result.indexOf(token, cursor)
-            if (tokenIndex < 0) break
-            val openParen = tokenIndex + token.length - 1
-            val closeParen = findMatchingParen(result, openParen)
-            if (closeParen < 0) {
-                cursor = tokenIndex + token.length
-                continue
-            }
-            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
-            val replacement = transform(args)
-            if (replacement == null) {
-                cursor = closeParen + 1
-                continue
-            }
-            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
-            cursor = tokenIndex + replacement.length
-        }
-        return result
-    }
+    ): String =
+        rewriteExecutableJavaNew(source, className, transform)
 
     private fun rewriteExecutableJavaNew(
         source: String,
