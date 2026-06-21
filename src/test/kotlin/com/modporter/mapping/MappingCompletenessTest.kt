@@ -3259,6 +3259,94 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy event bus post migration uses executable call and cancellation evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+
+        fun bodyBetween(startMarker: String, endMarker: String): String {
+            val start = source.indexOf(startMarker)
+            assertTrue(start >= 0, "$startMarker is missing")
+            val end = source.indexOf(endMarker, start + 1).let { if (it < 0) source.length else it }
+            return source.substring(start, end)
+        }
+
+        val migrationBody = bodyBetween(
+            "private fun migrateLegacyEventBusPostBooleans",
+            "private fun collapseDuplicateEventBusPostCancellationChecks"
+        )
+        val stripBody = bodyBetween(
+            "private fun stripUnusedEventBusPostCancellationChecks",
+            "private data class EventBusPostCall"
+        )
+        val finderBody = bodyBetween(
+            "private fun findEventBusPostCall",
+            "private fun trailingIsCanceledCallEnds"
+        )
+        val trailingBody = bodyBetween(
+            "private fun trailingIsCanceledCallEnds",
+            "private fun isStandaloneExpressionStart"
+        )
+        val standaloneBody = bodyBetween(
+            "private fun isStandaloneExpressionStart",
+            "private fun migrateLegacyFollowOwnerGoalConstructors"
+        )
+        val combined = migrationBody + stripBody + finderBody + trailingBody + standaloneBody
+        val offenders = listOf(
+            "raw post prefilter" to """source.contains("EVENT_BUS.post(")""",
+            "raw post rewrite" to """rewriteJavaCall(source, "post")""",
+            "raw post finder" to "source.indexOf(token, cursor)",
+            "raw post paren matcher" to "findMatchingParen(source, openParen)",
+            "raw receiver finder" to "findExpressionReceiverStart(source, tokenIndex)",
+            "raw isCanceled chain match" to """source.startsWith(".isCanceled", dot)""",
+            "raw isCanceled paren matcher" to "findMatchingParen(source, openParen)"
+        )
+            .filter { (_, marker) -> combined.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            migrationBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                migrationBody.contains("""executableCode.contains("EVENT_BUS.post(")""") &&
+                migrationBody.contains("""rewriteExecutableJavaCall(source, "post")""") &&
+                migrationBody.contains("""receiver.endsWith("EVENT_BUS")"""),
+            "Legacy event bus post migration must rewrite post calls from executable Java only"
+        )
+        assertTrue(
+            stripBody.contains("val executableCode = maskJavaCommentsAndLiterals(result)") &&
+                stripBody.contains("skipWhitespace(executableCode, chainEnd)") &&
+                stripBody.contains("executableCode[next] != ';'"),
+            "Unused event bus post cancellation cleanup must inspect executable semicolon context"
+        )
+        assertTrue(
+            finderBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                finderBody.contains("executableCode.indexOf(token, cursor)") &&
+                finderBody.contains("findMatchingParen(executableCode, openParen)") &&
+                finderBody.contains("findExpressionReceiverStart(executableCode, tokenIndex)") &&
+                finderBody.contains("splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))"),
+            "Event bus post finder must locate calls in executable Java while preserving original arguments"
+        )
+        assertTrue(
+            trailingBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                trailingBody.contains("""executableCode.startsWith(".isCanceled", dot)""") &&
+                trailingBody.contains("findMatchingParen(executableCode, openParen)") &&
+                trailingBody.contains("executableCode.substring(openParen + 1, closeParen).isNotBlank()"),
+            "Event bus cancellation-chain cleanup must identify isCanceled calls in executable Java only"
+        )
+        assertTrue(
+            standaloneBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                standaloneBody.contains("executableCode.substring(lineStart, expressionStart).trim().isNotEmpty()") &&
+                standaloneBody.contains("executableCode[index].isWhitespace()") &&
+                standaloneBody.contains("executableCode[index] == ';'"),
+            "Standalone event bus post cleanup must ignore comments and literals around the expression"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy event bus post migration must not rewrite or clean comments and string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `map codec serialization migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

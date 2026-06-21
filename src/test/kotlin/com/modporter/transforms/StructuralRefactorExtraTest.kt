@@ -20070,6 +20070,35 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy event bus post migration ignores comments and string literals`() {
+        val projectDir = createFile("EventBusPostDocs.java", """
+            package com.example;
+
+            public class EventBusPostDocs {
+                // if (NeoForge.EVENT_BUS.post(event)) {
+                //     cancel();
+                // }
+                private static final String DOC = "return NeoForge.EVENT_BUS.post(event);";
+                private static final String CHAIN_DOC = "NeoForge.EVENT_BUS.post(event).isCanceled().isCanceled();";
+
+                public Object keep(Object event) {
+                    return event;
+                }
+            }
+        """.trimIndent())
+        val sourceFile = tempDir.resolve("src/main/java/com/example/EventBusPostDocs.java")
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = sourceFile.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("return NeoForge.EVENT_BUS.post(event).isCanceled();"), migrated)
+        assertTrue(migrated.contains("NeoForge.EVENT_BUS.post(event).isCanceled().isCanceled();"), migrated)
+    }
+
+    @Test
     fun `migrates advancement holder lookups display access and packet fallback`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

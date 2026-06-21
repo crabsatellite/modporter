@@ -19396,9 +19396,10 @@ $body
     }
 
     private fun migrateLegacyEventBusPostBooleans(source: String): String {
-        if (!source.contains("EVENT_BUS.post(")) return source
-        var result = rewriteJavaCall(source, "post") { receiver, args ->
-            if (!receiver.endsWith("EVENT_BUS") || args.size != 1) return@rewriteJavaCall null
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("EVENT_BUS.post(")) return source
+        var result = rewriteExecutableJavaCall(source, "post") { receiver, args ->
+            if (!receiver.endsWith("EVENT_BUS") || args.size != 1) return@rewriteExecutableJavaCall null
             "$receiver.post(${args[0]}).isCanceled()"
         }
         result = collapseDuplicateEventBusPostCancellationChecks(result)
@@ -19432,8 +19433,9 @@ $body
                 continue
             }
             val chainEnd = chainEnds.last()
-            val next = skipWhitespace(result, chainEnd)
-            if (next >= result.length || result[next] != ';' || !isStandaloneExpressionStart(result, call.receiverStart)) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val next = skipWhitespace(executableCode, chainEnd)
+            if (next >= result.length || executableCode[next] != ';' || !isStandaloneExpressionStart(result, call.receiverStart)) {
                 cursor = chainEnd
                 continue
             }
@@ -19448,16 +19450,17 @@ $body
     private fun findEventBusPostCall(source: String, start: Int): EventBusPostCall? {
         val token = ".post("
         var cursor = start
+        val executableCode = maskJavaCommentsAndLiterals(source)
         while (true) {
-            val tokenIndex = source.indexOf(token, cursor)
+            val tokenIndex = executableCode.indexOf(token, cursor)
             if (tokenIndex < 0) return null
             val openParen = tokenIndex + "post".length + 1
-            val closeParen = findMatchingParen(source, openParen)
+            val closeParen = findMatchingParen(executableCode, openParen)
             if (closeParen < 0) {
                 cursor = tokenIndex + token.length
                 continue
             }
-            val receiverStart = findExpressionReceiverStart(source, tokenIndex)
+            val receiverStart = findExpressionReceiverStart(executableCode, tokenIndex)
             if (receiverStart < 0 || receiverStart >= tokenIndex) {
                 cursor = closeParen + 1
                 continue
@@ -19474,13 +19477,14 @@ $body
     private fun trailingIsCanceledCallEnds(source: String, start: Int): List<Int> {
         val ends = mutableListOf<Int>()
         var cursor = start
+        val executableCode = maskJavaCommentsAndLiterals(source)
         while (true) {
-            val dot = skipWhitespace(source, cursor)
-            if (!source.startsWith(".isCanceled", dot)) break
-            val openParen = skipWhitespace(source, dot + ".isCanceled".length)
-            if (openParen >= source.length || source[openParen] != '(') break
-            val closeParen = findMatchingParen(source, openParen)
-            if (closeParen < 0 || source.substring(openParen + 1, closeParen).isNotBlank()) break
+            val dot = skipWhitespace(executableCode, cursor)
+            if (!executableCode.startsWith(".isCanceled", dot)) break
+            val openParen = skipWhitespace(executableCode, dot + ".isCanceled".length)
+            if (openParen >= source.length || executableCode[openParen] != '(') break
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0 || executableCode.substring(openParen + 1, closeParen).isNotBlank()) break
             ends += closeParen + 1
             cursor = closeParen + 1
         }
@@ -19488,11 +19492,12 @@ $body
     }
 
     private fun isStandaloneExpressionStart(source: String, expressionStart: Int): Boolean {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val lineStart = source.lastIndexOfAny(charArrayOf('\n', '\r'), expressionStart - 1).let { if (it < 0) 0 else it + 1 }
-        if (source.substring(lineStart, expressionStart).trim().isNotEmpty()) return false
+        if (executableCode.substring(lineStart, expressionStart).trim().isNotEmpty()) return false
         var index = expressionStart - 1
-        while (index >= 0 && source[index].isWhitespace()) index--
-        return index < 0 || source[index] == ';' || source[index] == '{' || source[index] == '}'
+        while (index >= 0 && executableCode[index].isWhitespace()) index--
+        return index < 0 || executableCode[index] == ';' || executableCode[index] == '{' || executableCode[index] == '}'
     }
 
     private fun migrateLegacyFollowOwnerGoalConstructors(source: String): String {
