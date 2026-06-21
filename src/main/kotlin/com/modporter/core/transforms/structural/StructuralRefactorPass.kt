@@ -37940,16 +37940,8 @@ public class $className extends PlacementBanBuilder {
                     "F extends RecipeInput, ${match.groupValues[1]} extends $baseClass<${match.groupValues[2].trim()}, ${match.groupValues[3].trim()}, F>"
                 }
         }
-        result = result.replace("BlockStateIngredient bypassBlockIngredient = recipe.getBypassBlock();", "Optional<BlockStateIngredient> bypassBlockIngredient = recipe.getBypassBlock();")
-        result = result.replace("var bypassBlock = display.getBypassBlock();", "Optional<BlockStateIngredient> bypassBlock = display.getBypassBlock();")
+        result = migratePlacementBanBypassBlockOptionalAccess(result)
         result = replacePlacementBanJeiSetRecipe(result)
-        result = result.replace("recipe.getBypassBlock() == null || recipe.getBypassBlock().isEmpty()", "recipe.getBypassBlock().isEmpty() || recipe.getBypassBlock().get().isEmpty()")
-        result = result.replace("display.getBypassBlock() == null || display.getBypassBlock().isEmpty()", "display.getBypassBlock().isEmpty() || display.getBypassBlock().get().isEmpty()")
-        result = result.replace("bypassBlock != null && !bypassBlock.isEmpty()", "bypassBlock.isPresent() && !bypassBlock.get().isEmpty()")
-        result = result.replace("recipe.getBypassBlock().getPairs()", "recipe.getBypassBlock().get().getPairs()")
-        result = result.replace("bypassBlock.getPairs()", "bypassBlock.get().getPairs()")
-        result = result.replace("display.getInputEntries().get(0), bypassBlock.get().getPairs()", "display.getInputEntries().get(1), bypassBlock.get().getPairs()")
-        result = result.replace("new ArrayList<>(REIUtils.toIngredientList(recipe.getBypassBlock().get().getPairs()))", "new ArrayList<>(recipe.getBypassBlock().map(blockStateIngredient -> REIUtils.toIngredientList(blockStateIngredient.getPairs())).orElse(List.of()))")
         result = result.replace("Optional.ofNullable(recipe.getBiomeKey()),\n                Optional.ofNullable(recipe.getBiomeTag())", "recipe.getBiome()")
         result = Regex("""this\(\s*categoryIdentifier,\s*inputs,\s*recipe\.getBypassBlock\(\),\s*recipe\.getBiome\(\),""")
             .replace(result, "this(categoryIdentifier,\n                inputs,\n                recipe.getBiome(),\n                recipe.getBypassBlock(),")
@@ -38004,6 +37996,75 @@ public class $className extends PlacementBanBuilder {
         }
         if (result.contains("RecipeInput")) {
             result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeInput")
+        }
+        return result
+    }
+
+    private fun migratePlacementBanBypassBlockOptionalAccess(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("getBypassBlock()")) return source
+        val id = """[A-Za-z_$][\w$]*"""
+        val receiverExpression = """$id(?:\.$id(?:\(\))?)*"""
+        var result = replaceExecutableRegex(
+            source,
+            Regex("""\b((?:final\s+)?)(?:BlockStateIngredient|var)\s+($id)\s*=\s*($receiverExpression)\.getBypassBlock\(\)\s*;""")
+        ) { match ->
+            "${match.groupValues[1]}Optional<BlockStateIngredient> ${match.groupValues[2]} = ${match.groupValues[3]}.getBypassBlock();"
+        }
+
+        val executableResult = maskJavaCommentsAndLiterals(result)
+        val bypassBlockLocals = Regex(
+            """\bOptional\s*<\s*BlockStateIngredient\s*>\s+($id)\s*=\s*($receiverExpression)\.getBypassBlock\(\)\s*;"""
+        ).findAll(executableResult)
+            .map { it.groupValues[1] }
+            .toSet()
+
+        result = replaceExecutableRegex(
+            result,
+            Regex("""new\s+ArrayList\s*<>\s*\(\s*REIUtils\.toIngredientList\(\s*($receiverExpression)\.getBypassBlock\(\)(?:\.get\(\))?\.getPairs\(\)\s*\)\s*\)""")
+        ) { match ->
+            val receiver = match.groupValues[1]
+            "new ArrayList<>($receiver.getBypassBlock().map(blockStateIngredient -> REIUtils.toIngredientList(blockStateIngredient.getPairs())).orElse(List.of()))"
+        }
+
+        result = replaceExecutableRegex(
+            result,
+            Regex("""($receiverExpression)\.getBypassBlock\(\)\s*==\s*null\s*\|\|\s*($receiverExpression)\.getBypassBlock\(\)\.isEmpty\(\)""")
+        ) { match ->
+            val receiver = match.groupValues[1]
+            if (receiver == match.groupValues[2]) {
+                "$receiver.getBypassBlock().isEmpty() || $receiver.getBypassBlock().get().isEmpty()"
+            } else {
+                match.value
+            }
+        }
+
+        result = replaceExecutableRegex(
+            result,
+            Regex("""($receiverExpression)\.getBypassBlock\(\)\.getPairs\(\)""")
+        ) { match ->
+            "${match.groupValues[1]}.getBypassBlock().get().getPairs()"
+        }
+
+        bypassBlockLocals.forEach { local ->
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(?<![\w$])${Regex.escape(local)}\s*!=\s*null\s*&&\s*!\s*${Regex.escape(local)}\.isEmpty\(\)""")
+            ) {
+                "$local.isPresent() && !$local.get().isEmpty()"
+            }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""($receiverExpression)\.getInputEntries\(\)\.get\(\s*0\s*\)\s*,\s*${Regex.escape(local)}(?:\.get\(\))?\.getPairs\(\)""")
+            ) { match ->
+                "${match.groupValues[1]}.getInputEntries().get(1), $local.get().getPairs()"
+            }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(?<![\w$])${Regex.escape(local)}\.getPairs\(\)""")
+            ) {
+                "$local.get().getPairs()"
+            }
         }
         return result
     }

@@ -148,6 +148,84 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `placement ban display bypass block migration binds arbitrary receivers and locals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AbstractPlacementBanRecipe.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeInput;
+            import net.minecraft.world.level.biome.Biome;
+            import java.util.function.Predicate;
+
+            public class AbstractPlacementBanRecipe<T, S extends Predicate<T>> implements Recipe<RecipeInput> {
+                ResourceLocation id;
+                public ResourceKey<Biome> getBiomeKey() { return null; }
+                public TagKey<Biome> getBiomeTag() { return null; }
+                public BlockStateIngredient getBypassBlock() { return null; }
+            }
+        """.trimIndent())
+        srcDir.resolve("AltPlacementDisplay.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.rei.REIClientUtils;
+            import com.aetherteam.nitrogen.integration.rei.REIUtils;
+            import com.aetherteam.nitrogen.recipe.BlockPropertyPair;
+            import com.aetherteam.nitrogen.recipe.BlockStateIngredient;
+            import me.shedaniel.rei.api.common.display.basic.BasicDisplay;
+            import me.shedaniel.rei.api.common.entry.EntryIngredient;
+            import java.util.ArrayList;
+            import java.util.List;
+            import java.util.Optional;
+
+            public class AltPlacementDisplay<R extends AbstractPlacementBanRecipe<?, ?>> extends BasicDisplay {
+                public AltPlacementDisplay() {
+                    super(List.of(), List.of(), Optional.empty());
+                }
+
+                public void render(AltPlacementDisplay<R> shownDisplay, R sourceRecipe) {
+                    BlockStateIngredient inheritedBypass = sourceRecipe.getBypassBlock();
+                    var displayBypass = shownDisplay.getBypassBlock();
+                    if (sourceRecipe.getBypassBlock() == null || sourceRecipe.getBypassBlock().isEmpty()) {
+                        return;
+                    }
+                    if (displayBypass != null && !displayBypass.isEmpty()) {
+                        REIClientUtils.setupRendering(shownDisplay.getInputEntries().get(0), displayBypass.getPairs(), null);
+                    }
+                    BlockPropertyPair[] pairs = inheritedBypass.getPairs();
+                }
+
+                public static <R extends AbstractPlacementBanRecipe<?, ?>> ArrayList<Object> collect(R sourceRecipe) {
+                    return new ArrayList<>(REIUtils.toIngredientList(sourceRecipe.getBypassBlock().getPairs()));
+                }
+
+                public BlockStateIngredient getBypassBlock() { return null; }
+                public List<EntryIngredient> getInputEntries() { return List.of(); }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("AltPlacementDisplay.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("Optional<BlockStateIngredient> inheritedBypass = sourceRecipe.getBypassBlock();"), transformed)
+        assertTrue(transformed.contains("Optional<BlockStateIngredient> displayBypass = shownDisplay.getBypassBlock();"), transformed)
+        assertTrue(transformed.contains("sourceRecipe.getBypassBlock().isEmpty() || sourceRecipe.getBypassBlock().get().isEmpty()"), transformed)
+        assertTrue(transformed.contains("displayBypass.isPresent() && !displayBypass.get().isEmpty()"), transformed)
+        assertTrue(transformed.contains("shownDisplay.getInputEntries().get(1), displayBypass.get().getPairs()"), transformed)
+        assertTrue(transformed.contains("BlockPropertyPair[] pairs = inheritedBypass.get().getPairs();"), transformed)
+        assertTrue(transformed.contains("new ArrayList<>(sourceRecipe.getBypassBlock().map(blockStateIngredient -> REIUtils.toIngredientList(blockStateIngredient.getPairs())).orElse(List.of()))"), transformed)
+        assertFalse(transformed.contains("displayBypass != null"), transformed)
+        assertFalse(transformed.contains("inheritedBypass.getPairs()"), transformed)
+    }
+
+    @Test
     fun `legacy tooltip part hiding ignores comments and string literals`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

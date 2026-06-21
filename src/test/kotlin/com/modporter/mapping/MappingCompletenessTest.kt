@@ -8507,6 +8507,53 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `placement ban display bypass block migration uses executable receiver evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyPlacementBanDisplaySource")
+        assertTrue(start >= 0, "migrateLegacyPlacementBanDisplaySource is missing")
+        val end = source.indexOf("private fun replacePlacementBanJeiSetRecipe", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val helperStart = source.indexOf("private fun migratePlacementBanBypassBlockOptionalAccess")
+        assertTrue(helperStart >= 0, "migratePlacementBanBypassBlockOptionalAccess is missing")
+        val helperEnd = source.indexOf("private fun replacePlacementBanJeiSetRecipe", helperStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val helper = source.substring(helperStart, helperEnd)
+        val offenders = listOf(
+            "fixed recipe bypass declaration" to body.contains("""BlockStateIngredient bypassBlockIngredient = recipe.getBypassBlock();"""),
+            "fixed display bypass declaration" to body.contains("""var bypassBlock = display.getBypassBlock();"""),
+            "fixed recipe null empty check" to body.contains("""recipe.getBypassBlock() == null || recipe.getBypassBlock().isEmpty()"""),
+            "fixed display null empty check" to body.contains("""display.getBypassBlock() == null || display.getBypassBlock().isEmpty()"""),
+            "fixed local bypass null empty check" to body.contains("""bypassBlock != null && !bypassBlock.isEmpty()"""),
+            "fixed recipe getPairs" to body.contains("""recipe.getBypassBlock().getPairs()"""),
+            "fixed local getPairs" to body.contains("""bypassBlock.getPairs()"""),
+            "fixed display input index rewrite" to body.contains("""display.getInputEntries().get(0), bypassBlock.get().getPairs()"""),
+            "fixed REIUtils recipe rewrite" to body.contains("""REIUtils.toIngredientList(recipe.getBypassBlock()""")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("migratePlacementBanBypassBlockOptionalAccess(result)") &&
+                helper.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                helper.contains("replaceExecutableRegex(") &&
+                helper.contains("val bypassBlockLocals = Regex(") &&
+                helper.contains("match.groupValues[1]") &&
+                helper.contains("getBypassBlock().map(blockStateIngredient -> REIUtils.toIngredientList(blockStateIngredient.getPairs())).orElse(List.of())"),
+            "PlacementBan display bypass migration must derive receivers and local names from executable source"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "PlacementBan display bypass migration must not depend on fixed recipe/display/bypassBlock sample names: $offenders"
+        )
+    }
+
+    @Test
     fun `nullable import cleanup uses executable annotation evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
