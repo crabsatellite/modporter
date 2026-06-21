@@ -3538,6 +3538,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `attribute modifier constructor id migration uses executable constructor evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateAttributeModifierResourceLocationIds")
+        assertTrue(start >= 0, "migrateAttributeModifierResourceLocationIds is missing")
+        val end = source.indexOf("private fun modifierConstantPathName", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw AttributeModifier constructor rewrite" to """rewriteJavaNew(result, "AttributeModifier")""",
+            "raw string-name AttributeModifier regex rewrite" to """new\s+AttributeModifier\(\s*"([^"]+)""",
+            "raw uuid-name AttributeModifier regex rewrite" to """new\s+AttributeModifier\(\s*([^,\r\n]+)\s*,\s*"([^"]+)"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("""rewriteExecutableJavaNew(result, "AttributeModifier")""") &&
+                body.contains("args.size == 3") &&
+                body.contains("args.size != 4") &&
+                body.contains("idAliases[legacyId] = id") &&
+                body.contains("legacyName.endsWith(\".toString()\")"),
+            "AttributeModifier constructor id migration must parse executable Java constructors and preserve legacy name/id semantics"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "AttributeModifier constructor id migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `map codec serialization migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

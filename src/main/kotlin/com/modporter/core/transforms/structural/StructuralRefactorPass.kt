@@ -23714,40 +23714,39 @@ ${indent}}"""
                     }
                     "net.minecraft.resources.ResourceLocation $alias = $target;"
                 }
-            result = Regex(
-                """new\s+AttributeModifier\(\s*"([^"]+)"\s*,\s*([^,]+)\s*,\s*AttributeModifier\.Operation\.([A-Z_]+)\s*\)"""
-            ).replace(result) { match ->
-                val id = idExpression(modifierPathName(match.groupValues[1]))
-                "new AttributeModifier($id, ${match.groupValues[2].trim()}, AttributeModifier.Operation.${match.groupValues[3]})"
-            }
-            result = Regex(
-                """new\s+AttributeModifier\(\s*([^,\r\n]+)\s*,\s*"([^"]+)"\s*,\s*([^,]+)\s*,\s*AttributeModifier\.Operation\.([A-Z_]+)\s*\)"""
-            ).replace(result) { match ->
-                val oldId = match.groupValues[1].trim()
-                val id = idExpression(modifierPathName(match.groupValues[2]))
-                idAliases[oldId] = id
-                "new AttributeModifier($id, ${match.groupValues[3].trim()}, AttributeModifier.Operation.${match.groupValues[4]})"
-            }
-            result = rewriteJavaNew(result, "AttributeModifier") { args ->
-                if (args.size != 4) return@rewriteJavaNew null
+            result = rewriteExecutableJavaNew(result, "AttributeModifier") { args ->
+                if (args.size == 3) {
+                    val legacyName = args[0].trim()
+                    val amount = args[1].trim()
+                    val operation = args[2].trim()
+                    if (!Regex(""""(?:\\.|[^"\\])*"""").matches(legacyName)) return@rewriteExecutableJavaNew null
+                    if (amount.contains(",") || !Regex("""AttributeModifier\.Operation\.[A-Z_]+""").matches(operation)) {
+                        return@rewriteExecutableJavaNew null
+                    }
+                    return@rewriteExecutableJavaNew "new AttributeModifier(${idExpression(modifierPathName(legacyName.trim('"')))}, $amount, $operation)"
+                }
+                if (args.size != 4) return@rewriteExecutableJavaNew null
+                val legacyId = args[0].trim()
                 val legacyName = args[1].trim()
                 val amount = args[2].trim()
                 val operation = args[3].trim()
                 val id = when {
                     legacyName.endsWith(".toString()") -> {
                         val existingId = legacyName.removeSuffix(".toString()").trim()
-                        if (!isDeclaredResourceLocationExpression(existingId)) return@rewriteJavaNew null
+                        if (!isDeclaredResourceLocationExpression(existingId)) return@rewriteExecutableJavaNew null
                         existingId
                     }
                     legacyName.startsWith("\"") -> {
-                        val existingId = args[0].trim()
-                        if (isDeclaredResourceLocationExpression(existingId)) {
-                            existingId
+                        if (amount.contains(",") && isDeclaredResourceLocationExpression(legacyId)) {
+                            legacyId
                         } else {
                             idExpression(modifierPathName(legacyName.trim('"')))
                         }
                     }
-                    else -> return@rewriteJavaNew null
+                    else -> return@rewriteExecutableJavaNew null
+                }
+                if (legacyName.startsWith("\"") && !amount.contains(",")) {
+                    idAliases[legacyId] = id
                 }
                 "new AttributeModifier($id, $amount, $operation)"
             }

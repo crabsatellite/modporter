@@ -14541,6 +14541,52 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `attribute modifier constructor migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+            }
+        """.trimIndent())
+        val docs = srcDir.resolve("AttributeModifierDocs.java")
+        docs.writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class AttributeModifierDocs {
+                /*
+                static final AttributeModifier ACTIVE = new AttributeModifier("Active Boost", 1.0D, AttributeModifier.Operation.ADD_VALUE);
+                void update(Object oldId) {
+                    AttributeModifier speed = new AttributeModifier(oldId, "Segment Count Speed Boost", 0.1D, AttributeModifier.Operation.ADD_VALUE);
+                }
+                */
+                private static final String DOC = "new AttributeModifier(\"Active Boost\", 1.0D, AttributeModifier.Operation.ADD_VALUE)";
+
+                public AttributeModifier keep(AttributeModifier input) {
+                    return input;
+                }
+            }
+        """.trimIndent())
+        val original = docs.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = docs.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("ResourceLocation.fromNamespaceAndPath"), migrated)
+        assertFalse(migrated.contains("active_boost"), migrated)
+        assertFalse(migrated.contains("segment_count_speed_boost"), migrated)
+    }
+
+    @Test
     fun `attribute modifier namespace uses declared mod type not java file name`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
