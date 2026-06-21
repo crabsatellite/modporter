@@ -929,6 +929,43 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `cumulus menu definition migration uses executable registry evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateCumulusMenuDefinitionSource")
+        assertTrue(start >= 0, "migrateCumulusMenuDefinitionSource is missing")
+        val end = source.indexOf("private fun migrateCumulusMenuConstructorArgs", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw Cumulus registry key prefilter" to "source.contains(\"Cumulus.MENU_REGISTRY_KEY\")",
+            "raw DeferredRegister prefilter" to "source.contains(\"DeferredRegister<Menu>\")",
+            "raw Cumulus menu import prefilter" to "source.contains(\"com.aetherteam.cumulus.api.Menu\")",
+            "raw register declaration lookup" to "registerPattern.find(source)",
+            "raw menu parenthesis matching" to "findMatchingParen(source, openParen)",
+            "raw legacy background marker" to "source.contains(\"Menu.Background\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "cumulus menu definition migration contains $label" }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("registerPattern.find(executableCode)") &&
+                body.contains("findCumulusMenuRegistrations(source, executableCode, registerField)") &&
+                body.contains("val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)") &&
+                body.contains("findMatchingParen(executableCode, openParen)"),
+            "Cumulus menu definition migration must prove registry declarations and registrations from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Cumulus menu definition migration must not treat comments or strings as registry evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `structural metadata mod id helper requires unique metadata evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

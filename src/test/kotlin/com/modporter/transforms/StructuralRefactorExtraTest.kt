@@ -24055,6 +24055,51 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `cumulus menu migration ignores commented registry declarations`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        tempDir.resolve("gradle.properties").writeText("mod_id=example\n")
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleMenus.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.cumulus.Cumulus;
+            import com.aetherteam.cumulus.api.Menu;
+            import com.aetherteam.cumulus.api.Menus;
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.minecraft.network.chat.Component;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ExampleMenus {
+                /*
+                public static final DeferredRegister<Menu> MENUS = DeferredRegister.create(Cumulus.MENU_REGISTRY_KEY, ExampleMod.MODID);
+                public static final DeferredHolder<Menu, Menu> CUSTOM = MENUS.register("custom", () -> new Menu(Menus.MINECRAFT_ICON, Component.literal("Custom"), new TitleScreen()));
+                */
+                private static final String DOCS = "com.aetherteam.cumulus.api.Menu Cumulus.MENU_REGISTRY_KEY DeferredRegister<Menu> .register(";
+
+                public static Object keep() {
+                    return DOCS;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val menus = srcDir.resolve("ExampleMenus.java").readText()
+
+        assertTrue(result.changes.none { it.ruleId == "struct-cumulus-menu-api-121" }, result.changes.joinToString("\n"))
+        assertFalse(menus.contains("@CumulusEntrypoint"), menus)
+        assertTrue(menus.contains("DeferredRegister.create(Cumulus.MENU_REGISTRY_KEY, ExampleMod.MODID)"), menus)
+    }
+
+    @Test
     fun `removes stale Cumulus prepare hooks from already migrated menu initializers`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

@@ -17924,33 +17924,36 @@ ${indent}}
     }
 
     private fun migrateCumulusMenuDefinitionSource(projectDir: Path, source: String): CumulusMenuDefinitionMigration {
-        if (!source.contains("Cumulus.MENU_REGISTRY_KEY") ||
-            !source.contains("DeferredRegister<Menu>") ||
-            !source.contains(".register(") ||
-            !source.contains("com.aetherteam.cumulus.api.Menu")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("Cumulus.MENU_REGISTRY_KEY") ||
+            !executableCode.contains("DeferredRegister<Menu>") ||
+            !executableCode.contains(".register(") ||
+            !executableCode.contains("com.aetherteam.cumulus.api.Menu")) {
             return CumulusMenuDefinitionMigration(source, null)
         }
 
-        val className = javaTopLevelTypeName(source) ?: return CumulusMenuDefinitionMigration(source, null)
+        val className = javaTopLevelTypeName(executableCode) ?: return CumulusMenuDefinitionMigration(source, null)
         val registerPattern = Regex(
             """(?ms)^[ \t]*(?:public|protected|private)\s+static\s+final\s+DeferredRegister\s*<\s*Menu\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*DeferredRegister\.create\(\s*Cumulus\.MENU_REGISTRY_KEY\s*,\s*([^)]+?)\s*\)\s*;\s*\r?\n?"""
         )
-        val registerMatch = registerPattern.find(source) ?: return CumulusMenuDefinitionMigration(source, null)
-        val registerField = registerMatch.groupValues[1]
-        val modIdExpression = registerMatch.groupValues[2].trim()
-        val registrations = findCumulusMenuRegistrations(source, registerField)
+        val registerMatch = registerPattern.find(executableCode) ?: return CumulusMenuDefinitionMigration(source, null)
+        val registerField = registerMatch.groups[1]?.range?.let { source.substring(it) }
+            ?: return CumulusMenuDefinitionMigration(source, null)
+        val modIdExpression = registerMatch.groups[2]?.range?.let { source.substring(it).trim() }
+            ?: return CumulusMenuDefinitionMigration(source, null)
+        val registrations = findCumulusMenuRegistrations(source, executableCode, registerField)
         if (registrations.isEmpty()) return CumulusMenuDefinitionMigration(source, null)
 
         val hasLegacyBackground = registrations.any { registration ->
             registration.args.any { it.contains(".background(") }
-        } || source.contains("Menu.Background")
+        } || executableCode.contains("Menu.Background")
         val panoramaExpression = if (hasLegacyBackground) {
             cumulusPanoramaExpression(projectDir, source, modIdExpression) ?: return CumulusMenuDefinitionMigration(source, null)
         } else {
             null
         }
         val booleanSuppliers = Regex("""\bBooleanSupplier\s+([A-Za-z_$][\w$]*)\s*=""")
-            .findAll(source)
+            .findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
 
@@ -17969,7 +17972,7 @@ ${indent}}
             result = result.substring(0, registration.start) + replacement + result.substring(registration.end)
         }
 
-        result = registerPattern.replace(result, "")
+        result = result.removeRange(registerMatch.range)
         result = removeUnusedCumulusBooleanSupplierFields(result, booleanSuppliers)
         result = removeCumulusMenuBackgroundFields(result)
         result = addCumulusMenuInitializerClassShape(result, className)
@@ -17997,7 +18000,11 @@ ${indent}}
         return CumulusMenuDefinitionMigration(result, owner)
     }
 
-    private fun findCumulusMenuRegistrations(source: String, registerField: String): List<CumulusMenuRegistration> {
+    private fun findCumulusMenuRegistrations(
+        source: String,
+        executableCode: String,
+        registerField: String
+    ): List<CumulusMenuRegistration> {
         val id = """[A-Za-z_$][\w$]*"""
         val prefixPattern = Regex(
             """(?m)^([ \t]*(?:public|protected|private)\s+static\s+final\s+)DeferredHolder\s*<\s*Menu\s*,\s*Menu\s*>\s+($id)\s*=\s*${Regex.escape(registerField)}\.register\(\s*"([^"]+)"\s*,\s*\(\)\s*->\s*new\s+Menu\s*\("""
@@ -18006,8 +18013,16 @@ ${indent}}
         var cursor = 0
         while (true) {
             val match = prefixPattern.find(source, cursor) ?: break
+            val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+            if (!executableSegment.contains("DeferredHolder") ||
+                !executableSegment.contains("Menu") ||
+                !executableSegment.contains("${registerField}.register(") ||
+                !executableSegment.contains("new Menu(")) {
+                cursor = match.range.last + 1
+                continue
+            }
             val openParen = match.range.last
-            val closeMenu = findMatchingParen(source, openParen)
+            val closeMenu = findMatchingParen(executableCode, openParen)
             if (closeMenu < 0) {
                 cursor = match.range.last + 1
                 continue
