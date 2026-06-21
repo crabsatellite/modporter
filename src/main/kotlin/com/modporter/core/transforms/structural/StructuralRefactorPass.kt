@@ -33502,36 +33502,46 @@ ${indent}}
     }
 
     private fun migratePlayerCloneCapabilityLifecycleSource(source: String): String {
-        if (!source.contains("reviveCaps()") &&
-            !source.contains("invalidateCapabilities()") &&
-            !source.contains("invalidateCaps()")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("reviveCaps()") &&
+            !executableCode.contains("invalidateCapabilities()") &&
+            !executableCode.contains("invalidateCaps()")) {
             return source
         }
-        if (!source.contains(".copyFrom(")) return source
-        val methodText = javaDeclaredMethodText(source, "clone") ?: return source
-        val openBrace = methodText.indexOf('{')
-        if (openBrace < 0) return source
-        val signature = methodText.substring(0, openBrace)
+        if (!executableCode.contains(".copyFrom(")) return source
+        val declaration = Regex(
+            """(?m)^[ \t]*(?:@\w+(?:\([^)]*\))?\s*)*(?:public|protected|private)\s+(?:static\s+)?[\w<>\[\].?,\s]+\s+clone\s*\("""
+        ).find(executableCode) ?: return source
+        val openBrace = executableCode.indexOf('{', declaration.range.last)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
+        if (openBrace < 0 || closeBrace < 0) return source
+        val methodRange = declaration.range.first..closeBrace
+        val methodExecutable = executableCode.substring(methodRange.first, methodRange.last + 1)
+        val signature = methodExecutable.substring(0, openBrace - methodRange.first)
         val playerParams = Regex("""\b(?:Player|ServerPlayer)\s+([A-Za-z_$][\w$]*)\b""")
             .findAll(signature)
             .map { it.groupValues[1] }
             .toList()
-        if (playerParams.size < 2 || !methodText.contains(".copyFrom(")) return source
+        if (playerParams.size < 2 || !methodExecutable.contains(".copyFrom(")) return source
 
-        var migratedMethod = methodText
-        var changed = false
+        val edits = mutableListOf<Pair<IntRange, String>>()
         playerParams.forEach { playerName ->
             val revivePattern = Regex("""(?m)^[ \t]*${Regex.escape(playerName)}\.reviveCaps\(\)\s*;\s*\r?\n""")
             val invalidatePattern = Regex("""(?m)^[ \t]*${Regex.escape(playerName)}\.(?:invalidateCapabilities|invalidateCaps)\(\)\s*;\s*\r?\n""")
-            val hasRevive = revivePattern.containsMatchIn(migratedMethod)
-            val hasInvalidate = invalidatePattern.containsMatchIn(migratedMethod)
+            val reviveMatches = revivePattern.findAll(methodExecutable).toList()
+            val invalidateMatches = invalidatePattern.findAll(methodExecutable).toList()
+            val hasRevive = reviveMatches.isNotEmpty()
+            val hasInvalidate = invalidateMatches.isNotEmpty()
             if (hasRevive && hasInvalidate) {
-                migratedMethod = revivePattern.replace(migratedMethod, "")
-                migratedMethod = invalidatePattern.replace(migratedMethod, "")
-                changed = true
+                edits += reviveMatches.map { match ->
+                    (methodRange.first + match.range.first)..(methodRange.first + match.range.last) to ""
+                }
+                edits += invalidateMatches.map { match ->
+                    (methodRange.first + match.range.first)..(methodRange.first + match.range.last) to ""
+                }
             }
         }
-        return if (changed) source.replace(methodText, migratedMethod) else source
+        return applyStringEdits(source, edits)
     }
 
     private fun migrateLegacyEnchantmentTagChecks(source: String): String {

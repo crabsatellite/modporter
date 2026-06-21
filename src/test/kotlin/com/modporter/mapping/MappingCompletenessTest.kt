@@ -2645,6 +2645,44 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `player clone capability lifecycle migration uses executable method evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migratePlayerCloneCapabilityLifecycleSource")
+        assertTrue(start >= 0, "migratePlayerCloneCapabilityLifecycleSource is missing")
+        val end = source.indexOf("private fun migrateLegacyAuthlibProfileFetchSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw revive prefilter" to """source.contains("reviveCaps()")""",
+            "raw invalidate prefilter" to """source.contains("invalidateCapabilities()")""",
+            "raw invalidateCaps prefilter" to """source.contains("invalidateCaps()")""",
+            "raw copyFrom prefilter" to """source.contains(".copyFrom(")""",
+            "raw declared method extraction" to "javaDeclaredMethodText(source, \"clone\")",
+            "raw method text replacement" to "source.replace(methodText, migratedMethod)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains(").find(executableCode)") &&
+                body.contains("val methodExecutable = executableCode.substring") &&
+                body.contains("revivePattern.findAll(methodExecutable)") &&
+                body.contains("invalidatePattern.findAll(methodExecutable)") &&
+                body.contains("applyStringEdits(source, edits)"),
+            "Player clone capability lifecycle migration must locate clone wrappers from executable Java method source"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Player clone capability lifecycle migration must not use comments as wrapper evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `resource mod id detection does not infer constant owners from file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val resourceMigrator = projectRoot

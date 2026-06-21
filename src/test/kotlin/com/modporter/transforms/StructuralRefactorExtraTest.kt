@@ -26145,6 +26145,38 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `player clone capability lifecycle migration ignores comments`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PlayerCloneDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.player.Player;
+
+            public class PlayerCloneDocs {
+                public static void clone(Player originalPlayer, Player newPlayer, boolean wasDeath) {
+                    /*
+                    originalPlayer.reviveCaps();
+                    originalPlayer.invalidateCapabilities();
+                    */
+                    PlayerData originalData = PlayerData.get(originalPlayer).orElseThrow();
+                    PlayerData newData = PlayerData.get(newPlayer).orElseThrow();
+                    newData.copyFrom(originalData, wasDeath);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val source = srcDir.resolve("PlayerCloneDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(source.contains("originalPlayer.reviveCaps();"), source)
+        assertTrue(source.contains("originalPlayer.invalidateCapabilities();"), source)
+        assertFalse(source.contains("if (originalPlayer == null)"), source)
+    }
+
+    @Test
     fun `migrates MobEffect applicable event result API without dropping event dispatch`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
