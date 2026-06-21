@@ -3312,6 +3312,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `json reload deserializer migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateRemovedJsonReloadDeserializersSource")
+        assertTrue(start >= 0, "migrateRemovedJsonReloadDeserializersSource is missing")
+        val end = source.indexOf("private fun migrateModLoadingContextRegisterConfigSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw source prefilter" to body.contains("""source.contains("Deserializers.createFunctionSerializer().create()")"""),
+            "raw source replacement" to body.contains("source.replace(\"Deserializers.createFunctionSerializer().create()\""),
+            "raw Deserializers import usage scan" to body.contains("""withoutDeserializers.contains("Deserializers.")""")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("Deserializers.createFunctionSerializer().create()")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("""\bDeserializers\.createFunctionSerializer\(\)\.create\(\)""") &&
+                body.contains("maskJavaCommentsAndLiterals(withoutDeserializers).contains(\"Deserializers.\")"),
+            "JSON reload deserializer migration must rewrite executable calls and clean imports from executable usage"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "JSON reload deserializer migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy game event constructor migration uses executable call and constructor evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

@@ -15223,11 +15223,15 @@ ${entries.joinToString(",\n")}
     }
 
     private fun migrateRemovedJsonReloadDeserializersSource(source: String): String {
-        if (!source.contains("Deserializers.createFunctionSerializer().create()")) return source
-        var result = source.replace("Deserializers.createFunctionSerializer().create()", "new GsonBuilder().create()")
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("Deserializers.createFunctionSerializer().create()")) return source
+        var result = replaceExecutableRegex(
+            source,
+            Regex("""\bDeserializers\.createFunctionSerializer\(\)\.create\(\)""")
+        ) { "new GsonBuilder().create()" }
         result = addImportIfMissing(result, "com.google.gson.GsonBuilder")
         val withoutDeserializers = removeImport(result, "net.minecraft.world.level.storage.loot.Deserializers")
-        if (!withoutDeserializers.contains("Deserializers.")) {
+        if (!maskJavaCommentsAndLiterals(withoutDeserializers).contains("Deserializers.")) {
             result = withoutDeserializers
         }
         return result

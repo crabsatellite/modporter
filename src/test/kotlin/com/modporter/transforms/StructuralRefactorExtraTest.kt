@@ -5805,6 +5805,39 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `json reload deserializer migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/data")
+        srcDir.createDirectories()
+        srcDir.resolve("ReloadListenerDocs.java").writeText("""
+            package com.example.data;
+
+            import com.google.gson.Gson;
+            import net.minecraft.world.level.storage.loot.Deserializers;
+
+            public class ReloadListenerDocs {
+                private static final String DOC = "Deserializers.createFunctionSerializer().create()";
+
+                /*
+                 Deserializers.createFunctionSerializer().create();
+                 */
+
+                public static final Gson GSON_INSTANCE = Deserializers.createFunctionSerializer().create();
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val migrated = srcDir.resolve("ReloadListenerDocs.java").readText()
+
+        assertTrue(migrated.contains("import com.google.gson.GsonBuilder;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.world.level.storage.loot.Deserializers;"), migrated)
+        assertTrue(migrated.contains("public static final Gson GSON_INSTANCE = new GsonBuilder().create();"), migrated)
+        assertTrue(migrated.contains("private static final String DOC = \"Deserializers.createFunctionSerializer().create()\";"), migrated)
+        assertTrue(migrated.contains("Deserializers.createFunctionSerializer().create();"), migrated)
+        assertFalse(migrated.contains("DOC = \"new GsonBuilder().create()\""), migrated)
+    }
+
+    @Test
     fun `entity getLevel accessors migrate only resolved entity receivers`() {
         val srcDir = tempDir.resolve("src/main/java/com/example/entity")
         srcDir.createDirectories()
