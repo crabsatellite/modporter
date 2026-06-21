@@ -2281,9 +2281,11 @@ class MappingCompletenessTest {
             "literal modid elvis fallback" to "?: \"\\\"modid\\\"\"",
             "plain modid elvis fallback" to "?: \"modid\"",
             "package-tail modid fallback" to "substringAfterLast('.', \"modid\")",
+            "generated mixin config placeholder fallback" to "?: \"modporter\"",
             "generated compat shared package fallback" to "?: \"shared\"",
             "generated compat blank mod package fallback" to "ifBlank { \"mod\" }",
-            "legacy generated compat placeholder resolver" to "private fun detectGeneratedCompatPackage"
+            "legacy generated compat placeholder resolver" to "private fun detectGeneratedCompatPackage",
+            "legacy first metadata mod id reader" to "private fun readFirstModId"
         )
 
         val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->

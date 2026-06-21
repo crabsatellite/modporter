@@ -2630,6 +2630,7 @@ public interface $accessorName {
 }
 """.trimIndent()
 
+        requireMixinConfigRegistrationTarget(projectDir, generatedPackageName, accessorName)
         if (!accessorFile.exists() || accessorFile.readText() != accessorSource) {
             changes.add(Change(
                 file = accessorFile,
@@ -2688,6 +2689,7 @@ public interface $invokerName {
 }
 """.trimIndent()
 
+        requireMixinConfigRegistrationTarget(projectDir, generatedPackageName, invokerName)
         if (!invokerFile.exists() || invokerFile.readText() != invokerSource) {
             changes.add(Change(
                 file = invokerFile,
@@ -2706,6 +2708,38 @@ public interface $invokerName {
 
         changes.addAll(ensureMixinConfigEntry(projectDir, generatedPackageName, invokerName, dryRun))
         return changes
+    }
+
+    private fun requireMixinConfigRegistrationTarget(
+        projectDir: Path,
+        packageName: String,
+        mixinClassName: String
+    ) {
+        if (hasMixinConfigRegistrationTarget(projectDir, packageName, mixinClassName)) return
+        generatedMixinConfigName(projectDir)
+    }
+
+    private fun hasMixinConfigRegistrationTarget(
+        projectDir: Path,
+        packageName: String,
+        mixinClassName: String
+    ): Boolean {
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        if (!resourcesDir.exists()) return false
+        return java.nio.file.Files.walk(resourcesDir).use { paths ->
+            paths
+                .filter { it.fileName.toString().endsWith(".mixins.json") }
+                .anyMatch { mixinConfig ->
+                    val source = mixinConfig.readText()
+                    val configPackage = Regex(""""package"\s*:\s*"([^"]+)"""")
+                        .find(source)
+                        ?.groupValues
+                        ?.get(1)
+                        ?: return@anyMatch false
+                    relativeMixinNameForConfigPackage(packageName, mixinClassName, configPackage) != null &&
+                        (packageName == configPackage || Regex(""""plugin"\s*:""").containsMatchIn(source))
+                }
+        }
     }
 
     private fun ensureMixinConfigEntry(
@@ -2878,7 +2912,8 @@ public interface $invokerName {
     }
 
     private fun generatedMixinConfigName(projectDir: Path): String {
-        val modId = readFirstModId(projectDir) ?: "modporter"
+        val modId = detectUniqueProjectModId(projectDir)
+            ?: error("Cannot derive generated mixin config name: missing or ambiguous @Mod annotation and mod metadata mod id")
         return "$modId.modporter.mixins.json"
     }
 
@@ -2914,42 +2949,6 @@ public interface $invokerName {
             description = "Register existing mixin config in NeoForge mods metadata",
             ruleId = "build-register-existing-mixin-config"
         )
-    }
-
-    private fun readFirstModId(projectDir: Path): String? {
-        fun concreteModId(raw: String?): String? {
-            val value = raw?.trim()?.trim('"') ?: return null
-            return value.takeIf {
-                it.isNotBlank() &&
-                    !it.contains('$') &&
-                    !it.contains('{') &&
-                    Regex("""[a-z0-9_.-]+""", RegexOption.IGNORE_CASE).matches(it)
-            }
-        }
-
-        projectDir.resolve("gradle.properties")
-            .takeIf { it.exists() }
-            ?.readText()
-            ?.let { properties ->
-                Regex("""(?m)^\s*(?:mod_id|modid)\s*=\s*([^\s#]+)""")
-                    .find(properties)
-                    ?.groupValues
-                    ?.get(1)
-                    ?.let(::concreteModId)
-            }
-            ?.let { return it }
-
-        val candidates = listOf(
-            projectDir.resolve("src/main/resources/META-INF/neoforge.mods.toml"),
-            projectDir.resolve("src/main/resources/META-INF/mods.toml")
-        )
-        candidates.firstOrNull { it.exists() }
-            ?.readText()
-            ?.let { Regex("""(?m)^\s*modId\s*=\s*"([^"]+)"""").find(it)?.groupValues?.get(1) }
-            ?.let(::concreteModId)
-            ?.let { return it }
-
-        return detectModId(projectDir)
     }
 
     private fun ensureNeoForgeModsTomlMixinEntry(projectDir: Path, configName: String, dryRun: Boolean): List<Change> {

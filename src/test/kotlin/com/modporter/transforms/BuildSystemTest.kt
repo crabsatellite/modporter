@@ -1243,6 +1243,93 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `generated mixin config rejects missing mod id instead of placeholder name`() {
+        val projectDir = tempDir.resolve("missing-modid-generated-mixin-config")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        srcDir.createDirectories()
+        resourcesDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("FluidMixin.java").writeText("""
+            package com.example;
+
+            public class FluidMixin {
+                @SuppressWarnings({"rawtypes", "unchecked"})
+                private static Object blockingSpaceType() {
+                    try {
+                        Class<?> spaceType = Class.forName("com.simibubi.create.content.fluids.transfer.FluidFillingBehaviour${'$'}SpaceType");
+                        return Enum.valueOf((Class<? extends Enum>) spaceType.asSubclass(Enum.class), "BLOCKING");
+                    } catch (ClassNotFoundException e) {
+                        throw new IllegalStateException("Create FluidFillingBehaviour.SpaceType is unavailable", e);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("FluidMixin.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive generated mixin config name") },
+            "Expected missing mod id to hard gate generated mixin config naming; got ${result.errors}"
+        )
+        assertTrue(source.contains("Class.forName("), source)
+        assertFalse(resourcesDir.resolve("modporter.modporter.mixins.json").exists())
+        assertFalse(srcDir.resolve("modporter/mixin/ModPorterSpaceTypeAccessor.java").exists())
+    }
+
+    @Test
+    fun `generated mixin config rejects ambiguous metadata mod ids`() {
+        val projectDir = tempDir.resolve("ambiguous-modid-generated-mixin-config")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        val metaInfDir = resourcesDir.resolve("META-INF")
+        srcDir.createDirectories()
+        metaInfDir.createDirectories()
+        metaInfDir.resolve("mods.toml").writeText("""
+            modLoader="javafml"
+
+            [[mods]]
+            modId="firstmod"
+
+            [[mods]]
+            modId="secondmod"
+        """.trimIndent())
+        srcDir.resolve("FluidMixin.java").writeText("""
+            package com.example;
+
+            public class FluidMixin {
+                @SuppressWarnings({"rawtypes", "unchecked"})
+                private static Object blockingSpaceType() {
+                    try {
+                        Class<?> spaceType = Class.forName("com.simibubi.create.content.fluids.transfer.FluidFillingBehaviour${'$'}SpaceType");
+                        return Enum.valueOf((Class<? extends Enum>) spaceType.asSubclass(Enum.class), "BLOCKING");
+                    } catch (ClassNotFoundException e) {
+                        throw new IllegalStateException("Create FluidFillingBehaviour.SpaceType is unavailable", e);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("FluidMixin.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive generated mixin config name") },
+            "Expected ambiguous metadata mod ids to hard gate generated mixin config naming; got ${result.errors}"
+        )
+        assertTrue(source.contains("Class.forName("), source)
+        assertFalse(resourcesDir.resolve("firstmod.modporter.mixins.json").exists())
+        assertFalse(resourcesDir.resolve("secondmod.modporter.mixins.json").exists())
+        assertFalse(resourcesDir.resolve("modporter.modporter.mixins.json").exists())
+        assertFalse(srcDir.resolve("modporter/mixin/ModPorterSpaceTypeAccessor.java").exists())
+    }
+
+    @Test
     fun `generated mixin invoker joins conditional parent mixin config`() {
         val projectDir = tempDir.resolve("conditional-parent-mixin-config")
         val srcDir = projectDir.resolve("src/main/java/com/example")
