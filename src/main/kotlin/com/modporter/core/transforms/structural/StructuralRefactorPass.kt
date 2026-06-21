@@ -24510,17 +24510,54 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
     }
 
     private fun migrateCommandSourceStackLevelAccess(source: String): String {
-        if (!source.contains("CommandSourceStack") || !source.contains(".level()")) return source
-        var result = source
-        val variables = Regex("""\bCommandSourceStack\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
-            .map { it.groupValues[1] }
-            .toSet()
-        variables.forEach { variable ->
-            result = Regex("""\b${Regex.escape(variable)}\.level\(\)""")
-                .replace(result, "$variable.getLevel()")
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("CommandSourceStack") ||
+            !Regex("""\.\s*level\s*\(\s*\)""").containsMatchIn(executableCode)) {
+            return source
         }
-        return result
+        val commandSourceType = """(?:CommandSourceStack|net\.minecraft\.commands\.CommandSourceStack)"""
+        val declarationPattern = Regex("""\b$commandSourceType\s+([A-Za-z_$][\w$]*)\b""")
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        for (scope in commandSourceStackExecutableScopes(executableCode)) {
+            val declarations = declarationPattern.findAll(executableCode, scope.first)
+                .takeWhile { it.range.last <= scope.last }
+                .groupBy({ it.groupValues[1] }, { it.range.first })
+            if (declarations.isEmpty()) continue
+            for ((variable, declarationOffsets) in declarations) {
+                val levelCallPattern = Regex("""\b${Regex.escape(variable)}\s*\.\s*level\s*\(\s*\)""")
+                levelCallPattern.findAll(executableCode, scope.first)
+                    .takeWhile { it.range.last <= scope.last }
+                    .filter { match -> declarationOffsets.any { it < match.range.first } }
+                    .filterNot { match ->
+                        val originalMatch = source.substring(match.range)
+                        originalMatch.contains("/*") || originalMatch.contains("//")
+                    }
+                    .forEach { match -> edits += match.range to "$variable.getLevel()" }
+            }
+        }
+        return applyStringEdits(source, edits)
+    }
+
+    private fun commandSourceStackExecutableScopes(executableCode: String): List<IntRange> {
+        val methodRanges = javaMethodRanges(executableCode).map { it.range }
+        val typeBlocks = javaTypeBlocks(executableCode, executableCode)
+        val constructorRanges = typeBlocks.flatMap { type ->
+            val constructorPattern = Regex(
+                """(?m)^[ \t]*(?:@\w+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:public|protected|private)?\s*${Regex.escape(type.name)}\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\{"""
+            )
+            constructorPattern.findAll(executableCode)
+                .mapNotNull { match ->
+                    if (match.range.first <= type.bodyStart || match.range.first >= type.end) return@mapNotNull null
+                    val openBrace = executableCode.indexOf('{', match.range.last - 1)
+                    val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
+                    if (openBrace < 0 || closeBrace < 0 || closeBrace > type.end) return@mapNotNull null
+                    match.range.first..closeBrace
+                }
+                .toList()
+        }
+        return (methodRanges + constructorRanges)
+            .distinct()
+            .sortedBy { it.first }
     }
 
     private fun migrateLegacyStaticFmlModEventBusAccess(source: String): String {

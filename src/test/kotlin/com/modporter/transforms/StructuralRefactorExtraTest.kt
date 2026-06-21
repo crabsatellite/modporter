@@ -17182,6 +17182,52 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `command source stack level migration uses executable scoped variable evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CommandDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.commands.CommandSourceStack;
+
+            public class CommandDocs {
+                private static final String DOC = "source.level().getSeed()";
+
+                /*
+                 CommandSourceStack fakeSource;
+                 fakeSource.level().getSeed();
+                 */
+
+                public CommandDocs(CommandSourceStack constructorSource) {
+                    constructorSource
+                        .level()
+                        .getSeed();
+                }
+
+                public void run(CommandSourceStack source) {
+                    source
+                        .level()
+                        .getSeed();
+                }
+
+                public void unrelated(Object source) {
+                    source.level();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val command = srcDir.resolve("CommandDocs.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(command.contains("constructorSource.getLevel()\n            .getSeed();"), command)
+        assertTrue(command.contains("source.getLevel()\n            .getSeed();"), command)
+        assertTrue(command.contains("""private static final String DOC = "source.level().getSeed()";"""), command)
+        assertTrue(command.contains("fakeSource.level().getSeed();"), command)
+        assertTrue(command.contains("public void unrelated(Object source) {\n        source.level();"), command)
+    }
+
+    @Test
     fun `migrates strict runtime compile API surfaces without mod-specific rules`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

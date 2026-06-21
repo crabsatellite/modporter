@@ -2707,6 +2707,47 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `command source stack level migration uses executable scoped evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateCommandSourceStackLevelAccess")
+        assertTrue(start >= 0, "migrateCommandSourceStackLevelAccess is missing")
+        val end = source.indexOf("private fun migrateLegacyStaticFmlModEventBusAccess", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw CommandSourceStack prefilter" to """source.contains("CommandSourceStack")""",
+            "raw level-call prefilter" to """source.contains(".level()")""",
+            "raw result variable scan" to ".findAll(result)",
+            "raw variable replacement" to ".replace(result, \"${'$'}variable.getLevel()\")",
+            "full source edit fallback" to "replaceExecutableRegex(source"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("commandSourceStackExecutableScopes(executableCode)") &&
+                body.contains(".findAll(executableCode, scope.first)") &&
+                body.contains(".takeWhile { it.range.last <= scope.last }") &&
+                body.contains(".filter { match -> declarationOffsets.any { it < match.range.first } }") &&
+                body.contains("return applyStringEdits(source, edits)") &&
+                body.contains("private fun commandSourceStackExecutableScopes(executableCode: String)") &&
+                body.contains("javaMethodRanges(executableCode)") &&
+                body.contains("javaTypeBlocks(executableCode, executableCode)") &&
+                body.contains("constructorPattern.findAll(executableCode)"),
+            "CommandSourceStack level migration must use executable method/constructor scope evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "CommandSourceStack level migration must not rewrite comments, strings, or full-file same-name calls: $offenders"
+        )
+    }
+
+    @Test
     fun `production mod event bus listener migrations do not infer owners from java file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
