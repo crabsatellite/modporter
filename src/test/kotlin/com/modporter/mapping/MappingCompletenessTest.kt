@@ -3716,6 +3716,57 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy sound event supplier constructor migration uses executable declarations and calls`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val collectStart = source.indexOf("private fun collectSoundEventSupplierConstructors")
+        assertTrue(collectStart >= 0, "collectSoundEventSupplierConstructors is missing")
+        val collectEnd = source.indexOf("private fun isLegacySoundEventSupplierParameter", collectStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val collectBody = source.substring(collectStart, collectEnd)
+        val migrateStart = source.indexOf("private fun migrateLegacySoundEventSupplierLambdas")
+        assertTrue(migrateStart >= 0, "migrateLegacySoundEventSupplierLambdas is missing")
+        val migrateEnd = source.indexOf("private fun migrateSoundEventSupplierConstructorArgs", migrateStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val migrateBody = source.substring(migrateStart, migrateEnd)
+        val offenders = listOf(
+            "raw package scan" to ".find(source)",
+            "raw declared type scan" to ".findAll(source)",
+            "raw constructor scan" to "constructorPattern.findAll(source)",
+            "raw record scan" to "recordPattern.findAll(source)",
+            "raw SoundEvents prefilter" to """source.contains("SoundEvents.")""",
+            "raw supplier constructor rewrite" to "rewriteJavaNew(result, className)",
+            "raw super scan" to """result.indexOf("super(", cursor)""",
+            "raw super paren match" to "findMatchingParen(result, openParen)"
+        )
+            .filter { (_, marker) -> collectBody.contains(marker) || migrateBody.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            collectBody.contains("val code = maskJavaComments(source)") &&
+                collectBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                collectBody.contains(".find(code)") &&
+                collectBody.contains(".findAll(executableCode)") &&
+                collectBody.contains("constructorPattern.findAll(executableCode)") &&
+                collectBody.contains("recordPattern.findAll(executableCode)") &&
+                migrateBody.contains("maskJavaCommentsAndLiterals(source).contains(\"SoundEvents.\")") &&
+                migrateBody.contains("rewriteExecutableJavaNew(result, className)") &&
+                migrateBody.contains("val executableCode = maskJavaCommentsAndLiterals(result)") &&
+                migrateBody.contains("executableCode.indexOf(\"super(\", cursor)") &&
+                migrateBody.contains("findMatchingParen(executableCode, openParen)"),
+            "Legacy sound event supplier migration must collect constructor signatures and call sites from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy sound event supplier migration must not use comments or string literals as constructor evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `map codec serialization migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

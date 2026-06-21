@@ -20669,6 +20669,51 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy sound event supplier constructor migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val sourceFile = srcDir.resolve("SoundSupplierDocs.java")
+        sourceFile.writeText("""
+            package com.example;
+
+            import net.minecraft.sounds.SoundEvents;
+
+            public class SoundSupplierDocs {
+                /*
+                class GlovesItem {
+                    GlovesItem(java.util.function.Supplier<? extends net.minecraft.sounds.SoundEvent> sound) {
+                    }
+                }
+
+                class GoldGlovesItem extends GlovesItem {
+                    GoldGlovesItem() {
+                        super(() -> SoundEvents.ARMOR_EQUIP_GOLD);
+                    }
+                }
+                */
+                private static final String DOC = "new GlovesItem(() -> SoundEvents.GENERIC_EXPLODE)";
+
+                Object chain = new GlovesItem(() -> SoundEvents.ARMOR_EQUIP_CHAIN);
+
+                public String keep() {
+                    return DOC;
+                }
+            }
+        """.trimIndent())
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertEquals(0, result.changeCount)
+        assertEquals(original, migrated)
+        assertFalse(migrated.contains("SoundEvents.ARMOR_EQUIP_CHAIN.value()"), migrated)
+        assertFalse(migrated.contains("SoundEvents.GENERIC_EXPLODE.value()"), migrated)
+        assertFalse(migrated.contains("SoundEvents.ARMOR_EQUIP_GOLD.value()"), migrated)
+    }
+
+    @Test
     fun `migrates literal text color parse calls without hiding dynamic parse failures`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

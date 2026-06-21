@@ -31550,13 +31550,15 @@ ${indent}}
 
         javaFiles.forEach { javaFile ->
             val source = runCatching { javaFile.readText() }.getOrNull() ?: return@forEach
+            val code = maskJavaComments(source)
+            val executableCode = maskJavaCommentsAndLiterals(source)
             val packageName = Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
-                .find(source)
+                .find(code)
                 ?.groupValues
                 ?.get(1)
                 .orEmpty()
             val declaredTypes = Regex("""\b(?:class|record)\s+([A-Za-z_$][\w$]*)\b""")
-                .findAll(source)
+                .findAll(executableCode)
                 .map { it.groupValues[1] }
                 .toSet()
             if (declaredTypes.isEmpty()) return@forEach
@@ -31574,10 +31576,10 @@ ${indent}}
                     .add(SoundEventSupplierConstructor(params.size, supplierIndexes))
             }
 
-            constructorPattern.findAll(source).forEach { match ->
+            constructorPattern.findAll(executableCode).forEach { match ->
                 addConstructorHint(match.groupValues[1], match.groupValues[2])
             }
-            recordPattern.findAll(source).forEach { match ->
+            recordPattern.findAll(executableCode).forEach { match ->
                 addConstructorHint(match.groupValues[1], match.groupValues[2])
             }
         }
@@ -31600,22 +31602,23 @@ ${indent}}
         source: String,
         constructors: Map<String, List<SoundEventSupplierConstructor>>
     ): String {
-        if (!source.contains("SoundEvents.") || constructors.isEmpty()) return source
+        if (!maskJavaCommentsAndLiterals(source).contains("SoundEvents.") || constructors.isEmpty()) return source
 
         var result = source
         constructors.keys.forEach { className ->
-            result = rewriteJavaNew(result, className) { args ->
+            result = rewriteExecutableJavaNew(result, className) { args ->
                 val migratedArgs = migrateSoundEventSupplierConstructorArgs(args, constructors[className].orEmpty())
-                    ?: return@rewriteJavaNew null
+                    ?: return@rewriteExecutableJavaNew null
                 "new $className(${migratedArgs.joinToString(", ") { it.trim() }})"
             }
         }
 
         var cursor = 0
         while (true) {
-            val tokenIndex = result.indexOf("super(", cursor)
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenIndex = executableCode.indexOf("super(", cursor)
             if (tokenIndex < 0) break
-            if (tokenIndex > 0 && (result[tokenIndex - 1].isLetterOrDigit() || result[tokenIndex - 1] == '_' || result[tokenIndex - 1] == '.')) {
+            if (tokenIndex > 0 && (executableCode[tokenIndex - 1].isLetterOrDigit() || executableCode[tokenIndex - 1] == '_' || executableCode[tokenIndex - 1] == '.')) {
                 cursor = tokenIndex + "super(".length
                 continue
             }
@@ -31627,7 +31630,7 @@ ${indent}}
                 continue
             }
             val openParen = tokenIndex + "super".length
-            val closeParen = findMatchingParen(result, openParen)
+            val closeParen = findMatchingParen(executableCode, openParen)
             if (closeParen < 0) {
                 cursor = tokenIndex + "super(".length
                 continue
