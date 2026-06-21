@@ -837,23 +837,33 @@ $streamFields,
     }
 
     private fun migratePartialNbtIngredients(source: String): String {
-        if (!source.contains("PartialNBTIngredient")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("PartialNBTIngredient")) return source
 
         var result = source
         var changed = false
 
-        result = Regex(
-            """(?s)public\s+final\s+PartialNBTIngredient\s+([A-Za-z_$][\w$]*)\s*\(\s*Item\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*return\s+PartialNBTIngredient\.of\s*\(\s*\2\s*,\s*Util\.make\s*\(\s*\(\s*\)\s*->\s*\{\s*CompoundTag\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+CompoundTag\s*\(\s*\)\s*;\s*\3\.putInt\s*\(\s*ItemStack\.TAG_DAMAGE\s*,\s*\2\.getMaxDamage\s*\(\s*\)\s*\)\s*;\s*return\s+\3\s*;\s*\}\s*\)\s*\)\s*;\s*\}"""
-        ).replace(result) { match ->
+        result = replaceExecutableRegex(
+            result,
+            Regex(
+                """(?s)public\s+final\s+PartialNBTIngredient\s+([A-Za-z_$][\w$]*)\s*\(\s*Item\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*return\s+PartialNBTIngredient\.of\s*\(\s*\2\s*,\s*Util\.make\s*\(\s*\(\s*\)\s*->\s*\{\s*CompoundTag\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+CompoundTag\s*\(\s*\)\s*;\s*\3\.putInt\s*\(\s*ItemStack\.TAG_DAMAGE\s*,\s*\2\.getMaxDamage\s*\(\s*\)\s*\)\s*;\s*return\s+\3\s*;\s*\}\s*\)\s*\)\s*;\s*\}"""
+            )
+        ) { match ->
             changed = true
             val method = match.groupValues[1]
             val item = match.groupValues[2]
             "public final Ingredient $method(Item $item) {\n\t\treturn DataComponentIngredient.of(false, DataComponents.DAMAGE, $item.getMaxDamage(), $item);\n\t}"
         }
 
-        result = Regex(
-            """(?s)public\s+final\s+PartialNBTIngredient\s+([A-Za-z_$][\w$]*)\s*\(\s*Potion\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*return\s+PartialNBTIngredient\.of\s*\(\s*Items\.POTION\s*,\s*Util\.make\s*\(\s*\(\s*\)\s*->\s*\{\s*CompoundTag\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+CompoundTag\s*\(\s*\)\s*;\s*\3\.putString\s*\(\s*"Potion"\s*,\s*BuiltInRegistries\.POTION\.getKey\s*\(\s*\2\s*\)\.toString\s*\(\s*\)\s*\)\s*;\s*return\s+\3\s*;\s*\}\s*\)\s*\)\s*;\s*\}"""
-        ).replace(result) { match ->
+        result = replaceExecutableRegex(
+            result,
+            Regex(
+                """(?s)public\s+final\s+PartialNBTIngredient\s+([A-Za-z_$][\w$]*)\s*\(\s*Potion\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*return\s+PartialNBTIngredient\.of\s*\(\s*Items\.POTION\s*,\s*Util\.make\s*\(\s*\(\s*\)\s*->\s*\{\s*CompoundTag\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+CompoundTag\s*\(\s*\)\s*;\s*\3\.putString\s*\(\s*[^,]+,\s*BuiltInRegistries\.POTION\.getKey\s*\(\s*\2\s*\)\.toString\s*\(\s*\)\s*\)\s*;\s*return\s+\3\s*;\s*\}\s*\)\s*\)\s*;\s*\}"""
+            )
+        ) { match ->
+            if (!Regex("""\.putString\s*\(\s*"Potion"\s*,""").containsMatchIn(match.value)) {
+                return@replaceExecutableRegex match.value
+            }
             changed = true
             val method = match.groupValues[1]
             val potion = match.groupValues[2]

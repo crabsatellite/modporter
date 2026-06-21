@@ -4475,6 +4475,40 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `partial nbt ingredient migration uses executable source evidence`() {
+        val textPass = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = textPass.indexOf("private fun migratePartialNbtIngredients")
+        assertTrue(start >= 0, "migratePartialNbtIngredients is missing")
+        val end = textPass.indexOf("private fun migrateSingleItemRecipeBuilderResults", start + 1).let {
+            if (it < 0) textPass.length else it
+        }
+        val body = textPass.substring(start, end)
+        val offenders = listOf(
+            "raw partial nbt prefilter" to body.contains("""source.contains("PartialNBTIngredient")"""),
+            "raw damage replacement" to Regex("""Regex\([\s\S]*?ItemStack\.TAG_DAMAGE[\s\S]*?\)\s*\.\s*replace\(result""").containsMatchIn(body),
+            "raw potion replacement" to Regex("""Regex\([\s\S]*?BuiltInRegistries\.POTION[\s\S]*?\)\s*\.\s*replace\(result""").containsMatchIn(body)
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("PartialNBTIngredient")""") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("match.value") &&
+                body.contains("""return@replaceExecutableRegex match.value"""),
+            "PartialNBTIngredient migration must use executable Java source and leave unsupported matches untouched"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "PartialNBTIngredient migration must not rewrite comments or string literals with raw regex replacement: $offenders"
+        )
+    }
+
+    @Test
     fun `curative item effect migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

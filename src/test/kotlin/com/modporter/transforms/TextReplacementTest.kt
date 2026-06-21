@@ -4074,6 +4074,57 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `partial nbt ingredient migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.Util;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.neoforged.neoforge.common.crafting.PartialNBTIngredient;
+
+            public class TestMod {
+                /*
+                 public final PartialNBTIngredient commented(Item item) {
+                     return PartialNBTIngredient.of(item, Util.make(() -> {
+                         CompoundTag nbt = new CompoundTag();
+                         nbt.putInt(ItemStack.TAG_DAMAGE, item.getMaxDamage());
+                         return nbt;
+                     }));
+                 }
+                 */
+                private static final String DOC = "PartialNBTIngredient.of(item, Util.make(() -> nbt))";
+
+                public final PartialNBTIngredient damagedItem(Item item) {
+                    return PartialNBTIngredient.of(item, Util.make(() -> {
+                        CompoundTag nbt = new CompoundTag();
+                        nbt.putInt(ItemStack.TAG_DAMAGE, item.getMaxDamage());
+                        return nbt;
+                    }));
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("public final Ingredient damagedItem(Item item)"), transformed)
+        assertTrue(
+            transformed.contains("DataComponentIngredient.of(false, DataComponents.DAMAGE, item.getMaxDamage(), item)"),
+            transformed
+        )
+        assertTrue(transformed.contains("public final PartialNBTIngredient commented(Item item)"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"PartialNBTIngredient.of(item, Util.make(() -> nbt))\";"), transformed)
+        assertFalse(transformed.contains("public final Ingredient commented(Item item)"), transformed)
+        assertFalse(transformed.contains("DOC = \"DataComponentIngredient.of"), transformed)
+    }
+
+    @Test
     fun `unsupported partial nbt ingredient helpers are not half migrated`() {
         val projectDir = createTestFile("""
             package com.example;
