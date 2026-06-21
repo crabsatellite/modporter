@@ -4219,6 +4219,49 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `tier incorrect tag resources are not emitted from metadata namespace fallback`() {
+        val projectDir = createTestFile("""
+            package com.example.util;
+
+            import net.minecraft.tags.BlockTags;
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.item.Tiers;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.neoforged.neoforge.common.SimpleTier;
+            import net.neoforged.neoforge.common.TierSortingRegistry;
+
+            import java.util.List;
+
+            public class TestMod {
+                public static final Tier COPPER = TierSortingRegistry.registerTier(
+                        new SimpleTier(2, 512, 6.5F, 2, 25, BlockTags.create(UnknownMod.prefix("needs_copper_tool")), () -> Ingredient.EMPTY),
+                        UnknownMod.prefix("copper"), List.of(Tiers.IRON), List.of(Tiers.DIAMOND));
+            }
+        """.trimIndent())
+        val metaInf = projectDir.resolve("src/main/resources/META-INF")
+        metaInf.createDirectories()
+        metaInf.resolve("mods.toml").writeText("""
+            [[mods]]
+            modId = "example"
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+        val metadataFallbackTag = projectDir.resolve("src/main/resources/data/example/tags/block/incorrect_for_copper_tool.json")
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive namespace for custom tool tier tag") },
+            "Expected namespace hard gate, got: ${result.errors}"
+        )
+        assertTrue(transformed.contains("TierSortingRegistry.registerTier"), transformed)
+        assertTrue(transformed.contains("UnknownMod.prefix(\"needs_copper_tool\")"), transformed)
+        assertFalse(metadataFallbackTag.exists(), "Must not emit generated tags from mods.toml namespace fallback")
+    }
+
+    @Test
     fun `tier sorting registry drop checks migrate to tier tool properties`() {
         val projectDir = createTestFile("""
             package com.example.util;

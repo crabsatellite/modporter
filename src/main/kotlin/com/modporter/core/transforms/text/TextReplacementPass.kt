@@ -336,7 +336,7 @@ class TextReplacementPass(
                 )
             )
         }
-        ensureTierIncorrectTagResources(projectDir, file, tierIncorrectTagResources, changes, dryRun)
+        ensureTierIncorrectTagResources(projectDir, tierIncorrectTagResources, changes, dryRun)
 
         val beforeLootCodecs = content
         content = migrateLootSerializerCodecs(content, legacyLootCodecOwners)
@@ -1174,7 +1174,7 @@ $streamFields,
             ?: if (simpleArgs.size == 7) incorrectBlockTagForMiningLevel(simpleArgs[0].trim()) else oldNeedsTag
         if (toolName != null && miningLevel != null) {
             val namespace = namespaceFromTagExpression(oldNeedsTag, projectDir, sourceFile)
-            if (namespace == null && projectMetadataNamespaces(projectDir).singleOrNull() == null) {
+            if (namespace == null) {
                 val relative = projectDir.relativize(sourceFile).toString().replace('\\', '/')
                 errors.add("Cannot derive namespace for custom tool tier tag '$oldNeedsTag' in $relative")
                 return null
@@ -1312,62 +1312,49 @@ $streamFields,
 
     private fun ensureTierIncorrectTagResources(
         projectDir: Path,
-        sourceFile: Path,
         specs: List<TierIncorrectTagResource>,
         changes: MutableList<Change>,
         dryRun: Boolean
     ) {
         if (specs.isEmpty()) return
         val resourceDirs = targetResourceDirs(projectDir)
-        val metadataNamespaces = projectMetadataNamespaces(projectDir)
         val emittedTargets = mutableSetOf<Path>()
 
         for (spec in specs.distinct()) {
-            val namespaces = spec.namespace?.let { listOf(it) } ?: metadataNamespaces.singleOrNull()?.let { listOf(it) }
-            if (namespaces.isNullOrEmpty()) continue
-
             for (resourceDir in resourceDirs) {
-                for (namespace in namespaces) {
-                    val target = resourceDir
-                        .resolve("data")
-                        .resolve(namespace)
-                        .resolve("tags/block")
-                        .resolve("${spec.path}.json")
-                    if (!emittedTargets.add(target)) continue
-                    if (target.exists()) continue
+                val target = resourceDir
+                    .resolve("data")
+                    .resolve(spec.namespace)
+                    .resolve("tags/block")
+                    .resolve("${spec.path}.json")
+                if (!emittedTargets.add(target)) continue
+                if (target.exists()) continue
 
-                    val content = """
+                val content = """
 {
   "values": [
     "${spec.vanillaReference}"
   ]
 }
-                    """.trimIndent() + "\n"
-                    changes.add(
-                        Change(
-                            file = target,
-                            line = 1,
-                            description = "Generate 1.21 incorrect-block tag for migrated custom tool tier",
-                            before = spec.sourceTagExpression,
-                            after = "${namespace}:${spec.path} -> ${spec.vanillaReference}",
-                            confidence = Confidence.HIGH,
-                            ruleId = "tier-incorrect-block-tag-resource"
-                        )
+                """.trimIndent() + "\n"
+                changes.add(
+                    Change(
+                        file = target,
+                        line = 1,
+                        description = "Generate 1.21 incorrect-block tag for migrated custom tool tier",
+                        before = spec.sourceTagExpression,
+                        after = "${spec.namespace}:${spec.path} -> ${spec.vanillaReference}",
+                        confidence = Confidence.HIGH,
+                        ruleId = "tier-incorrect-block-tag-resource"
                     )
-                    if (!dryRun) {
-                        target.parent.createDirectories()
-                        target.writeText(content)
-                    }
+                )
+                if (!dryRun) {
+                    target.parent.createDirectories()
+                    target.writeText(content)
                 }
             }
         }
     }
-
-    private fun existingResourceDirs(projectDir: Path): List<Path> =
-        listOf(
-            projectDir.resolve("src/main/resources"),
-            projectDir.resolve("src/generated/resources")
-        ).filter { it.exists() }
 
     private fun targetResourceDirs(projectDir: Path): List<Path> {
         val generated = projectDir.resolve("src/generated/resources")
@@ -1375,25 +1362,8 @@ $streamFields,
         return listOf(projectDir.resolve("src/main/resources"))
     }
 
-    private fun projectMetadataNamespaces(projectDir: Path): List<String> {
-        val namespaces = linkedSetOf<String>()
-        existingResourceDirs(projectDir).forEach { resourceDir ->
-            readModIds(resourceDir.resolve("META-INF/mods.toml")).forEach(namespaces::add)
-            readModIds(resourceDir.resolve("META-INF/neoforge.mods.toml")).forEach(namespaces::add)
-        }
-        return namespaces.toList()
-    }
-
-    private fun readModIds(toml: Path): List<String> {
-        if (!toml.exists()) return emptyList()
-        return Regex("""(?m)^\s*modId\s*=\s*"([a-z0-9_.-]+)"\s*$""")
-            .findAll(toml.readText())
-            .map { it.groupValues[1] }
-            .toList()
-    }
-
     private data class TierIncorrectTagResource(
-        val namespace: String?,
+        val namespace: String,
         val path: String,
         val vanillaReference: String,
         val sourceTagExpression: String

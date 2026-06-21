@@ -3665,27 +3665,47 @@ class MappingCompletenessTest {
     }
 
     @Test
-    fun `text resource namespace helpers do not infer mod id from data directories`() {
+    fun `tier incorrect tag resources require source namespace evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
             .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
             .readText()
-        val helper = "projectMetadataNamespaces"
-        val start = source.indexOf("private fun $helper")
-        assertTrue(start >= 0, "$helper is missing")
-        val end = source.indexOf("\n    private fun ", start + 1).let { if (it < 0) source.length else it }
-        val body = source.substring(start, end)
+        val migrationStart = source.indexOf("private fun migrateTierSortingRegistryCall")
+        assertTrue(migrationStart >= 0, "migrateTierSortingRegistryCall is missing")
+        val migrationEnd = source.indexOf("private fun simpleTierConstructorArguments", migrationStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val migrationBody = source.substring(migrationStart, migrationEnd)
+        val resourceStart = source.indexOf("private fun ensureTierIncorrectTagResources")
+        assertTrue(resourceStart >= 0, "ensureTierIncorrectTagResources is missing")
+        val resourceEnd = source.indexOf("private fun targetResourceDirs", resourceStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val resourceBody = source.substring(resourceStart, resourceEnd)
         val forbidden = listOf(
-            "data directory scan" to ".resolve(\"data\")",
-            "directory namespace listing" to "Files.list"
+            "metadata namespace fallback" to "projectMetadataNamespaces",
+            "mods.toml namespace fallback" to "readModIds",
+            "single metadata namespace fallback" to "metadataNamespaces.singleOrNull()",
+            "nullable resource namespace" to "namespace?.let"
         )
         val offenders = forbidden
-            .filter { (_, marker) -> body.contains(marker) }
-            .map { (label, _) -> "$helper contains $label" }
+            .filter { (_, marker) -> source.contains(marker) || resourceBody.contains(marker) }
+            .map { (label, _) -> label }
 
         assertTrue(
+            migrationBody.contains("val namespace = namespaceFromTagExpression(oldNeedsTag, projectDir, sourceFile)") &&
+                migrationBody.contains("if (namespace == null)") &&
+                migrationBody.contains("Cannot derive namespace for custom tool tier tag"),
+            "Tier incorrect tag migration must hard gate when the old tag expression has no namespace"
+        )
+        assertTrue(
+            resourceBody.contains(".resolve(spec.namespace)") &&
+                resourceBody.contains("after = \"\${spec.namespace}:\${spec.path} -> \${spec.vanillaReference}\""),
+            "Generated tier incorrect tag resources must use the namespace parsed from the source tag expression"
+        )
+        assertTrue(
             offenders.isEmpty(),
-            "Resource namespace helpers must use mod metadata or source expressions, not data directory names: $offenders"
+            "Tier incorrect tag resources must not infer namespaces from project metadata or directories: $offenders"
         )
     }
 
