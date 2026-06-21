@@ -15932,6 +15932,46 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `Mth trigonometry float argument migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TrigDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.util.Mth;
+
+            public class TrigDocs {
+                private static final String DOC = "Mth.sin(angle) Mth.cos((float) partial)";
+
+                /*
+                void docs(double angle, float partial) {
+                    double x = Mth.sin(angle);
+                    double z = Mth.cos((float) partial);
+                }
+                */
+
+                void real(double angle, float partial) {
+                    double x = Mth.sin(angle);
+                    double z = Mth.cos((float) partial);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val trig = srcDir.resolve("TrigDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(trig.contains("""private static final String DOC = "Mth.sin(angle) Mth.cos((float) partial)";"""), trig)
+        assertTrue(trig.contains("double x = Mth.sin((float) angle);"), trig)
+        assertTrue(trig.contains("double z = Mth.cos(partial);"), trig)
+        assertTrue(
+            Regex("""/\*\s*void docs\(double angle, float partial\)\s*\{\s*double x = Mth\.sin\(angle\);\s*double z = Mth\.cos\(\(float\) partial\);""", RegexOption.DOT_MATCHES_ALL)
+                .containsMatchIn(trig),
+            trig
+        )
+    }
+
+    @Test
     fun `migrates legacy packet registrations and common 1_21 compile surfaces`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val networkDir = srcDir.resolve("network")

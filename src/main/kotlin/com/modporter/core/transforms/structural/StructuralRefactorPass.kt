@@ -16735,37 +16735,40 @@ ${indent}}
 
     private fun migrateRedundantJava21Casts(source: String): String {
         var result = source
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val floatVariables = Regex("""\bfloat\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
+            .findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
         for (variable in floatVariables) {
-            result = Regex("""\(float\)\s+${Regex.escape(variable)}\b""")
-                .replace(result, variable)
+            result = replaceExecutableRegex(result, Regex("""\(float\)\s+${Regex.escape(variable)}\b""")) { variable }
         }
 
+        val resultExecutableCode = maskJavaCommentsAndLiterals(result)
         val livingEntityVariables = Regex("""\bLivingEntity\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
+            .findAll(resultExecutableCode)
             .map { it.groupValues[1] }
             .toSet()
         for (variable in livingEntityVariables) {
-            result = Regex("""\(\s*\(\s*LivingEntity\s*\)\s*${Regex.escape(variable)}\s*\)""")
-                .replace(result, variable)
+            result = replaceExecutableRegex(result, Regex("""\(\s*\(\s*LivingEntity\s*\)\s*${Regex.escape(variable)}\s*\)""")) { variable }
         }
 
-        if (result.contains("Vector3f")) {
+        val vectorExecutableCode = maskJavaCommentsAndLiterals(result)
+        if (vectorExecutableCode.contains("Vector3f")) {
             val vectorVariables = Regex("""\b(?:org\.joml\.)?Vector3f\s+([A-Za-z_$][\w$]*)\b""")
-                .findAll(result)
+                .findAll(vectorExecutableCode)
                 .map { it.groupValues[1] }
                 .toSet()
             val vectorArrays = Regex("""\b(?:org\.joml\.)?Vector3f\s*\[\s*]\s+([A-Za-z_$][\w$]*)\b""")
-                .findAll(result)
+                .findAll(vectorExecutableCode)
                 .map { it.groupValues[1] }
                 .toSet()
             val vectorReceivers = (vectorVariables + vectorArrays).joinToString("|") { Regex.escape(it) }
             if (vectorReceivers.isNotBlank()) {
-                result = Regex("""\(float\)\s*\(\s*(($vectorReceivers)(?:\s*\[[^]]+])?\.(?:x|y|z)\(\))\s*\)""")
-                    .replace(result) { match -> match.groupValues[1] }
+                result = replaceExecutableRegex(
+                    result,
+                    Regex("""\(float\)\s*\(\s*(($vectorReceivers)(?:\s*\[[^]]+])?\.(?:x|y|z)\(\))\s*\)""")
+                ) { match -> match.groupValues[1] }
             }
         }
 
@@ -17107,46 +17110,65 @@ ${indent}}
     }
 
     private fun migrateMthTrigonometryFloatArguments(source: String): String {
-        if (!source.contains("Mth.sin(") && !source.contains("Mth.cos(")) return source
-        var result = source
-        val methodPattern = Regex("""(?m)(?:public|protected|private)?\s*(?:static\s+)?[\w<>\[\].?,\s]+\s+[A-Za-z_$][\w$]*\s*\([^;{}]*\)\s*\{""")
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("Mth.sin(") && !executableCode.contains("Mth.cos(")) return source
+        val methodPattern = Regex("""(?m)^[ \t]*(?:@[\w.]+(?:\([^)]*\))?[ \t]+)*(?:public|protected|private)?[ \t]*(?:(?:static|final|synchronized|strictfp)[ \t]+)*(?:<[^;{}()]+>[ \t]+)?[\w<>\[\].?, \t]+[ \t]+[A-Za-z_$][\w$]*[ \t]*\([^;{}]*\)[ \t]*(?:throws[^{;]+)?\{""")
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        fun addExecutableEdit(methodRange: IntRange, match: MatchResult, replacement: String) {
+            val absoluteRange = (methodRange.first + match.range.first)..(methodRange.first + match.range.last)
+            if (executableCode.substring(absoluteRange) == match.value &&
+                source.substring(absoluteRange) == match.value) {
+                edits += absoluteRange to replacement
+            }
+        }
         var cursor = 0
         while (true) {
-            val method = methodPattern.find(result, cursor) ?: break
-            val openBrace = result.indexOf('{', method.range.last - 1)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            val method = methodPattern.find(executableCode, cursor) ?: break
+            val openBrace = executableCode.indexOf('{', method.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
             if (openBrace < 0 || closeBrace < 0) {
                 cursor = method.range.last + 1
                 continue
             }
-            val methodText = result.substring(method.range.first, closeBrace + 1)
+            val methodRange = method.range.first..closeBrace
+            val methodExecutableText = executableCode.substring(methodRange)
             val doubleVariables = Regex("""\bdouble\s+([A-Za-z_$][\w$]*)\b""")
-                .findAll(methodText)
+                .findAll(methodExecutableText)
                 .map { it.groupValues[1] }
                 .toSet()
             val floatVariables = Regex("""\bfloat\s+([A-Za-z_$][\w$]*)\b""")
-                .findAll(methodText)
+                .findAll(methodExecutableText)
                 .map { it.groupValues[1] }
                 .toSet()
-            var rewrittenMethod = methodText
             for (variable in doubleVariables - floatVariables) {
                 val escaped = Regex.escape(variable)
-                rewrittenMethod = Regex("""\bMth\.sin\(\s*$escaped\s*\)""").replace(rewrittenMethod, "Mth.sin((float) $variable)")
-                rewrittenMethod = Regex("""\bMth\.cos\(\s*$escaped\s*\)""").replace(rewrittenMethod, "Mth.cos((float) $variable)")
+                Regex("""\bMth\.sin\(\s*$escaped\s*\)""")
+                    .findAll(methodExecutableText)
+                    .forEach { match ->
+                        addExecutableEdit(methodRange, match, "Mth.sin((float) $variable)")
+                    }
+                Regex("""\bMth\.cos\(\s*$escaped\s*\)""")
+                    .findAll(methodExecutableText)
+                    .forEach { match ->
+                        addExecutableEdit(methodRange, match, "Mth.cos((float) $variable)")
+                    }
             }
             for (variable in floatVariables) {
                 val escaped = Regex.escape(variable)
-                rewrittenMethod = Regex("""\bMth\.sin\(\s*\(float\)\s*$escaped\s*\)""").replace(rewrittenMethod, "Mth.sin($variable)")
-                rewrittenMethod = Regex("""\bMth\.cos\(\s*\(float\)\s*$escaped\s*\)""").replace(rewrittenMethod, "Mth.cos($variable)")
+                Regex("""\bMth\.sin\(\s*\(float\)\s*$escaped\s*\)""")
+                    .findAll(methodExecutableText)
+                    .forEach { match ->
+                        addExecutableEdit(methodRange, match, "Mth.sin($variable)")
+                    }
+                Regex("""\bMth\.cos\(\s*\(float\)\s*$escaped\s*\)""")
+                    .findAll(methodExecutableText)
+                    .forEach { match ->
+                        addExecutableEdit(methodRange, match, "Mth.cos($variable)")
+                    }
             }
-            if (rewrittenMethod != methodText) {
-                result = result.substring(0, method.range.first) + rewrittenMethod + result.substring(closeBrace + 1)
-                cursor = method.range.first + rewrittenMethod.length
-            } else {
-                cursor = closeBrace + 1
-            }
+            cursor = closeBrace + 1
         }
-        return result
+        return applyStringEdits(source, edits)
     }
 
     private fun migrateMapDecorationRecordSource(source: String): String {

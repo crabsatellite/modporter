@@ -3030,6 +3030,82 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `Java 21 redundant cast migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateRedundantJava21Casts")
+        assertTrue(start >= 0, "migrateRedundantJava21Casts is missing")
+        val end = source.indexOf("private fun migrateBlockDefaultStateThisEscapeWarning", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw variable scan" to ".findAll(result)",
+            "raw float cast replacement" to ".replace(result, variable)",
+            "raw vector cast replacement" to ".replace(result) { match -> match.groupValues[1] }"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("findAll(executableCode)") &&
+                body.contains("maskJavaCommentsAndLiterals(result)") &&
+                body.contains("replaceExecutableRegex(result, Regex"),
+            "Java 21 redundant cast migration must inspect and rewrite executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Java 21 redundant cast migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `Mth trigonometry float argument migration uses executable method source`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateMthTrigonometryFloatArguments")
+        assertTrue(start >= 0, "migrateMthTrigonometryFloatArguments is missing")
+        val end = source.indexOf("private fun migrateMapDecorationRecordSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw Mth.sin prefilter" to """source.contains("Mth.sin(")""",
+            "raw Mth.cos prefilter" to """source.contains("Mth.cos(")""",
+            "raw method scan" to "methodPattern.find(result, cursor)",
+            "raw brace matching" to "findMatchingBrace(result, openBrace)",
+            "raw method extraction" to "result.substring(method.range.first",
+            "raw method splice" to "result.substring(0, method.range.first)",
+            "unanchored method pattern" to "Regex(\"\"\"(?m)(?:public|protected|private)?"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("Mth.sin(")""") &&
+                body.contains("""executableCode.contains("Mth.cos(")""") &&
+                body.contains("val methodPattern = Regex(\"\"\"(?m)^[ \\t]*") &&
+                body.contains("methodPattern.find(executableCode, cursor)") &&
+                body.contains("findMatchingBrace(executableCode, openBrace)") &&
+                body.contains("val methodExecutableText = executableCode.substring(methodRange)") &&
+                body.contains("findAll(methodExecutableText)") &&
+                body.contains("source.substring(absoluteRange) == match.value") &&
+                body.contains("return applyStringEdits(source, edits)"),
+            "Mth trigonometry migration must collect variables and rewrite calls from executable Java method source"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Mth trigonometry migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy entity type AABB migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
