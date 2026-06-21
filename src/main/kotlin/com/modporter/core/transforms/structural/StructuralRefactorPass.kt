@@ -10084,6 +10084,7 @@ $fields
         val javaFiles = Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .toList()
+        val javaSourceTypes = collectJavaSourceTypes(javaFiles)
         val recordComponents = collectJavaRecordComponents(srcDir)
         val mapCodecConstantOwners = collectMapCodecConstantOwners(srcDir)
         val mapCodecRequiredOwners = collectMapCodecRequiredOwners(srcDir)
@@ -10505,7 +10506,8 @@ $fields
 
                 val predicateOverrideMigrated = migrateLegacyRegistryBackedItemStackPredicateOverrides(
                     text,
-                    legacyItemStackPredicateOverrides
+                    legacyItemStackPredicateOverrides,
+                    javaSourceTypes
                 )
                 if (predicateOverrideMigrated != text) {
                     changes.add(Change(
@@ -10922,31 +10924,43 @@ $fields
     private fun collectLegacyItemStackPredicateOverrideMethods(javaFiles: List<Path>): Set<LegacyItemStackPredicateOverrideMethod> =
         javaFiles.mapNotNull { javaFile ->
             val source = javaFile.readText()
-            if (!source.contains("Predicate<ItemStack>") ||
-                !source.contains("Map<Predicate<ItemStack>") ||
-                !source.contains(".putIfAbsent(")) {
+            val executableCode = maskJavaCommentsAndLiterals(source)
+            if (!executableCode.contains("Predicate<ItemStack>") ||
+                !executableCode.contains("Map<Predicate<ItemStack>") ||
+                !executableCode.contains(".putIfAbsent(")) {
                 return@mapNotNull null
             }
-            val ownerClass = classNameOfJavaSource(source) ?: return@mapNotNull null
-            val packageName = packageNameOf(source)
+            val ownerClass = classNameOfJavaSource(executableCode) ?: return@mapNotNull null
+            val packageName = packageNameOf(executableCode)
             val methodPattern = Regex(
                 """(?m)\bstatic\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*Predicate\s*<\s*ItemStack\s*>\s+[A-Za-z_$][\w$]*\s*,"""
             )
-            methodPattern.findAll(source)
+            methodPattern.findAll(executableCode)
                 .map { LegacyItemStackPredicateOverrideMethod(packageName, ownerClass, it.groupValues[1]) }
                 .toList()
         }.flatten().toSet()
 
     private fun migrateLegacyRegistryBackedItemStackPredicateOverrides(
         source: String,
-        methods: Set<LegacyItemStackPredicateOverrideMethod>
+        methods: Set<LegacyItemStackPredicateOverrideMethod>,
+        javaTypes: List<JavaSourceType>
     ): String {
-        var result = migratePlayerBackedSimpleContainerFieldVisibility(source)
-        if (!source.contains("Predicate<ItemStack>") && methods.none { source.contains("${it.methodName}(") }) {
+        val methodAccesses = legacyItemStackPredicateOverrideMethodAccesses(methods, javaTypes)
+        val migratableMethods = methodAccesses.keys
+        val requiredContainerTypes = methodAccesses.values.map { it.containerTypeFqn }.toSet()
+        val currentTypeFqn = currentJavaSourceTypeFqn(source)
+        var result = if (currentTypeFqn in requiredContainerTypes) {
+            migratePlayerBackedSimpleContainerFieldVisibility(source)
+        } else {
+            source
+        }
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("Predicate<ItemStack>") &&
+            migratableMethods.none { executableCode.contains("${it.methodName}(") }) {
             return result
         }
-        result = migrateLegacyItemStackPredicateOverrideDefinitions(result)
-        result = migrateLegacyItemStackPredicateOverrideCallSites(result, methods)
+        result = migrateLegacyItemStackPredicateOverrideDefinitions(result, javaTypes)
+        result = migrateLegacyItemStackPredicateOverrideCallSites(result, migratableMethods)
         if (result == source) return source
         if (result.contains("Function<RegistryAccess, Predicate<ItemStack>>")) {
             result = addImportIfMissing(result, "java.util.function.Function")
@@ -10958,33 +10972,51 @@ $fields
         return result
     }
 
-    private fun migrateLegacyItemStackPredicateOverrideDefinitions(source: String): String {
-        if (!source.contains("Map<Predicate<ItemStack>") ||
-            !source.contains("Predicate<ItemStack>") ||
-            !source.contains(".putIfAbsent(")) {
-            return migratePlayerBackedSimpleContainerFieldVisibility(source)
+    private data class ItemStackPredicateRegistryAccess(
+        val expression: String,
+        val containerTypeFqn: String
+    )
+
+    private fun migrateLegacyItemStackPredicateOverrideDefinitions(source: String, javaTypes: List<JavaSourceType>): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("Map<Predicate<ItemStack>") ||
+            !executableCode.contains("Predicate<ItemStack>") ||
+            !executableCode.contains(".putIfAbsent(")) {
+            return source
         }
-        val registryAccess = inferItemStackPredicateOverrideRegistryAccess(source) ?: return migratePlayerBackedSimpleContainerFieldVisibility(source)
+        val registryAccess = inferItemStackPredicateOverrideRegistryAccess(source, javaTypes)
+            ?: return source
         var result = source
         val fieldNames = Regex("""Map\s*<\s*Predicate\s*<\s*ItemStack\s*>\s*,\s*String\s*>\s+([A-Za-z_$][\w$]*)""")
-            .findAll(result)
+            .findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
-        if (fieldNames.isEmpty()) return migratePlayerBackedSimpleContainerFieldVisibility(source)
+        if (fieldNames.isEmpty()) return source
 
-        result = Regex("""Map\s*<\s*Predicate\s*<\s*ItemStack\s*>\s*,\s*String\s*>""")
-            .replace(result, "Map<Function<RegistryAccess, Predicate<ItemStack>>, String>")
-        result = Regex("""Predicate\s*<\s*ItemStack\s*>\s+([A-Za-z_$][\w$]*)(?=\s*,\s*String\s+[A-Za-z_$][\w$]*\s*\))""")
-            .replace(result, "Function<RegistryAccess, Predicate<ItemStack>> $1")
+        result = replaceExecutableRegex(
+            result,
+            Regex("""Map\s*<\s*Predicate\s*<\s*ItemStack\s*>\s*,\s*String\s*>""")
+        ) { "Map<Function<RegistryAccess, Predicate<ItemStack>>, String>" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""Predicate\s*<\s*ItemStack\s*>\s+([A-Za-z_$][\w$]*)(?=\s*,\s*String\s+[A-Za-z_$][\w$]*\s*\))""")
+        ) { match -> "Function<RegistryAccess, Predicate<ItemStack>> ${match.groupValues[1]}" }
 
         for (fieldName in fieldNames) {
             val loopPattern = Regex(
                 """(?ms)^([ \t]*)for\s*\(\s*Predicate\s*<\s*ItemStack\s*>\s+([A-Za-z_$][\w$]*)\s*:\s*${Regex.escape(fieldName)}\.keySet\(\)\s*\)\s*\{\s*if\s*\(\s*\2\.test\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\)\s*\{\s*return\s+${Regex.escape(fieldName)}\.get\(\s*\2\s*\)\s*;\s*}\s*}\s*return\s+([^;\r\n]+);\s*$"""
             )
-            result = loopPattern.replace(result) { match ->
+            val beforeLoopRewrite = result
+            result = replaceExecutableRegex(result, loopPattern) { match ->
                 val indent = match.groupValues[1]
                 val stack = match.groupValues[3]
-                val fallback = match.groupValues[4].trim()
+                val originalLoop = beforeLoopRewrite.substring(match.range.first, match.range.last + 1)
+                val fallback = Regex("""(?s).*}\s*return\s+([^;\r\n]+);\s*$""")
+                    .find(originalLoop)
+                    ?.groupValues
+                    ?.get(1)
+                    ?.trim()
+                    ?: match.groupValues[4].trim()
                 "${indent}Optional<String> key = $fieldName.entrySet().stream().filter(e -> e.getKey().apply($registryAccess).test($stack)).findAny().map(Map.Entry::getValue);\n" +
                     "${indent}return key.orElseGet(() -> $fallback);"
             }
@@ -10994,24 +11026,115 @@ $fields
         return result
     }
 
-    private fun inferItemStackPredicateOverrideRegistryAccess(source: String): String? {
-        val inventoryField = Regex(
+    private fun legacyItemStackPredicateOverrideMethodAccesses(
+        methods: Set<LegacyItemStackPredicateOverrideMethod>,
+        javaTypes: List<JavaSourceType>
+    ): Map<LegacyItemStackPredicateOverrideMethod, ItemStackPredicateRegistryAccess> =
+        methods.mapNotNull { method ->
+            val access = legacyItemStackPredicateOverrideMethodAccess(method, javaTypes) ?: return@mapNotNull null
+            method to access
+        }.toMap()
+
+    private fun legacyItemStackPredicateOverrideMethodAccess(
+        method: LegacyItemStackPredicateOverrideMethod,
+        javaTypes: List<JavaSourceType>
+    ): ItemStackPredicateRegistryAccess? {
+        val owner = javaTypes.singleOrNull { it.fqn == method.qualifiedOwner } ?: return null
+        val executableCode = maskJavaCommentsAndLiterals(owner.source)
+        if (!executableCode.contains("Map<Predicate<ItemStack>") ||
+            !executableCode.contains("Predicate<ItemStack>") ||
+            !executableCode.contains(".putIfAbsent(")) {
+            return null
+        }
+        return inferItemStackPredicateOverrideRegistryAccessShape(owner.source, javaTypes)
+    }
+
+    private fun inferItemStackPredicateOverrideRegistryAccess(source: String, javaTypes: List<JavaSourceType>): String? =
+        inferItemStackPredicateOverrideRegistryAccessShape(source, javaTypes)?.expression
+
+    private fun inferItemStackPredicateOverrideRegistryAccessShape(
+        source: String,
+        javaTypes: List<JavaSourceType>
+    ): ItemStackPredicateRegistryAccess? {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val packageName = packageNameOf(executableCode)
+        val imports = javaNonStaticImports(executableCode)
+        val wildcardImports = javaNonStaticWildcardImports(executableCode)
+        val knownTypes = javaTypes.map { it.fqn }.toSet()
+        val typeByFqn = javaTypes.associateBy { it.fqn }
+        val inventoryFields = Regex(
             """(?m)^[ \t]*private\s+final\s+([A-Za-z_$][\w$]*(?:Inventory|Container))\s+([A-Za-z_$][\w$]*)\s*;"""
-        ).find(source) ?: return null
-        val fieldName = inventoryField.groupValues[2]
-        return "this.$fieldName.player.registryAccess()"
+        ).findAll(executableCode)
+            .mapNotNull { match ->
+                val typeName = match.groupValues[1]
+                val resolvedType = resolveKnownJavaTypeReference(
+                    typeName,
+                    packageName,
+                    imports,
+                    wildcardImports,
+                    knownTypes
+                ) ?: return@mapNotNull null
+                val type = typeByFqn[resolvedType] ?: return@mapNotNull null
+                if (!isPlayerBackedSimpleContainerType(type)) return@mapNotNull null
+                match.groupValues[2] to resolvedType
+            }
+            .distinct()
+            .toList()
+        val (fieldName, containerTypeFqn) = inventoryFields.singleOrNull() ?: return null
+        return ItemStackPredicateRegistryAccess(
+            expression = "this.$fieldName.player.registryAccess()",
+            containerTypeFqn = containerTypeFqn
+        )
+    }
+
+    private fun currentJavaSourceTypeFqn(source: String): String? {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val className = javaTopLevelTypeName(executableCode) ?: return null
+        val packageName = packageNameOf(executableCode)
+        return if (packageName.isBlank()) className else "$packageName.$className"
+    }
+
+    private fun isPlayerBackedSimpleContainerType(type: JavaSourceType): Boolean {
+        val executableCode = maskJavaCommentsAndLiterals(type.source)
+        val imports = javaNonStaticImports(executableCode)
+        val wildcardImports = javaNonStaticWildcardImports(executableCode)
+        val extendsSimpleContainer = extractJavaTopLevelSuperTypes(executableCode).any { superType ->
+            resolveKnownJavaTypeReference(
+                superType,
+                type.packageName,
+                imports,
+                wildcardImports,
+                setOf("net.minecraft.world.SimpleContainer")
+            ) == "net.minecraft.world.SimpleContainer"
+        }
+        if (!extendsSimpleContainer) return false
+
+        val hasAccessibleOrMigratablePlayerField = Regex(
+            """(?m)^[ \t]*(?:private|public)\s+final\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s+player\s*;"""
+        ).findAll(executableCode).any { match ->
+            resolveKnownJavaTypeReference(
+                match.groupValues[1],
+                type.packageName,
+                imports,
+                wildcardImports,
+                setOf("net.minecraft.world.entity.player.Player")
+            ) == "net.minecraft.world.entity.player.Player"
+        }
+        if (!hasAccessibleOrMigratablePlayerField) return false
+        return Regex("""\bthis\.player\s*=\s*player\s*;""").containsMatchIn(executableCode)
     }
 
     private fun migratePlayerBackedSimpleContainerFieldVisibility(source: String): String {
-        if (!source.contains("private final Player player") ||
-            !source.contains("this.player = player") ||
-            !Regex("""extends\s+SimpleContainer\b""").containsMatchIn(source)) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!Regex("""(?m)^[ \t]*private\s+final\s+(?:net\.minecraft\.world\.entity\.player\.)?Player\s+player\s*;""").containsMatchIn(executableCode) ||
+            !executableCode.contains("this.player = player") ||
+            !Regex("""extends\s+(?:net\.minecraft\.world\.)?SimpleContainer\b""").containsMatchIn(executableCode)) {
             return source
         }
-        return source.replace(
-            Regex("""(?m)^([ \t]*)private\s+final\s+Player\s+player\s*;"""),
-            "$1public final Player player;"
-        )
+        return replaceExecutableRegex(
+            source,
+            Regex("""(?m)^([ \t]*)private\s+final\s+((?:net\.minecraft\.world\.entity\.player\.)?Player)\s+player\s*;"""),
+        ) { match -> "${match.groupValues[1]}public final ${match.groupValues[2]} player;" }
     }
 
     private fun migrateLegacyItemStackPredicateOverrideCallSites(
@@ -11021,12 +11144,12 @@ $fields
         if (methods.isEmpty()) return source
         var result = source
         methods.forEach { method ->
-            result = rewriteJavaCallWithOffset(result, method.methodName) { receiver, args, _ ->
-                if (args.size < 2) return@rewriteJavaCallWithOffset null
+            result = rewriteExecutableJavaCall(result, method.methodName) { receiver, args ->
+                if (args.size < 2) return@rewriteExecutableJavaCall null
                 val receiverText = receiver.trim()
                 val matchesOwner = receiverText == method.ownerClass || receiverText == method.qualifiedOwner ||
                     receiverText.endsWith(".${method.ownerClass}")
-                if (!matchesOwner || !isLegacyItemStackPredicateLambda(args[0])) return@rewriteJavaCallWithOffset null
+                if (!matchesOwner || !isLegacyItemStackPredicateLambda(args[0])) return@rewriteExecutableJavaCall null
                 val migratedArgs = args.toMutableList()
                 migratedArgs[0] = "registryAccess -> ${args[0].trim()}"
                 "$receiverText.${method.methodName}(${migratedArgs.joinToString(", ") { it.trim() }})"
@@ -11044,22 +11167,23 @@ $fields
         var cursor = 0
         val token = "${method.methodName}("
         while (true) {
-            val tokenIndex = result.indexOf(token, cursor)
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenIndex = executableCode.indexOf(token, cursor)
             if (tokenIndex < 0) break
             if (tokenIndex > 0) {
-                val prev = result[tokenIndex - 1]
+                val prev = executableCode[tokenIndex - 1]
                 if (prev.isLetterOrDigit() || prev == '_' || prev == '$' || prev == '.') {
                     cursor = tokenIndex + token.length
                     continue
                 }
             }
             val openParen = tokenIndex + method.methodName.length
-            val closeParen = findMatchingParen(result, openParen)
+            val closeParen = findMatchingParen(executableCode, openParen)
             if (closeParen < 0) {
                 cursor = tokenIndex + token.length
                 continue
             }
-            if (looksLikeJavaMethodDeclaration(result, tokenIndex, closeParen)) {
+            if (looksLikeJavaMethodDeclaration(executableCode, tokenIndex, closeParen)) {
                 cursor = closeParen + 1
                 continue
             }
@@ -41028,6 +41152,13 @@ $writeLines
         val fqn: String
             get() = if (packageName.isBlank()) className else "$packageName.$className"
     }
+
+    private fun collectJavaSourceTypes(javaFiles: List<Path>): List<JavaSourceType> =
+        javaFiles.mapNotNull { file ->
+            val source = file.readText()
+            val className = javaTopLevelTypeName(source) ?: return@mapNotNull null
+            JavaSourceType(file, packageNameOf(source), className, source)
+        }
 
     private data class NitrogenRecipeSerializerSource(
         val type: JavaSourceType,

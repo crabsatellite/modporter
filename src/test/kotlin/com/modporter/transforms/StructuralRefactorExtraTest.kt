@@ -22194,6 +22194,86 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `item stack predicate override registry access rejects ambiguous player backed containers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        listOf("PrimaryInventory", "SecondaryInventory").forEach { name ->
+            srcDir.resolve("$name.java").writeText("""
+                package com.example;
+
+                import net.minecraft.world.SimpleContainer;
+                import net.minecraft.world.entity.player.Player;
+
+                public class $name extends SimpleContainer {
+                    private final Player player;
+
+                    public $name(Player player) {
+                        super(1);
+                        this.player = player;
+                    }
+                }
+            """.trimIndent())
+        }
+        srcDir.resolve("LoreBookMenu.java").writeText("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.Map;
+            import java.util.function.Predicate;
+            import net.minecraft.world.item.ItemStack;
+
+            public class LoreBookMenu {
+                private static final Map<Predicate<ItemStack>, String> LORE_ENTRY_OVERRIDES = new HashMap<>();
+                private final PrimaryInventory primaryInventory;
+                private final SecondaryInventory secondaryInventory;
+
+                public LoreBookMenu(PrimaryInventory primaryInventory, SecondaryInventory secondaryInventory) {
+                    this.primaryInventory = primaryInventory;
+                    this.secondaryInventory = secondaryInventory;
+                }
+
+                public static void addLoreEntryOverride(Predicate<ItemStack> predicate, String entry) {
+                    LORE_ENTRY_OVERRIDES.putIfAbsent(predicate, entry);
+                }
+
+                public String getLoreEntryKey(ItemStack stack) {
+                    for (Predicate<ItemStack> predicate : LORE_ENTRY_OVERRIDES.keySet()) {
+                        if (predicate.test(stack)) {
+                            return LORE_ENTRY_OVERRIDES.get(predicate);
+                        }
+                    }
+                    return "lore." + stack.getDescriptionId();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LoreClient.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+
+            public class LoreClient {
+                public static void registerLoreOverrides() {
+                    LoreBookMenu.addLoreEntryOverride(stack -> ItemStack.isSameItemSameComponents(stack, ItemStack.EMPTY), "lore.example");
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val primary = srcDir.resolve("PrimaryInventory.java").readText()
+        val secondary = srcDir.resolve("SecondaryInventory.java").readText()
+        val menu = srcDir.resolve("LoreBookMenu.java").readText()
+        val client = srcDir.resolve("LoreClient.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-registry-backed-itemstack-predicate" }, result.changes.joinToString("\n"))
+        assertTrue(primary.contains("private final Player player;"), primary)
+        assertTrue(secondary.contains("private final Player player;"), secondary)
+        assertTrue(menu.contains("Map<Predicate<ItemStack>, String> LORE_ENTRY_OVERRIDES"), menu)
+        assertFalse(menu.contains("Function<RegistryAccess, Predicate<ItemStack>>"), menu)
+        assertFalse(menu.contains(".player.registryAccess()"), menu)
+        assertFalse(client.contains("registryAccess ->"), client)
+    }
+
+    @Test
     fun `legacy banner item factories do not infer owners from java file names`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

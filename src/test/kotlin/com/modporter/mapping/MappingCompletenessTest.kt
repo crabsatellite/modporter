@@ -4921,14 +4921,59 @@ class MappingCompletenessTest {
         }
         val body = source.substring(start, end)
         val offenders = listOf(
-            "java file-name owner fallback" to Regex("""classNameOfJavaSource\(source\)\s*\?:\s*javaFile\.fileName\.toString\(\)\.removeSuffix\("\.java"\)""")
+            "java file-name owner fallback" to Regex("""classNameOfJavaSource\(source\)\s*\?:\s*javaFile\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "raw source method scan" to Regex("""methodPattern\.findAll\(source\)"""),
+            "raw source owner declaration" to Regex("""classNameOfJavaSource\(source\)""")
         )
             .filter { (_, pattern) -> pattern.containsMatchIn(body) }
             .map { (label, _) -> "collectLegacyItemStackPredicateOverrideMethods contains $label" }
 
         assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("classNameOfJavaSource(executableCode)") &&
+                body.contains("methodPattern.findAll(executableCode)"),
+            "Registry-backed item-stack predicate method collection must use executable Java only"
+        )
+        assertTrue(
             offenders.isEmpty(),
             "Registry-backed item-stack predicate migrations must use source-declared Java owners, not Java file-name fallback inference: $offenders"
+        )
+    }
+
+    @Test
+    fun `registry backed item stack predicate registry access requires unique player backed source type`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyRegistryBackedItemStackPredicateOverrides")
+        assertTrue(start >= 0, "migrateLegacyRegistryBackedItemStackPredicateOverrides is missing")
+        val end = source.indexOf("private fun migrateLegacyItemStackPredicateOverrideCallSites", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw inventory field scan" to Regex("""\.find(?:All)?\(source\)"""),
+            "global simple type fallback" to Regex("""javaTypes\.(?:singleOrNull|firstOrNull)\s*\{[^}]*className"""),
+            "unconditional player field visibility" to Regex("""var\s+result\s*=\s*migratePlayerBackedSimpleContainerFieldVisibility\(source\)"""),
+            "raw map rewrite result replace" to Regex("""\.replace\(result,\s*"Map<Function<RegistryAccess""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("legacyItemStackPredicateOverrideMethodAccesses(methods, javaTypes)") &&
+                body.contains("requiredContainerTypes") &&
+                body.contains("currentTypeFqn in requiredContainerTypes") &&
+                body.contains("resolveKnownJavaTypeReference") &&
+                body.contains("isPlayerBackedSimpleContainerType(type)") &&
+                body.contains("inventoryFields.singleOrNull()") &&
+                body.contains("replaceExecutableRegex("),
+            "Registry-backed item-stack predicate migration must resolve a unique source-backed player container before rewriting"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Registry-backed item-stack predicate migration must not guess registryAccess or rewrite raw comments: $offenders"
         )
     }
 
