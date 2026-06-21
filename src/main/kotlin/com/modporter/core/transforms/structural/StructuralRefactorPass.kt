@@ -21709,13 +21709,13 @@ ${indent}}"""
         }
 
         val directCastPattern = Regex("""^\(\s*\(\s*($id(?:FurnaceBlockEntityAccessor|FurnaceAccessor))\s*\)\s*(.+)\s*\)$""")
-        result = rewriteJavaCallWithOffset(result, "callCanBurn") { receiver, args, callOffset ->
-            if (args.size != 4) return@rewriteJavaCallWithOffset null
+        result = rewriteExecutableJavaCallWithOffset(result, "callCanBurn") { receiver, args, callOffset ->
+            if (args.size != 4) return@rewriteExecutableJavaCallWithOffset null
             val cast = nearestFurnaceCanBurnAccessorCast(result, receiver, callOffset)
                 ?: directCastPattern.find(receiver)?.let { match ->
                     FurnaceCanBurnAccessorCast(match.groupValues[1], match.groupValues[2].trim())
                 }
-                ?: return@rewriteJavaCallWithOffset null
+                ?: return@rewriteExecutableJavaCallWithOffset null
             changed = true
             "${cast.typeName}.callCanBurn(${args.joinToString(", ")}, ${cast.furnaceExpression})"
         }
@@ -21729,19 +21729,25 @@ ${indent}}"""
         offset: Int
     ): FurnaceCanBurnAccessorCast? {
         val id = """[A-Za-z_$][\w$]*"""
-        val methodRange = enclosingMethodRange(source, offset)
-        val prefixStart = methodRange?.first ?: source.lastIndexOf('\n', offset).let { if (it < 0) 0 else it + 1 }
-        val prefix = source.substring(prefixStart, offset)
-        return Regex(
-            """\b($id(?:FurnaceBlockEntityAccessor|FurnaceAccessor))\s+${Regex.escape(variable)}\s*=\s*\(\s*\1\s*\)\s*([^;\r\n]+)\s*;"""
-        ).findAll(prefix)
-            .lastOrNull()
-            ?.let { match ->
-                FurnaceCanBurnAccessorCast(
-                    typeName = match.groupValues[1],
-                    furnaceExpression = match.groupValues[2].trim()
-                )
-            }
+        val accessorType = """$id(?:FurnaceBlockEntityAccessor|FurnaceAccessor)"""
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val methodRange = enclosingMethodRange(executableCode, offset)
+        val prefixStart = methodRange?.first ?: executableCode.lastIndexOf('\n', offset).let { if (it < 0) 0 else it + 1 }
+        val prefixCode = executableCode.substring(prefixStart, offset)
+        val bindingPattern = Regex(
+            """\b(?:$accessorType\s+)?${Regex.escape(variable)}\s*=\s*\(\s*($accessorType)\s*\)\s*([^;\r\n]+)\s*;"""
+        )
+        val binding = bindingPattern.findAll(prefixCode).lastOrNull() ?: return null
+        val afterBinding = prefixCode.substring(binding.range.last + 1)
+        if (Regex("""(?<![.\w$])${Regex.escape(variable)}\s*=(?!=)""").containsMatchIn(afterBinding)) {
+            return null
+        }
+        val typeRange = binding.groups[1]?.range ?: return null
+        val expressionRange = binding.groups[2]?.range ?: return null
+        return FurnaceCanBurnAccessorCast(
+            typeName = source.substring(prefixStart + typeRange.first, prefixStart + typeRange.last + 1).trim(),
+            furnaceExpression = source.substring(prefixStart + expressionRange.first, prefixStart + expressionRange.last + 1).trim()
+        )
     }
 
     private fun migrateRecipeHolderOptionalMapLambdaValueAccess(source: String): String {

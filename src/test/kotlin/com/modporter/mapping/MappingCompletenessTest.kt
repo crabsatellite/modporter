@@ -2135,6 +2135,48 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `furnace can burn accessor migration uses executable binding evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val migrateStart = source.indexOf("private fun migrateLegacyAbstractFurnaceCanBurnInvokerBoundary")
+        assertTrue(migrateStart >= 0, "migrateLegacyAbstractFurnaceCanBurnInvokerBoundary is missing")
+        val migrateEnd = source.indexOf("private fun nearestFurnaceCanBurnAccessorCast", migrateStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val migrateBody = source.substring(migrateStart, migrateEnd)
+        val bindingStart = source.indexOf("private fun nearestFurnaceCanBurnAccessorCast")
+        assertTrue(bindingStart >= 0, "nearestFurnaceCanBurnAccessorCast is missing")
+        val bindingEnd = source.indexOf("private fun migrateRecipeHolderOptionalMapLambdaValueAccess", bindingStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val bindingBody = source.substring(bindingStart, bindingEnd)
+        val offenders = listOf(
+            "raw callCanBurn scan" to migrateBody.contains("""rewriteJavaCallWithOffset(result, "callCanBurn")"""),
+            "raw nearest binding source" to bindingBody.contains("source.substring(prefixStart, offset)"),
+            "declaration backreference binding" to bindingBody.contains("""\s*\1\s*\)"""),
+            "missing stale assignment guard" to !bindingBody.contains("afterBinding")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            migrateBody.contains("""rewriteExecutableJavaCallWithOffset(result, "callCanBurn")""") &&
+                bindingBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                bindingBody.contains("val prefixCode = executableCode.substring(prefixStart, offset)") &&
+                bindingBody.contains("bindingPattern.findAll(prefixCode).lastOrNull()") &&
+                bindingBody.contains("afterBinding") &&
+                bindingBody.contains("source.substring(prefixStart + expressionRange.first"),
+            "Furnace canBurn accessor migration must bind call receivers from executable cast assignments"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Furnace canBurn accessor migration must not use comments or stale declarations as binding evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `production registry access migrations do not use nearby variable or fallback inference`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val forbidden = listOf(

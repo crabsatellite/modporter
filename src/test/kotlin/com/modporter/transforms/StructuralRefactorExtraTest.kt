@@ -13106,6 +13106,63 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `furnace can burn accessor migration uses latest executable cast binding`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val accessorDir = srcDir.resolve("mixin")
+        srcDir.createDirectories()
+        accessorDir.createDirectories()
+        accessorDir.resolve("AbstractFurnaceBlockEntityAccessor.java").writeText("""
+            package com.example.mixin;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.gen.Invoker;
+
+            @Mixin(AbstractFurnaceBlockEntity.class)
+            public interface AbstractFurnaceBlockEntityAccessor {
+                @Invoker
+                boolean callCanBurn(RegistryAccess registryAccess, Recipe<?> recipe, NonNullList<ItemStack> stacks, int stackSize);
+            }
+        """.trimIndent())
+        srcDir.resolve("FurnaceHook.java").writeText("""
+            package com.example;
+
+            import com.example.mixin.AbstractFurnaceBlockEntityAccessor;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
+
+            public class FurnaceHook {
+                public static boolean check(Level level, AbstractFurnaceBlockEntity first, AbstractFurnaceBlockEntity second, Recipe<?> recipe, NonNullList<ItemStack> stacks, int stackSize) {
+                    AbstractFurnaceBlockEntityAccessor accessor = (AbstractFurnaceBlockEntityAccessor) first;
+                    /*
+                     accessor = (AbstractFurnaceBlockEntityAccessor) ignoredCommentFurnace;
+                     */
+                    accessor = (AbstractFurnaceBlockEntityAccessor) second;
+                    return accessor.callCanBurn(level.registryAccess(), recipe, stacks, stackSize);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val hook = srcDir.resolve("FurnaceHook.java").readText()
+
+        assertTrue(
+            hook.contains("AbstractFurnaceBlockEntityAccessor.callCanBurn(level.registryAccess(), recipe, stacks, stackSize, second)"),
+            hook
+        )
+        assertFalse(hook.contains("first)"), hook)
+        assertFalse(hook.contains("callCanBurn(level.registryAccess(), recipe, stacks, stackSize, ignoredCommentFurnace)"), hook)
+        assertFalse(hook.contains("accessor.callCanBurn"), hook)
+    }
+
+    @Test
     fun `migrates legacy criterion trigger singleton and entity spawn tag stack config`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val advancementDir = srcDir.resolve("advancement")
