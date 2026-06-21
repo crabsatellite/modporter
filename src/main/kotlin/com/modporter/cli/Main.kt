@@ -237,8 +237,7 @@ class ListCommand : CliktCommand(
 private fun resolvePipeline(pipelineId: String, projectDir: Path) =
     if (pipelineId == "auto") {
         PipelineRegistry.detect(projectDir)
-            ?: PipelineRegistry.get("forge2neo")
-            ?: error("No pipeline found. Use --pipeline to specify.")
+            ?: throw UsageError("No pipeline detected from project contents. Use --pipeline to specify one explicitly.")
     } else {
         PipelineRegistry.get(pipelineId)
             ?: error("Unknown pipeline: $pipelineId. Use 'modporter list' to see available pipelines.")

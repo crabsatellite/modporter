@@ -41,7 +41,7 @@ object PipelineRegistry {
             emptyList()
         }
 
-        if (javaFiles.isEmpty()) return pipelines.values.firstOrNull()
+        if (javaFiles.isEmpty()) return null
 
         val sampleContent = javaFiles.joinToString("\n") { it.toFile().readText() }
 

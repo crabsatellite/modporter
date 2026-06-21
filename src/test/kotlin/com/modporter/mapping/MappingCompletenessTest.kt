@@ -77,6 +77,29 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `auto pipeline detection does not fall back to registered defaults`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val registrySource = projectRoot
+            .resolve("src/main/kotlin/com/modporter/registry/PipelineRegistry.kt")
+            .readText()
+        val cliSource = projectRoot
+            .resolve("src/main/kotlin/com/modporter/cli/Main.kt")
+            .readText()
+        val offenders = listOf(
+            "empty Java source defaults to first registered pipeline" to registrySource.contains("pipelines.values.firstOrNull()"),
+            "auto resolver falls back to forge2neo" to Regex("""PipelineRegistry\.detect\(projectDir\)\s*\?:\s*PipelineRegistry\.get\("forge2neo"\)""")
+                .containsMatchIn(cliSource)
+        )
+            .filter { (_, present) -> present }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Auto pipeline detection must fail closed without source evidence instead of selecting a default pipeline: $offenders"
+        )
+    }
+
+    @Test
     fun `text replacements do not migrate register event string ids without source structure`() {
         val db = MappingDatabase.loadDefault()
         val offenders = db.getTextReplacements()

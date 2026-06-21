@@ -74,8 +74,27 @@ class CliTest {
         """.trimIndent())
 
         val cmd = ValidateCommand()
-        cmd.parse(listOf("--src", projectDir.toString()))
+        cmd.parse(listOf("--src", projectDir.toString(), "--pipeline", "forge2neo"))
         // Should complete without error — no Forge references found
+    }
+
+    @Test
+    fun `auto pipeline rejects projects without detection evidence`() {
+        val projectDir = tempDir.resolve("plainmod")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("Plain.java").writeText("""
+            package com.example;
+            public class Plain {
+                void init() {}
+            }
+        """.trimIndent())
+
+        val error = assertFailsWith<UsageError> {
+            AnalyzeCommand().parse(listOf("--src", projectDir.toString()))
+        }
+
+        assertTrue(error.message?.contains("No pipeline detected") == true)
     }
 
     @Test
