@@ -11137,11 +11137,8 @@ $fields
 
     private fun inferBannerPatternRegistryLookupExpression(source: String, offset: Int): String? {
         inferCreativeTabBannerPatternLookup(source, offset)?.let { return it }
-        val method = javaMethodRanges(source).firstOrNull { offset in it.range }
-        if (method != null) {
-            inferBannerPatternLookupFromScope(source.substring(method.range.first, offset), method.header)?.let { return it }
-        }
-        return inferBannerPatternLookupFromScope(source.substring(0, offset), null)
+        val method = javaMethodRanges(source).firstOrNull { offset in it.range } ?: return null
+        return inferBannerPatternLookupFromScope(source.substring(method.range.first, offset), method.header)
     }
 
     private fun inferCreativeTabBannerPatternLookup(source: String, offset: Int): String? {

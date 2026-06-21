@@ -3140,6 +3140,31 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy banner item factory lookup migrations require scoped registry evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun inferBannerPatternRegistryLookupExpression")
+        assertTrue(start >= 0, "inferBannerPatternRegistryLookupExpression is missing")
+        val end = source.indexOf("private fun inferCreativeTabBannerPatternLookup", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "file-prefix scope fallback" to Regex("""inferBannerPatternLookupFromScope\s*\(\s*source\.substring\s*\(\s*0\s*,\s*offset\s*\)"""),
+            "unscoped null-header lookup fallback" to Regex("""inferBannerPatternLookupFromScope\s*\([^)]*,\s*null\s*\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> "inferBannerPatternRegistryLookupExpression contains $label" }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy banner item factory call migrations must use the current Java method or creative-tab lambda as registry evidence, not file-prefix lookup fallback: $offenders"
+        )
+    }
+
+    @Test
     fun `deferred register and holder collectors do not infer owners from java file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
