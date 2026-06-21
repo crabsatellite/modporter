@@ -25991,6 +25991,56 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `placement modifier type migration does not use project mod id when registry name lacks namespace`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("main_mod")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        srcDir.resolve("UnscopedPlacementRegistry.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.core.Registry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifier;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+
+            public class UnscopedPlacementRegistry {
+                public static final PlacementModifierType<ConfigFilter> CONFIG = register(ResourceLocation.parse("config"), ConfigFilter.CODEC);
+
+                public static <P extends PlacementModifier> PlacementModifierType<P> register(ResourceLocation name, Codec<P> codec) {
+                    return Registry.register(BuiltInRegistries.PLACEMENT_MODIFIER_TYPE, name, () -> codec);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ConfigFilter.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+
+            public class ConfigFilter {
+                public static final Codec<ConfigFilter> CODEC = null;
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val placement = srcDir.resolve("UnscopedPlacementRegistry.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(placement.contains("register(ResourceLocation.parse(\"config\"), ConfigFilter.CODEC)"), placement)
+        assertFalse(placement.contains("DeferredRegister.create(Registries.PLACEMENT_MODIFIER_TYPE, \"main_mod\")"), placement)
+        assertFalse(placement.contains("DeferredHolder<PlacementModifierType<?>"), placement)
+    }
+
+    @Test
     fun `empty project returns empty results`() {
         val projectDir = tempDir.resolve("empty-project")
         projectDir.createDirectories()

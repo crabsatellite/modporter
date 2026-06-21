@@ -3088,6 +3088,33 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `placement modifier type migration does not use project mod id namespace fallback`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateBuiltInPlacementModifierTypeRegistrations")
+        assertTrue(start >= 0, "migrateBuiltInPlacementModifierTypeRegistrations is missing")
+        val end = source.indexOf("private fun migratePlacementModifierTypeDeferredHolderReferences", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+
+        assertTrue(
+            body.contains("placementModifierRegistryNamespaceExpression(source)") &&
+                body.contains("ResourceLocation\\.fromNamespaceAndPath") &&
+                body.contains("ResourceLocation\\.parse"),
+            "Placement modifier type migration must derive namespace from existing ResourceLocation registrations"
+        )
+        assertTrue(
+            !body.contains("modId: String") &&
+                !body.contains("return modId") &&
+                !body.contains("\"${'$'}it\""),
+            "Placement modifier type migration must not synthesize a DeferredRegister namespace from project mod id"
+        )
+    }
+
+    @Test
     fun `worldgen region accessor migrations do not infer mixin owners from java file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

@@ -15637,7 +15637,7 @@ ${indent}}
         result = migrateRegistryFileCodecMapCodecSource(result, effectiveMapCodecConstantOwners)
         result = migrateLegacyFunctionalInterfaceMapCodecSource(result)
         result = migrateMapCodecRegistryFactorySignatures(result)
-        result = migrateBuiltInPlacementModifierTypeRegistrations(result, modId)
+        result = migrateBuiltInPlacementModifierTypeRegistrations(result)
         result = migrateLegacyEventHooks121(result)
         result = migrateLegacyLootAndRegistryAccess(result, legacyLootTableResourceLocationReferences)
         result = migrateRegistrySetBuilderBuildPatchSource(result)
@@ -25588,12 +25588,12 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         return fields
     }
 
-    private fun migrateBuiltInPlacementModifierTypeRegistrations(source: String, modId: String): String {
+    private fun migrateBuiltInPlacementModifierTypeRegistrations(source: String): String {
         if (!source.contains("BuiltInRegistries.PLACEMENT_MODIFIER_TYPE") ||
             !source.contains("PlacementModifierType")) {
             return source
         }
-        val modIdExpression = inferPlacementModifierDeferredRegisterModIdExpression(source, modId) ?: return source
+        val modIdExpression = placementModifierRegistryNamespaceExpression(source) ?: return source
         var changed = false
         var result = Regex(
             """(?m)^([ \t]*(?:public|protected|private)?\s*static\s+final\s+)PlacementModifierType\s*<\s*([^>\r\n]+)\s*>\s+([A-Z][A-Z0-9_]*)\s*=\s*register\s*\(\s*(.+?)\s*,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.CODEC)\s*\)\s*;"""
@@ -25623,7 +25623,7 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         return result
     }
 
-    private fun inferPlacementModifierDeferredRegisterModIdExpression(source: String, modId: String): String? {
+    private fun placementModifierRegistryNamespaceExpression(source: String): String? {
         Regex("""ResourceLocation\.fromNamespaceAndPath\s*\(\s*([^,\r\n]+?)\s*,""")
             .find(source)
             ?.groupValues
@@ -25635,7 +25635,7 @@ public $className(Properties $propertiesName, WoodType $typeName) {
             ?.groupValues
             ?.get(1)
             ?.let { return "\"$it\"" }
-        return modId.takeIf { it.isNotBlank() }?.let { "\"$it\"" }
+        return null
     }
 
     private fun placementModifierRegistryPathExpression(nameExpression: String): String? {
