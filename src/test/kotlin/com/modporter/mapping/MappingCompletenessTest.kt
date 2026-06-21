@@ -3501,6 +3501,43 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy neoforge model api constructors use executable constructor evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyNeoForgeModelApiSource")
+        assertTrue(start >= 0, "migrateLegacyNeoForgeModelApiSource is missing")
+        val end = source.indexOf("private fun migrateAttributeModifierResourceLocationIds", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw BlockElementFace prefilter" to """source.contains("BlockElementFace")""",
+            "raw ResourceLocation prefilter" to """source.contains("new ResourceLocation(")""",
+            "raw BlockElementFace constructor rewrite" to """rewriteJavaNew(result, "BlockElementFace")""",
+            "raw ResourceLocation constructor rewrite" to """rewriteJavaNew(result, "ResourceLocation")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("BlockElementFace")""") &&
+                body.contains("""executableCode.contains("new ResourceLocation(")""") &&
+                body.contains("""rewriteExecutableJavaNew(result, "BlockElementFace")""") &&
+                body.contains("""rewriteExecutableJavaNew(result, "ResourceLocation")""") &&
+                body.contains("findAll(maskJavaCommentsAndLiterals(result))") &&
+                body.contains("replaceExecutableJavaRegex(result"),
+            "Legacy NeoForge model API constructor and face accessor migrations must inspect executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy NeoForge model API migrations must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `map codec serialization migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

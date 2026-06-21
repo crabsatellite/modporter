@@ -23569,12 +23569,13 @@ ${indent}}"""
     }
 
     private fun migrateLegacyNeoForgeModelApiSource(source: String): String {
-        if (!source.contains("CustomLoaderBuilder") &&
-            !source.contains("IUnbakedGeometry") &&
-            !source.contains("BlockElementFace") &&
-            !source.contains("FaceBakery") &&
-            !source.contains("UnbakedGeometryHelper") &&
-            !source.contains("new ResourceLocation(")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("CustomLoaderBuilder") &&
+            !executableCode.contains("IUnbakedGeometry") &&
+            !executableCode.contains("BlockElementFace") &&
+            !executableCode.contains("FaceBakery") &&
+            !executableCode.contains("UnbakedGeometryHelper") &&
+            !executableCode.contains("new ResourceLocation(")) {
             return source
         }
 
@@ -23609,7 +23610,7 @@ ${indent}}"""
             result = Regex("""\b${Regex.escape(modelLocationName)}\b""").replace(result, replacement)
         }
 
-        result = rewriteJavaNew(result, "BlockElementFace") { args ->
+        result = rewriteExecutableJavaNew(result, "BlockElementFace") { args ->
             when {
                 args.size == 5 && args[4] == "null" ->
                     "new BlockElementFace(${args.take(4).joinToString(", ")})"
@@ -23619,7 +23620,7 @@ ${indent}}"""
             }
         }
 
-        result = rewriteJavaNew(result, "ResourceLocation") { args ->
+        result = rewriteExecutableJavaNew(result, "ResourceLocation") { args ->
             when (args.size) {
                 1 -> "ResourceLocation.parse(${args[0]})"
                 2 -> "ResourceLocation.fromNamespaceAndPath(${args[0]}, ${args[1]})"
@@ -23629,17 +23630,17 @@ ${indent}}"""
 
         if (result.contains("BlockElementFace")) {
             val faceVariables = Regex("""\bBlockElementFace\s+([A-Za-z_$][\w$]*)\b""")
-                .findAll(result)
+                .findAll(maskJavaCommentsAndLiterals(result))
                 .map { it.groupValues[1] }
                 .toSet()
             for (variable in faceVariables) {
                 val escaped = Regex.escape(variable)
-                result = Regex("""\b$escaped\.uv\.uvs\b""").replace(result, "$variable.uv().uvs")
-                result = Regex("""\b$escaped\.uv\.rotation\b""").replace(result, "$variable.uv().rotation")
-                result = Regex("""\b$escaped\.cullForDirection\b(?!\s*\()""").replace(result, "$variable.cullForDirection()")
-                result = Regex("""\b$escaped\.texture\b(?!\s*\()""").replace(result, "$variable.texture()")
-                result = Regex("""\b$escaped\.tintIndex\b(?!\s*\()""").replace(result, "$variable.tintIndex()")
-                result = Regex("""\b$escaped\.getFaceData\(\)""").replace(result, "$variable.faceData()")
+                result = replaceExecutableJavaRegex(result, Regex("""\b$escaped\.uv\.uvs\b""")) { "$variable.uv().uvs" }
+                result = replaceExecutableJavaRegex(result, Regex("""\b$escaped\.uv\.rotation\b""")) { "$variable.uv().rotation" }
+                result = replaceExecutableJavaRegex(result, Regex("""\b$escaped\.cullForDirection\b(?!\s*\()""")) { "$variable.cullForDirection()" }
+                result = replaceExecutableJavaRegex(result, Regex("""\b$escaped\.texture\b(?!\s*\()""")) { "$variable.texture()" }
+                result = replaceExecutableJavaRegex(result, Regex("""\b$escaped\.tintIndex\b(?!\s*\()""")) { "$variable.tintIndex()" }
+                result = replaceExecutableJavaRegex(result, Regex("""\b$escaped\.getFaceData\(\)""")) { "$variable.faceData()" }
             }
         }
 
@@ -38619,6 +38620,19 @@ $encodeLines
             }
             result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
             cursor = tokenIndex + replacement.length
+        }
+        return result
+    }
+
+    private fun replaceExecutableJavaRegex(
+        source: String,
+        pattern: Regex,
+        transform: (MatchResult) -> String
+    ): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        var result = source
+        pattern.findAll(executableCode).toList().asReversed().forEach { match ->
+            result = result.substring(0, match.range.first) + transform(match) + result.substring(match.range.last + 1)
         }
         return result
     }

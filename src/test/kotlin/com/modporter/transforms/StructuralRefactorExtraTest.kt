@@ -19989,6 +19989,43 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy neoforge model api constructor migration ignores comments and string literals`() {
+        val sourceFile = createFile("CustomModelDocs.java", """
+            package com.example;
+
+            import net.minecraft.client.renderer.block.model.BlockElementFace;
+            import net.minecraft.client.renderer.block.model.BlockFaceUV;
+            import net.minecraft.core.Direction;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.neoforge.client.model.ExtraFaceData;
+
+            public class CustomModelDocs {
+                /*
+                BlockElementFace face = new BlockElementFace(null, 1, "#all", new BlockFaceUV(new float[]{0.0F, 0.0F, 16.0F, 16.0F}, 0), null);
+                ResourceLocation oldId = new ResourceLocation("example", "path");
+                boolean visible = face.texture != null && face.tintIndex != -1 && face.uv.rotation != 0 && face.uv.uvs.length > 0 && face.getFaceData() != null;
+                */
+                private static final String DOC = "new ResourceLocation(\"example\", \"path\"); new BlockElementFace(Direction.NORTH, 0, \"#all\", null, new ExtraFaceData(0xFFFFFFFF, 15, 15, true)); face.texture;";
+
+                public ResourceLocation keep(ResourceLocation input, Direction direction, BlockFaceUV uv) {
+                    return input;
+                }
+            }
+        """.trimIndent()).resolve("src/main/java/com/example/CustomModelDocs.java")
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("ResourceLocation.fromNamespaceAndPath"), migrated)
+        assertFalse(migrated.contains("ResourceLocation.parse"), migrated)
+        assertFalse(migrated.contains("face.texture()"), migrated)
+        assertFalse(migrated.contains("face.faceData()"), migrated)
+    }
+
+    @Test
     fun `migrates event bus post goal and dye color API surfaces`() {
         val projectDir = createFile("EventGoalColorSurface.java", """
             package com.example;
