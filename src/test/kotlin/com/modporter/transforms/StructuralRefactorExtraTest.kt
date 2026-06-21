@@ -19960,6 +19960,46 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy rarity enum extension migration rejects ambiguous metadata mod ids`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val metaInf = tempDir.resolve("src/main/resources/META-INF")
+        srcDir.createDirectories()
+        metaInf.createDirectories()
+        metaInf.resolve("mods.toml").writeText("""
+            modLoader="javafml"
+
+            [[mods]]
+            modId="firstmod"
+
+            [[mods]]
+            modId="secondmod"
+        """.trimIndent())
+        srcDir.resolve("AmbiguousRarity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.ChatFormatting;
+            import net.minecraft.world.item.Rarity;
+
+            public class AmbiguousRarity {
+                public static final Rarity CUSTOM = Rarity.create("CUSTOM", ChatFormatting.GREEN);
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("AmbiguousRarity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("""Rarity.create("CUSTOM", ChatFormatting.GREEN)"""), migrated)
+        assertFalse(migrated.contains("Rarity.valueOf("), migrated)
+        assertFalse(srcDir.resolve("NeoForgeEnumExtensions.java").exists())
+        assertFalse(tempDir.resolve("src/main/resources/META-INF/enumextensions.json").exists())
+        assertTrue(
+            result.changes.none { it.ruleId.startsWith("struct-rarity-enum-extension") },
+            "ambiguous metadata mod ids must not select the first metadata namespace: ${result.changes}"
+        )
+    }
+
+    @Test
     fun `legacy mob category enum extension migration fails closed for unnameable literals`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

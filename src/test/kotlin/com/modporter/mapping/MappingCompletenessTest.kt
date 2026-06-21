@@ -929,6 +929,30 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `structural metadata mod id helper requires unique metadata evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun projectMetadataModId")
+        assertTrue(start >= 0, "projectMetadataModId is missing")
+        val end = source.indexOf("private fun removeUnusedCumulusBooleanSupplierFields", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+
+        assertTrue(
+            body.contains("val candidates = linkedSetOf<String>()") &&
+                body.contains("return candidates.singleOrNull()"),
+            "Structural metadata mod id detection must accept only a unique declared metadata mod id"
+        )
+        assertTrue(
+            !body.contains(".firstOrNull()") && !body.contains(".find("),
+            "Structural metadata mod id detection must not choose the first metadata declaration"
+        )
+    }
+
+    @Test
     fun `client only build detection ignores comments and strings`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

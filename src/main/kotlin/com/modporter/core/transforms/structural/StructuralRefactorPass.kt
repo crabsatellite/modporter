@@ -17922,26 +17922,31 @@ ${indent}}
     }
 
     private fun projectMetadataModId(projectDir: Path): String? {
+        val candidates = linkedSetOf<String>()
+        fun addCandidate(value: String) {
+            val trimmed = value.trim()
+            if (Regex("""[A-Za-z0-9_.-]+""").matches(trimmed)) {
+                candidates += trimmed
+            }
+        }
+
         val gradleProperties = projectDir.resolve("gradle.properties")
         if (gradleProperties.exists()) {
             Regex("""(?m)^\s*(?:mod_id|modid)\s*=\s*([A-Za-z0-9_.-]+)\s*$""")
-                .find(gradleProperties.readText())
-                ?.groupValues
-                ?.get(1)
-                ?.let { return it }
+                .findAll(gradleProperties.readText())
+                .forEach { addCandidate(it.groupValues[1]) }
         }
-        return listOf(
+        listOf(
             projectDir.resolve("src/main/resources/META-INF/neoforge.mods.toml"),
             projectDir.resolve("src/main/resources/META-INF/mods.toml")
         ).asSequence()
             .filter { it.exists() }
-            .mapNotNull { file ->
+            .forEach { file ->
                 Regex("(?m)^\\s*modId\\s*=\\s*\"([^\"]+)\"")
-                    .find(file.readText())
-                    ?.groupValues
-                    ?.get(1)
+                    .findAll(file.readText())
+                    .forEach { addCandidate(it.groupValues[1]) }
             }
-            .firstOrNull()
+        return candidates.singleOrNull()
     }
 
     private fun removeUnusedCumulusBooleanSupplierFields(source: String, booleanSuppliers: Set<String>): String {
