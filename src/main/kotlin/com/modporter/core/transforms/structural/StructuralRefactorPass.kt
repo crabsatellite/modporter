@@ -15687,14 +15687,17 @@ ${indent}}
     }
 
     private fun migrateLegacyIgnoreExplosionSignatureSource(source: String): String {
-        if (!source.contains("ignoreExplosion(")) return source
-        var changed = false
-        val result = Regex("""\b(public\s+boolean\s+ignoreExplosion)\s*\(\s*\)""")
-            .replace(source) { match ->
-                changed = true
-                "${match.groupValues[1]}(Explosion explosion)"
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("ignoreExplosion(")) return source
+        val signaturePattern = Regex("""\b(public\s+boolean\s+ignoreExplosion)\s*\(\s*\)""")
+        val edits = signaturePattern.findAll(executableCode)
+            .map { match ->
+                match.range to "${match.groupValues[1]}(Explosion explosion)"
             }
-        return if (changed) addImportIfMissing(result, "net.minecraft.world.level.Explosion") else source
+            .toList()
+        if (edits.isEmpty()) return source
+        val result = applyStringEdits(source, edits)
+        return addImportIfMissing(result, "net.minecraft.world.level.Explosion")
     }
 
     private fun migrateDimensionSpecialEffectsCloudSignatureSource(source: String): String {

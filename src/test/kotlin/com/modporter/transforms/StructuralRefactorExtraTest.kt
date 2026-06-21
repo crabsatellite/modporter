@@ -28458,6 +28458,38 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy explosion override signature migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DocumentedExplosionSignatureSurface.java").writeText("""
+            package com.example;
+
+            public class DocumentedExplosionSignatureSurface {
+                private static final String DOC = "public boolean ignoreExplosion()";
+
+                /*
+                public boolean ignoreExplosion() {
+                    return true;
+                }
+                */
+
+                public boolean keep() {
+                    return DOC.length() > 0;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("DocumentedExplosionSignatureSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("private static final String DOC = \"public boolean ignoreExplosion()\";"), migrated)
+        assertTrue(migrated.contains("public boolean ignoreExplosion()"), migrated)
+        assertFalse(migrated.contains("ignoreExplosion(Explosion explosion)"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.world.level.Explosion;"), migrated)
+    }
+
+    @Test
     fun `migrates dimension special effects cloud renderer signature`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

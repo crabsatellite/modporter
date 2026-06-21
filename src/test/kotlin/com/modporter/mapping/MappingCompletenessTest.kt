@@ -3830,6 +3830,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy ignore explosion signature migration uses executable source`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyIgnoreExplosionSignatureSource")
+        assertTrue(start >= 0, "migrateLegacyIgnoreExplosionSignatureSource is missing")
+        val end = source.indexOf("private fun migrateDimensionSpecialEffectsCloudSignatureSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw ignoreExplosion prefilter" to """source.contains("ignoreExplosion(")""",
+            "raw signature replacement" to ".replace(source) { match ->",
+            "manual changed flag" to "var changed = false"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("signaturePattern.findAll(executableCode)") &&
+                body.contains("applyStringEdits(source, edits)") &&
+                body.contains("addImportIfMissing(result, \"net.minecraft.world.level.Explosion\")"),
+            "Legacy ignoreExplosion signature migration must rewrite only executable method signatures"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy ignoreExplosion signature migration must not use comments or strings as signature evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `dimension cloud render signature migration uses executable method ranges`() {
         val source = Path.of("")
             .toAbsolutePath()
