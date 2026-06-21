@@ -14912,28 +14912,45 @@ ${entries.joinToString(",\n")}
     private fun migrateSplitLevelTickSideChecks(source: String): String {
         if (!source.contains("LevelTickEvent") || !source.contains(".side")) return source
         var result = source
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val levelTickEventNames = Regex("""\bLevelTickEvent\.(?:Pre|Post)\s+([A-Za-z_$][\w$]*)""")
-            .findAll(result)
+            .findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
         levelTickEventNames.forEach { eventName ->
             val event = Regex.escape(eventName)
-            result = Regex("""\b$event\.side\s*==\s*LogicalSide\.SERVER\b""")
-                .replace(result, "!$eventName.getLevel().isClientSide()")
-            result = Regex("""\bLogicalSide\.SERVER\s*==\s*$event\.side\b""")
-                .replace(result, "!$eventName.getLevel().isClientSide()")
-            result = Regex("""\b$event\.side\s*!=\s*LogicalSide\.SERVER\b""")
-                .replace(result, "$eventName.getLevel().isClientSide()")
-            result = Regex("""\bLogicalSide\.SERVER\s*!=\s*$event\.side\b""")
-                .replace(result, "$eventName.getLevel().isClientSide()")
-            result = Regex("""\b$event\.side\s*==\s*LogicalSide\.CLIENT\b""")
-                .replace(result, "$eventName.getLevel().isClientSide()")
-            result = Regex("""\bLogicalSide\.CLIENT\s*==\s*$event\.side\b""")
-                .replace(result, "$eventName.getLevel().isClientSide()")
-            result = Regex("""\b$event\.side\s*!=\s*LogicalSide\.CLIENT\b""")
-                .replace(result, "!$eventName.getLevel().isClientSide()")
-            result = Regex("""\bLogicalSide\.CLIENT\s*!=\s*$event\.side\b""")
-                .replace(result, "!$eventName.getLevel().isClientSide()")
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b$event\.side\s*==\s*LogicalSide\.SERVER\b""")
+            ) { "!$eventName.getLevel().isClientSide()" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\bLogicalSide\.SERVER\s*==\s*$event\.side\b""")
+            ) { "!$eventName.getLevel().isClientSide()" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b$event\.side\s*!=\s*LogicalSide\.SERVER\b""")
+            ) { "$eventName.getLevel().isClientSide()" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\bLogicalSide\.SERVER\s*!=\s*$event\.side\b""")
+            ) { "$eventName.getLevel().isClientSide()" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b$event\.side\s*==\s*LogicalSide\.CLIENT\b""")
+            ) { "$eventName.getLevel().isClientSide()" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\bLogicalSide\.CLIENT\s*==\s*$event\.side\b""")
+            ) { "$eventName.getLevel().isClientSide()" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b$event\.side\s*!=\s*LogicalSide\.CLIENT\b""")
+            ) { "!$eventName.getLevel().isClientSide()" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\bLogicalSide\.CLIENT\s*!=\s*$event\.side\b""")
+            ) { "!$eventName.getLevel().isClientSide()" }
         }
         return removeUnusedSimpleImports(
             result,

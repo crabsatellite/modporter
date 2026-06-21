@@ -9293,6 +9293,7 @@ class StructuralRefactorExtraTest {
 
             public class TickHandlers {
                 private static int pending;
+                private static final String SIDE_DOC = "event.side == LogicalSide.SERVER";
 
                 @SubscribeEvent
                 public static void onLivingTick(LivingEvent.LivingTickEvent event) {
@@ -9337,6 +9338,11 @@ class StructuralRefactorExtraTest {
 
                 @SubscribeEvent
                 public static void onLevelTick(LevelTickEvent.Post event) {
+                    String textBlock = ${"\"\"\""}
+                        LogicalSide.SERVER == event.side
+                        event.side != LogicalSide.CLIENT
+                        ${"\"\"\""};
+                    // event.side == LogicalSide.SERVER
                     if (event.side == LogicalSide.SERVER) {
                         ping();
                     }
@@ -9367,8 +9373,12 @@ class StructuralRefactorExtraTest {
         assertTrue(!migrated.contains("TickEvent.Phase"))
         assertTrue(!migrated.contains("event.phase"))
         assertTrue(!migrated.contains("tick.phase"))
-        assertTrue(!migrated.contains("event.side"))
-        assertTrue(!migrated.contains("LogicalSide"))
+        assertFalse(migrated.contains("import net.neoforged.fml.LogicalSide;"), migrated)
+        assertFalse(migrated.contains("if (event.side == LogicalSide.SERVER) {"), migrated)
+        assertTrue(migrated.contains("private static final String SIDE_DOC = \"event.side == LogicalSide.SERVER\";"), migrated)
+        assertTrue(migrated.contains("LogicalSide.SERVER == event.side"), migrated)
+        assertTrue(migrated.contains("event.side != LogicalSide.CLIENT"), migrated)
+        assertTrue(migrated.contains("// event.side == LogicalSide.SERVER"), migrated)
         assertTrue(!migrated.contains("phase check removed"), migrated)
     }
 

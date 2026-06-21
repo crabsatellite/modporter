@@ -3251,6 +3251,45 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `split level tick side migration uses executable event evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateSplitLevelTickSideChecks")
+        assertTrue(start >= 0, "migrateSplitLevelTickSideChecks is missing")
+        val end = source.indexOf("private fun removeLegacyTickPhaseChecks", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val executableReplacementCount = Regex("""replaceExecutableRegex\(""").findAll(body).count()
+        val offenders = listOf(
+            "raw event variable scan" to (
+                body.contains(".findAll(result)") || body.contains(".findAll(source)")
+                ),
+            "raw side replacement" to body.contains(".replace(result,"),
+            "raw LogicalSide import cleanup" to (
+                body.contains("removeImport(result, \"net.neoforged.fml.LogicalSide\")") ||
+                    body.contains("removeImport(result, \"net.minecraftforge.fml.LogicalSide\")")
+                )
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains(".findAll(executableCode)") &&
+                executableReplacementCount >= 8 &&
+                body.contains("removeUnusedSimpleImports("),
+            "Split LevelTickEvent side migration must find event parameters and side comparisons in executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Split LevelTickEvent side migration must not use comments or strings as event evidence or replacement targets: $offenders"
+        )
+    }
+
+    @Test
     fun `command source stack level migration uses executable scoped evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
