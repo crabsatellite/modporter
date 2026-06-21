@@ -3430,6 +3430,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy model event constructor migration uses executable constructor evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyModelEventSource")
+        assertTrue(start >= 0, "migrateLegacyModelEventSource is missing")
+        val end = source.indexOf("private fun migrateRegisterAdditionalModelResourceLocations", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw ModelResourceLocation prefilter" to """source.contains("ModelResourceLocation")""",
+            "raw ModelEvent prefilter" to """source.contains("ModelEvent.")""",
+            "raw ModelResourceLocation constructor rewrite" to """rewriteJavaNew(result, "ModelResourceLocation")"""
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("ModelResourceLocation")""") &&
+                body.contains("""executableCode.contains("ModelEvent.")""") &&
+                body.contains("""rewriteExecutableJavaNew(result, "ModelResourceLocation")""") &&
+                body.contains("args.size != 2") &&
+                body.contains("variant == \"\\\"inventory\\\"\""),
+            "Legacy model event constructor migration must locate ModelResourceLocation constructors in executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy model event constructor migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `map codec serialization migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

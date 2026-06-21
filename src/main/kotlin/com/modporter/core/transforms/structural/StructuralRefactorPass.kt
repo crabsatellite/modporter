@@ -17761,7 +17761,8 @@ ${indent}}
     }
 
     private fun migrateLegacyModelEventSource(source: String): String {
-        if (!source.contains("ModelResourceLocation") && !source.contains("ModelEvent.")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("ModelResourceLocation") && !executableCode.contains("ModelEvent.")) return source
         var result = source
         var needsResourceLocation = false
         val modIdExpression = Regex("""@(?:Mod\.)?EventBusSubscriber\s*\([^)]*\bmodid\s*=\s*([^,\)]+)""")
@@ -17784,8 +17785,8 @@ ${indent}}
         result = Regex("""(\b[A-Za-z_$][\w$]*\.getKey\(\))\.getPath\(\)""")
             .replace(result, "$1.id().getPath()")
 
-        result = rewriteJavaNew(result, "ModelResourceLocation") { args ->
-            if (args.size != 2) return@rewriteJavaNew null
+        result = rewriteExecutableJavaNew(result, "ModelResourceLocation") { args ->
+            if (args.size != 2) return@rewriteExecutableJavaNew null
             val model = args[0].trim()
             val variant = args[1].trim()
             if (variant == "\"inventory\"") {

@@ -25607,6 +25607,33 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy model resource location constructor migration ignores comments and string literals`() {
+        val sourceFile = createFile("ModelResourceLocationDocs.java", """
+            package com.example;
+
+            import net.minecraft.client.resources.model.ModelResourceLocation;
+
+            public class ModelResourceLocationDocs {
+                // ModelResourceLocation commented = new ModelResourceLocation(ExampleMod.prefix("item/commented"), "inventory");
+                private static final String DOC = "new ModelResourceLocation(ExampleMod.prefix(\"item/docs\"), \"inventory\")";
+
+                public ModelResourceLocation keep(ModelResourceLocation input) {
+                    return input;
+                }
+            }
+        """.trimIndent()).resolve("src/main/java/com/example/ModelResourceLocationDocs.java")
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("ModelResourceLocation.inventory(ExampleMod.prefix"), migrated)
+        assertFalse(migrated.contains("ModelResourceLocation.standalone(ExampleMod.prefix"), migrated)
+    }
+
+    @Test
     fun `migrates source backed accessors payload surface and context signatures`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val networkDir = srcDir.resolve("network")
