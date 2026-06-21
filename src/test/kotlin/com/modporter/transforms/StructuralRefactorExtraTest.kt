@@ -17414,6 +17414,11 @@ class StructuralRefactorExtraTest {
             import org.joml.Matrix4f;
 
             public class SpriteVertexSurface {
+                // float docU = sprite.getU(1.0D);
+                // float docV = sprite.getV(width * (double) 2);
+                private static final String DOC_U = "sprite.getU(1.0D)";
+                private static final String DOC_V = "sprite.getV(width * (double) 2)";
+
                 void render(VertexConsumer vertex, Matrix4f matrix4f, TextureAtlasSprite sprite, float x, float y, float z, double width) {
                     float u = sprite.getU(width * (double) 2);
                     float v = sprite.getV(1.0D);
@@ -19073,6 +19078,12 @@ class StructuralRefactorExtraTest {
         assertTrue(spriteVertexSurface.contains("sprite.getU((float) (width * (double) 2))"))
         assertTrue(spriteVertexSurface.contains("sprite.getV((float) (1.0D))"))
         assertTrue(spriteVertexSurface.contains("vertex.addVertex(matrix4f, x, y, z).setColor(255, 255, 255, 255)"))
+        assertTrue(spriteVertexSurface.contains("// float docU = sprite.getU(1.0D);"), spriteVertexSurface)
+        assertTrue(spriteVertexSurface.contains("// float docV = sprite.getV(width * (double) 2);"), spriteVertexSurface)
+        assertTrue(spriteVertexSurface.contains("private static final String DOC_U = \"sprite.getU(1.0D)\";"), spriteVertexSurface)
+        assertTrue(spriteVertexSurface.contains("private static final String DOC_V = \"sprite.getV(width * (double) 2)\";"), spriteVertexSurface)
+        assertFalse(spriteVertexSurface.contains("// float docU = sprite.getU((float)"), spriteVertexSurface)
+        assertFalse(spriteVertexSurface.contains("DOC_U = \"sprite.getU((float)"), spriteVertexSurface)
         assertTrue(guiLayerSurface.contains("import net.neoforged.neoforge.client.gui.VanillaGuiLayers;"))
         assertTrue(guiLayerSurface.contains("import net.minecraft.resources.ResourceLocation;"))
         assertTrue(guiLayerSurface.contains("event.registerAbove(VanillaGuiLayers.CROSSHAIR, ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, \"indicator\"), (graphics, deltaTracker) -> {"))

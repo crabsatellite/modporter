@@ -4254,6 +4254,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `texture atlas sprite coordinate migration uses executable call evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateTextureAtlasSpriteFloatCoordinateCalls")
+        assertTrue(start >= 0, "migrateTextureAtlasSpriteFloatCoordinateCalls is missing")
+        val end = source.indexOf("private fun migratePartialTickAccessors", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getU prefilter" to body.contains("""source.contains(".getU(")"""),
+            "raw getV prefilter" to body.contains("""source.contains(".getV(")"""),
+            "raw getU rewrite" to body.contains("""rewriteJavaCall(result, "getU")"""),
+            "raw getV rewrite" to body.contains("""rewriteJavaCall(result, "getV")""")
+        )
+            .filter { (_, failed) -> failed }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains(".getU(")""") &&
+                body.contains("""executableCode.contains(".getV(")""") &&
+                body.contains("""rewriteExecutableJavaCall(result, "getU")""") &&
+                body.contains("""rewriteExecutableJavaCall(result, "getV")""") &&
+                body.contains("needsFloatCast(args[0])"),
+            "TextureAtlasSprite coordinate migration must inspect executable Java calls before adding casts"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "TextureAtlasSprite coordinate migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `curative item effect migration uses executable call evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

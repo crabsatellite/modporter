@@ -19403,6 +19403,8 @@ $body
             .replace(source, "$1public$2")
 
     private fun migrateTextureAtlasSpriteFloatCoordinateCalls(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".getU(") && !executableCode.contains(".getV(")) return source
         var result = source
         fun needsFloatCast(arg: String): Boolean {
             val trimmed = arg.trim()
@@ -19413,14 +19415,14 @@ $body
                         Regex("""\bdouble\b""").containsMatchIn(trimmed)
                     )
         }
-        result = rewriteJavaCall(result, "getU") { receiver, args ->
+        result = rewriteExecutableJavaCall(result, "getU") { receiver, args ->
             if (args.size == 1 && needsFloatCast(args[0])) {
                 "$receiver.getU((float) (${args[0]}))"
             } else {
                 null
             }
         }
-        result = rewriteJavaCall(result, "getV") { receiver, args ->
+        result = rewriteExecutableJavaCall(result, "getV") { receiver, args ->
             if (args.size == 1 && needsFloatCast(args[0])) {
                 "$receiver.getV((float) (${args[0]}))"
             } else {
