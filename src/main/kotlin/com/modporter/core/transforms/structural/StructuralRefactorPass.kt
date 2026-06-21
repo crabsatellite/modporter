@@ -11227,13 +11227,14 @@ $fields
     private fun collectLegacyBannerPatternLayerFactories(javaFiles: List<Path>): Set<LegacyBannerPatternLayerFactory> =
         javaFiles.mapNotNull { javaFile ->
             val source = javaFile.readText()
-            if (!source.contains("BannerPattern.Builder") || !source.contains("new BannerPattern.Builder()")) {
+            val executableCode = maskJavaCommentsAndLiterals(source)
+            if (!executableCode.contains("BannerPattern.Builder") || !executableCode.contains("new BannerPattern.Builder()")) {
                 return@mapNotNull null
             }
-            val ownerClass = classNameOfJavaSource(source) ?: return@mapNotNull null
-            val packageName = packageNameOf(source)
+            val ownerClass = classNameOfJavaSource(executableCode) ?: return@mapNotNull null
+            val packageName = packageNameOf(executableCode)
             Regex("""(?m)\bstatic\s+final\s+BannerPattern\.Builder\s+([A-Za-z_$][\w$]*)\s*=""")
-                .findAll(source)
+                .findAll(executableCode)
                 .map { LegacyBannerPatternLayerFactory(packageName, ownerClass, it.groupValues[1]) }
                 .toList()
         }.flatten().toSet()
@@ -11241,16 +11242,17 @@ $fields
     private fun collectLegacyBannerItemStackFactories(javaFiles: List<Path>): Set<LegacyBannerItemStackFactory> =
         javaFiles.mapNotNull { javaFile ->
             val source = javaFile.readText()
-            if (!source.contains(".toListTag()") ||
-                !source.contains("BlockItem.setBlockEntityData") ||
-                !source.contains("BlockEntityType.BANNER")) {
+            val code = maskJavaComments(source)
+            if (!code.contains(".toListTag()") ||
+                !code.contains("BlockItem.setBlockEntityData") ||
+                !code.contains("BlockEntityType.BANNER")) {
                 return@mapNotNull null
             }
-            val ownerClass = classNameOfJavaSource(source) ?: return@mapNotNull null
-            val packageName = packageNameOf(source)
-            javaMethodRanges(source)
+            val ownerClass = classNameOfJavaSource(code) ?: return@mapNotNull null
+            val packageName = packageNameOf(code)
+            javaMethodRanges(code)
                 .mapNotNull { method ->
-                    val methodText = source.substring(method.range)
+                    val methodText = code.substring(method.range)
                     if (methodText.contains(".toListTag()") &&
                         methodText.contains("BlockItem.setBlockEntityData") &&
                         methodText.contains("BlockEntityType.BANNER") &&
@@ -11267,9 +11269,10 @@ $fields
         patternFactories: Set<LegacyBannerPatternLayerFactory>,
         itemFactories: Set<LegacyBannerItemStackFactory>
     ): String {
-        if (!source.contains("BannerPattern") &&
-            !source.contains(".toListTag()") &&
-            itemFactories.none { source.contains("${it.methodName}()") }) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("BannerPattern") &&
+            !executableCode.contains(".toListTag()") &&
+            itemFactories.none { executableCode.contains("${it.methodName}()") }) {
             return source
         }
 
@@ -11299,14 +11302,15 @@ $fields
     }
 
     private fun migrateLegacyBannerPatternFactoryDefinitions(source: String): String {
-        if (!source.contains("BannerPattern.Builder") || !source.contains("new BannerPattern.Builder()")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("BannerPattern.Builder") || !executableCode.contains("new BannerPattern.Builder()")) return source
         val pattern = Regex(
             """(?ms)^([ \t]*)(public|protected|private)?([ \t]+static[ \t]+final[ \t]+)BannerPattern\.Builder[ \t]+([A-Za-z_$][\w$]*)[ \t]*=[ \t]*new[ \t]+BannerPattern\.Builder[ \t]*\([ \t]*\)(.*?);[ \t]*$"""
         )
-        return pattern.replace(source) { match ->
+        return replaceExecutableRegex(source, pattern) { match ->
             val initializerTail = match.groupValues[5]
             val entries = legacyBannerPatternEntries(initializerTail)
-            if (entries.isEmpty()) return@replace match.value
+            if (entries.isEmpty()) return@replaceExecutableRegex match.value
             val indent = match.groupValues[1]
             val visibility = match.groupValues[2].ifBlank { "public" }
             val fieldName = match.groupValues[4]
@@ -11338,15 +11342,16 @@ $fields
         source: String,
         patternFactories: Set<LegacyBannerPatternLayerFactory>
     ): String {
-        if (!source.contains(".toListTag()") ||
-            !source.contains("BlockItem.setBlockEntityData") ||
-            !source.contains("BlockEntityType.BANNER")) {
+        val code = maskJavaComments(source)
+        if (!code.contains(".toListTag()") ||
+            !code.contains("BlockItem.setBlockEntityData") ||
+            !code.contains("BlockEntityType.BANNER")) {
             return source
         }
         var result = source
-        val methods = javaMethodRanges(result)
+        val methods = javaMethodRanges(code)
             .filter { method ->
-                val methodText = result.substring(method.range)
+                val methodText = code.substring(method.range)
                 methodText.contains(".toListTag()") &&
                     methodText.contains("BlockItem.setBlockEntityData") &&
                     methodText.contains("BlockEntityType.BANNER")
@@ -11434,13 +11439,13 @@ $fields
         source: String,
         factory: LegacyBannerItemStackFactory
     ): String =
-        rewriteJavaCallWithOffset(source, factory.methodName) { receiver, args, callOffset ->
-            if (args.isNotEmpty()) return@rewriteJavaCallWithOffset null
+        rewriteExecutableJavaCallWithOffset(source, factory.methodName) { receiver, args, callOffset ->
+            if (args.isNotEmpty()) return@rewriteExecutableJavaCallWithOffset null
             val receiverText = receiver.trim()
             val matchesFactory = receiverText == factory.ownerClass || receiverText == factory.qualifiedOwner ||
                 receiverText.endsWith(".${factory.ownerClass}")
-            if (!matchesFactory) return@rewriteJavaCallWithOffset null
-            val lookup = inferBannerPatternRegistryLookupExpression(source, callOffset) ?: return@rewriteJavaCallWithOffset null
+            if (!matchesFactory) return@rewriteExecutableJavaCallWithOffset null
+            val lookup = inferBannerPatternRegistryLookupExpression(source, callOffset) ?: return@rewriteExecutableJavaCallWithOffset null
             "$receiverText.${factory.methodName}($lookup)"
         }
 
@@ -11452,17 +11457,18 @@ $fields
         var cursor = 0
         val token = "${factory.methodName}("
         while (true) {
-            val tokenIndex = result.indexOf(token, cursor)
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenIndex = executableCode.indexOf(token, cursor)
             if (tokenIndex < 0) break
             if (tokenIndex > 0) {
-                val prev = result[tokenIndex - 1]
+                val prev = executableCode[tokenIndex - 1]
                 if (prev.isLetterOrDigit() || prev == '_' || prev == '$' || prev == '.') {
                     cursor = tokenIndex + token.length
                     continue
                 }
             }
             val openParen = tokenIndex + factory.methodName.length
-            val closeParen = findMatchingParen(result, openParen)
+            val closeParen = findMatchingParen(executableCode, openParen)
             if (closeParen < 0) {
                 cursor = tokenIndex + token.length
                 continue
@@ -11471,7 +11477,7 @@ $fields
                 cursor = closeParen + 1
                 continue
             }
-            if (looksLikeJavaMethodDeclaration(result, tokenIndex, closeParen)) {
+            if (looksLikeJavaMethodDeclaration(executableCode, tokenIndex, closeParen)) {
                 cursor = closeParen + 1
                 continue
             }
@@ -38593,6 +38599,42 @@ $encodeLines
             val receiver = result.substring(receiverStart, tokenIndex).trim()
             val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
             val replacement = transform(receiver, args)
+            if (replacement == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            result = result.substring(0, receiverStart) + replacement + result.substring(closeParen + 1)
+            cursor = receiverStart + replacement.length
+        }
+        return result
+    }
+
+    private fun rewriteExecutableJavaCallWithOffset(
+        source: String,
+        methodName: String,
+        transform: (receiver: String, args: List<String>, callOffset: Int) -> String?
+    ): String {
+        var result = source
+        var cursor = 0
+        val token = ".${methodName}("
+        while (true) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenIndex = executableCode.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + methodName.length + 1
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val receiverStart = findExpressionReceiverStart(executableCode, tokenIndex)
+            if (receiverStart < 0 || receiverStart >= tokenIndex) {
+                cursor = closeParen + 1
+                continue
+            }
+            val receiver = result.substring(receiverStart, tokenIndex).trim()
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            val replacement = transform(receiver, args, tokenIndex)
             if (replacement == null) {
                 cursor = closeParen + 1
                 continue

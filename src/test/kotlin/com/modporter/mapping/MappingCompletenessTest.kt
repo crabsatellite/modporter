@@ -4990,11 +4990,26 @@ class MappingCompletenessTest {
         }
         val body = source.substring(start, end)
         val offenders = listOf(
-            "java file-name owner fallback" to Regex("""classNameOfJavaSource\(source\)\s*\?:\s*javaFile\.fileName\.toString\(\)\.removeSuffix\("\.java"\)""")
+            "java file-name owner fallback" to Regex("""classNameOfJavaSource\(source\)\s*\?:\s*javaFile\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "raw source owner declaration" to Regex("""classNameOfJavaSource\(source\)"""),
+            "raw source package declaration" to Regex("""packageNameOf\(source\)"""),
+            "raw pattern field scan" to Regex("""\.findAll\(source\)"""),
+            "raw method range scan" to Regex("""javaMethodRanges\(source\)""")
         )
             .filter { (_, pattern) -> pattern.containsMatchIn(body) }
             .map { (label, _) -> "legacy banner component collectors contain $label" }
 
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("classNameOfJavaSource(executableCode)") &&
+                body.contains("packageNameOf(executableCode)") &&
+                body.contains(".findAll(executableCode)") &&
+                body.contains("val code = maskJavaComments(source)") &&
+                body.contains("classNameOfJavaSource(code)") &&
+                body.contains("packageNameOf(code)") &&
+                body.contains("javaMethodRanges(code)"),
+            "Legacy banner component collectors must derive owners and factories from comment-masked Java source"
+        )
         assertTrue(
             offenders.isEmpty(),
             "Legacy banner component migrations must use source-declared Java owners, not Java file-name fallback inference: $offenders"
@@ -5066,6 +5081,41 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty(),
             "Legacy banner item factory call migrations must use the current Java method or creative-tab lambda as registry evidence, not file-prefix lookup fallback: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy banner item factory call rewrites use executable source`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun rewriteQualifiedLegacyBannerItemStackFactoryCalls")
+        assertTrue(start >= 0, "rewriteQualifiedLegacyBannerItemStackFactoryCalls is missing")
+        val end = source.indexOf("private fun looksLikeJavaMethodDeclaration", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw qualified call rewrite" to Regex("""rewriteJavaCallWithOffset\(source,\s*factory\.methodName"""),
+            "raw unqualified token scan" to Regex("""result\.indexOf\(token,\s*cursor\)"""),
+            "raw unqualified paren matching" to Regex("""findMatchingParen\(result,\s*openParen\)"""),
+            "raw declaration check" to Regex("""looksLikeJavaMethodDeclaration\(result,\s*tokenIndex,\s*closeParen\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("rewriteExecutableJavaCallWithOffset(source, factory.methodName)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("executableCode.indexOf(token, cursor)") &&
+                body.contains("findMatchingParen(executableCode, openParen)") &&
+                body.contains("looksLikeJavaMethodDeclaration(executableCode, tokenIndex, closeParen)"),
+            "Legacy banner item factory calls must be located in executable Java, not comments or strings"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy banner item factory calls must not rewrite commented examples: $offenders"
         )
     }
 

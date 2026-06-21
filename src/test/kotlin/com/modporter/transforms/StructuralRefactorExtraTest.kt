@@ -22366,6 +22366,108 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy banner item factory collection ignores commented factory definitions`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleItems.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.level.block.entity.BannerPattern;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+
+            public class ExampleItems {
+                /*
+                public static ItemStack createExampleBannerItemStack() {
+                    ItemStack bannerStack = new ItemStack(Items.WHITE_BANNER);
+                    CompoundTag tag = new CompoundTag();
+                    tag.put("Patterns", new BannerPattern.Builder().toListTag());
+                    BlockItem.setBlockEntityData(bannerStack, BlockEntityType.BANNER, tag);
+                    return bannerStack;
+                }
+                */
+
+                public static ItemStack createExampleBannerItemStack() {
+                    return new ItemStack(Items.WHITE_BANNER);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Usage.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.item.ItemStack;
+
+            public class Usage {
+                public ItemStack make(HolderLookup.Provider registries) {
+                    return ExampleItems.createExampleBannerItemStack();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val usage = srcDir.resolve("Usage.java").readText()
+        val items = srcDir.resolve("ExampleItems.java").readText()
+
+        assertTrue(usage.contains("return ExampleItems.createExampleBannerItemStack();"), usage)
+        assertFalse(usage.contains("lookupOrThrow(Registries.BANNER_PATTERN)"), usage)
+        assertFalse(items.contains("HolderGetter<BannerPattern> patternRegistry"), items)
+        assertTrue(result.changes.none { it.ruleId == "struct-banner-pattern-components" }, result.changes.joinToString("\n"))
+    }
+
+    @Test
+    fun `legacy banner item factory calls ignore commented call examples`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleItems.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.item.DyeColor;
+            import net.minecraft.world.level.block.entity.BannerPattern;
+            import net.minecraft.world.level.block.entity.BannerPatterns;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+
+            public class ExampleItems {
+                public static ItemStack createExampleBannerItemStack() {
+                    ItemStack bannerStack = new ItemStack(Items.WHITE_BANNER);
+                    CompoundTag tag = new CompoundTag();
+                    tag.put("Patterns", new BannerPattern.Builder().addPattern(BannerPatterns.STRIPE_BOTTOM, DyeColor.CYAN).toListTag());
+                    BlockItem.setBlockEntityData(bannerStack, BlockEntityType.BANNER, tag);
+                    return bannerStack;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Usage.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.item.ItemStack;
+
+            public class Usage {
+                public ItemStack make(HolderLookup.Provider registries) {
+                    // ExampleItems.createExampleBannerItemStack();
+                    return ExampleItems.createExampleBannerItemStack();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val usage = srcDir.resolve("Usage.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-banner-pattern-components" }, result.changes.joinToString("\n"))
+        assertTrue(usage.contains("return ExampleItems.createExampleBannerItemStack(registries.lookupOrThrow(Registries.BANNER_PATTERN));"), usage)
+        assertTrue(usage.contains("// ExampleItems.createExampleBannerItemStack();"), usage)
+        assertFalse(usage.contains("// ExampleItems.createExampleBannerItemStack(registries.lookupOrThrow(Registries.BANNER_PATTERN));"), usage)
+    }
+
+    @Test
     fun `item stack predicate override methods do not infer owners from java file names`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
