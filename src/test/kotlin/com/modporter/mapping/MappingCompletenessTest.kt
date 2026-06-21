@@ -9529,10 +9529,22 @@ class MappingCompletenessTest {
                 .filter { (_, marker) -> body.contains(marker) }
                 .map { (label, _) -> "$helper contains $label" }
         }
+        val worldCarverStart = source.indexOf("private fun detectWorldCarverModIdExpression")
+        assertTrue(worldCarverStart >= 0, "detectWorldCarverModIdExpression is missing")
+        val worldCarverEnd = source.indexOf("\n    private fun ", worldCarverStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val worldCarverBody = source.substring(worldCarverStart, worldCarverEnd)
+        val worldCarverFallbackOffenders = listOf(
+            "project mod id fallback" to "projectModIdExpression",
+            "unique metadata mod id fallback" to "detectUniqueProjectModId"
+        )
+            .filter { (_, marker) -> worldCarverBody.contains(marker) }
+            .map { (label, _) -> "detectWorldCarverModIdExpression contains $label" }
 
         assertTrue(
-            offenders.isEmpty(),
-            "Build-system mod id helpers must use @Mod, subscriber modid, or project metadata, not arbitrary constant references: $offenders"
+            offenders.isEmpty() && worldCarverFallbackOffenders.isEmpty(),
+            "Build-system mod id helpers must use scoped @Mod/subscriber evidence, not arbitrary constants or world-carver project fallbacks: ${offenders + worldCarverFallbackOffenders}"
         )
     }
 

@@ -4329,7 +4329,7 @@ $body
         return Regex("""\b${Regex.escape(simpleName)}\b""").containsMatchIn(withoutImports)
     }
 
-    private fun detectWorldCarverModIdExpression(source: String, projectDir: Path): String? {
+    private fun detectWorldCarverModIdExpression(source: String): String? {
         Regex("""@(?:Mod\.)?EventBusSubscriber\s*\([^)]*\bmodid\s*=\s*([^,)]+)""")
             .find(source)
             ?.groupValues
@@ -4337,8 +4337,7 @@ $body
             ?.trim()
             ?.takeIf { it.isNotBlank() }
             ?.let { return it }
-
-        return projectModIdExpression(projectDir)
+        return null
     }
 
     private fun camelOrConstantToRegistryPath(name: String): String {
@@ -5609,7 +5608,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                     .associate { it.groupValues[2] to it.groupValues[1] }
                     .toMutableMap()
                 val migratedFields = linkedSetOf<String>()
-                val modIdExpr = detectWorldCarverModIdExpression(original, projectDir)
+                val modIdExpr = detectWorldCarverModIdExpression(original)
                     ?: throw IllegalStateException(
                         "Cannot derive mod id for world carver registration in " +
                             projectDir.relativize(javaFile).toString().replace('\\', '/')

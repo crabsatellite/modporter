@@ -5258,6 +5258,55 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `world carver migration rejects project mod id fallback without subscriber modid`() {
+        val projectDir = tempDir.resolve("p19-world-carvers-no-subscriber-modid")
+        val initDir = projectDir.resolve("src/main/java/com/example/init")
+        val rootDir = projectDir.resolve("src/main/java/com/example")
+        initDir.createDirectories()
+        rootDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=metadata_mod\n")
+        rootDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+            }
+        """.trimIndent())
+        initDir.resolve("ExampleCarvers.java").writeText("""
+            package com.example.init;
+
+            import com.example.world.ExampleCavesCarver;
+            import net.minecraft.world.level.levelgen.carver.CaveCarverConfiguration;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.registries.ForgeRegistries;
+            import net.neoforged.neoforge.registries.RegisterEvent;
+
+            public class ExampleCarvers {
+                public static final ExampleCavesCarver EXAMPLE_CAVES = new ExampleCavesCarver(CaveCarverConfiguration.CODEC, false);
+
+                @SubscribeEvent
+                public static void register(RegisterEvent evt) {
+                    evt.register(ForgeRegistries.Keys.WORLD_CARVERS, helper -> helper.register(ExampleMod.prefix("example_caves"), EXAMPLE_CAVES));
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val carvers = initDir.resolve("ExampleCarvers.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive mod id for world carver registration") },
+            "Expected missing subscriber modid to hard gate; got ${result.errors}"
+        )
+        assertFalse(carvers.contains("DeferredRegister<WorldCarver<?>> CARVER_TYPES"))
+        assertFalse(carvers.contains("metadata_mod"))
+        assertFalse(carvers.contains("ExampleMod.ID"))
+    }
+
+    @Test
     fun `does not exclude legacy criterion triggers and payload registrars with missing packet classes`() {
         val projectDir = tempDir.resolve("p20")
         val advancementDir = projectDir.resolve("src/main/java/com/example/advancements")
