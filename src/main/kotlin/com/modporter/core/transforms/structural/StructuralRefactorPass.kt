@@ -16658,34 +16658,41 @@ ${indent}}
     }
 
     private fun migrateCuriosHelperRemovalApis(source: String): String {
-        if (!source.contains("CuriosApi.getCuriosHelper()")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("CuriosApi.getCuriosHelper()")) return source
         var result = source
-        result = rewriteJavaCall(result, "getEquippedCurios") { receiver, args ->
-            if (receiver != "CuriosApi.getCuriosHelper()" || args.size != 1) return@rewriteJavaCall null
+        result = rewriteExecutableJavaCall(result, "getEquippedCurios") { receiver, args ->
+            if (receiver != "CuriosApi.getCuriosHelper()" || args.size != 1) return@rewriteExecutableJavaCall null
             "CuriosApi.getCuriosInventory(${args[0].trim()}).map(handler -> handler.getEquippedCurios())"
         }
-        result = rewriteJavaCall(result, "findFirstCurio") { receiver, args ->
-            if (receiver != "CuriosApi.getCuriosHelper()" || args.size != 2) return@rewriteJavaCall null
+        result = rewriteExecutableJavaCall(result, "findFirstCurio") { receiver, args ->
+            if (receiver != "CuriosApi.getCuriosHelper()" || args.size != 2) return@rewriteExecutableJavaCall null
             "CuriosApi.getCuriosInventory(${args[0].trim()}).flatMap(handler -> handler.findFirstCurio(${args[1].trim()}))"
         }
         return result
     }
 
     private fun migrateCuriosInventoryOptionalTypes(source: String): String {
-        if (!source.contains("CuriosApi.getCuriosInventory") || !source.contains("LazyOptional")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("CuriosApi.getCuriosInventory") || !executableCode.contains("LazyOptional")) return source
 
         val before = source
-        var result = Regex("""\b(?:net\.neoforged\.neoforge\.common\.util\.)?LazyOptional\s*<\s*ICuriosItemHandler\s*>""")
-            .replace(source, "Optional<ICuriosItemHandler>")
+        var result = replaceExecutableRegex(
+            source,
+            Regex("""\b(?:net\.neoforged\.neoforge\.common\.util\.)?LazyOptional\s*<\s*ICuriosItemHandler\s*>""")
+        ) { "Optional<ICuriosItemHandler>" }
         if (result == before) return source
+        val executableResult = maskJavaCommentsAndLiterals(result)
         val optionalCuriosVariables = Regex("""\bOptional\s*<\s*ICuriosItemHandler\s*>\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
+            .findAll(executableResult)
             .map { it.groupValues[1] }
             .toSet()
         optionalCuriosVariables.forEach { variable ->
-            result = Regex("""\b${Regex.escape(variable)}\.resolve\(\)""").replace(result, variable)
-            result = Regex("""\b${Regex.escape(variable)}\.isPresent\(\)\s*&&\s*${Regex.escape(variable)}\.isPresent\(\)""")
-                .replace(result, "$variable.isPresent()")
+            result = replaceExecutableRegex(result, Regex("""\b${Regex.escape(variable)}\.resolve\(\)""")) { variable }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b${Regex.escape(variable)}\.isPresent\(\)\s*&&\s*${Regex.escape(variable)}\.isPresent\(\)""")
+            ) { "$variable.isPresent()" }
         }
         result = removeImport(result, "net.neoforged.neoforge.common.util.LazyOptional")
         result = addImportIfMissing(result, "java.util.Optional")
@@ -35606,11 +35613,12 @@ ${indent}}
     }
 
     private fun migrateGeneratedLazyOptionalImportSource(source: String, generatedCompatPackage: () -> String): String {
-        if (!source.contains("LazyOptional<") ||
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!Regex("""\bLazyOptional\s*<""").containsMatchIn(executableCode) ||
             Regex("""(?m)^[ \t]*import\s+com\.modporter\.generated\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.compat\.LazyOptional;\s*$""")
-                .containsMatchIn(source) ||
+                .containsMatchIn(executableCode) ||
             Regex("""(?m)^package\s+com\.modporter\.generated\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.compat\s*;""")
-                .containsMatchIn(source)) {
+                .containsMatchIn(executableCode)) {
             return source
         }
         val compatPackage = generatedCompatPackage()
@@ -38293,6 +38301,42 @@ $encodeLines
                 continue
             }
             val receiverStart = findExpressionReceiverStart(result, tokenIndex)
+            if (receiverStart < 0 || receiverStart >= tokenIndex) {
+                cursor = closeParen + 1
+                continue
+            }
+            val receiver = result.substring(receiverStart, tokenIndex).trim()
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            val replacement = transform(receiver, args)
+            if (replacement == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            result = result.substring(0, receiverStart) + replacement + result.substring(closeParen + 1)
+            cursor = receiverStart + replacement.length
+        }
+        return result
+    }
+
+    private fun rewriteExecutableJavaCall(
+        source: String,
+        methodName: String,
+        transform: (receiver: String, args: List<String>) -> String?
+    ): String {
+        var result = source
+        var cursor = 0
+        val token = ".${methodName}("
+        while (true) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenIndex = executableCode.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + methodName.length + 1
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val receiverStart = findExpressionReceiverStart(executableCode, tokenIndex)
             if (receiverStart < 0 || receiverStart >= tokenIndex) {
                 cursor = closeParen + 1
                 continue

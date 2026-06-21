@@ -24733,6 +24733,52 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `Curios helper and inventory optional migrations ignore comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CuriosCommentSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.player.Player;
+            import net.neoforged.neoforge.common.util.LazyOptional;
+            import top.theillusivec4.curios.api.CuriosApi;
+            import top.theillusivec4.curios.api.type.capability.ICuriosItemHandler;
+
+            public class CuriosCommentSurface {
+                private LazyOptional<ICuriosItemHandler> executableHandler;
+
+                public static void real(Player player) {
+                    CuriosApi.getCuriosHelper().getEquippedCurios(player).ifPresent(handler -> {});
+                    Object inventory = CuriosApi.getCuriosInventory(player);
+                }
+
+                public CuriosCommentSurface(Player player) {
+                    this.executableHandler = CuriosApi.getCuriosInventory(player);
+                }
+
+                /*
+                CuriosApi.getCuriosHelper().getEquippedCurios(player);
+                LazyOptional<ICuriosItemHandler> docs = CuriosApi.getCuriosInventory(player);
+                */
+                private static final String SAMPLE = "CuriosApi.getCuriosHelper().findFirstCurio(player, stack -> true); LazyOptional<ICuriosItemHandler>";
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("CuriosCommentSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(migrated.contains("CuriosApi.getCuriosInventory(player).map(handler -> handler.getEquippedCurios()).ifPresent"), migrated)
+        assertTrue(migrated.contains("import java.util.Optional;"), migrated)
+        assertTrue(migrated.contains("private Optional<ICuriosItemHandler> executableHandler;"), migrated)
+        assertTrue(migrated.contains("CuriosApi.getCuriosHelper().getEquippedCurios(player);"), migrated)
+        assertTrue(migrated.contains("LazyOptional<ICuriosItemHandler> docs = CuriosApi.getCuriosInventory(player);"), migrated)
+        assertTrue(migrated.contains("CuriosApi.getCuriosHelper().findFirstCurio(player, stack -> true); LazyOptional<ICuriosItemHandler>"), migrated)
+        assertFalse(Regex("""(?m)^[ \t]*Optional\s*<\s*ICuriosItemHandler\s*>\s+docs\b""").containsMatchIn(migrated), migrated)
+    }
+
+    @Test
     fun `register additional model keys use standalone variant for inline and static field registrations`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

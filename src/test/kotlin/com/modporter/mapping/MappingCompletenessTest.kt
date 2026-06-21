@@ -2523,6 +2523,21 @@ class MappingCompletenessTest {
             structuralPass.contains("private fun migrateGeneratedLazyOptionalImportSource(source: String, generatedCompatPackage: () -> String)"),
             "Generated LazyOptional import migration must resolve compat packages lazily at the import bridge site"
         )
+        val generatedBridgeStart = structuralPass.indexOf("private fun migrateGeneratedLazyOptionalImportSource")
+        assertTrue(generatedBridgeStart >= 0, "migrateGeneratedLazyOptionalImportSource is missing")
+        val generatedBridgeEnd = structuralPass.indexOf("\n    private fun ", generatedBridgeStart + 1).let {
+            if (it < 0) structuralPass.length else it
+        }
+        val generatedBridgeBody = structuralPass.substring(generatedBridgeStart, generatedBridgeEnd)
+        assertTrue(
+            generatedBridgeBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                generatedBridgeBody.contains("containsMatchIn(executableCode)"),
+            "Generated LazyOptional import bridge must inspect executable Java before requiring a generated compat package"
+        )
+        assertTrue(
+            !generatedBridgeBody.contains("""source.contains("LazyOptional<")"""),
+            "Generated LazyOptional import bridge must not let comments or strings trigger the required mod-id hard gate"
+        )
     }
 
     @Test
@@ -3721,6 +3736,44 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty(),
             "Curios item capability migration must not depend on fixed project-local helper names or raw-source evidence: $offenders"
+        )
+    }
+
+    @Test
+    fun `curios helper and inventory optional migrations use executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateCuriosHelperRemovalApis")
+        assertTrue(start >= 0, "migrateCuriosHelperRemovalApis is missing")
+        val end = source.indexOf("private fun migrateCuriosAttributeModifierHolderTypes", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw Curios helper prefilter" to "source.contains(\"CuriosApi.getCuriosHelper()\")",
+            "raw Curios inventory prefilter" to "source.contains(\"CuriosApi.getCuriosInventory\")",
+            "raw LazyOptional prefilter" to "source.contains(\"LazyOptional\")",
+            "raw helper getEquippedCurios rewrite" to "rewriteJavaCall(result, \"getEquippedCurios\")",
+            "raw helper findFirstCurio rewrite" to "rewriteJavaCall(result, \"findFirstCurio\")",
+            "raw LazyOptional type replacement" to ".replace(source, \"Optional<ICuriosItemHandler>\")",
+            "raw LazyOptional resolve replacement" to ".replace(result, variable)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "curios helper migration contains $label" }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("rewriteExecutableJavaCall(result, \"getEquippedCurios\")") &&
+                body.contains("rewriteExecutableJavaCall(result, \"findFirstCurio\")") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)"),
+            "Curios helper and inventory optional migrations must inspect executable Java and rewrite only executable code"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Curios helper and inventory optional migrations must not treat comments or strings as migration evidence: $offenders"
         )
     }
 
