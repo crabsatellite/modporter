@@ -1064,6 +1064,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `particle type registration migration rewrites executable source only`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateParticleTypeRegistrations")
+        assertTrue(start >= 0, "migrateParticleTypeRegistrations is missing")
+        val end = source.indexOf("private fun migrateParticleNetworkCodecs", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw particle type prefilter" to """source.contains("new ParticleType<>(false, new")""",
+            "raw deserializer prefilter" to """source.contains(".Deserializer()")""",
+            "raw deserializer scan" to ".findAll(result)",
+            "raw particle type replacement" to ".replace(result, \"new ParticleType<>(false)\")",
+            "raw codec block replacement" to "codecBlock.replace(result)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""!executableCode.contains("new ParticleType<>(false, new")""") &&
+                body.contains(".findAll(executableCode)") &&
+                body.contains("replaceExecutableRegex("),
+            "ParticleType registration migration must discover and rewrite registrations from executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "ParticleType registration migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `client only build detection ignores comments and strings`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

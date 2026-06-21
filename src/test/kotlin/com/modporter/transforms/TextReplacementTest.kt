@@ -2968,6 +2968,38 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `custom particle type registration migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            public class ParticleTypeDocs {
+                /*
+                public static final DeferredHolder<ParticleType<LeafParticleData>, ParticleType<LeafParticleData>> FALLEN_LEAF =
+                        PARTICLES.register("fallen_leaf", () -> new ParticleType<>(false, new LeafParticleData.Deserializer()) {
+                            @Override
+                            public Codec<LeafParticleData> codec() {
+                                return LeafParticleData.codecLeaf();
+                            }
+                        });
+                */
+                private static final String DOC = "new ParticleType<>(false, new LeafParticleData.Deserializer())";
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "particle-type-codec-streamcodec" }, result.changes.joinToString("\n"))
+        assertTrue(transformed.contains("new ParticleType<>(false, new LeafParticleData.Deserializer())"), transformed)
+        assertTrue(transformed.contains("DeferredHolder<ParticleType<LeafParticleData>, ParticleType<LeafParticleData>>"), transformed)
+        assertFalse(transformed.contains("DeferredHolder<ParticleType<?>, ParticleType<LeafParticleData>>"), transformed)
+        assertFalse(transformed.contains("LeafParticleData.STREAM_CODEC"), transformed)
+    }
+
+    @Test
     fun `loot datagen builders and global loot modifier generics migrate to 1_21 APIs`() {
         val projectDir = createTestFile("""
             package com.example;

@@ -753,23 +753,32 @@ $streamFields,
     }
 
     private fun migrateParticleTypeRegistrations(source: String): String {
-        if (!source.contains("new ParticleType<>(false, new") || !source.contains(".Deserializer()")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("new ParticleType<>(false, new") || !executableCode.contains(".Deserializer()")) {
             return source
         }
         var result = source
         val customTypes = Regex("""new\s+([A-Za-z_$][\w$]*)\.Deserializer\s*\(\s*\)""")
-            .findAll(result)
+            .findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
 
-        result = Regex("""new\s+ParticleType<>\(\s*false\s*,\s*new\s+[A-Za-z_$][\w$]*\.Deserializer\s*\(\s*\)\s*\)""")
-            .replace(result, "new ParticleType<>(false)")
-        result = Regex("""DeferredHolder<ParticleType<([A-Za-z_$][\w$]*)>,\s*ParticleType<\1>>""")
-            .replace(result, "DeferredHolder<ParticleType<?>, ParticleType<$1>>")
-        result = Regex("""public\s+Codec<([A-Za-z_$][\w$]*)>\s+codec\s*\(\s*\)""")
-            .replace(result, "public MapCodec<$1> codec()")
-        result = Regex("""return\s+([A-Za-z_$][\w$]*)\.codec[A-Za-z_$][\w$]*\s*\(\s*\)\s*;""")
-            .replace(result, "return $1.CODEC;")
+        result = replaceExecutableRegex(
+            result,
+            Regex("""new\s+ParticleType<>\(\s*false\s*,\s*new\s+[A-Za-z_$][\w$]*\.Deserializer\s*\(\s*\)\s*\)""")
+        ) { "new ParticleType<>(false)" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""DeferredHolder<ParticleType<([A-Za-z_$][\w$]*)>,\s*ParticleType<\1>>""")
+        ) { match -> "DeferredHolder<ParticleType<?>, ParticleType<${match.groupValues[1]}>>" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""public\s+Codec<([A-Za-z_$][\w$]*)>\s+codec\s*\(\s*\)""")
+        ) { match -> "public MapCodec<${match.groupValues[1]}> codec()" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""return\s+([A-Za-z_$][\w$]*)\.codec[A-Za-z_$][\w$]*\s*\(\s*\)\s*;""")
+        ) { match -> "return ${match.groupValues[1]}.CODEC;" }
 
         for (typeName in customTypes) {
             val streamSignature = "StreamCodec<? super RegistryFriendlyByteBuf, $typeName> streamCodec()"
@@ -777,7 +786,7 @@ $streamFields,
             val codecBlock = Regex(
                 """@Override\s*\r?\n\s*public\s+MapCodec<${Regex.escape(typeName)}>\s+codec\s*\(\s*\)\s*\{\s*return\s+${Regex.escape(typeName)}\.CODEC;\s*\}"""
             )
-            result = codecBlock.replace(result) { match ->
+            result = replaceExecutableRegex(result, codecBlock) { match ->
                 match.value + """
 
 
@@ -3664,6 +3673,31 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         }
         return result.toString()
     }
+
+    private fun replaceExecutableRegex(
+        source: String,
+        pattern: Regex,
+        replacement: (ExecutableRegexMatch) -> String
+    ): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val matches = pattern.findAll(executableCode).toList()
+        if (matches.isEmpty()) return source
+
+        var result = source
+        for (match in matches.asReversed()) {
+            val originalValue = source.substring(match.range.first, match.range.last + 1)
+            result = result.replaceRange(
+                match.range,
+                replacement(ExecutableRegexMatch(originalValue, match.groupValues))
+            )
+        }
+        return result
+    }
+
+    private data class ExecutableRegexMatch(
+        val value: String,
+        val groupValues: List<String>
+    )
 
     private data class ParticleField(
         val type: String,
