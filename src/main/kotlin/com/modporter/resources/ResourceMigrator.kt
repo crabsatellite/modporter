@@ -634,9 +634,10 @@ class ResourceMigrationPass(
         val typePattern = Regex(
             """\b(?:public|protected|private|abstract|final|static|\s)*(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b"""
         )
-        for (match in typePattern.findAll(source)) {
-            val openBrace = source.indexOf('{', match.range.last)
-            val closeBrace = if (openBrace >= 0) findMatchingJavaBrace(source, openBrace) else -1
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        for (match in typePattern.findAll(executableSource)) {
+            val openBrace = executableSource.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingJavaBrace(executableSource, openBrace) else -1
             if (openBrace >= 0 && closeBrace > openBrace && offset in openBrace..closeBrace) {
                 return match.groupValues[1]
             }

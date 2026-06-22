@@ -8776,23 +8776,36 @@ class MappingCompletenessTest {
             listOf(
                 "takeWhile previous-type scan" to "takeWhile { it.range.first <= offset }",
                 "last declaration fallback" to "lastOrNull()",
-                "post-loop type lookup" to "return typePattern.findAll(source)"
+                "post-loop type lookup" to "return typePattern.findAll(source)",
+                "raw type declaration scan" to "typePattern.findAll(source)",
+                "raw type open brace scan" to "source.indexOf('{', match.range.last)",
+                "raw type brace matching" to Regex("""findMatching(?:Java)?Brace\(source,\s*openBrace\)""")
             )
-                .filter { (_, marker) -> body.contains(marker) }
+                .filter { (_, marker) ->
+                    when (marker) {
+                        is String -> body.contains(marker)
+                        is Regex -> marker.containsMatchIn(body)
+                        else -> false
+                    }
+                }
                 .map { (reason, _) -> "$label contains $reason" }
         }
 
         assertTrue(
             sources.all { (_, source) ->
                 val body = helperBody(source)
-                body.contains("offset in openBrace..closeBrace") &&
+                body.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                    body.contains("typePattern.findAll(executableSource)") &&
+                    body.contains("val openBrace = executableSource.indexOf('{', match.range.last)") &&
+                    Regex("""findMatching(?:Java)?Brace\(executableSource,\s*openBrace\)""").containsMatchIn(body) &&
+                    body.contains("offset in openBrace..closeBrace") &&
                     Regex("""return\s+null\s*\}\s*$""").containsMatchIn(body)
             },
-            "Java owner resolution must return a type only when the offset is inside that type body"
+            "Java owner resolution must locate type bodies in executable Java and return a type only when the offset is inside that body"
         )
         assertTrue(
             offenders.isEmpty(),
-            "Java owner resolution must not assign orphaned declarations to the previous type: $offenders"
+            "Java owner resolution must not assign orphaned declarations or comments/text blocks to a type: $offenders"
         )
     }
 
