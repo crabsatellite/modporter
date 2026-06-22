@@ -6673,6 +6673,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy advancement datagen holder id migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyAdvancementDatagenSource")
+        assertTrue(start >= 0, "migrateLegacyAdvancementDatagenSource is missing")
+        val end = source.indexOf("private fun legacyCriteriaTriggerExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw advancement save holder rewrite" to ".replace(result) { match -> \"AdvancementHolder",
+            "raw PlayerTrigger advancement argument rewrite" to ".replace(result, \"${'$'}1AdvancementHolder${'$'}2\")",
+            "raw PlayerTrigger criterion return rewrite" to ".replace(result, \"${'$'}1 Criterion<PlayerTrigger.TriggerInstance> ${'$'}2\")",
+            "raw holder id replacement" to "result.replace(\"${'$'}variable.getId()",
+            "raw getAdvancement id replacement" to "result.replace(\".getAdvancement().getId()",
+            "raw holder variable search" to ".findAll(result)\n            .map { it.groupValues[1] }\n            .toSet()\n        holderVariables.forEach"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableHolderSource = maskJavaCommentsAndLiterals(result)") &&
+                body.contains(".findAll(executableHolderSource)") &&
+                body.contains("replaceExecutableRegex(result, Regex(\"\"\"\\b${'$'}{Regex.escape(variable)}\\.getId") &&
+                body.contains("replaceExecutableRegex(result, Regex(\"\"\"\\.getAdvancement\\s*\\("),
+            "Legacy advancement datagen holder-id migration must use executable Java declarations and accessors"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy advancement datagen holder-id migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy neoforge model api constructors use executable constructor evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
@@ -6815,6 +6851,50 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty(),
             "Legacy advancement fallback packet migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy advancement holder API migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyAdvancementHolderApis")
+        assertTrue(start >= 0, "migrateLegacyAdvancementHolderApis is missing")
+        val end = source.indexOf("private fun migrateLegacyAdvancementParentLoop", start + 1)
+        assertTrue(end > start, "migrateLegacyAdvancementHolderApis boundary is missing")
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getAdvancement lookup replacement" to "result.replace(\".getAdvancements().getAdvancement(",
+            "raw manager get lookup replacement" to "result.replace(\"manager.getAdvancements().get(",
+            "raw server manager variable replacement" to "result.replace(\"${'$'}managerVariable.getAdvancement(",
+            "raw predicate type replacement" to "result.replace(\"Predicate<Advancement>\"",
+            "raw javadoc link replacement" to "result.replace(\"{@link Advancement}\"",
+            "raw matches signature replacement" to "result.replace(\"matches(Advancement ",
+            "raw retrieveOverride signature replacement" to "result.replace(\"retrieveOverride(Advancement ",
+            "raw checkRoot signature replacement" to "result.replace(\"checkRoot(Advancement ",
+            "raw holder getDisplay replacement" to "result.replace(\"${'$'}variable.getDisplay()",
+            "raw holder getId replacement" to "result.replace(\"${'$'}variable.getId()",
+            "raw holder variable search" to ".findAll(result)",
+            "raw Advancement import removal" to """removeImport(result, "net.minecraft.advancements.Advancement")""",
+            "comment-sensitive Advancement import retention" to "containsMatchIn(withoutAdvancementImport)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableManagerSource = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("val executableHolderSource = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("replaceExecutableRegex(") &&
+                body.contains("addExecutableImportIfMissing(result, \"net.minecraft.advancements.AdvancementHolder\")") &&
+                body.contains("removeExecutableImport(result, \"net.minecraft.advancements.Advancement\")") &&
+                body.contains("maskJavaCommentsAndLiterals(withoutAdvancementImport)"),
+            "Legacy advancement holder migration must derive and rewrite only executable Java API surfaces"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy advancement holder migration must not rewrite comments/strings or retain imports because of comments: $offenders"
         )
     }
 

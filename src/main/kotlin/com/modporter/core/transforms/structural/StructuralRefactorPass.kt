@@ -20663,56 +20663,85 @@ $body
         }
 
         var result = source
-        result = result.replace(".getAdvancements().getAdvancement(", ".getAdvancements().get(")
-        result = result.replace("manager.getAdvancements().get(", "manager.get(")
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\.getAdvancements\s*\(\s*\)\s*\.getAdvancement\s*\(""")
+        ) { ".getAdvancements().get(" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\bmanager\.getAdvancements\s*\(\s*\)\s*\.get\s*\(""")
+        ) { "manager.get(" }
+        val executableManagerSource = maskJavaCommentsAndLiterals(result)
         val advancementManagerVariables = Regex("""\bServerAdvancementManager\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
+            .findAll(executableManagerSource)
             .map { it.groupValues[1] }
             .toSet()
         for (managerVariable in advancementManagerVariables) {
-            result = result.replace("$managerVariable.getAdvancement(", "$managerVariable.get(")
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b${Regex.escape(managerVariable)}\.getAdvancement\s*\(""")
+            ) { "$managerVariable.get(" }
         }
 
-        result = result.replace("Predicate<Advancement>", "Predicate<AdvancementHolder>")
-        result = result.replace("{@link Advancement}", "{@link AdvancementHolder}")
-        result = result.replace("matches(Advancement ", "matches(AdvancementHolder ")
-        result = result.replace("retrieveOverride(Advancement ", "retrieveOverride(AdvancementHolder ")
-        result = result.replace("checkRoot(Advancement ", "checkRoot(AdvancementHolder ")
-        if (result.contains("AdvancementToast.class")) {
-            result = Regex("""\bprivate\s+Advancement\s+advancement\s*;""")
-                .replace(result, "private AdvancementHolder advancement;")
+        result = replaceExecutableRegex(result, Regex("""\bPredicate\s*<\s*Advancement\s*>""")) { "Predicate<AdvancementHolder>" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\b(matches|retrieveOverride|checkRoot)\s*\(\s*Advancement\s+""")
+        ) { match ->
+            "${match.groupValues[1]}(AdvancementHolder "
         }
-        result = Regex("""\b(public|private|protected)\s+static\s+Advancement\s+getAdvancement\s*\(""")
-            .replace(result, "$1 static AdvancementHolder getAdvancement(")
-        result = Regex(
-            """\b(public|private|protected)\s+static\s+boolean\s+doesPlayerHaveRequiredAdvancement\(\s*Player\s+([A-Za-z_$][\w$]*)\s*,\s*Advancement\s+([A-Za-z_$][\w$]*)\s*\)"""
-        ).replace(result) { match ->
+        if (maskJavaCommentsAndLiterals(result).contains("AdvancementToast.class")) {
+            result = replaceExecutableRegex(result, Regex("""\bprivate\s+Advancement\s+advancement\s*;""")) {
+                "private AdvancementHolder advancement;"
+            }
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\b(public|private|protected)\s+static\s+Advancement\s+getAdvancement\s*\(""")
+        ) { match ->
+            "${match.groupValues[1]} static AdvancementHolder getAdvancement("
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\b(public|private|protected)\s+static\s+boolean\s+doesPlayerHaveRequiredAdvancement\(\s*Player\s+([A-Za-z_$][\w$]*)\s*,\s*Advancement\s+([A-Za-z_$][\w$]*)\s*\)""")
+        ) { match ->
             "${match.groupValues[1]} static boolean doesPlayerHaveRequiredAdvancement(Player ${match.groupValues[2]}, AdvancementHolder ${match.groupValues[3]})"
         }
-        result = Regex(
-            """\bAdvancement\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\r\n]*(?:getAdvancement|getAdvancements\(\)\.get|manager\.get|PlayerHelper\.getAdvancement)\([^;\r\n]*;)"""
-        ).replace(result) { match ->
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\bAdvancement\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\r\n]*(?:getAdvancement|getAdvancements\(\)\.get|manager\.get|PlayerHelper\.getAdvancement)\([^;\r\n]*;)""")
+        ) { match ->
             "AdvancementHolder ${match.groupValues[1]} = ${match.groupValues[2]}"
         }
 
+        val executableHolderSource = maskJavaCommentsAndLiterals(result)
         val holderVariables = Regex("""\bAdvancementHolder\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
+            .findAll(executableHolderSource)
             .map { it.groupValues[1] }
             .toSet()
-        val holderLambdaVariables = if (result.contains("Predicate<AdvancementHolder>") || result.contains("new AdvancementSoundOverride")) {
+        val holderLambdaVariables = if (
+            executableHolderSource.contains("Predicate<AdvancementHolder>") ||
+            executableHolderSource.contains("new AdvancementSoundOverride")
+        ) {
             Regex("""\b([A-Za-z_$][\w$]*)\s*->[^;\r\n]*\b\1\.getId\(\)""")
-                .findAll(result)
+                .findAll(executableHolderSource)
                 .map { it.groupValues[1] }
                 .toSet()
         } else {
             emptySet()
         }
         for (variable in holderVariables) {
-            result = result.replace("$variable.getDisplay()", "$variable.value().display().orElse(null)")
-            result = result.replace("$variable.getId()", "$variable.id()")
+            result = replaceExecutableRegex(result, Regex("""\b${Regex.escape(variable)}\.getDisplay\s*\(\s*\)""")) {
+                "$variable.value().display().orElse(null)"
+            }
+            result = replaceExecutableRegex(result, Regex("""\b${Regex.escape(variable)}\.getId\s*\(\s*\)""")) {
+                "$variable.id()"
+            }
         }
         for (variable in holderLambdaVariables) {
-            result = result.replace("$variable.getId()", "$variable.id()")
+            result = replaceExecutableRegex(result, Regex("""\b${Regex.escape(variable)}\.getId\s*\(\s*\)""")) {
+                "$variable.id()"
+            }
         }
         result = migrateLegacyAdvancementParentLoop(result)
         result = migrateLegacyDeferredRegistryEntryStream(result)
@@ -20726,17 +20755,18 @@ $body
             "new $packetType($fallbackType.FALLBACK.title(), $fallbackType.FALLBACK.icon()) : new $packetType("
         }
 
-        if (result != source && result.contains("AdvancementHolder")) {
-            result = addImportIfMissing(result, "net.minecraft.advancements.AdvancementHolder")
-            if (result.contains("Minecraft.getInstance().player")) {
-                result = addImportIfMissing(result, "net.minecraft.client.Minecraft")
-                result = addImportIfMissing(result, "net.minecraft.client.player.LocalPlayer")
+        if (result != source && maskJavaCommentsAndLiterals(result).contains("AdvancementHolder")) {
+            result = addExecutableImportIfMissing(result, "net.minecraft.advancements.AdvancementHolder")
+            val executableResult = maskJavaCommentsAndLiterals(result)
+            if (executableResult.contains("Minecraft.getInstance().player")) {
+                result = addExecutableImportIfMissing(result, "net.minecraft.client.Minecraft")
+                result = addExecutableImportIfMissing(result, "net.minecraft.client.player.LocalPlayer")
             }
-            if (result.contains("DeferredHolder::value")) {
-                result = addImportIfMissing(result, "net.neoforged.neoforge.registries.DeferredHolder")
+            if (executableResult.contains("DeferredHolder::value")) {
+                result = addExecutableImportIfMissing(result, "net.neoforged.neoforge.registries.DeferredHolder")
             }
-            val withoutAdvancementImport = removeImport(result, "net.minecraft.advancements.Advancement")
-            if (!Regex("""\bAdvancement\b""").containsMatchIn(withoutAdvancementImport)) {
+            val withoutAdvancementImport = removeExecutableImport(result, "net.minecraft.advancements.Advancement")
+            if (!Regex("""\bAdvancement\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutAdvancementImport))) {
                 result = withoutAdvancementImport
             }
         }
@@ -20903,21 +20933,38 @@ ${indent}}
             ?.groupValues
             ?.get(1)
 
-        result = Regex("""(?s)\bAdvancement\s+([A-Za-z_$][\w$]*)\s*=\s*((?:(?!;).)*?\.save\s*\()""")
-            .replace(result) { match -> "AdvancementHolder ${match.groupValues[1]} = ${match.groupValues[2]}" }
-        result = Regex("""\b(PlayerTrigger\.TriggerInstance\s+advancementTrigger\s*\(\s*)Advancement(\s+[A-Za-z_$][\w$]*\s*\))""")
-            .replace(result, "$1AdvancementHolder$2")
-        result = Regex("""\b(private|protected|public)\s+PlayerTrigger\.TriggerInstance\s+(advancementTrigger\s*\()""")
-            .replace(result, "$1 Criterion<PlayerTrigger.TriggerInstance> $2")
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(?s)\bAdvancement\s+([A-Za-z_$][\w$]*)\s*=\s*((?:(?!;).)*?\.save\s*\()""")
+        ) { match ->
+            "AdvancementHolder ${match.groupValues[1]} = ${match.groupValues[2]}"
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\b(PlayerTrigger\.TriggerInstance\s+advancementTrigger\s*\(\s*)Advancement(\s+[A-Za-z_$][\w$]*\s*\))""")
+        ) { match ->
+            "${match.groupValues[1]}AdvancementHolder${match.groupValues[2]}"
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\b(private|protected|public)\s+PlayerTrigger\.TriggerInstance\s+(advancementTrigger\s*\()""")
+        ) { match ->
+            "${match.groupValues[1]} Criterion<PlayerTrigger.TriggerInstance> ${match.groupValues[2]}"
+        }
 
+        val executableHolderSource = maskJavaCommentsAndLiterals(result)
         val holderVariables = Regex("""\bAdvancementHolder\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
+            .findAll(executableHolderSource)
             .map { it.groupValues[1] }
             .toSet()
         holderVariables.forEach { variable ->
-            result = result.replace("$variable.getId()", "$variable.id()")
+            result = replaceExecutableRegex(result, Regex("""\b${Regex.escape(variable)}\.getId\s*\(\s*\)""")) {
+                "$variable.id()"
+            }
         }
-        result = result.replace(".getAdvancement().getId()", ".getAdvancement().id()")
+        result = replaceExecutableRegex(result, Regex("""\.getAdvancement\s*\(\s*\)\s*\.getId\s*\(\s*\)""")) {
+            ".getAdvancement().id()"
+        }
 
         result = result.replace("LocationPredicate.inDimension(", "LocationPredicate.Builder.inDimension(")
         if (providerName != null) {

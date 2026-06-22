@@ -23383,6 +23383,9 @@ class StructuralRefactorExtraTest {
             import net.minecraft.world.entity.player.Player;
 
             public class PlayerHelper {
+                private static final String ADVANCEMENT_DOC =
+                    "legacy Advancement docs: return manager.getAdvancements().getAdvancement(advancementLocation); Predicate<Advancement>";
+
                 public static Advancement getAdvancement(Player player, ResourceLocation advancementLocation) {
                     if (player instanceof LocalPlayer localPlayer) {
                         ClientAdvancements manager = localPlayer.connection.getAdvancements();
@@ -23412,11 +23415,13 @@ class StructuralRefactorExtraTest {
 
             public class PortalSurface {
                 private static final String FALLBACK_DOC = "info == null ? MissingAdvancementToast.FALLBACK : new MissingAdvancementToastPacket(info.getTitle(), info.getIcon())";
+                private static final String HOLDER_DOC = "Advancement requirement; requirement.getDisplay(); requirement.getId();";
 
                 public void send(ServerPlayer player, ResourceLocation id) {
                     Advancement requirement = PlayerHelper.getAdvancement(player, id);
                     if (requirement != null && !PlayerHelper.doesPlayerHaveRequiredAdvancement(player, requirement)) {
                         DisplayInfo info = requirement.getDisplay();
+                        // Advancement requirement; requirement.getDisplay(); requirement.getId();
                         // PacketDistributor.sendToPlayer(player, info == null ? MissingAdvancementToast.FALLBACK : new MissingAdvancementToastPacket(info.getTitle(), info.getIcon()));
                         PacketDistributor.sendToPlayer(player, info == null ? MissingAdvancementToast.FALLBACK : new MissingAdvancementToastPacket(info.getTitle(), info.getIcon()));
                     }
@@ -23430,17 +23435,22 @@ class StructuralRefactorExtraTest {
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
         assertTrue(helper.contains("import net.minecraft.advancements.AdvancementHolder;"))
+        assertFalse(helper.contains("import net.minecraft.advancements.Advancement;"), helper)
         assertTrue(helper.contains("public static AdvancementHolder getAdvancement(Player player, ResourceLocation advancementLocation)"))
         assertTrue(helper.contains("return manager.get(advancementLocation);"))
         assertTrue(helper.contains("return serverPlayer.getServer().getAdvancements().get(advancementLocation);"))
         assertTrue(helper.contains("doesPlayerHaveRequiredAdvancement(Player player, AdvancementHolder advancement)"))
         assertTrue(helper.contains("serverPlayer.getAdvancements().getOrStartProgress(advancement).isDone()"))
+        assertTrue(helper.contains("legacy Advancement docs: return manager.getAdvancements().getAdvancement(advancementLocation); Predicate<Advancement>"), helper)
+        assertFalse(portal.contains("import net.minecraft.advancements.Advancement;"), portal)
         assertTrue(portal.contains("AdvancementHolder requirement = PlayerHelper.getAdvancement(player, id);"))
         assertTrue(portal.contains("DisplayInfo info = requirement.value().display().orElse(null);"))
         assertTrue(portal.contains("info == null ? new MissingAdvancementToastPacket(MissingAdvancementToast.FALLBACK.title(), MissingAdvancementToast.FALLBACK.icon()) : new MissingAdvancementToastPacket(info.getTitle(), info.getIcon())"))
         assertTrue(portal.contains("""private static final String FALLBACK_DOC = "info == null ? MissingAdvancementToast.FALLBACK : new MissingAdvancementToastPacket(info.getTitle(), info.getIcon())";"""), portal)
+        assertTrue(portal.contains("""private static final String HOLDER_DOC = "Advancement requirement; requirement.getDisplay(); requirement.getId();";"""), portal)
+        assertTrue(portal.contains("// Advancement requirement; requirement.getDisplay(); requirement.getId();"), portal)
         assertTrue(portal.contains("// PacketDistributor.sendToPlayer(player, info == null ? MissingAdvancementToast.FALLBACK : new MissingAdvancementToastPacket(info.getTitle(), info.getIcon()));"), portal)
-        assertTrue(!portal.contains("requirement.getDisplay()"))
+        assertFalse(portal.contains("DisplayInfo info = requirement.getDisplay();"), portal)
     }
 
     @Test
