@@ -17,3 +17,6 @@ Thumbs.db
 
 # Test outputs
 src/test/resources/fixtures/*-ported/
+
+# Local paper drafts, kept private until publication-ready
+/paper/
