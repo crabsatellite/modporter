@@ -3379,36 +3379,55 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
     }
 
     private fun migrateRemovedTagManagerAccess(source: String): String {
-        if (!source.contains("ITagManager<")) return source
-        val lines = removeImportLine(source, "net.neoforged.neoforge.registries.tags.ITagManager").lines()
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("ITagManager<")) return source
+        val lines = source.lines()
+        val executableLines = executableCode.lines()
         val out = mutableListOf<String>()
         var i = 0
+        var changed = false
         val id = """[A-Za-z_$][\w$]*"""
         val declaration = Regex("""^(\s*)ITagManager<\s*Item\s*>\s+($id)\s*=\s*BuiltInRegistries\.ITEM\.tags\(\)\s*;\s*$""")
         while (i < lines.size) {
-            val decl = declaration.find(lines[i])
+            val decl = declaration.find(executableLines[i])
             if (decl != null && i + 2 < lines.size) {
                 val varName = decl.groupValues[2]
                 val nullGuard = Regex("""^\s*if\s*\(\s*${Regex.escape(varName)}\s*!=\s*null\s*\)\s*\{\s*$""")
-                if (nullGuard.matches(lines[i + 1])) {
+                if (nullGuard.matches(executableLines[i + 1])) {
                     val loop = Regex("""^(\s*)${Regex.escape(varName)}\.getTag\((.*)\)\.stream\(\)\.forEach\(\s*\(\s*($id)\s*\)\s*->\s*(.*)\);\s*$""")
-                        .find(lines[i + 2])
-                    if (loop != null && i + 3 < lines.size && lines[i + 3].trim() == "}") {
-                        val indent = loop.groupValues[1]
-                        val tagExpression = loop.groupValues[2].trim()
-                        val itemVariable = loop.groupValues[3]
-                        val body = loop.groupValues[4].trim()
+                        .find(executableLines[i + 2])
+                    if (loop != null && i + 3 < lines.size && executableLines[i + 3].trim() == "}") {
+                        val sourceLoop = Regex("""^(\s*)${Regex.escape(varName)}\.getTag\((.*)\)\.stream\(\)\.forEach\(\s*\(\s*($id)\s*\)\s*->\s*(.*)\);\s*$""")
+                            .find(lines[i + 2])
+                        if (sourceLoop == null) {
+                            out.add(lines[i])
+                            i++
+                            continue
+                        }
+                        val indent = sourceLoop.groupValues[1]
+                        val tagExpression = sourceLoop.groupValues[2].trim()
+                        val itemVariable = sourceLoop.groupValues[3]
+                        val body = sourceLoop.groupValues[4].trim()
                         out.add("${indent}BuiltInRegistries.ITEM.getTagOrEmpty($tagExpression).forEach((holder) -> { Item $itemVariable = holder.value(); $body; });")
+                        changed = true
                         i += 4
                         continue
                     }
 
                     val emptyCheck = Regex("""^(\s*)if\s*\(\s*${Regex.escape(varName)}\.getTag\((.*)\)\.isEmpty\(\)\s*\)\s*\{\s*$""")
-                        .find(lines[i + 2])
+                        .find(executableLines[i + 2])
                     if (emptyCheck != null) {
-                        val indent = emptyCheck.groupValues[1]
-                        val tagExpression = emptyCheck.groupValues[2].trim()
+                        val sourceEmptyCheck = Regex("""^(\s*)if\s*\(\s*${Regex.escape(varName)}\.getTag\((.*)\)\.isEmpty\(\)\s*\)\s*\{\s*$""")
+                            .find(lines[i + 2])
+                        if (sourceEmptyCheck == null) {
+                            out.add(lines[i])
+                            i++
+                            continue
+                        }
+                        val indent = sourceEmptyCheck.groupValues[1]
+                        val tagExpression = sourceEmptyCheck.groupValues[2].trim()
                         out.add("${indent}if (!BuiltInRegistries.ITEM.getTagOrEmpty($tagExpression).iterator().hasNext()) {")
+                        changed = true
                         i += 3
                         while (i < lines.size) {
                             out.add(lines[i])
@@ -3426,7 +3445,15 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
             out.add(lines[i])
             i++
         }
-        return out.joinToString("\n")
+        if (!changed) return source
+        var result = out.joinToString("\n")
+        val remainingExecutableBody = maskJavaCommentsAndLiterals(result).lines()
+            .filterNot { it.trimStart().startsWith("import ") }
+            .joinToString("\n")
+        if (!Regex("""\bITagManager\b""").containsMatchIn(remainingExecutableBody)) {
+            result = removeImportLine(result, "net.neoforged.neoforge.registries.tags.ITagManager")
+        }
+        return result
     }
 
     private fun isNetworkHooksExtraDataWriter(expression: String, source: String): Boolean {

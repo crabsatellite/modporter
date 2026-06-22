@@ -3173,6 +3173,49 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `removed tag manager migration uses executable source evidence and preserves unsupported shapes`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateRemovedTagManagerAccess")
+        assertTrue(start >= 0, "migrateRemovedTagManagerAccess is missing")
+        val end = source.indexOf("private fun isNetworkHooksExtraDataWriter", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw prefilter" to """source.contains("ITagManager<")""",
+            "eager import deletion" to """removeImportLine(source, "net.neoforged.neoforge.registries.tags.ITagManager")""",
+            "raw declaration line match" to "declaration.find(lines[i])",
+            "raw null guard match" to "nullGuard.matches(lines[i + 1])",
+            "raw close brace match" to "lines[i + 3].trim() == \"}\"",
+            "unconditional migrated output" to "return out.joinToString(\"\\n\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("if (!executableCode.contains(\"ITagManager<\")) return source") &&
+                body.contains("val executableLines = executableCode.lines()") &&
+                body.contains("var changed = false") &&
+                body.contains("declaration.find(executableLines[i])") &&
+                body.contains("nullGuard.matches(executableLines[i + 1])") &&
+                body.contains(".find(executableLines[i + 2])") &&
+                body.contains("executableLines[i + 3].trim() == \"}\"") &&
+                body.contains("if (!changed) return source") &&
+                body.contains("val remainingExecutableBody = maskJavaCommentsAndLiterals(result).lines()") &&
+                body.contains("removeImportLine(result, \"net.neoforged.neoforge.registries.tags.ITagManager\")"),
+            "Removed ITagManager migration must use executable Java evidence and only clean imports after a proven rewrite"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Removed ITagManager migration must not rewrite or delete imports from comments, strings, or unsupported shapes: $offenders"
+        )
+    }
+
+    @Test
     fun `loot conditional function codec migrations do not synthesize member names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

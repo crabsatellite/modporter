@@ -2511,6 +2511,48 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `removed tag manager migration ignores comments text blocks and unsupported shapes`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.tags.ITagManager;
+
+            public class TagAccess {
+                private static final String DOC = ${"\"\"\""}
+                    ITagManager<Item> tags = BuiltInRegistries.ITEM.tags();
+                    if (tags != null) {
+                        tags.getTag(itemTag).stream().forEach((item) -> getMap().put(item, burnTime));
+                    }
+                    ${"\"\"\""};
+
+                // ITagManager<Item> commented = BuiltInRegistries.ITEM.tags();
+
+                public static void unsupported(TagKey<Item> itemTag) {
+                    ITagManager<Item> tags = BuiltInRegistries.ITEM.tags();
+                    if (tags != null) {
+                        use(tags.getTag(itemTag));
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.neoforged.neoforge.registries.tags.ITagManager;"), transformed)
+        assertTrue(transformed.contains("ITagManager<Item> tags = BuiltInRegistries.ITEM.tags();"), transformed)
+        assertTrue(transformed.contains("use(tags.getTag(itemTag));"), transformed)
+        assertTrue(transformed.contains("tags.getTag(itemTag).stream().forEach((item) -> getMap().put(item, burnTime));"), transformed)
+        assertFalse(transformed.contains("BuiltInRegistries.ITEM.getTagOrEmpty(itemTag).forEach"), transformed)
+    }
+
+    @Test
     fun `network hooks open screen handles nested simple menu provider lambda`() {
         val projectDir = createTestFile("""
             package com.example;
