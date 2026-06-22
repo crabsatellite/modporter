@@ -2691,6 +2691,48 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `mmlib block loot constructor migration uses executable source evidence`() {
+        val source = Path.of("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .toAbsolutePath()
+            .readText()
+        val start = source.indexOf("private fun migrateMmlibBlockLootConstructor")
+        assertTrue(start >= 0, "migrateMmlibBlockLootConstructor is missing")
+        val end = source.indexOf("private fun findMatchingParen", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw extends prefilter" to body.contains("""source.contains("extends AbstartctBlockLoot")"""),
+            "raw class scan" to body.contains(".find(source)"),
+            "raw constructor removal" to body.contains(""").replace(result, "\n")"""),
+            "raw class header scan" to body.contains("classHeaderPattern.find(result)"),
+            "raw Set import cleanup" to body.contains("""result.contains("Set<")"""),
+            "raw Item import cleanup" to body.contains("""result.contains(" Item")"""),
+            "raw import removal" to body.contains("removeImport(result")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("extends AbstartctBlockLoot")""") &&
+                body.contains(".find(executableCode)") &&
+                body.contains(".containsMatchIn(executableCode)") &&
+                body.contains("replaceExecutableRegex(result, Regex") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("classHeaderPattern.find(executableResult)") &&
+                body.contains("val remainingExecutableCode = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("removeExecutableImport(result, \"java.util.Set\")") &&
+                body.contains("removeExecutableImport(result, \"net.minecraft.world.item.Item\")"),
+            "MMLib block loot constructor migration must use executable source evidence for detection, rewrites, and import cleanup"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "MMLib block loot constructor migration must not infer from comments or rewrite strings: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy doEnchant damage effect migration does not use nearby damage source fallback`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

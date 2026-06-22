@@ -11624,6 +11624,54 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `mmlib block loot constructor migration ignores comments and strings`() {
+        val projectDir = createFile("MmlibBlockLootDocs.java", """
+            package com.example;
+
+            import cn.mcmod_mmf.mmlib.data.loot.AbstartctBlockLoot;
+            import java.util.Set;
+            import net.minecraft.world.item.Item;
+
+            public class MmlibBlockLootDocs extends AbstartctBlockLoot {
+                private static final String DOC = "public class FakeBlockLoot extends AbstartctBlockLoot { public FakeBlockLoot(Set<Item> items) { super(items); } }";
+
+                public MmlibBlockLootDocs(Set<Item> pExplosionResistant) {
+                    super(pExplosionResistant);
+                }
+
+                public MmlibBlockLootDocs() {
+                    super(Set.of());
+                }
+            }
+        """.trimIndent())
+        createFile("MmlibBlockLootGhost.java", """
+            package com.example;
+
+            public class MmlibBlockLootGhost {
+                private static final String DOC = "public class GhostBlockLoot extends AbstartctBlockLoot { public GhostBlockLoot() { super(Set.of()); } }";
+
+                public void docs() {
+                    // public class GhostBlockLoot extends AbstartctBlockLoot {}
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val docs = tempDir.resolve("src/main/java/com/example/MmlibBlockLootDocs.java").readText()
+        val ghost = tempDir.resolve("src/main/java/com/example/MmlibBlockLootGhost.java").readText()
+        assertTrue(docs.contains("public MmlibBlockLootDocs(net.minecraft.core.HolderLookup.Provider provider)"), docs)
+        assertFalse(docs.contains("public MmlibBlockLootDocs(Set<Item>"), docs)
+        assertFalse(docs.contains("public MmlibBlockLootDocs()"), docs)
+        assertFalse(docs.contains("import java.util.Set;"), docs)
+        assertFalse(docs.contains("import net.minecraft.world.item.Item;"), docs)
+        assertTrue(docs.contains("""private static final String DOC = "public class FakeBlockLoot extends AbstartctBlockLoot { public FakeBlockLoot(Set<Item> items) { super(items); } }";"""), docs)
+        assertFalse(ghost.contains("HolderLookup.Provider provider"), ghost)
+        assertTrue(ghost.contains("""private static final String DOC = "public class GhostBlockLoot extends AbstartctBlockLoot { public GhostBlockLoot() { super(Set.of()); } }";"""), ghost)
+        assertTrue(ghost.contains("// public class GhostBlockLoot extends AbstartctBlockLoot {}"), ghost)
+    }
+
+    @Test
     fun `migrates Sakura loot feature and item component compile surfaces`() {
         val projectDir = createFile("SakuraBlockLoot.java", """
             package com.example;

@@ -40225,24 +40225,25 @@ $encodeLines
     }
 
     private fun migrateMmlibBlockLootConstructor(source: String): String {
-        if (!source.contains("extends AbstartctBlockLoot")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("extends AbstartctBlockLoot")) return source
         val className = Regex("""class\s+([A-Za-z_$][\w$]*)\s+extends\s+AbstartctBlockLoot\b""")
-            .find(source)
+            .find(executableCode)
             ?.groupValues
             ?.get(1)
             ?: return source
-        if (source.contains("$className(net.minecraft.core.HolderLookup.Provider provider)") ||
-            source.contains("$className(HolderLookup.Provider provider)")) {
+        if (Regex("""\b${Regex.escape(className)}\s*\(\s*(?:net\.minecraft\.core\.)?HolderLookup\.Provider\s+provider\s*\)""")
+                .containsMatchIn(executableCode)) {
             return source
         }
 
         var result = source
-        result = Regex(
+        result = replaceExecutableRegex(result, Regex(
             """(?s)\s*public\s+${Regex.escape(className)}\s*\(\s*Set\s*<\s*Item\s*>\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*super\(\s*\1\s*\);\s*\}\s*"""
-        ).replace(result, "\n")
-        result = Regex(
+        )) { "\n" }
+        result = replaceExecutableRegex(result, Regex(
             """(?s)\s*public\s+${Regex.escape(className)}\s*\(\s*\)\s*\{\s*super\(\s*Set\.of\(\)\s*\);\s*\}\s*"""
-        ).replace(result, "\n")
+        )) { "\n" }
 
         val constructor = """
 
@@ -40251,17 +40252,20 @@ $encodeLines
     }
 """.trimEnd()
         val classHeaderPattern = Regex("""public\s+class\s+${Regex.escape(className)}\s+extends\s+AbstartctBlockLoot\s*\{\s*""")
-        val classHeader = classHeaderPattern.find(result) ?: return result
+        val executableResult = maskJavaCommentsAndLiterals(result)
+        val classHeader = classHeaderPattern.find(executableResult) ?: return result
+        val classHeaderText = result.substring(classHeader.range.first, classHeader.range.last + 1)
         result = result.substring(0, classHeader.range.first) +
-            classHeader.value.trimEnd() +
+            classHeaderText.trimEnd() +
             constructor +
             "\n" +
             result.substring(classHeader.range.last + 1)
-        if (!result.contains("Set<")) {
-            result = removeImport(result, "java.util.Set")
+        val remainingExecutableCode = maskJavaCommentsAndLiterals(result)
+        if (!remainingExecutableCode.contains("Set<")) {
+            result = removeExecutableImport(result, "java.util.Set")
         }
-        if (!result.contains(" Item") && !result.contains("<Item>")) {
-            result = removeImport(result, "net.minecraft.world.item.Item")
+        if (!remainingExecutableCode.contains(" Item") && !remainingExecutableCode.contains("<Item>")) {
+            result = removeExecutableImport(result, "net.minecraft.world.item.Item")
         }
         return result
     }
