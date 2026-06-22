@@ -1676,6 +1676,48 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `split tick phase cleanup uses executable phase evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun cleanupSplitTickPhaseChecks")
+        assertTrue(start >= 0, "cleanupSplitTickPhaseChecks is missing")
+        val end = source.indexOf("private fun migrateRemovedTitleScreenAccessors", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "raw START phase scan" to Regex("""modified\.contains\("event\.phase\s*(?:==|!=)\s*TickEvent\.Phase\.START"\)"""),
+            "raw RenderFrameEvent replacement" to Regex("""\.replace\("RenderFrameEvent\.Post""""),
+            "raw modified replacement" to Regex("""\.replace\(modified"""),
+            "raw TickEvent phase residual scan" to Regex("""containsMatchIn\(modified\)""")
+        )
+            .filter { (_, marker) -> marker.containsMatchIn(body) }
+            .map { (label, _) -> "split tick phase cleanup contains $label" }
+        val required = listOf(
+            "executable mask" to Regex("""val\s+executableOriginal\s*=\s*maskJavaCommentsAndLiterals\(original\)"""),
+            "executable START phase scan" to Regex("""executableOriginal\.contains\("event\.phase\s*==\s*TickEvent\.Phase\.START"\)"""),
+            "executable START not-equals scan" to Regex("""executableOriginal\.contains\("event\.phase\s*!=\s*TickEvent\.Phase\.START"\)"""),
+            "executable RenderFrameEvent replacement" to Regex("""replaceExecutableRegex\(\s*modified,\s*Regex\("{3}\\bRenderFrameEvent\\\.Post\\b"{3}\)"""),
+            "executable event phase replacements" to Regex("""replaceExecutableRegex\(\s*modified,\s*Regex\("{3}[^"]*event\\\.phase"""),
+            "executable residual mask" to Regex("""val\s+executableModified\s*=\s*maskJavaCommentsAndLiterals\(modified\)"""),
+            "executable residual scan" to Regex("""containsMatchIn\(executableModified\)""")
+        )
+            .filterNot { (_, marker) -> marker.containsMatchIn(body) }
+            .map { (label, _) -> "split tick phase cleanup missing $label" }
+
+        assertTrue(
+            required.isEmpty(),
+            "Split tick phase cleanup must derive phase removal from executable Java and edit executable ranges only: $required"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "Split tick phase cleanup must not infer or rewrite from comments, strings, or text blocks: $forbidden"
+        )
+    }
+
+    @Test
     fun `creative selected tab reflection migration uses method local evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

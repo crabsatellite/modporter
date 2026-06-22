@@ -3028,36 +3028,65 @@ config="$configName"
             .forEach { javaFile ->
                 val original = javaFile.readText()
                 var modified = original
-                val hadStartPhase = modified.contains("event.phase == TickEvent.Phase.START") ||
-                    modified.contains("event.phase != TickEvent.Phase.START")
+                val executableOriginal = maskJavaCommentsAndLiterals(original)
+                val hadStartPhase = executableOriginal.contains("event.phase == TickEvent.Phase.START") ||
+                    executableOriginal.contains("event.phase != TickEvent.Phase.START")
 
                 if (hadStartPhase) {
-                    modified = modified
-                        .replace("RenderFrameEvent.Post", "RenderFrameEvent.Pre")
+                    modified = replaceExecutableRegex(
+                        modified,
+                        Regex("""\bRenderFrameEvent\.Post\b""")
+                    ) { "RenderFrameEvent.Pre" }
                 }
 
-                modified = Regex("""(?m)^[ \t]*if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\)\s*return;\s*\r?\n""")
-                    .replace(modified, "")
-                modified = Regex("""(?m)^[ \t]*if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.START\s*\)\s*return;\s*\r?\n""")
-                    .replace(modified, "")
-                modified = Regex("""if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\|\|\s*([^{}\r\n;]+?)\s*\)\s*\{""")
-                    .replace(modified) { match -> "if (${match.groupValues[1].trim()}) {" }
-                modified = Regex("""if\s*\(\s*([^{}\r\n;]+?)\s*\|\|\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\)\s*\{""")
-                    .replace(modified) { match -> "if (${match.groupValues[1].trim()}) {" }
-                modified = Regex("""event\.phase\s*==\s*TickEvent\.Phase\.END\s*&&\s*""").replace(modified, "")
-                modified = Regex("""\s*&&\s*event\.phase\s*==\s*TickEvent\.Phase\.END""").replace(modified, "")
-                modified = Regex("""if\s*\(\s*event\.phase\s*==\s*TickEvent\.Phase\.START\s*\)\s*\{""").replace(modified, "{")
-                modified = Regex("""event\.phase\s*==\s*TickEvent\.Phase\.START\s*&&\s*""").replace(modified, "")
-                modified = Regex("""\s*&&\s*event\.phase\s*==\s*TickEvent\.Phase\.START""").replace(modified, "")
+                modified = replaceExecutableRegex(
+                    modified,
+                    Regex("""(?m)^[ \t]*if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\)\s*return;\s*\r?\n""")
+                ) { "" }
+                modified = replaceExecutableRegex(
+                    modified,
+                    Regex("""(?m)^[ \t]*if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.START\s*\)\s*return;\s*\r?\n""")
+                ) { "" }
+                modified = replaceExecutableRegex(
+                    modified,
+                    Regex("""if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\|\|\s*([^{}\r\n;]+?)\s*\)\s*\{""")
+                ) { match -> "if (${match.groupValues[1].trim()}) {" }
+                modified = replaceExecutableRegex(
+                    modified,
+                    Regex("""if\s*\(\s*([^{}\r\n;]+?)\s*\|\|\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\)\s*\{""")
+                ) { match -> "if (${match.groupValues[1].trim()}) {" }
+                modified = replaceExecutableRegex(
+                    modified,
+                    Regex("""event\.phase\s*==\s*TickEvent\.Phase\.END\s*&&\s*""")
+                ) { "" }
+                modified = replaceExecutableRegex(
+                    modified,
+                    Regex("""\s*&&\s*event\.phase\s*==\s*TickEvent\.Phase\.END""")
+                ) { "" }
+                modified = replaceExecutableRegex(
+                    modified,
+                    Regex("""if\s*\(\s*event\.phase\s*==\s*TickEvent\.Phase\.START\s*\)\s*\{""")
+                ) { "{" }
+                modified = replaceExecutableRegex(
+                    modified,
+                    Regex("""event\.phase\s*==\s*TickEvent\.Phase\.START\s*&&\s*""")
+                ) { "" }
+                modified = replaceExecutableRegex(
+                    modified,
+                    Regex("""\s*&&\s*event\.phase\s*==\s*TickEvent\.Phase\.START""")
+                ) { "" }
 
-                if (!Regex("""\bTickEvent\.Phase\b""").containsMatchIn(modified) &&
+                val executableModified = maskJavaCommentsAndLiterals(modified)
+                if (!Regex("""\bTickEvent\.Phase\b""").containsMatchIn(executableModified) &&
                     Regex("""\bTickEvent\b|import\s+net\.(?:minecraftforge|neoforged\.neoforge)\.event(?:\.tick)?\.TickEvent;""")
-                        .containsMatchIn(modified)) {
+                        .containsMatchIn(executableModified)) {
                     modified = removeJavaImport(modified, "net.minecraftforge.event.TickEvent")
                     modified = removeJavaImport(modified, "net.neoforged.neoforge.event.TickEvent")
                     modified = removeJavaImport(modified, "net.neoforged.neoforge.event.tick.TickEvent")
-                    modified = Regex("""(?m)^[ \t]*import\s+net\.(?:minecraftforge|neoforged\.neoforge)\.event(?:\.tick)?\.TickEvent;\s*(?:\r?\n)?""")
-                        .replace(modified, "")
+                    modified = replaceExecutableRegex(
+                        modified,
+                        Regex("""(?m)^[ \t]*import\s+net\.(?:minecraftforge|neoforged\.neoforge)\.event(?:\.tick)?\.TickEvent;\s*(?:\r?\n)?""")
+                    ) { "" }
                     modified = modified.lines()
                         .filterNot { line ->
                             line.trim() == "import net.minecraftforge.event.TickEvent;" ||

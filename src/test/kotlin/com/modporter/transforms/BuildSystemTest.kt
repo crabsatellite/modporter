@@ -3550,6 +3550,78 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `split tick cleanup ignores comments strings and text blocks`() {
+        val projectDir = tempDir.resolve("split-tick-phase-docs")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TickHandlers.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.client.event.RenderFrameEvent;
+            import net.neoforged.neoforge.event.TickEvent;
+
+            public class TickHandlers {
+                String note = "RenderFrameEvent.Post event.phase == TickEvent.Phase.START";
+                String docs = ${"\"\"\""}
+                    public static void renderTick(RenderFrameEvent.Post event) {
+                        if (event.phase == TickEvent.Phase.START) {
+                            render();
+                        }
+                    }
+                    ${"\"\"\""};
+
+                public static void renderTick(RenderFrameEvent.Post event) {
+                    // if (event.phase == TickEvent.Phase.START) { render(); }
+                    if (event.phase == TickEvent.Phase.START) {
+                        render();
+                    }
+                }
+
+                private static void render() {}
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("TickHandlers.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-cleanup-split-tick-phase" })
+        assertTrue(source.contains("public static void renderTick(RenderFrameEvent.Pre event)"), source)
+        assertTrue(source.contains("String note = \"RenderFrameEvent.Post event.phase == TickEvent.Phase.START\";"), source)
+        assertTrue(source.contains("public static void renderTick(RenderFrameEvent.Post event) {"), source)
+        assertTrue(source.contains("// if (event.phase == TickEvent.Phase.START) { render(); }"), source)
+    }
+
+    @Test
+    fun `split tick cleanup ignores documentation only`() {
+        val projectDir = tempDir.resolve("split-tick-phase-docs-only")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val javaFile = srcDir.resolve("TickNotes.java")
+        javaFile.writeText("""
+            package com.example;
+
+            public class TickNotes {
+                String note = "RenderFrameEvent.Post event.phase == TickEvent.Phase.START";
+                String docs = ${"\"\"\""}
+                    public static void renderTick(RenderFrameEvent.Post event) {
+                        if (event.phase == TickEvent.Phase.START) {
+                            render();
+                        }
+                    }
+                    ${"\"\"\""};
+            }
+        """.trimIndent())
+        val before = javaFile.readText()
+
+        val result = pass.apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-cleanup-split-tick-phase" })
+        assertEquals(before, javaFile.readText())
+    }
+
+    @Test
     fun `split tick cleanup does not rewrite unrelated java files`() {
         val projectDir = tempDir.resolve("split-tick-noop")
         val srcDir = projectDir.resolve("src/main/java/com/example")
