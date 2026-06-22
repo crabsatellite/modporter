@@ -31079,6 +31079,8 @@ bus.addListener(ActualListenerRegistry::register);
                     guiGraphics.blit(HEARTS, x + 10, y, Gui.HeartType.CONTAINER.getX(false, blink), 0, 9, 9);
                 }
             }
+
+            // trailing documentation mentions a brace }
         """.trimIndent())
 
         val result = StructuralRefactorPass().apply(tempDir)
@@ -31090,6 +31092,11 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("modporterLegacyHeartTypeX(Gui.HeartType.CONTAINER, false, blink)"), migrated)
         assertTrue(migrated.contains("private static int modporterLegacyHeartTypeX(net.minecraft.client.gui.Gui.HeartType heartType, boolean halfHeart, boolean blinking)"), migrated)
         assertTrue(migrated.contains("return 16 + (index * 2 + offset) * 9;"), migrated)
+        assertTrue(migrated.contains("// trailing documentation mentions a brace }"), migrated)
+        val helperIndex = migrated.indexOf("private static int modporterLegacyHeartTypeX")
+        val trailingCommentIndex = migrated.indexOf("// trailing documentation mentions a brace }")
+        val classCloseBeforeComment = migrated.lastIndexOf('}', trailingCommentIndex)
+        assertTrue(helperIndex >= 0 && helperIndex < classCloseBeforeComment && classCloseBeforeComment < trailingCommentIndex, migrated)
         assertFalse(migrated.contains(".getX("), migrated)
     }
 

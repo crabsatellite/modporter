@@ -41875,7 +41875,8 @@ $writeLines
     }
 
     private fun insertBeforeLastClassBrace(source: String, insertion: String): String {
-        val closeBrace = source.lastIndexOf('}')
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val closeBrace = executableCode.lastIndexOf('}')
         if (closeBrace < 0) return source
         return source.substring(0, closeBrace).trimEnd() + "\n" + insertion + "\n" + source.substring(closeBrace)
     }

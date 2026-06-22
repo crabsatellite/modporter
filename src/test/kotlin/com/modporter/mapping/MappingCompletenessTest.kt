@@ -4487,6 +4487,35 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `structural class end insertion helper uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun insertBeforeLastClassBrace")
+        assertTrue(start >= 0, "insertBeforeLastClassBrace is missing")
+        val end = source.indexOf("private fun removeImport", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw last brace scan" to "source.lastIndexOf('}')"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val closeBrace = executableCode.lastIndexOf('}')"),
+            "Structural class-end insertion must locate the final class brace in executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Structural class-end insertion must not use comments, strings, or text blocks as class-end evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy registry utility migrations use executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
