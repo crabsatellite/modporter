@@ -2050,6 +2050,60 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `deferred register listener migration ignores comments and text blocks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public ExampleMod(IEventBus bus) {
+                    String docs = ""
+                        + "bus.addListener(ActualListenerRegistry::register);";
+                    String blockDocs = ${"\"\"\""}
+bus.addListener(ActualListenerRegistry::register);
+${"\"\"\""};
+                    // bus.addListener(ActualListenerRegistry::register);
+                    bus.addListener(ActualListenerRegistry::register);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ActualListenerRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.levelgen.carver.WorldCarver;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            class ActualListenerRegistry {
+                static final DeferredRegister<WorldCarver<?>> CARVER_TYPES = DeferredRegister.create(Registries.CARVER, ExampleMod.ID);
+
+                static void register(IEventBus bus) {
+                    CARVER_TYPES.register(bus);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredregister-listener" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(main.contains("ActualListenerRegistry.CARVER_TYPES.register(bus);"), main)
+        assertTrue(main.contains("\"bus.addListener(ActualListenerRegistry::register);\""), main)
+        assertTrue(main.contains("""
+bus.addListener(ActualListenerRegistry::register);
+""".trimIndent()), main)
+        assertTrue(main.contains("// bus.addListener(ActualListenerRegistry::register);"), main)
+    }
+
+    @Test
     fun `detects ifPresent and orElse on capability-related expressions`() {
         val projectDir = createFile("CapUsage.java", """
             package com.example;

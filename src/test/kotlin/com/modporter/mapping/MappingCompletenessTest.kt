@@ -8980,6 +8980,41 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `deferred register listener migration uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateDeferredRegisterListenerReferences")
+        assertTrue(start >= 0, "migrateDeferredRegisterListenerReferences is missing")
+        val end = source.indexOf("private fun registerMissingDeferredRegisterFields", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw listener prefilter" to body.contains("""original.contains("::register")"""),
+            "raw source prefilter" to body.contains("""source.contains("::register")"""),
+            "raw listener replacement" to body.contains("listenerPattern.replace(source)")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableOriginal = maskJavaCommentsAndLiterals(original)") &&
+                body.contains("""executableOriginal.contains("::register")""") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("""executableCode.contains("::register")""") &&
+                body.contains("replaceExecutableRegex(source, listenerPattern)") &&
+                body.contains("return@replaceExecutableRegex match.value"),
+            "DeferredRegister listener migration must locate stale Class::register listeners in executable Java only"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "DeferredRegister listener migration must not rewrite comments or text block examples: $offenders"
+        )
+    }
+
+    @Test
     fun `record component access migration uses executable source evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

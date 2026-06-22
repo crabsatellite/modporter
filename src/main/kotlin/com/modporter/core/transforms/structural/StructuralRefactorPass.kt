@@ -13971,7 +13971,8 @@ ${entries.joinToString(",\n")}
         val changes = mutableListOf<Change>()
         javaFiles.forEach { file ->
             val original = file.readText()
-            if (!original.contains("::register") || !original.contains(".addListener(")) return@forEach
+            val executableOriginal = maskJavaCommentsAndLiterals(original)
+            if (!executableOriginal.contains("::register") || !executableOriginal.contains(".addListener(")) return@forEach
             val migrated = migrateDeferredRegisterListenerReferencesSource(original, owners)
             if (migrated != original) {
                 changes.add(Change(
@@ -13993,14 +13994,15 @@ ${entries.joinToString(",\n")}
         source: String,
         owners: Map<String, DeferredRegisterOwner>
     ): String {
-        if (owners.isEmpty() || !source.contains("::register") || !source.contains(".addListener(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (owners.isEmpty() || !executableCode.contains("::register") || !executableCode.contains(".addListener(")) return source
         val listenerPattern = Regex(
             """(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.addListener\(\s*((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)::register\s*\)\s*;\s*$"""
         )
-        return listenerPattern.replace(source) { match ->
+        return replaceExecutableRegex(source, listenerPattern) { match ->
             val target = match.groupValues[3]
             val simpleName = target.substringAfterLast('.')
-            val owner = owners[simpleName] ?: return@replace match.value
+            val owner = owners[simpleName] ?: return@replaceExecutableRegex match.value
             "${match.groupValues[1]}$target.${owner.fieldName}.register(${match.groupValues[2]});"
         }
     }
