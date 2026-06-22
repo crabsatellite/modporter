@@ -2059,16 +2059,19 @@ $header
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val original = javaFile.readText()
-                if (!original.contains(replacement) || !original.contains("TagKey<") || !original.contains("getTag()")) {
+                val executableOriginal = maskJavaCommentsAndLiterals(original)
+                if (!executableOriginal.contains(replacement) ||
+                    !executableOriginal.contains("TagKey<") ||
+                    !executableOriginal.contains("getTag()")) {
                     return@forEach
                 }
                 val tagGetterOwners = Regex("""\bclass\s+([A-Za-z_$][\w$]*)\b""")
-                    .findAll(original)
+                    .findAll(executableOriginal)
                     .mapNotNull { match ->
-                        val openBrace = original.indexOf('{', match.range.last)
-                        val closeBrace = if (openBrace >= 0) findMatchingBrace(original, openBrace) else -1
+                        val openBrace = executableOriginal.indexOf('{', match.range.last)
+                        val closeBrace = if (openBrace >= 0) findMatchingBrace(executableOriginal, openBrace) else -1
                         if (closeBrace <= openBrace) return@mapNotNull null
-                        val body = original.substring(openBrace + 1, closeBrace)
+                        val body = executableOriginal.substring(openBrace + 1, closeBrace)
                         if (Regex("""public\s+TagKey\s*<[^>]+>\s+getTag\s*\(\s*\)\s*\{""").containsMatchIn(body)) {
                             match.groupValues[1]
                         } else {
@@ -2081,11 +2084,14 @@ $header
                 var modified = original
                 for (owner in tagGetterOwners) {
                     val variables = Regex("""\b${Regex.escape(owner)}\s+([A-Za-z_$][\w$]*)\b""")
-                        .findAll(original)
+                        .findAll(executableOriginal)
                         .map { it.groupValues[1] }
                         .toSet()
                     for (variable in variables) {
-                        modified = modified.replace("$variable$replacement", "$variable.getTag()")
+                        modified = replaceExecutableRegex(
+                            modified,
+                            Regex("""\b${Regex.escape(variable)}${Regex.escape(replacement)}""")
+                        ) { "$variable.getTag()" }
                     }
                 }
 

@@ -1534,6 +1534,58 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `restore non itemstack getTag migration uses executable type evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun restoreNonItemStackGetTagCalls")
+        assertTrue(start >= 0, "restoreNonItemStackGetTagCalls is missing")
+        val end = source.indexOf("private fun migrateModifyBakingResultModelLocations", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "raw replacement prefilter" to "original.contains(replacement)",
+            "raw TagKey prefilter" to """original.contains("TagKey<")""",
+            "raw getTag prefilter" to """original.contains("getTag()")""",
+            "raw class scan" to Regex("""findAll\(original\)"""),
+            "raw class brace match" to "findMatchingBrace(original, openBrace)",
+            "raw class body scan" to "val body = original.substring(openBrace + 1, closeBrace)",
+            "raw whole-source replacement" to "modified.replace(\"\$variable\$replacement"
+        )
+            .filter { (_, marker) ->
+                when (marker) {
+                    is String -> body.contains(marker)
+                    is Regex -> marker.containsMatchIn(body)
+                    else -> false
+                }
+            }
+            .map { (label, _) -> "restore non itemstack getTag migration contains $label" }
+        val required = listOf(
+            "executable mask" to Regex("""val\s+executableOriginal\s*=\s*maskJavaCommentsAndLiterals\(original\)"""),
+            "executable replacement prefilter" to Regex("""executableOriginal\.contains\(replacement\)"""),
+            "executable TagKey prefilter" to Regex("""executableOriginal\.contains\("TagKey<"\)"""),
+            "executable getTag prefilter" to Regex("""executableOriginal\.contains\("getTag\(\)"\)"""),
+            "executable class scan" to Regex("""findAll\(executableOriginal\)"""),
+            "executable class brace match" to Regex("""findMatchingBrace\(executableOriginal,\s*openBrace\)"""),
+            "executable class body scan" to Regex("""val\s+body\s*=\s*executableOriginal\.substring\(openBrace\s*\+\s*1,\s*closeBrace\)"""),
+            "executable call replacement" to Regex("""replaceExecutableRegex\(\s*modified\s*,""")
+        )
+            .filterNot { (_, marker) -> marker.containsMatchIn(body) }
+            .map { (label, _) -> "restore non itemstack getTag migration missing $label" }
+
+        assertTrue(
+            required.isEmpty(),
+            "Restore non-ItemStack getTag migration must prove local holder types from executable Java and edit executable call sites only: $required"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "Restore non-ItemStack getTag migration must not infer or rewrite from comments, strings, or text blocks: $forbidden"
+        )
+    }
+
+    @Test
     fun `modify baking result model resource migration uses executable lambda evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

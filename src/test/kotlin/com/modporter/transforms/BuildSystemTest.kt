@@ -2958,6 +2958,90 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `restore getTag migration ignores comments strings and text blocks`() {
+        val projectDir = tempDir.resolve("restore-local-gettag-docs")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("Filters.java").writeText("""
+            package com.example;
+
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.Item;
+
+            public class Filters {
+                String note = "filter.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()";
+                String docs = ${"\"\"\""}
+                    public static class TagFilter {
+                        public TagKey<Item> getTag() {
+                            return null;
+                        }
+                    }
+                    void add(TagFilter filter) {
+                        use(filter.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag());
+                    }
+                    ${"\"\"\""};
+
+                void add(TagFilter filter) {
+                    // filter.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()
+                    use(filter.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag());
+                }
+
+                void use(Object value) {}
+
+                public static class TagFilter {
+                    private final TagKey<Item> tag = null;
+
+                    public TagKey<Item> getTag() {
+                        return this.tag;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("Filters.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-restore-non-itemstack-gettag" })
+        assertTrue(content.contains("use(filter.getTag());"), content)
+        assertTrue(content.contains("String note = \"filter.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()\";"), content)
+        assertTrue(content.contains("use(filter.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag());"), content)
+        assertTrue(content.contains("// filter.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()"), content)
+    }
+
+    @Test
+    fun `restore getTag migration ignores documentation only`() {
+        val projectDir = tempDir.resolve("restore-local-gettag-docs-only")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("FilterNotes.java")
+        file.writeText("""
+            package com.example;
+
+            public class FilterNotes {
+                String note = "TagKey< getTag() filter.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()";
+                String docs = ${"\"\"\""}
+                    public static class TagFilter {
+                        public TagKey<Item> getTag() {
+                            return null;
+                        }
+                    }
+                    void add(TagFilter filter) {
+                        use(filter.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag());
+                    }
+                    ${"\"\"\""};
+            }
+        """.trimIndent())
+        val before = file.readText()
+
+        val result = pass.apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-restore-non-itemstack-gettag" })
+        assertEquals(before, file.readText())
+    }
+
+    @Test
     fun `passes model resource location id from modify baking result lambda`() {
         val projectDir = tempDir.resolve("modelresource-id")
         val srcDir = projectDir.resolve("src/main/java/com/example")
