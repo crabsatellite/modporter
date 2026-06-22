@@ -6673,6 +6673,76 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `criterion instance factory hints use executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun collectCriterionInstanceFactoryHints")
+        assertTrue(start >= 0, "collectCriterionInstanceFactoryHints is missing")
+        val end = source.indexOf("private fun collectDeferredRegisterOwners", start + 1)
+        assertTrue(end > start, "collectCriterionInstanceFactoryHints boundary is missing")
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw record Instance prefilter" to "source.contains(\"record Instance\")",
+            "raw Criterion prefilter" to "source.contains(\"Criterion<\")",
+            "raw factory regex search" to ".findAll(source)",
+            "raw factory body search" to "source.substring(openBrace, closeBrace).contains(\"new Instance(Optional.empty())\")",
+            "raw DeferredHolder prefilter" to "source.contains(\"DeferredHolder\")",
+            "raw CriterionTrigger prefilter" to "source.contains(\"CriterionTrigger\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("executableCode.contains(\"record Instance\")") &&
+                body.contains("executableCode.contains(\"Criterion<\")") &&
+                body.contains(".findAll(executableCode)") &&
+                body.contains("executableCode.substring(openBrace, closeBrace).contains(\"new Instance(Optional.empty())\")") &&
+                body.contains("executableCode.contains(\"DeferredHolder\")") &&
+                body.contains("executableCode.contains(\"CriterionTrigger\")"),
+            "Criterion instance factory hints must derive from executable Java declarations and factory bodies"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Criterion instance factory hints must not be inferred from comments or string literals: $offenders"
+        )
+    }
+
+    @Test
+    fun `legacy advancement datagen empty criterion factories use executable rewrites`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyAdvancementDatagenSource")
+        assertTrue(start >= 0, "migrateLegacyAdvancementDatagenSource is missing")
+        val end = source.indexOf("private fun legacyCriteriaTriggerExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw ContextAwarePredicate empty constructor replacement" to ".replace(result, \"new ${'$'}1(java.util.Optional.empty())\")",
+            "raw empty factory replacement" to ".replace(result, factoryCall)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("replaceExecutableRegex(\n            result,\n            Regex(\"\"\"new\\s+([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*\\.Instance)") &&
+                body.contains("ContextAwarePredicate\\.ANY") &&
+                body.contains("replaceExecutableRegex(\n                result,\n                Regex(\"\"\"new\\s+${'$'}{Regex.escape(instanceType)}") &&
+                body.contains(") { factoryCall }"),
+            "Legacy advancement datagen empty criterion factory migration must rewrite only executable constructor tokens"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy advancement datagen empty criterion factory migration must not rewrite comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy advancement datagen holder id migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

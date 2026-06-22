@@ -7334,8 +7334,10 @@ class StructuralRefactorExtraTest {
                 */
                 private static final String PLAYER_DOC = "new PlayerTrigger.TriggerInstance(CriteriaTriggers.SLEPT_IN_BED.getId(), ContextAwarePredicate.ANY)";
                 private static final String INVENTORY_DOC = "new InventoryChangeTrigger.TriggerInstance(ContextAwarePredicate.ANY, MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, new ItemPredicate[0])";
+                private static final String SINGLE_DOC = "new ExampleTrigger.Instance(ContextAwarePredicate.ANY)";
 
                 public Advancement keep(Advancement advancement) {
+                    // new ExampleTrigger.Instance(ContextAwarePredicate.ANY)
                     return advancement;
                 }
             }
@@ -7350,6 +7352,74 @@ class StructuralRefactorExtraTest {
         assertFalse(migrated.contains("createCriterion(new PlayerTrigger.TriggerInstance"), migrated)
         assertFalse(migrated.contains("CriteriaTriggers.INVENTORY_CHANGED.createCriterion"), migrated)
         assertFalse(migrated.contains("Criterion<ItemUsedOnLocationTrigger.TriggerInstance> ignored"), migrated)
+    }
+
+    @Test
+    fun `legacy advancement datagen empty criterion factories use executable source evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("FactoryTrigger.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+            import net.minecraft.advancements.Criterion;
+            import net.minecraft.advancements.critereon.ContextAwarePredicate;
+
+            public class FactoryTrigger {
+                public record Instance(Optional<ContextAwarePredicate> player) {
+                    public static Criterion<FactoryTrigger.Instance> any() {
+                        return new Instance(Optional.empty());
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CommentOnlyTrigger.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+            import net.minecraft.advancements.Criterion;
+            import net.minecraft.advancements.critereon.ContextAwarePredicate;
+
+            public class CommentOnlyTrigger {
+                public record Instance(Optional<ContextAwarePredicate> player) {
+                    /*
+                    public static Criterion<CommentOnlyTrigger.Instance> any() {
+                        return new Instance(Optional.empty());
+                    }
+                    */
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FactoryUsage.java").writeText("""
+            package com.example;
+
+            import net.minecraft.advancements.critereon.ContextAwarePredicate;
+
+            public class FactoryUsage {
+                private static final String DOC = "new FactoryTrigger.Instance(ContextAwarePredicate.ANY); new CommentOnlyTrigger.Instance(java.util.Optional.empty())";
+
+                public Object realFactory() {
+                    return new FactoryTrigger.Instance(ContextAwarePredicate.ANY);
+                }
+
+                public Object commentOnlyFactory() {
+                    // new FactoryTrigger.Instance(ContextAwarePredicate.ANY)
+                    return new CommentOnlyTrigger.Instance(ContextAwarePredicate.ANY);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val usage = srcDir.resolve("FactoryUsage.java").readText()
+        val commentOnly = srcDir.resolve("CommentOnlyTrigger.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(usage.contains("return FactoryTrigger.Instance.any();"), usage)
+        assertTrue(usage.contains("return new CommentOnlyTrigger.Instance(java.util.Optional.empty());"), usage)
+        assertFalse(usage.contains("CommentOnlyTrigger.Instance.any()"), usage)
+        assertTrue(usage.contains("""private static final String DOC = "new FactoryTrigger.Instance(ContextAwarePredicate.ANY); new CommentOnlyTrigger.Instance(java.util.Optional.empty())";"""), usage)
+        assertTrue(usage.contains("// new FactoryTrigger.Instance(ContextAwarePredicate.ANY)"), usage)
+        assertTrue(commentOnly.contains("public static Criterion<CommentOnlyTrigger.Instance> any()"), commentOnly)
     }
 
     @Test

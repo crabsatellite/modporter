@@ -14539,16 +14539,17 @@ ${entries.joinToString(",\n")}
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val source = javaFile.readText()
+                val executableCode = maskJavaCommentsAndLiterals(source)
                 val className = classNameOfJavaSource(source) ?: return@forEach
                 val packageName = packageNameOf(source)
-                if (source.contains("record Instance") && source.contains("Criterion<")) {
+                if (executableCode.contains("record Instance") && executableCode.contains("Criterion<")) {
                     val factory = Regex(
                         """(?m)^[ \t]*public\s+static\s+Criterion\s*<[^>\r\n]+>\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{"""
-                    ).findAll(source).firstOrNull { match ->
-                        val openBrace = source.indexOf('{', match.range.last)
-                        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+                    ).findAll(executableCode).firstOrNull { match ->
+                        val openBrace = executableCode.indexOf('{', match.range.last)
+                        val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
                         closeBrace > openBrace &&
-                            source.substring(openBrace, closeBrace).contains("new Instance(Optional.empty())")
+                            executableCode.substring(openBrace, closeBrace).contains("new Instance(Optional.empty())")
                     }?.groupValues?.get(1)
                     if (factory != null) {
                         factories["$className.Instance"] = "$className.Instance.$factory()"
@@ -14557,10 +14558,10 @@ ${entries.joinToString(",\n")}
                         }
                     }
                 }
-                if (source.contains("DeferredHolder") && source.contains("CriterionTrigger")) {
+                if (executableCode.contains("DeferredHolder") && executableCode.contains("CriterionTrigger")) {
                     Regex(
                         """DeferredHolder\s*<\s*CriterionTrigger\s*<\s*\?\s*>\s*,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>\s+([A-Z][A-Z0-9_]*)\s*="""
-                    ).findAll(source).forEach { match ->
+                    ).findAll(executableCode).forEach { match ->
                         val triggerClass = match.groupValues[1].substringAfterLast('.')
                         val holder = if (packageName != null) {
                             "$packageName.$className.${match.groupValues[2]}"
@@ -21012,11 +21013,17 @@ ${indent}}
             }
         }
 
-        result = Regex("""new\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.Instance)\(\s*ContextAwarePredicate\.ANY\s*\)""")
-            .replace(result, "new $1(java.util.Optional.empty())")
+        result = replaceExecutableRegex(
+            result,
+            Regex("""new\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.Instance)\(\s*ContextAwarePredicate\.ANY\s*\)""")
+        ) { match ->
+            "new ${match.groupValues[1]}(java.util.Optional.empty())"
+        }
         criterionFactoryHints.emptyInstanceFactories.forEach { (instanceType, factoryCall) ->
-            result = Regex("""new\s+${Regex.escape(instanceType)}\(\s*(?:java\.util\.)?Optional\.empty\(\)\s*\)""")
-                .replace(result, factoryCall)
+            result = replaceExecutableRegex(
+                result,
+                Regex("""new\s+${Regex.escape(instanceType)}\(\s*(?:java\.util\.)?Optional\.empty\(\)\s*\)""")
+            ) { factoryCall }
         }
         result = migrateLegacyItemUsedOnLocationTriggerConstructorReturns(result)
         result = rewriteExecutableJavaNew(result, "ItemUsedOnLocationTrigger.TriggerInstance") { args ->
