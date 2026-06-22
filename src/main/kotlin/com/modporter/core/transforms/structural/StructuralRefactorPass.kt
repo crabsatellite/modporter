@@ -14022,10 +14022,12 @@ ${entries.joinToString(",\n")}
         val original = mainClass.readText()
         val migrated = addMissingDeferredRegistersToConstructorArray(original, fields)
         if (migrated == original) return emptyList()
+        val executableOriginal = maskJavaCommentsAndLiterals(original)
+        val executableMigrated = maskJavaCommentsAndLiterals(migrated)
         val missing = fields.filter { field ->
             hasDeferredRegisterArray(original) &&
-                !deferredRegisterReferencePattern(field).containsMatchIn(original) &&
-                deferredRegisterReferencePattern(field).containsMatchIn(migrated)
+                !deferredRegisterReferencePattern(field).containsMatchIn(executableOriginal) &&
+                deferredRegisterReferencePattern(field).containsMatchIn(executableMigrated)
         }
         if (missing.isEmpty()) return emptyList()
         val changes = listOf(Change(
@@ -14045,17 +14047,18 @@ ${entries.joinToString(",\n")}
         source: String,
         fields: List<DeferredRegisterField>
     ): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         if (fields.isEmpty() || !hasDeferredRegisterArray(source)) return source
         val arrayMatch = Regex("""DeferredRegister\s*<\s*\?\s*>\s*\[\]\s+[A-Za-z_$][\w$]*\s*=\s*\{""")
-            .find(source)
+            .find(executableCode)
             ?: return source
-        val openBrace = source.indexOf('{', arrayMatch.range.first)
-        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+        val openBrace = executableCode.indexOf('{', arrayMatch.range.first)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
         if (openBrace < 0 || closeBrace <= openBrace) return source
 
         val missing = fields
             .filterNot {
-                deferredRegisterReferencePattern(it).containsMatchIn(source) ||
+                deferredRegisterReferencePattern(it).containsMatchIn(executableCode) ||
                     deferredRegisterFieldRegisteredViaOwnerMethod(source, it)
             }
             .map { it.qualifiedReference }
@@ -14077,8 +14080,11 @@ ${entries.joinToString(",\n")}
         return source.substring(0, closeBrace) + insertion + source.substring(closeBrace)
     }
 
-    private fun hasDeferredRegisterArray(source: String): Boolean =
-        Regex("""DeferredRegister\s*<\s*\?\s*>\s*\[\]\s+[A-Za-z_$][\w$]*\s*=""").containsMatchIn(source)
+    private fun hasDeferredRegisterArray(source: String): Boolean {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        return Regex("""DeferredRegister\s*<\s*\?\s*>\s*\[\]\s+[A-Za-z_$][\w$]*\s*=""")
+            .containsMatchIn(executableCode)
+    }
 
     private fun deferredRegisterReferencePattern(field: DeferredRegisterField): Regex {
         val simple = Regex.escape(field.ownerSimpleName)
@@ -14092,6 +14098,8 @@ ${entries.joinToString(",\n")}
         field: DeferredRegisterField
     ): Boolean {
         val ownerSource = field.ownerFile?.takeIf { it.exists() }?.readText() ?: return false
+        val executableOwnerSource = maskJavaCommentsAndLiterals(ownerSource)
+        val executableMainSource = maskJavaCommentsAndLiterals(mainSource)
         val owner = if (field.ownerQualifiedName.isBlank()) {
             Regex.escape(field.ownerSimpleName)
         } else {
@@ -14101,13 +14109,13 @@ ${entries.joinToString(",\n")}
         val methodPattern = Regex(
             """(?s)\b(?:public|protected|private)?\s*static\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*$busType\s+([A-Za-z_$][\w$]*)\s*\)\s*\{(.*?)\n\s*\}"""
         )
-        return methodPattern.findAll(ownerSource).any { match ->
+        return methodPattern.findAll(executableOwnerSource).any { match ->
             val methodName = match.groupValues[1]
             val busName = match.groupValues[2]
             val body = match.groupValues[3]
             val registersField = Regex("""\b${Regex.escape(field.fieldName)}\.register\s*\(\s*${Regex.escape(busName)}\s*\)""")
                 .containsMatchIn(body)
-            registersField && Regex("""\b$owner\.${Regex.escape(methodName)}\s*\(""").containsMatchIn(mainSource)
+            registersField && Regex("""\b$owner\.${Regex.escape(methodName)}\s*\(""").containsMatchIn(executableMainSource)
         }
     }
 

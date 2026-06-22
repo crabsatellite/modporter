@@ -9015,6 +9015,50 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `deferred register array completeness uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun registerMissingDeferredRegisterFields")
+        assertTrue(start >= 0, "registerMissingDeferredRegisterFields is missing")
+        val end = source.indexOf("private fun String.lineStartIndent", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw original reference scan" to Regex("""containsMatchIn\(original\)"""),
+            "raw migrated reference scan" to Regex("""containsMatchIn\(migrated\)"""),
+            "raw array match" to Regex("""\.find\(source\)"""),
+            "raw brace match" to Regex("""findMatchingBrace\(source,\s*openBrace\)"""),
+            "raw source reference scan" to Regex("""containsMatchIn\(source\)"""),
+            "raw owner method scan" to Regex("""methodPattern\.findAll\(ownerSource\)"""),
+            "raw main owner-call scan" to Regex("""containsMatchIn\(mainSource\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableOriginal = maskJavaCommentsAndLiterals(original)") &&
+                body.contains("val executableMigrated = maskJavaCommentsAndLiterals(migrated)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains(".find(executableCode)") &&
+                body.contains("findMatchingBrace(executableCode, openBrace)") &&
+                body.contains("deferredRegisterReferencePattern(it).containsMatchIn(executableCode)") &&
+                body.contains("private fun hasDeferredRegisterArray(source: String): Boolean") &&
+                body.contains("val executableOwnerSource = maskJavaCommentsAndLiterals(ownerSource)") &&
+                body.contains("val executableMainSource = maskJavaCommentsAndLiterals(mainSource)") &&
+                body.contains("methodPattern.findAll(executableOwnerSource)") &&
+                body.contains("containsMatchIn(executableMainSource)"),
+            "DeferredRegister array completeness must use executable Java for array detection, existing references, and owner method evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "DeferredRegister array completeness must not infer from comments or text block examples: $offenders"
+        )
+    }
+
+    @Test
     fun `record component access migration uses executable source evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

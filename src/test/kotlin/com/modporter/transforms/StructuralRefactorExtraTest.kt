@@ -2050,6 +2050,76 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `deferred register array completeness ignores comments and text blocks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public ExampleMod(IEventBus bus) {
+                    String docs = ${"\"\"\""}
+DeferredRegister<?>[] registers = { };
+RegisteredOwner.registerAll(bus);
+${"\"\"\""};
+                    // DeferredRegister<?>[] registers = { };
+                    DeferredRegister<?>[] registers = { };
+                    for (DeferredRegister<?> register : registers) {
+                        register.register(bus);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ActualArrayRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.levelgen.placement.PlacementModifierType;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            class ActualArrayRegistry {
+                static final DeferredRegister<PlacementModifierType<?>> PLACEMENT_MODIFIER_TYPES = DeferredRegister.create(Registries.PLACEMENT_MODIFIER_TYPE, ExampleMod.ID);
+            }
+        """.trimIndent())
+        srcDir.resolve("RegisteredOwner.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.levelgen.carver.WorldCarver;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            class RegisteredOwner {
+                static final DeferredRegister<WorldCarver<?>> CARVER_TYPES = DeferredRegister.create(Registries.CARVER, ExampleMod.ID);
+
+                static void registerAll(IEventBus bus) {
+                    CARVER_TYPES.register(bus);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = srcDir.resolve("ExampleMod.java").readText()
+        val actualArray = main.substringAfterLast("DeferredRegister<?>[] registers = {").substringBefore("};")
+
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredregister-array-completeness" }, "changes=${result.changes} errors=${result.errors}")
+        assertTrue(actualArray.contains("com.example.ActualArrayRegistry.PLACEMENT_MODIFIER_TYPES"), main)
+        assertTrue(actualArray.contains("com.example.RegisteredOwner.CARVER_TYPES"), main)
+        assertTrue(main.contains("""
+DeferredRegister<?>[] registers = { };
+RegisteredOwner.registerAll(bus);
+""".trimIndent()), main)
+        assertTrue(main.contains("// DeferredRegister<?>[] registers = { };"), main)
+    }
+
+    @Test
     fun `deferred register listener migration ignores comments and text blocks`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
