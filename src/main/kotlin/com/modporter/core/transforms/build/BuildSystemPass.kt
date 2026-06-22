@@ -2114,17 +2114,18 @@ $header
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val original = javaFile.readText()
-                if (!original.contains("ModelEvent.ModifyBakingResult") ||
-                    !original.contains("event.getModels().replaceAll")) {
+                val executableOriginal = maskJavaCommentsAndLiterals(original)
+                if (!executableOriginal.contains("ModelEvent.ModifyBakingResult") ||
+                    !executableOriginal.contains("event.getModels().replaceAll")) {
                     return@forEach
                 }
 
                 val lambdaMatch = Regex("""replaceAll\s*\(\s*\(\s*([A-Za-z_$][\w$]*)\s*,\s*[A-Za-z_$][\w$]*\s*\)\s*->""")
-                    .find(original)
+                    .find(executableOriginal)
                     ?: return@forEach
                 val locationVar = lambdaMatch.groupValues[1]
                 val callPattern = Regex("""(\.[A-Za-z_$][\w$]*\(\s*)${Regex.escape(locationVar)}(\s*\))""")
-                val modified = callPattern.replace(original) { match ->
+                val modified = replaceExecutableRegex(original, callPattern) { match ->
                     "${match.groupValues[1]}$locationVar.id()${match.groupValues[2]}"
                 }
 

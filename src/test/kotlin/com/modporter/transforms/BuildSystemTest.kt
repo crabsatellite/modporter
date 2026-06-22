@@ -2985,6 +2985,72 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `model resource location id migration ignores comments strings and text blocks`() {
+        val projectDir = tempDir.resolve("modelresource-id-docs")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ClientModels.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.client.event.ModelEvent;
+
+            public class ClientModels {
+                String note = "ModelHooks.shouldWrap(location)";
+                String docs = ${"\"\"\""}
+                    public static void modifyBakingResult(ModelEvent.ModifyBakingResult event) {
+                        event.getModels().replaceAll((location, model) ->
+                            ModelHooks.shouldWrap(location) ? model : null);
+                    }
+                    ${"\"\"\""};
+
+                public static void modifyBakingResult(ModelEvent.ModifyBakingResult event) {
+                    // ModelHooks.shouldWrap(location)
+                    event.getModels().replaceAll((location, model) ->
+                        ModelHooks.shouldWrap(location) ? new Wrapped(model) : model);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ClientModels.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-modelresource-location-id" })
+        assertTrue(content.contains("ModelHooks.shouldWrap(location.id()) ? new Wrapped(model) : model);"), content)
+        assertTrue(content.contains("String note = \"ModelHooks.shouldWrap(location)\";"), content)
+        assertTrue(content.contains("ModelHooks.shouldWrap(location) ? model : null);"), content)
+        assertTrue(content.contains("// ModelHooks.shouldWrap(location)"), content)
+    }
+
+    @Test
+    fun `model resource location id migration ignores documentation only`() {
+        val projectDir = tempDir.resolve("modelresource-id-docs-only")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ClientModelNotes.java")
+        file.writeText("""
+            package com.example;
+
+            public class ClientModelNotes {
+                String note = "ModelEvent.ModifyBakingResult event.getModels().replaceAll ModelHooks.shouldWrap(location)";
+                String docs = ${"\"\"\""}
+                    public static void modifyBakingResult(ModelEvent.ModifyBakingResult event) {
+                        event.getModels().replaceAll((location, model) ->
+                            ModelHooks.shouldWrap(location) ? model : null);
+                    }
+                    ${"\"\"\""};
+            }
+        """.trimIndent())
+        val before = file.readText()
+
+        val result = pass.apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-modelresource-location-id" })
+        assertEquals(before, file.readText())
+    }
+
+    @Test
     fun `retargets client color handler mixin imports to event package shape`() {
         val projectDir = tempDir.resolve("client-colorhandler-package")
         val srcDir = projectDir.resolve("src/main/java/com/example")

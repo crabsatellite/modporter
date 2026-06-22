@@ -1534,6 +1534,52 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `modify baking result model resource migration uses executable lambda evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateModifyBakingResultModelLocations")
+        assertTrue(start >= 0, "migrateModifyBakingResultModelLocations is missing")
+        val end = source.indexOf("private fun migrateClassForNameReflection", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "raw ModifyBakingResult prefilter" to """original.contains("ModelEvent.ModifyBakingResult")""",
+            "raw replaceAll prefilter" to """original.contains("event.getModels().replaceAll")""",
+            "raw lambda search" to Regex("""\)\.find\(original\)"""),
+            "raw full-source call replacement" to Regex("""callPattern\.replace\(original""")
+        )
+            .filter { (_, marker) ->
+                when (marker) {
+                    is String -> body.contains(marker)
+                    is Regex -> marker.containsMatchIn(body)
+                    else -> false
+                }
+            }
+            .map { (label, _) -> "modify baking result model resource migration contains $label" }
+        val required = listOf(
+            "executable mask" to Regex("""val\s+executableOriginal\s*=\s*maskJavaCommentsAndLiterals\(original\)"""),
+            "executable ModifyBakingResult prefilter" to Regex("""executableOriginal\.contains\("ModelEvent\.ModifyBakingResult"\)"""),
+            "executable replaceAll prefilter" to Regex("""executableOriginal\.contains\("event\.getModels\(\)\.replaceAll"\)"""),
+            "executable lambda search" to Regex("""\.find\(executableOriginal\)"""),
+            "executable call replacement" to Regex("""val\s+modified\s*=\s*replaceExecutableRegex\(\s*original\s*,\s*callPattern""")
+        )
+            .filterNot { (_, marker) -> marker.containsMatchIn(body) }
+            .map { (label, _) -> "modify baking result model resource migration missing $label" }
+
+        assertTrue(
+            required.isEmpty(),
+            "ModifyBakingResult model resource migration must prove the lambda from executable Java and edit executable call sites only: $required"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "ModifyBakingResult model resource migration must not infer or rewrite from comments, strings, or text blocks: $forbidden"
+        )
+    }
+
+    @Test
     fun `creative selected tab reflection migration uses method local evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
