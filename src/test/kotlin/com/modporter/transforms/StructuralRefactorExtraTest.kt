@@ -7862,6 +7862,44 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `DistExecutor guard import insertion ignores text block fake imports`() {
+        val textBlockDelimiter = "\"\"\""
+        val projectDir = createFile("ClientRegistration.java", """
+            package com.example;
+
+            import net.neoforged.fml.DistExecutor;
+
+            public class ClientRegistration {
+                private static final String DOC = $textBlockDelimiter
+                    import net.neoforged.api.distmarker.Dist;
+                    import net.neoforged.fml.loading.FMLLoader;
+                    $textBlockDelimiter;
+
+                public ClientRegistration(EventBus bus) {
+                    DistExecutor.unsafeRunForDist(() -> () -> {
+                        ClientMenus.register(bus);
+                        return true;
+                    }, () -> () -> false);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/ClientRegistration.java")
+            .readText()
+
+        assertTrue(Regex("""(?m)^import net\.neoforged\.api\.distmarker\.Dist;$""").containsMatchIn(migrated), migrated)
+        assertTrue(Regex("""(?m)^import net\.neoforged\.fml\.loading\.FMLLoader;$""").containsMatchIn(migrated), migrated)
+        assertEquals(2, Regex("""import net\.neoforged\.api\.distmarker\.Dist;""").findAll(migrated).count(), migrated)
+        assertEquals(2, Regex("""import net\.neoforged\.fml\.loading\.FMLLoader;""").findAll(migrated).count(), migrated)
+        assertTrue(migrated.contains("private static final String DOC = \"\"\""), migrated)
+        assertTrue(migrated.contains("if (FMLLoader.getDist() == Dist.CLIENT) {"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.fml.DistExecutor;"), migrated)
+        assertFalse(migrated.contains("DistExecutor.unsafeRunForDist"), migrated)
+    }
+
+    @Test
     fun `BaseEntityBlock codec is high confidence with Properties constructor`() {
         val projectDir = createFile("LightBlock.java", """
             package com.example;

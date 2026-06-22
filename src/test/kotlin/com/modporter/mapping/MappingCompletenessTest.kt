@@ -3415,6 +3415,36 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `structural import insertion uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun addImportIfMissing")
+        assertTrue(start >= 0, "addImportIfMissing is missing")
+        val end = source.indexOf("private fun removeImportIfPresent", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "raw import presence scan" to """source.contains("import ${'$'}importName;")""",
+            "raw import insertion scan" to ".findAll(source)",
+            "raw package insertion scan" to ".find(source)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("addExecutableImportIfMissing(source, importName)"),
+            "Structural import insertion must use comment/literal-masked executable Java evidence"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "Structural import insertion must not treat comments or string literals as real imports: $forbidden"
+        )
+    }
+
+    @Test
     fun `legacy static FML mod event bus migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

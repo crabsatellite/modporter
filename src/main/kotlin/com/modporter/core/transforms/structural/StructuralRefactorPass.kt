@@ -1284,25 +1284,8 @@ ${indent}}
         return result
     }
 
-    private fun addImportIfMissing(source: String, importName: String): String {
-        if (source.contains("import $importName;")) return source
-        val importLine = "import $importName;\n"
-        val lastImport = Regex("""^import\s+[^;]+;""", RegexOption.MULTILINE)
-            .findAll(source)
-            .lastOrNull()
-        if (lastImport != null) {
-            val insertPos = lastImport.range.last + 1
-            return source.substring(0, insertPos) + "\n" + importLine + source.substring(insertPos)
-        }
-
-        val packageDecl = Regex("""^package\s+[^;]+;""", RegexOption.MULTILINE).find(source)
-        if (packageDecl != null) {
-            val insertPos = packageDecl.range.last + 1
-            return source.substring(0, insertPos) + "\n\n" + importLine + source.substring(insertPos)
-        }
-
-        return importLine + source
-    }
+    private fun addImportIfMissing(source: String, importName: String): String =
+        addExecutableImportIfMissing(source, importName)
 
     private fun removeImportIfPresent(source: String, importName: String): String =
         Regex("""(?m)^[ \t]*import\s+${Regex.escape(importName)};\s*\r?\n""")
