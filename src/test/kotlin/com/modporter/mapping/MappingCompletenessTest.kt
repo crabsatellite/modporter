@@ -4454,6 +4454,39 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `structural nested class replacement helper uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun replaceNestedClass")
+        assertTrue(start >= 0, "replaceNestedClass is missing")
+        val end = source.indexOf("private fun insertBeforeLastClassBrace", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw nested class declaration scan" to ".find(source)",
+            "raw nested class open brace scan" to "source.indexOf('{', match.range.first)",
+            "raw nested class brace matching" to "findMatchingBrace(source, openBrace)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains(".find(executableCode)") &&
+                body.contains("val openBrace = executableCode.indexOf('{', match.range.first)") &&
+                body.contains("val closeBrace = findMatchingBrace(executableCode, openBrace)"),
+            "Structural nested class replacement must locate declarations and braces in executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Structural nested class replacement must not use comments, strings, or text blocks as class evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy registry utility migrations use executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

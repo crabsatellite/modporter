@@ -11127,6 +11127,7 @@ bus.addListener(ActualListenerRegistry::register);
                         RECIPE_SERIALIZERS.register("custom_fluid_crafting", Serializer::new);
                 private static final String METHOD_DOC = $textBlockDelimiter
                     public ResourceLocation getId() { return ResourceLocation.parse("example:doc"); }
+                    public static class Serializer { public Object codec() { return null; } }
                     $textBlockDelimiter;
                 private final ResourceLocation id;
                 private final ResourceLocation fluidId;
@@ -11209,6 +11210,7 @@ bus.addListener(ActualListenerRegistry::register);
         assertFalse(recipe.contains("private final ResourceLocation id;"))
         assertTrue(recipe.contains("private static final String METHOD_DOC = \"\"\""))
         assertTrue(recipe.contains("""public ResourceLocation getId() { return ResourceLocation.parse("example:doc"); }"""))
+        assertTrue(recipe.contains("""public static class Serializer { public Object codec() { return null; } }"""))
         assertFalse(recipe.contains("return id;"))
         assertTrue(registry.contains("DeferredHolder<Block, LiquidBlock> fluidBlock"))
         assertTrue(registry.contains("DeferredHolder<FluidType, DynamicFluidType> fluidType"))

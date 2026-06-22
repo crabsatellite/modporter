@@ -41865,10 +41865,11 @@ $writeLines
 
     private fun replaceNestedClass(source: String, className: String, replacement: String): String {
         val pattern = Regex("""public\s+static\s+class\s+${Regex.escape(className)}\b""")
-        val match = pattern.find(source) ?: return source
-        val openBrace = source.indexOf('{', match.range.first)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val match = pattern.find(executableCode) ?: return source
+        val openBrace = executableCode.indexOf('{', match.range.first)
         if (openBrace < 0) return source
-        val closeBrace = findMatchingBrace(source, openBrace)
+        val closeBrace = findMatchingBrace(executableCode, openBrace)
         if (closeBrace < 0) return source
         return source.substring(0, match.range.first) + replacement + source.substring(closeBrace + 1)
     }
