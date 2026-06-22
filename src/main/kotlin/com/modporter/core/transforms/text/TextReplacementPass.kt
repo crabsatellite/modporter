@@ -2106,20 +2106,23 @@ ${codecFields.joinToString(",\n")}
         }
     }
 
-    private fun legacyJavaPackageName(source: String): String =
-        Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
-            .find(source)
+    private fun legacyJavaPackageName(source: String): String {
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        return Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+            .find(executableSource)
             ?.groupValues
             ?.get(1)
             .orEmpty()
+    }
 
     private fun legacyJavaContext(source: String): LegacyJavaContext {
+        val executableSource = maskJavaCommentsAndLiterals(source)
         val typeImports = linkedMapOf<String, String>()
         val wildcardImports = mutableListOf<String>()
         val staticFieldImports = linkedMapOf<String, String>()
         val staticWildcardImports = mutableListOf<String>()
         Regex("""(?m)^\s*import\s+(static\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\.\*)?)\s*;""")
-            .findAll(source)
+            .findAll(executableSource)
             .forEach { match ->
                 val imported = match.groupValues[2]
                 val isStatic = match.groupValues[1].isNotBlank()
@@ -2239,11 +2242,19 @@ ${codecFields.joinToString(",\n")}
     private fun detectLegacyJavaModIds(javaSources: List<Pair<Path, String>>): Map<String, String> {
         val ids = linkedMapOf<String, String>()
         for ((_, source) in javaSources) {
+            val code = maskJavaComments(source)
+            val executableCode = maskJavaCommentsAndLiterals(source)
             val packageName = legacyJavaPackageName(source)
             Regex("""\bstatic\s+(?:final\s+)?String\s+([A-Za-z_$][\w$]*)\s*=\s*"([^"]+)"""")
-                .findAll(source)
+                .findAll(code)
+                .filter { match ->
+                    val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                    executableSegment.contains("static") &&
+                        executableSegment.contains("String") &&
+                        executableSegment.contains("=")
+                }
                 .forEach { match ->
-                    val ownerClass = javaTypeNameContainingOffset(source, match.range.first)
+                    val ownerClass = javaTypeNameContainingOffset(code, match.range.first)
                         ?: return@forEach
                     ids["$ownerClass.${match.groupValues[1]}"] = match.groupValues[2]
                     if (packageName.isNotBlank()) {
@@ -2251,7 +2262,12 @@ ${codecFields.joinToString(",\n")}
                     }
                 }
             Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)\s*(?:public|protected|private|abstract|final|\s)*class\s+([A-Za-z_$][\w$]*)""")
-                .find(source)
+                .find(code)
+                ?.takeIf { match ->
+                    val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                    executableSegment.contains("@Mod") &&
+                        executableSegment.contains("class")
+                }
                 ?.let { match ->
                     ids[match.groupValues[2]] = match.groupValues[1]
                     if (packageName.isNotBlank()) {
@@ -2282,7 +2298,8 @@ ${codecFields.joinToString(",\n")}
         val classPattern = Regex("""\b(?:public|protected|private|static|final|\s)*class\s+([A-Za-z_$][\w$]*)\b""")
         for ((file, source) in javaSources) {
             val packageName = legacyJavaPackageName(source)
-            classPattern.findAll(source).forEach { match ->
+            val executableSource = maskJavaCommentsAndLiterals(source)
+            classPattern.findAll(executableSource).forEach { match ->
                 val className = match.groupValues[1]
                 val key = if (packageName.isBlank()) className else "$packageName.$className"
                 result.getOrPut(key) { mutableListOf() }.add(file to source)

@@ -1548,6 +1548,47 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `custom enchantment data ignores mod ids declared only in text blocks`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ExampleDocs {
+                private static final String README = ${"\"\"\""}
+                    public static final String MODID = "example";
+                    ${"\"\"\""};
+            }
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(
+                        BuiltInRegistries.ENCHANTMENT,
+                        ExampleDocs.MODID
+                );
+                public static final DeferredHolder<Enchantment, Enchantment> FLAME = ENCHANTMENTS.register("flame", FlameEnchantment::new);
+
+                private static class FlameEnchantment extends Enchantment {
+                    private FlameEnchantment() {
+                        super(Rarity.COMMON, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.CHEST});
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any { it.contains("unresolved mod id expression 'ExampleDocs.MODID'") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/flame.json").exists())
+    }
+
+    @Test
     fun `custom enchantment data resolves unqualified mod id from declaring java type`() {
         val projectDir = createTestFile("""
             package com.example;
@@ -1779,6 +1820,56 @@ class TextReplacementTest {
                 public GhostEnchantment() {
                     super(Rarity.COMMON, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.CHEST});
                 }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
+
+        assertTrue(
+            result.errors.any { it.contains("class reference 'GhostEnchantment' is unresolved") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/ghost.json").exists())
+    }
+
+    @Test
+    fun `custom enchantment data ignores supplier classes declared only in text blocks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> GHOST = ENCHANTMENTS.register("ghost", GhostEnchantment::new);
+            }
+        """.trimIndent())
+        srcDir.resolve("Docs.java").writeText("""
+            package com.example;
+
+            public final class Docs {
+                private static final String README = ${"\"\"\""}
+                    import net.minecraft.world.entity.EquipmentSlot;
+                    import net.minecraft.world.item.enchantment.Enchantment;
+                    import net.minecraft.world.item.enchantment.EnchantmentCategory;
+
+                    public class GhostEnchantment extends Enchantment {
+                        public GhostEnchantment() {
+                            super(Rarity.COMMON, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.CHEST});
+                        }
+                    }
+                    ${"\"\"\""};
             }
         """.trimIndent())
 

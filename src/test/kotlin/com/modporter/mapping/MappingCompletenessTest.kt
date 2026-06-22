@@ -9098,6 +9098,61 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `custom enchantment Java source evidence uses executable source`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+
+        fun functionBody(name: String): String {
+            val start = source.indexOf("private fun $name")
+            assertTrue(start >= 0, "$name is missing")
+            val end = source.indexOf("\n    private fun ", start + 1).let {
+                if (it < 0) source.length else it
+            }
+            return source.substring(start, end)
+        }
+
+        val packageName = functionBody("legacyJavaPackageName")
+        val context = functionBody("legacyJavaContext")
+        val modIds = functionBody("detectLegacyJavaModIds")
+        val classIndex = functionBody("indexJavaClassSources")
+        val forbidden = listOf(
+            "raw package scan" to (packageName to Regex("""\.find\(source\)""")),
+            "raw import scan" to (context to Regex("""\.findAll\(source\)""")),
+            "raw mod id constant scan" to (modIds to Regex("""\.findAll\(source\)""")),
+            "raw mod annotation scan" to (modIds to Regex("""\.find\(source\)""")),
+            "raw class source scan" to (classIndex to Regex("""classPattern\.findAll\(source\)"""))
+        )
+        val offenders = forbidden
+            .filter { (_, scoped) -> scoped.second.containsMatchIn(scoped.first) }
+            .map { (label, _) -> "TextReplacementPass contains $label" }
+
+        assertTrue(
+            packageName.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                packageName.contains(".find(executableSource)") &&
+                context.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                context.contains(".findAll(executableSource)") &&
+                modIds.contains("val code = maskJavaComments(source)") &&
+                modIds.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                modIds.contains(".findAll(code)") &&
+                modIds.contains(".find(code)") &&
+                modIds.contains("val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)") &&
+                modIds.contains("executableSegment.contains(\"static\")") &&
+                modIds.contains("executableSegment.contains(\"String\")") &&
+                modIds.contains("executableSegment.contains(\"@Mod\")") &&
+                modIds.contains("executableSegment.contains(\"class\")") &&
+                classIndex.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                classIndex.contains("classPattern.findAll(executableSource)"),
+            "Custom enchantment Java source evidence must come from executable Java, with string values read only from comment-masked source"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Custom enchantment Java source evidence must not treat comments, strings, or text blocks as package/import/mod-id/class evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `custom enchantment data migrations do not infer declaration owners from java file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
