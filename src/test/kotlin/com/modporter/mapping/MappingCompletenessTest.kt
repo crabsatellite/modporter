@@ -1718,6 +1718,45 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `noParticlesOnBreak block property migration uses executable call evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateBlockPropertiesNoParticlesOnBreak")
+        assertTrue(start >= 0, "migrateBlockPropertiesNoParticlesOnBreak is missing")
+        val end = source.indexOf("private fun configureAccessTransformers", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "raw noParticles prefilter" to """original.contains(".noParticlesOnBreak()")""",
+            "raw token index" to "source.indexOf(token, cursor)",
+            "raw receiver scan" to "findFluentReceiverStart(source, tokenIndex)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "noParticlesOnBreak migration contains $label" }
+        val required = listOf(
+            "executable file mask" to Regex("""val\s+executableOriginal\s*=\s*maskJavaCommentsAndLiterals\(original\)"""),
+            "executable prefilter" to Regex("""executableOriginal\.contains\("\.noParticlesOnBreak\(\)"\)"""),
+            "executable rewrite mask" to Regex("""val\s+executableSource\s*=\s*maskJavaCommentsAndLiterals\(source\)"""),
+            "executable token index" to Regex("""executableSource\.indexOf\(token,\s*cursor\)"""),
+            "executable receiver scan" to Regex("""findFluentReceiverStart\(executableSource,\s*tokenIndex\)""")
+        )
+            .filterNot { (_, marker) -> marker.containsMatchIn(body) }
+            .map { (label, _) -> "noParticlesOnBreak migration missing $label" }
+
+        assertTrue(
+            required.isEmpty(),
+            "noParticlesOnBreak migration must derive helper wrapping from executable Java fluent calls: $required"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "noParticlesOnBreak migration must not infer or rewrite from comments, strings, or text blocks: $forbidden"
+        )
+    }
+
+    @Test
     fun `creative selected tab reflection migration uses method local evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

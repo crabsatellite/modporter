@@ -3771,7 +3771,8 @@ config="$configName"
         val changedFiles = mutableListOf<Path>()
         for (javaFile in javaFiles) {
             val original = javaFile.readText()
-            if (!original.contains(".noParticlesOnBreak()")) continue
+            val executableOriginal = maskJavaCommentsAndLiterals(original)
+            if (!executableOriginal.contains(".noParticlesOnBreak()")) continue
             val migrated = rewriteNoParticlesOnBreakCalls(original)
             if (migrated != original) {
                 changedFiles.add(javaFile)
@@ -3820,12 +3821,13 @@ config="$configName"
 
     private fun rewriteNoParticlesOnBreakCalls(source: String): String {
         val token = ".noParticlesOnBreak()"
+        val executableSource = maskJavaCommentsAndLiterals(source)
         val result = StringBuilder()
         var cursor = 0
         while (cursor < source.length) {
-            val tokenIndex = source.indexOf(token, cursor)
+            val tokenIndex = executableSource.indexOf(token, cursor)
             if (tokenIndex < 0) break
-            val receiverStart = findFluentReceiverStart(source, tokenIndex)
+            val receiverStart = findFluentReceiverStart(executableSource, tokenIndex)
             if (receiverStart < 0 || receiverStart >= tokenIndex) {
                 result.append(source, cursor, tokenIndex + token.length)
                 cursor = tokenIndex + token.length

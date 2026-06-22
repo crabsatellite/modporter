@@ -3502,6 +3502,77 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `noParticlesOnBreak migration ignores comments strings and text blocks`() {
+        val projectDir = tempDir.resolve("no-particles-block-properties-docs")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.neoforged.moddev' version '2.0.139'
+            }
+
+            neoForge {
+                version = "21.1.203"
+            }
+        """.trimIndent())
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("Blocks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.SoundType;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class Blocks {
+                String note = "BlockBehaviour.Properties.of().noParticlesOnBreak()";
+                String docs = ${"\"\"\""}
+                    public static final Block DOC = new Block(BlockBehaviour.Properties.of().noParticlesOnBreak());
+                    ${"\"\"\""};
+
+                // BlockBehaviour.Properties.of().noParticlesOnBreak()
+                public static final Block JAR = new Block(BlockBehaviour.Properties.of().noOcclusion().noParticlesOnBreak().sound(SoundType.BONE_BLOCK));
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val blockSource = srcDir.resolve("Blocks.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-block-properties-no-particles" })
+        assertTrue(blockSource.contains("com.modporter.compat.ModPorterBlockProperties.noParticlesOnBreak(BlockBehaviour.Properties.of().noOcclusion()).sound(SoundType.BONE_BLOCK)"), blockSource)
+        assertTrue(blockSource.contains("String note = \"BlockBehaviour.Properties.of().noParticlesOnBreak()\";"), blockSource)
+        assertTrue(blockSource.contains("public static final Block DOC = new Block(BlockBehaviour.Properties.of().noParticlesOnBreak());"), blockSource)
+        assertTrue(blockSource.contains("// BlockBehaviour.Properties.of().noParticlesOnBreak()"), blockSource)
+    }
+
+    @Test
+    fun `noParticlesOnBreak migration ignores documentation only`() {
+        val projectDir = tempDir.resolve("no-particles-block-properties-docs-only")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val javaFile = srcDir.resolve("BlockNotes.java")
+        javaFile.writeText("""
+            package com.example;
+
+            public class BlockNotes {
+                String note = "BlockBehaviour.Properties.of().noParticlesOnBreak()";
+                String docs = ${"\"\"\""}
+                    public static final Block DOC = new Block(BlockBehaviour.Properties.of().noParticlesOnBreak());
+                    ${"\"\"\""};
+            }
+        """.trimIndent())
+        val before = javaFile.readText()
+
+        val result = pass.apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-block-properties-no-particles" })
+        assertEquals(before, javaFile.readText())
+        assertFalse(projectDir.resolve("src/main/java/com/modporter/compat/ModPorterBlockProperties.java").exists())
+        assertFalse(projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").exists())
+    }
+
+    @Test
     fun `cleans split tick phase checks after NeoForge event migration`() {
         val projectDir = tempDir.resolve("split-tick-phase")
         val srcDir = projectDir.resolve("src/main/java/com/example")
