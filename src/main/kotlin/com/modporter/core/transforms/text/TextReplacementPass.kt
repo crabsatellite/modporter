@@ -2766,9 +2766,10 @@ ${codecFields.joinToString(",\n")}
 
     private fun legacyMethodBodySpan(source: String, methodName: String): LegacySourceSpan? {
         val declaration = findJavaMethodDeclaration(source, methodName) ?: return null
-        val openBrace = source.indexOf('{', declaration.range.last)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val openBrace = executableCode.indexOf('{', declaration.range.last)
         if (openBrace < 0) return null
-        val closeBrace = findMatchingBrace(source, openBrace)
+        val closeBrace = findMatchingBrace(executableCode, openBrace)
         if (closeBrace < 0) return null
         return LegacySourceSpan(
             text = source.substring(openBrace + 1, closeBrace),
@@ -3503,9 +3504,10 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         val declaration = findJavaMethodDeclaration(source, methodName)
             ?: return source
         val start = annotationStartBefore(source, declaration.range.first)
-        val openBrace = source.indexOf('{', declaration.range.last)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val openBrace = executableCode.indexOf('{', declaration.range.last)
         if (openBrace < 0) return source
-        val closeBrace = findMatchingBrace(source, openBrace)
+        val closeBrace = findMatchingBrace(executableCode, openBrace)
         if (closeBrace < 0) return source
         var end = closeBrace + 1
         if (end < source.length && source[end] == '\r') end++
@@ -3517,9 +3519,10 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         val declaration = findJavaMethodDeclaration(source, methodName, searchFrom)
             ?: return source to null
         val start = annotationStartBefore(source, declaration.range.first)
-        val openBrace = source.indexOf('{', declaration.range.last)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val openBrace = executableCode.indexOf('{', declaration.range.last)
         if (openBrace < 0) return source to null
-        val closeBrace = findMatchingBrace(source, openBrace)
+        val closeBrace = findMatchingBrace(executableCode, openBrace)
         if (closeBrace < 0) return source to null
         var end = closeBrace + 1
         if (end < source.length && source[end] == '\r') end++
@@ -3527,10 +3530,12 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         return source.removeRange(start, end) to start
     }
 
-    private fun findJavaMethodDeclaration(source: String, methodName: String, searchFrom: Int = 0): MatchResult? =
-        Regex(
+    private fun findJavaMethodDeclaration(source: String, methodName: String, searchFrom: Int = 0): MatchResult? {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        return Regex(
             """(?m)^[ \t]*(?:public|protected|private)\s+(?:static\s+)?(?:final\s+)?(?:<[^>\r\n]+>\s+)?[\w.$<>\[\], ?]+\s+${Regex.escape(methodName)}\s*\("""
-        ).find(source, searchFrom)
+        ).find(executableCode, searchFrom)
+    }
 
     private fun annotationStartBefore(source: String, declarationIndex: Int): Int {
         val lineStart = source.lastIndexOf('\n', declarationIndex).let { if (it < 0) 0 else it + 1 }

@@ -3216,6 +3216,43 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `java method helpers use executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun legacyMethodBodySpan")
+        assertTrue(start >= 0, "legacyMethodBodySpan is missing")
+        val end = source.indexOf("private fun annotationStartBefore", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw method declaration scan" to ".find(source, searchFrom)",
+            "raw method open brace scan" to "source.indexOf('{', declaration.range.last)",
+            "raw method brace matching" to "findMatchingBrace(source, openBrace)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("private fun legacyMethodBodySpan") &&
+                body.contains("private fun replaceFirstJavaMethodByName") &&
+                body.contains("private fun removeFirstJavaMethodByName") &&
+                body.contains("private fun findJavaMethodDeclaration") &&
+                Regex("""val executableCode = maskJavaCommentsAndLiterals\(source\)""").findAll(body).count() >= 4 &&
+                body.contains("val openBrace = executableCode.indexOf('{', declaration.range.last)") &&
+                body.contains("val closeBrace = findMatchingBrace(executableCode, openBrace)") &&
+                body.contains(".find(executableCode, searchFrom)"),
+            "Java method helpers must locate declarations and braces in executable Java while preserving original source ranges"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Java method helpers must not use comments, literals, or text blocks as method evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `loot conditional function codec migrations do not synthesize member names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

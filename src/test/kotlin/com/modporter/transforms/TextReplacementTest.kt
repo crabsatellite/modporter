@@ -4359,6 +4359,66 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `condition serializer method cleanup ignores Java methods inside text blocks`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.neoforge.common.conditions.ICondition;
+            import net.neoforged.neoforge.common.conditions.IConditionSerializer;
+
+            public class TestMod implements ICondition {
+                private static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath("example", "enabled");
+                public static final TestMod INSTANCE = new TestMod();
+                private static final String DOC = ${"\"\"\""}
+                    public String getID() {
+                        return "documentation";
+                    }
+                    ${"\"\"\""};
+
+                @Override
+                public ResourceLocation getID() {
+                    return ID;
+                }
+
+                @Override
+                public boolean test(IContext context) {
+                    return true;
+                }
+
+                public static class Serializer implements IConditionSerializer<TestMod> {
+                    @Override
+                    public ResourceLocation getID() {
+                        return ID;
+                    }
+
+                    @Override
+                    public TestMod read(JsonObject json) {
+                        return new TestMod();
+                    }
+
+                    @Override
+                    public void write(JsonObject json, TestMod value) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "neoforge-condition-serializer-mapcodec" })
+        assertTrue(transformed.contains("public String getID()"), transformed)
+        assertTrue(transformed.contains("return \"documentation\";"), transformed)
+        assertFalse(transformed.contains("public ResourceLocation getID()"), transformed)
+        assertFalse(transformed.contains("class Serializer"), transformed)
+    }
+
+    @Test
     fun `partial nbt ingredient helpers migrate to data component ingredients`() {
         val projectDir = createTestFile("""
             package com.example;
