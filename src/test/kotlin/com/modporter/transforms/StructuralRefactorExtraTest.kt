@@ -7852,6 +7852,48 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `DistExecutor import cleanup preserves text block documentation`() {
+        val textBlockDelimiter = "\"\"\""
+        val projectDir = createFile("MenuPacket.java", """
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.DistExecutor;
+            // [forge2neo] import net.neoforged.fml.DistExecutor;
+            // DistExecutor removed in NeoForge
+
+            public class MenuPacket {
+                private static final String DOC = $textBlockDelimiter
+                    import net.neoforged.fml.DistExecutor;
+                    // [forge2neo] import net.neoforged.fml.DistExecutor;
+                    // DistExecutor removed in NeoForge
+                    $textBlockDelimiter;
+
+                static void handle(MenuPacket packet, Context context) {
+                    context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
+                            Dist.CLIENT,
+                            () -> () -> ClientMenu.open(packet)
+                    ));
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/MenuPacket.java")
+            .readText()
+
+        assertFalse(Regex("""(?m)^import net\.neoforged\.fml\.DistExecutor;$""").containsMatchIn(migrated), migrated)
+        assertEquals(2, Regex("""import net\.neoforged\.fml\.DistExecutor;""").findAll(migrated).count(), migrated)
+        assertEquals(1, Regex("""DistExecutor removed in NeoForge""").findAll(migrated).count(), migrated)
+        assertTrue(migrated.contains("private static final String DOC = \"\"\""), migrated)
+        assertTrue(migrated.contains("context.enqueueWork(() -> {"), migrated)
+        assertTrue(migrated.contains("if (FMLLoader.getDist() == Dist.CLIENT) {"), migrated)
+        assertTrue(migrated.contains("ClientMenu.open(packet);"), migrated)
+        assertFalse(migrated.contains("DistExecutor.unsafeRunWhenOn"), migrated)
+    }
+
+    @Test
     fun `migrates DistExecutor runForDist client block statement to dist guard`() {
         val projectDir = createFile("ClientRegistration.java", """
             package com.example;

@@ -3483,6 +3483,49 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `DistExecutor import cleanup uses executable import and comment evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun removeDistExecutorImports")
+        assertTrue(start >= 0, "removeDistExecutorImports is missing")
+        val end = source.indexOf("private fun removeStandaloneLineCommentsOutsideJavaLiterals", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val helperStart = source.indexOf("private fun removeStandaloneLineCommentsOutsideJavaLiterals")
+        assertTrue(helperStart >= 0, "removeStandaloneLineCommentsOutsideJavaLiterals is missing")
+        val helperEnd = source.indexOf("private fun unwrapStandaloneInteractionHandChecks", helperStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val helperBody = source.substring(helperStart, helperEnd)
+        val forbidden = listOf(
+            "raw result replace" to "result.replace(",
+            "raw source replace" to "source.replace("
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("removeExecutableImport(result, \"net.minecraftforge.fml.DistExecutor\")") &&
+                body.contains("removeExecutableImport(result, \"net.neoforged.fml.DistExecutor\")") &&
+                body.contains("removeStandaloneLineCommentsOutsideJavaLiterals("),
+            "DistExecutor import cleanup must remove executable imports and scoped placeholder comments separately"
+        )
+        assertTrue(
+            helperBody.contains("!inBlockComment && !inTextBlock && !inString && !inChar") &&
+                helperBody.contains("inTextBlock") &&
+                helperBody.contains("inLineComment"),
+            "Placeholder comment cleanup must track Java literal/comment state instead of raw line deletion"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "DistExecutor cleanup must not use raw source import/comment deletion: $forbidden"
+        )
+    }
+
+    @Test
     fun `legacy static FML mod event bus migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

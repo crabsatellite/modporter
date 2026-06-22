@@ -1246,15 +1246,97 @@ ${indent}}
 
     private fun removeDistExecutorImports(source: String): String {
         var result = source
-        result = result.replace(
-            Regex("""(?m)^[ \t]*(?://\s*(?:\[[^\]\r\n]+]\s*)?)?import\s+net\.(?:minecraftforge|neoforged)\.fml\.DistExecutor;\s*\r?\n"""),
-            ""
+        result = removeExecutableImport(result, "net.minecraftforge.fml.DistExecutor")
+        result = removeExecutableImport(result, "net.neoforged.fml.DistExecutor")
+        return removeStandaloneLineCommentsOutsideJavaLiterals(
+            result,
+            listOf(
+                Regex("""//\s*(?:\[[^\]\r\n]+]\s*)?import\s+net\.(?:minecraftforge|neoforged)\.fml\.DistExecutor;\s*"""),
+                Regex("""//\s*DistExecutor removed in NeoForge\s*""")
+            )
         )
-        result = result.replace(
-            Regex("""(?m)^[ \t]*//\s*DistExecutor removed in NeoForge\s*\r?\n"""),
-            ""
-        )
-        return result
+    }
+
+    private fun removeStandaloneLineCommentsOutsideJavaLiterals(source: String, commentPatterns: List<Regex>): String {
+        val result = StringBuilder(source.length)
+        var index = 0
+        var inBlockComment = false
+        var inTextBlock = false
+        var inString = false
+        var inChar = false
+        var escaped = false
+
+        while (index < source.length) {
+            val lineStart = index
+            val newlineIndex = source.indexOf('\n', index)
+            val lineEndExclusive = if (newlineIndex < 0) source.length else newlineIndex + 1
+            val line = source.substring(lineStart, lineEndExclusive)
+            val trimmed = line.trimEnd('\r', '\n').trim()
+            val removeLine = !inBlockComment && !inTextBlock && !inString && !inChar &&
+                commentPatterns.any { it.matches(trimmed) }
+
+            var offset = 0
+            var inLineComment = false
+            while (offset < line.length) {
+                val ch = line[offset]
+                val next = line.getOrNull(offset + 1)
+                val nextTwo = line.getOrNull(offset + 2)
+                when {
+                    inLineComment -> {
+                        if (ch == '\r' || ch == '\n') inLineComment = false
+                    }
+                    inBlockComment -> {
+                        if (ch == '*' && next == '/') {
+                            offset++
+                            inBlockComment = false
+                        }
+                    }
+                    inTextBlock -> {
+                        if (ch == '"' && next == '"' && nextTwo == '"') {
+                            offset += 2
+                            inTextBlock = false
+                        }
+                    }
+                    inString -> {
+                        if (ch == '"' && !escaped) inString = false
+                        escaped = ch == '\\' && !escaped
+                        if (ch != '\\') escaped = false
+                    }
+                    inChar -> {
+                        if (ch == '\'' && !escaped) inChar = false
+                        escaped = ch == '\\' && !escaped
+                        if (ch != '\\') escaped = false
+                    }
+                    ch == '/' && next == '/' -> {
+                        offset++
+                        inLineComment = true
+                    }
+                    ch == '/' && next == '*' -> {
+                        offset++
+                        inBlockComment = true
+                    }
+                    ch == '"' && next == '"' && nextTwo == '"' -> {
+                        offset += 2
+                        inTextBlock = true
+                        escaped = false
+                    }
+                    ch == '"' -> {
+                        inString = true
+                        escaped = false
+                    }
+                    ch == '\'' -> {
+                        inChar = true
+                        escaped = false
+                    }
+                }
+                offset++
+            }
+
+            if (!removeLine) result.append(line)
+            index = lineEndExclusive
+        }
+
+        return result.toString()
     }
 
     private fun unwrapStandaloneInteractionHandChecks(source: String, handName: String): String {
