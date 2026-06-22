@@ -1,8 +1,19 @@
 # ModPorter
 
-> **Work in progress:** ModPorter is under active development. It is already usable by developers and can automate a meaningful part of Forge 1.20.1 to NeoForge 1.21.1 migration work, but it is not yet a fully tested or fully hands-off porter. A port is only considered successful when the automated build, runtime, world-load, and log-clean gates pass; unresolved complex migrations are tracked as failing gates and unimplemented automated capabilities.
+> **Work in progress / developer preview:** ModPorter is under active development. It is already useful for developers moving Forge 1.20.1 projects to NeoForge 1.21.1, and the current benchmark milestone proves hands-off strict runtime ports for selected large public mods. It is not yet a general guarantee that every Forge 1.20.1 mod will port without engineering work. A port is only considered successful when the automated build, dedicated server, GameTest server, client boot, client saved-world load, and log-clean gates pass.
 
 General-purpose Minecraft mod migration tool. Currently supports **Forge 1.20.1 -> NeoForge 1.21.1**.
+
+## Current Milestone
+
+As of the current repository state, the strict real-mod gate has been verified for these large public benchmark targets:
+
+| Target | Source | Strict gate status | Notes |
+|--------|--------|--------------------|-------|
+| The Aether | `The-Aether-Team/The-Aether`, `1.20.1-develop` | PASS | Compile, dedicated server, GameTest server, client boot, saved-world load, and log-clean audit passed. Remaining allowed log findings are machine-evidenced external dependency or source-inherited issues. |
+| Twilight Forest | `TeamTwilight/twilightforest`, `1.20.1` | PASS | Compile, dedicated server, GameTest server, client boot, saved-world load, and log-clean audit passed. The remaining allowed finding is a machine-evidenced source-inherited creative-tab duplicate for `twilightforest:glass_sword`. |
+
+This is a publishable **developer-preview milestone**, not a final compatibility guarantee. The benchmark harness is the source of truth: new mods should be treated as unsupported until they pass the strict gate, and failures should become deterministic migration rules or explicit evidence-backed allowlist entries.
 
 ## Quick Start
 
@@ -29,8 +40,14 @@ Migrates Forge 1.20.1 mods to NeoForge 1.21.1 using a 5-pass pipeline:
 1. **TextReplacement** - Package renames, API changes, import migrations (~95 rules)
 2. **AST** - Structural Java transformations (CustomPacketPayload, BaseEntityBlock codec)
 3. **StructuralRefactor** - Event bus cleanup, mod-bus event extraction, obsolete method removal
-4. **BuildSystem** - build.gradle rewrite (ForgeGradle -> NeoForge ModDev), source exclusions, dependency cleanup
+4. **BuildSystem** - build.gradle rewrite (ForgeGradle -> NeoForge ModDev), Access Transformer and mixin metadata preservation, dependency cleanup, source-set hygiene
 5. **ResourceMigration** - mods.toml format, recipe/advancement JSON updates
+
+### Rule Policy
+
+ModPorter should not use benchmark-specific shortcuts to make a particular mod pass. Production migration rules are expected to be source-structure or API-surface rules with regression coverage, and strict validation rejects placeholder behavior such as TODO migrations, commented-out source logic, source excludes, skipped structural parsing, and unverified runtime warnings.
+
+The codebase does contain explicit adapters and dependency mappings for real modding APIs and libraries such as Nitrogen, Cumulus, Quark, JEI, Jade, Curios, and similar ecosystem surfaces. Those are treated as API compatibility rules, not per-target bypasses: they must be triggered by source/dependency evidence and covered by tests or strict benchmark gates.
 
 ### Verification Coverage
 
@@ -55,6 +72,12 @@ the report.
 
 # Strict success gate
 ./gradlew strictRealModBenchmark
+```
+
+```powershell
+# Reproduce the current large-mod milestone on one target at a time
+$env:MODPORTER_BENCHMARK_CASES="aether"; ./gradlew.bat strictRealModBenchmark --no-daemon
+$env:MODPORTER_BENCHMARK_CASES="twilightforest"; ./gradlew.bat strictRealModBenchmark --no-daemon
 ```
 
 `realModBenchmark` reads `src/test/resources/benchmarks/real-mods.tsv`, ports each available
