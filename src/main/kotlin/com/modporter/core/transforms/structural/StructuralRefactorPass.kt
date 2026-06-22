@@ -14148,9 +14148,10 @@ ${entries.joinToString(",\n")}
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val source = javaFile.readText()
-                if (!source.contains("extends MapDecoration")) return@forEach
+                val executableCode = maskJavaCommentsAndLiterals(source)
+                if (!executableCode.contains("extends MapDecoration")) return@forEach
                 Regex("""\b(?:class\s+)?([A-Za-z_$][\w$]*)\s+extends\s+MapDecoration\b""")
-                    .findAll(source)
+                    .findAll(executableCode)
                     .forEach { classes.add(it.groupValues[1]) }
             }
         return classes
@@ -17660,39 +17661,38 @@ $migratedRecipes
     }
 
     private fun migrateMapDecorationRecordSource(source: String): String {
-        if (!source.contains("MapDecoration")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("MapDecoration")) return source
 
         var result = source
-        if (result.contains("MapDecoration.Type.")) {
-            result = result.replace("MapDecoration.Type.", "MapDecorationTypes.")
-            result = addImportIfMissing(result, "net.minecraft.world.level.saveddata.maps.MapDecorationTypes")
+        val beforeTypeMigration = result
+        result = replaceExecutableRegex(result, Regex("""\bMapDecoration\.Type\.""")) { "MapDecorationTypes." }
+        if (result != beforeTypeMigration) {
+            result = addExecutableImportIfMissing(result, "net.minecraft.world.level.saveddata.maps.MapDecorationTypes")
         }
         val decorationVariables = Regex("""\bMapDecoration\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
+            .findAll(maskJavaCommentsAndLiterals(result))
             .map { it.groupValues[1] }
             .toSet()
         for (variable in decorationVariables) {
-            result = result
-                .replace("$variable.getX()", "$variable.x()")
-                .replace("$variable.getY()", "$variable.y()")
-                .replace("$variable.getRot()", "$variable.rot()")
+            result = replaceExecutableRegex(result, Regex("""\b${Regex.escape(variable)}\.getX\(\)""")) { "$variable.x()" }
+            result = replaceExecutableRegex(result, Regex("""\b${Regex.escape(variable)}\.getY\(\)""")) { "$variable.y()" }
+            result = replaceExecutableRegex(result, Regex("""\b${Regex.escape(variable)}\.getRot\(\)""")) { "$variable.rot()" }
         }
 
-        if (result.contains("new MapDecoration(")) {
-            result = Regex("""new\s+MapDecoration\(([^;\r\n]*?),\s*null\s*\)""")
-                .replace(result) { match ->
-                    "new MapDecoration(${match.groupValues[1]}, java.util.Optional.empty())"
+        if (maskJavaCommentsAndLiterals(result).contains("new MapDecoration(")) {
+            result = rewriteExecutableJavaNew(result, "MapDecoration") { args ->
+                if (args.size != 5) return@rewriteExecutableJavaNew null
+                val nameArg = args[4].trim()
+                val replacementNameArg = when {
+                    nameArg == "null" -> "java.util.Optional.empty()"
+                    nameArg.startsWith("java.util.Optional.") -> return@rewriteExecutableJavaNew null
+                    nameArg.startsWith("Optional.") -> return@rewriteExecutableJavaNew null
+                    nameArg.startsWith("Component.") -> "java.util.Optional.of($nameArg)"
+                    else -> return@rewriteExecutableJavaNew null
                 }
-            result = Regex("""new\s+MapDecoration\(([^;\r\n]*?),\s*(Component\.[^;\r\n)]+\(.*?\))\s*\)""")
-                .replace(result) { match ->
-                    val args = match.groupValues[1]
-                    val component = match.groupValues[2]
-                    if (args.contains("java.util.Optional.") || component.startsWith("java.util.Optional.")) {
-                        match.value
-                    } else {
-                        "new MapDecoration($args, java.util.Optional.of($component))"
-                    }
-                }
+                "new MapDecoration(${args.take(4).joinToString(", ") { it.trim() }}, $replacementNameArg)"
+            }
         }
 
         return result
@@ -31435,17 +31435,19 @@ $methodBody
     }
 
     private fun migrateFinalMapDecorationSubclassSource(source: String): String {
-        if (!source.contains("extends MapDecoration")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("extends MapDecoration")) return source
 
         var result = source
         var changed = false
         val pattern = Regex("""(?s)public\s+static\s+class\s+([A-Za-z_$][\w$]*)\s+extends\s+MapDecoration\s*\{""")
         var cursor = 0
         while (true) {
-            val match = pattern.find(result, cursor) ?: break
+            val executableResult = maskJavaCommentsAndLiterals(result)
+            val match = pattern.find(executableResult, cursor) ?: break
             val className = match.groupValues[1]
-            val openBrace = result.indexOf('{', match.range.last)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            val openBrace = executableResult.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableResult, openBrace) else -1
             if (closeBrace <= openBrace) {
                 cursor = match.range.last + 1
                 continue
@@ -31464,12 +31466,14 @@ $methodBody
         }
 
         if (!changed) return source
-        result = result.replace("super.equals(o) && o instanceof", "o instanceof")
-        result = result.replace("super.hashCode() * 31 +", "")
-        result = Regex("""(?m)^([ \t]*)@Override\s*\r?\n([ \t]*(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*\r?\n)?[ \t]*public\s+boolean\s+render\s*\()""")
-            .replace(result, "$1$2")
-        result = result.replace("Type.TARGET_X", "MapDecorationTypes.TARGET_X")
-        result = addImportIfMissing(result, "net.minecraft.world.level.saveddata.maps.MapDecorationTypes")
+        result = replaceExecutableRegex(result, Regex("""super\.equals\(o\)\s*&&\s*o\s+instanceof""")) { "o instanceof" }
+        result = replaceExecutableRegex(result, Regex("""super\.hashCode\(\)\s*\*\s*31\s*\+""")) { "" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(?m)^([ \t]*)@Override\s*\r?\n([ \t]*(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*\r?\n)?[ \t]*public\s+boolean\s+render\s*\()""")
+        ) { match -> "${match.groupValues[1]}${match.groupValues[2]}" }
+        result = replaceExecutableRegex(result, Regex("""\bType\.TARGET_X\b""")) { "MapDecorationTypes.TARGET_X" }
+        result = addExecutableImportIfMissing(result, "net.minecraft.world.level.saveddata.maps.MapDecorationTypes")
         return migrateMapDecorationRecordSource(result)
     }
 
@@ -31477,16 +31481,20 @@ $methodBody
         source: String,
         finalMapDecorationClasses: Set<String>
     ): String {
-        if (finalMapDecorationClasses.isEmpty() || !source.contains(".decorations.put(")) return source
+        var executableCode = maskJavaCommentsAndLiterals(source)
+        if (finalMapDecorationClasses.isEmpty() || !executableCode.contains(".decorations.put(")) return source
         var result = source
         finalMapDecorationClasses.forEach { className ->
+            executableCode = maskJavaCommentsAndLiterals(result)
             val variables = Regex("""\b(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(className)}\s+([A-Za-z_$][\w$]*)\b""")
-                .findAll(result)
+                .findAll(executableCode)
                 .map { it.groupValues[1] }
                 .toSet()
             variables.forEach { variable ->
-                result = Regex("""(\.decorations\.put\(\s*[^,\r\n]+,\s*)${Regex.escape(variable)}(\s*\))""")
-                    .replace(result, "$1$variable.asMapDecoration()$2")
+                result = replaceExecutableRegex(
+                    result,
+                    Regex("""(\.decorations\.put\(\s*[^,\r\n]+,\s*)${Regex.escape(variable)}(\s*\))""")
+                ) { match -> "${match.groupValues[1]}$variable.asMapDecoration()${match.groupValues[2]}" }
             }
         }
         return result

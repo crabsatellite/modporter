@@ -14789,6 +14789,52 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `map decoration migrations ignore comments and strings`() {
+        val projectDir = createFile("MapDecorationDocs.java", """
+            package com.example;
+
+            import net.minecraft.world.level.saveddata.maps.MapDecoration;
+            import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
+
+            public class MapDecorationDocs {
+                private static final String DOC = "MapDecoration.Type.PLAYER_OFF_MAP decoration.getX() new MapDecoration(MapDecoration.Type.PLAYER_OFF_MAP, decoration.getX(), decoration.getY(), decoration.getRot(), null)";
+
+                public void update(MapItemSavedData data, MapDecoration decoration) {
+                    // MapDecoration.Type.PLAYER_OFF_MAP decoration.getX() new MapDecoration(MapDecoration.Type.PLAYER_OFF_MAP, decoration.getX(), decoration.getY(), decoration.getRot(), null)
+                    data.decorations.put("real", new MapDecoration(MapDecoration.Type.PLAYER_OFF_MAP, decoration.getX(), decoration.getY(), decoration.getRot(), null));
+                }
+            }
+        """.trimIndent())
+        createFile("GhostMapPacket.java", """
+            package com.example;
+
+            import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
+
+            public class GhostMapPacket {
+                private static final String DOC = "public static class GhostMarker extends MapDecoration { } GhostMarker marker data.decorations.put(key, marker)";
+
+                public void copy(MapItemSavedData data, Object marker, String key) {
+                    // public static class GhostMarker extends MapDecoration {}
+                    data.decorations.put(key, marker);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val docs = tempDir.resolve("src/main/java/com/example/MapDecorationDocs.java").readText()
+        val ghost = tempDir.resolve("src/main/java/com/example/GhostMapPacket.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(docs.contains("new MapDecoration(MapDecorationTypes.PLAYER_OFF_MAP, decoration.x(), decoration.y(), decoration.rot(), java.util.Optional.empty())"), docs)
+        assertTrue(docs.contains("""private static final String DOC = "MapDecoration.Type.PLAYER_OFF_MAP decoration.getX() new MapDecoration(MapDecoration.Type.PLAYER_OFF_MAP, decoration.getX(), decoration.getY(), decoration.getRot(), null)";"""), docs)
+        assertTrue(docs.contains("// MapDecoration.Type.PLAYER_OFF_MAP decoration.getX() new MapDecoration(MapDecoration.Type.PLAYER_OFF_MAP, decoration.getX(), decoration.getY(), decoration.getRot(), null)"), docs)
+        assertTrue(ghost.contains("data.decorations.put(key, marker);"), ghost)
+        assertFalse(ghost.contains("marker.asMapDecoration()"), ghost)
+        assertTrue(ghost.contains("""private static final String DOC = "public static class GhostMarker extends MapDecoration { } GhostMarker marker data.decorations.put(key, marker)";"""), ghost)
+        assertTrue(ghost.contains("// public static class GhostMarker extends MapDecoration {}"), ghost)
+    }
+
+    @Test
     fun `useItemOn maps cross file InteractionResult helper returns`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

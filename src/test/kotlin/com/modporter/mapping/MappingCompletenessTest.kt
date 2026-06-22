@@ -4524,6 +4524,81 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `map decoration migrations use executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val collectorStart = source.indexOf("private fun collectFinalMapDecorationSubclassClasses")
+        assertTrue(collectorStart >= 0, "collectFinalMapDecorationSubclassClasses is missing")
+        val collectorEnd = source.indexOf("private fun collectLootTableProviderClasses", collectorStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val collectorBody = source.substring(collectorStart, collectorEnd)
+        val recordStart = source.indexOf("private fun migrateMapDecorationRecordSource")
+        assertTrue(recordStart >= 0, "migrateMapDecorationRecordSource is missing")
+        val recordEnd = source.indexOf("private fun migrateLegacyModelRenderPackedColorBodies", recordStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val recordBody = source.substring(recordStart, recordEnd)
+        val subclassStart = source.indexOf("private fun migrateFinalMapDecorationSubclassSource")
+        assertTrue(subclassStart >= 0, "migrateFinalMapDecorationSubclassSource is missing")
+        val subclassEnd = source.indexOf("private fun rewriteMapDecorationSubclassBody", subclassStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val subclassBody = source.substring(subclassStart, subclassEnd)
+
+        val offenders = listOf(
+            "collector raw extends prefilter" to (collectorBody.contains("""source.contains("extends MapDecoration")""")),
+            "collector raw subclass scan" to collectorBody.contains(".findAll(source)"),
+            "record raw MapDecoration prefilter" to recordBody.contains("""source.contains("MapDecoration")"""),
+            "record raw type replacement" to recordBody.contains("""result.replace("MapDecoration.Type.""""),
+            "record raw getter replacement" to recordBody.contains(""".replace("${'$'}variable.getX()""""),
+            "record raw declaration scan" to recordBody.contains(".findAll(result)"),
+            "record raw constructor prefilter" to recordBody.contains("""result.contains("new MapDecoration(")"""),
+            "record raw constructor replacement" to recordBody.contains(""").replace(result) { match ->"""),
+            "subclass raw extends prefilter" to subclassBody.contains("""source.contains("extends MapDecoration")"""),
+            "subclass raw class scan" to subclassBody.contains("pattern.find(result, cursor)"),
+            "subclass raw brace matching" to subclassBody.contains("findMatchingBrace(result, openBrace)"),
+            "subclass raw cleanup replacement" to subclassBody.contains("""result.replace("super.equals(o) && o instanceof""""),
+            "subclass usage raw decorations prefilter" to subclassBody.contains("""source.contains(".decorations.put(")"""),
+            "subclass usage raw variable scan" to subclassBody.contains(".findAll(result)"),
+            "subclass usage raw put replacement" to subclassBody.contains(""".replace(result, "${'$'}1${'$'}variable.asMapDecoration()${'$'}2")""")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            collectorBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                collectorBody.contains("""executableCode.contains("extends MapDecoration")""") &&
+                collectorBody.contains(".findAll(executableCode)"),
+            "MapDecoration subclass collection must use executable Java declarations"
+        )
+        assertTrue(
+            recordBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                recordBody.contains("""executableCode.contains("MapDecoration")""") &&
+                recordBody.contains("replaceExecutableRegex(result, Regex") &&
+                recordBody.contains(".findAll(maskJavaCommentsAndLiterals(result))") &&
+                recordBody.contains("rewriteExecutableJavaNew(result, \"MapDecoration\")") &&
+                recordBody.contains("addExecutableImportIfMissing(result, \"net.minecraft.world.level.saveddata.maps.MapDecorationTypes\")"),
+            "MapDecoration record migration must scan and rewrite executable Java only"
+        )
+        assertTrue(
+            subclassBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                subclassBody.contains("""executableCode.contains("extends MapDecoration")""") &&
+                subclassBody.contains("pattern.find(executableResult, cursor)") &&
+                subclassBody.contains("findMatchingBrace(executableResult, openBrace)") &&
+                subclassBody.contains("replaceExecutableRegex(result, Regex") &&
+                subclassBody.contains(".findAll(executableCode)"),
+            "MapDecoration final subclass and usage migrations must use executable Java evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "MapDecoration migrations must not infer from comments or rewrite strings: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy entity type AABB migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
