@@ -41854,10 +41854,11 @@ $writeLines
         val pattern = Regex(
             """(?m)^[ \t]*(?:@\w+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:public|protected|private)\s+(?:static\s+)?[\w<>\[\].?,\s]+\s+${Regex.escape(methodName)}\s*\("""
         )
-        val match = pattern.find(source) ?: return source
-        val openBrace = source.indexOf('{', match.range.last)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val match = pattern.find(executableCode) ?: return source
+        val openBrace = executableCode.indexOf('{', match.range.last)
         if (openBrace < 0) return source
-        val closeBrace = findMatchingBrace(source, openBrace)
+        val closeBrace = findMatchingBrace(executableCode, openBrace)
         if (closeBrace < 0) return source
         return source.substring(0, match.range.first).trimEnd() + "\n\n" + source.substring(closeBrace + 1).trimStart('\r', '\n')
     }

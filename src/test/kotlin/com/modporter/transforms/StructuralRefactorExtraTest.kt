@@ -11098,6 +11098,7 @@ bus.addListener(ActualListenerRegistry::register);
 
     @Test
     fun `migrates custom recipe serializer and deferred holder generics`() {
+        val textBlockDelimiter = "\"\"\""
         val projectDir = createFile("CustomFluidCraftingRecipe.java", """
             package com.example;
 
@@ -11124,6 +11125,9 @@ bus.addListener(ActualListenerRegistry::register);
                         DeferredRegister.create(Registries.RECIPE_SERIALIZER, HotBath.MOD_ID);
                 public static final DeferredHolder<RecipeSerializer<CustomFluidCraftingRecipe>, RecipeSerializer<CustomFluidCraftingRecipe>> SERIALIZER =
                         RECIPE_SERIALIZERS.register("custom_fluid_crafting", Serializer::new);
+                private static final String METHOD_DOC = $textBlockDelimiter
+                    public ResourceLocation getId() { return ResourceLocation.parse("example:doc"); }
+                    $textBlockDelimiter;
                 private final ResourceLocation id;
                 private final ResourceLocation fluidId;
                 private final Item ingredient;
@@ -11203,7 +11207,9 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(recipe.contains("new CustomFluidCraftingRecipe(fluidId, ingredient, ingredientCount)"))
         assertTrue(recipe.contains("public ItemStack getResultItem(HolderLookup.Provider registryAccess)"))
         assertFalse(recipe.contains("private final ResourceLocation id;"))
-        assertFalse(recipe.contains("public ResourceLocation getId()"))
+        assertTrue(recipe.contains("private static final String METHOD_DOC = \"\"\""))
+        assertTrue(recipe.contains("""public ResourceLocation getId() { return ResourceLocation.parse("example:doc"); }"""))
+        assertFalse(recipe.contains("return id;"))
         assertTrue(registry.contains("DeferredHolder<Block, LiquidBlock> fluidBlock"))
         assertTrue(registry.contains("DeferredHolder<FluidType, DynamicFluidType> fluidType"))
         assertTrue(registry.contains("DeferredHolder<Block, T> registerBlock"))
