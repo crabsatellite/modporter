@@ -809,6 +809,44 @@ class RealModBenchmarkTest {
     }
 
     @Test
+    fun `git source preparation records resolved commit evidence`(@TempDir tempDir: Path) {
+        val origin = tempDir.resolve("origin")
+        git(tempDir, "init", origin.toString())
+        git(origin, "config", "user.email", "modporter@example.test")
+        git(origin, "config", "user.name", "ModPorter Test")
+        origin.resolve("build.gradle").writeText("plugins {}\n")
+        git(origin, "add", ".")
+        git(origin, "commit", "-m", "initial")
+        git(origin, "branch", "-M", "main")
+        val commit = git(origin, "rev-parse", "HEAD")
+
+        val reportsDir = tempDir.resolve("reports")
+        val prepared = prepareGitSource(
+            BenchmarkCase(
+                id = "example",
+                displayName = "Example",
+                provider = "git",
+                location = origin.toString(),
+                ref = "main",
+                subdir = ".",
+                required = true
+            ),
+            url = origin.toString(),
+            ref = "main",
+            sourceRoot = tempDir.resolve("sources"),
+            reportsDir = reportsDir,
+            timeoutSeconds = 30
+        )
+
+        assertTrue(prepared.path?.exists() == true, "Expected cloned source path: $prepared")
+        assertTrue(prepared.sourceLabel.endsWith("@$commit"), prepared.sourceLabel)
+        assertTrue(
+            reportsDir.resolve("example-fetch.log").readText().contains("resolvedCommit=$commit"),
+            "fetch log should retain resolved git commit"
+        )
+    }
+
+    @Test
     fun `client smoke world staging disables early display for deterministic runtime gate`(@TempDir tempDir: Path) {
         val fixtureWorld = tempDir.resolve("fixture-world")
         fixtureWorld.resolve("region").createDirectories()
@@ -1286,13 +1324,49 @@ class RealModBenchmarkTest {
                 note = "git clone failed: ${result.note}"
             )
         }
+        val commit = resolvedGitCommit(cloneDir)
+        if (commit != null) {
+            logFile.toFile().appendText("\n[ModPorterBenchmark] resolvedCommit=$commit\n")
+        } else {
+            logFile.toFile().appendText("\n[ModPorterBenchmark] resolvedCommit=<unavailable>\n")
+        }
+        val sourceLabel = if (commit != null) "git:$url#$ref@$commit" else "git:$url#$ref"
 
         val subdir = resolveSubdir(cloneDir, case.subdir)
         return if (subdir.exists() && subdir.isDirectory()) {
-            PreparedSource(subdir, "git:$url#$ref", null, "OK")
+            PreparedSource(subdir, sourceLabel, null, "OK")
         } else {
-            PreparedSource(null, "git:$url#$ref", Status.FAIL, "Configured subdir missing: $subdir")
+            PreparedSource(null, sourceLabel, Status.FAIL, "Configured subdir missing: $subdir")
         }
+    }
+
+    private fun resolvedGitCommit(repo: Path): String? =
+        runCatching {
+            val process = ProcessBuilder("git", "rev-parse", "HEAD")
+                .directory(repo.toFile())
+                .redirectErrorStream(true)
+                .start()
+            val finished = process.waitFor(10, TimeUnit.SECONDS)
+            if (!finished) {
+                terminateProcessTree(process, forcibly = true)
+                return@runCatching null
+            }
+            val output = process.inputStream.bufferedReader().readText().trim()
+            output.lineSequence().firstOrNull()?.trim()?.takeIf { it.matches(Regex("[0-9a-fA-F]{40}")) }
+        }.getOrNull()
+
+    private fun git(workingDir: Path, vararg args: String): String {
+        val process = ProcessBuilder(listOf("git") + args)
+            .directory(workingDir.toFile())
+            .redirectErrorStream(true)
+            .start()
+        val finished = process.waitFor(30, TimeUnit.SECONDS)
+        if (!finished) {
+            terminateProcessTree(process, forcibly = true)
+        }
+        val output = process.inputStream.bufferedReader().readText().trim()
+        assertTrue(finished && process.exitValue() == 0, "git ${args.joinToString(" ")} failed: $output")
+        return output.lineSequence().lastOrNull()?.trim().orEmpty()
     }
 
     private fun resolveSubdir(root: Path, subdir: String): Path =
