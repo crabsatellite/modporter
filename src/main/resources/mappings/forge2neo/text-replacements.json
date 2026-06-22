@@ -3734,14 +3734,6 @@
       "isRegex": true
     },
     {
-      "id": "custom-enchantment-remove-subclasses",
-      "pattern": "\\n\\s*private\\s+static\\s+class\\s+\\w+\\s+extends\\s+Enchantment\\s*\\{(?:[^{}]|\\{(?:[^{}]|\\{[^{}]*\\})*\\})*\\}",
-      "replacement": "",
-      "description": "Remove legacy custom Enchantment subclasses; 1.21 enchantments are data-driven",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "custom-enchantment-getlevel-holder-call",
       "pattern": "(\\w+)\\.getEnchantmentLevel\\(ModEnchantments\\.(\\w+)\\.get\\(\\)\\)",
       "replacement": "$1.getEnchantmentLevel(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(ModEnchantments.$2))",

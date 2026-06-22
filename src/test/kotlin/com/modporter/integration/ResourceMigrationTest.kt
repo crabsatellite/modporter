@@ -2192,6 +2192,53 @@ class ResourceMigrationTest {
     }
 
     @Test
+    fun `legacy Nitrogen fuel sprite generation resolves texture across resource roots once`() {
+        val projectDir = tempDir.resolve("nitrogenfuel-multi-root")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val mainTextureDir = projectDir.resolve("src/main/resources/assets/example/textures/gui/menu")
+        val generatedAssetsDir = projectDir.resolve("src/generated/resources/assets/example")
+        srcDir.createDirectories()
+        mainTextureDir.createDirectories()
+        generatedAssetsDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleFuelCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.rei.categories.fuel.AbstractFuelCategory;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleFuelCategory {
+                public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "textures/gui/menu/altar.png");
+
+                void register(Object registry, Object recipeType) {
+                    registry.add(new AbstractFuelCategory(recipeType, TEXTURE) {});
+                }
+            }
+        """.trimIndent())
+
+        val source = BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB)
+        source.setRGB(176, 0, 0xFF0A1B2C.toInt())
+        source.setRGB(56, 35, 0xFF3D4E5F.toInt())
+        ImageIO.write(source, "png", mainTextureDir.resolve("altar.png").toFile())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), "Expected the main resource texture to satisfy all roots: ${result.errors}")
+        assertTrue(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_icon.png").exists())
+        assertTrue(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_background.png").exists())
+        assertFalse(projectDir.resolve("src/generated/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_icon.png").exists())
+        assertFalse(projectDir.resolve("src/generated/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_background.png").exists())
+        assertEquals(1, result.changes.count { it.ruleId == "res-nitrogen-fuel-icon-sprite" })
+        assertEquals(1, result.changes.count { it.ruleId == "res-nitrogen-fuel-background-sprite" })
+    }
+
+    @Test
     fun `legacy Nitrogen fuel sprite generation rejects unresolved qualified namespace constants`() {
         val projectDir = tempDir.resolve("nitrogenfuel-unresolved")
         val srcDir = projectDir.resolve("src/main/java/com/example")

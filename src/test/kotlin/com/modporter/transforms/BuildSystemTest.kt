@@ -2,7 +2,9 @@ package com.modporter.transforms
 
 import com.modporter.core.transforms.build.BuildSystemPass
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertTimeoutPreemptively
 import org.junit.jupiter.api.io.TempDir
+import java.time.Duration
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.*
@@ -1214,6 +1216,14 @@ class BuildSystemTest {
 
             [[mods]]
             modId="examplemod"
+
+            [[dependencies.examplemod]]
+            modId="neoforge"
+            type="required"
+
+            [[dependencies.examplemod]]
+            modId="minecraft"
+            type="required"
         """.trimIndent())
         resourcesDir.resolve("example.mixins.json").writeText("""
             {
@@ -2597,6 +2607,7 @@ class BuildSystemTest {
             import net.minecraft.sounds.SoundEvent;
             import net.minecraft.world.entity.LivingEntity;
             import net.minecraft.world.entity.decoration.HangingEntity;
+            import net.minecraft.world.entity.decoration.Painting;
             import net.neoforged.fml.util.ObfuscationReflectionHelper;
             import org.jetbrains.annotations.Nullable;
             import java.lang.invoke.MethodHandle;
@@ -2642,6 +2653,15 @@ class BuildSystemTest {
                         throwable.printStackTrace();
                     }
                 }
+
+                public static void setLocalPaintingDirection(Direction direction) {
+                    Painting painting = null;
+                    try {
+                        boundDirectionSetter.invoke(painting, direction);
+                    } catch (Throwable throwable) {
+                        throwable.printStackTrace();
+                    }
+                }
             }
         """.trimIndent())
 
@@ -2663,6 +2683,7 @@ class BuildSystemTest {
         assertTrue(content.contains("import com.example.modporter.mixin.ModPorterHangingEntityInvoker;"), content)
         assertTrue(content.contains("return ((ModPorterLivingEntityInvoker) living).modporter${'$'}getDeathSound();"), content)
         assertTrue(content.contains("((ModPorterHangingEntityInvoker) painting).modporter${'$'}setDirection(direction);"), content)
+        assertTrue(content.contains("Painting painting = null;"), content)
         assertTrue(livingInvoker.contains("package com.example.modporter.mixin;"), livingInvoker)
         assertTrue(livingInvoker.contains("@Mixin(LivingEntity.class)"), livingInvoker)
         assertTrue(livingInvoker.contains("@Invoker(\"getDeathSound\")"), livingInvoker)
@@ -3228,6 +3249,41 @@ class BuildSystemTest {
             public net.minecraft.client.resources.model.ModelBakery f_119234_ # UNREFERENCED_TEXTURES
             public net.minecraft.world.level.chunk.ChunkGenerator m_223138_(Lnet/minecraft/core/Holder;Lnet/minecraft/world/level/levelgen/RandomState;)Ljava/util/List; # getPlacementsForStructure
             public net.minecraft.world.entity.ai.goal.GoalSelector f_25345_ # availableGoals
+            protected net.minecraft.world.level.levelgen.structure.StructurePiece f_73379_ # rotation
+            public net.minecraft.world.entity.LivingEntity m_21275_(Lnet/minecraft/world/damagesource/DamageSource;)Z # isDamageSourceBlocked
+            public net.minecraft.client.model.HumanoidModel m_102875_(Lnet/minecraft/world/entity/LivingEntity;)V # poseRightArm
+            public net.minecraft.world.level.block.FireBlock m_53444_(Lnet/minecraft/world/level/block/Block;II)V # setFlammable
+            public net.minecraft.world.level.saveddata.maps.MapItemSavedData f_77894_ # decorations
+            public net.minecraft.client.multiplayer.ClientAdvancements f_104390_ # advancementToProgress
+            public net.minecraft.world.entity.Entity f_19815_ # dimensions
+            public net.minecraft.world.entity.Mob m_21424_(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ItemStack;)V # maybeDisableShield
+            public net.minecraft.client.gui.Gui f_92980_ # vignetteBrightness
+            public net.minecraft.world.entity.ai.control.MoveControl f_24981_ # operation
+            public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer f_70263_ # baseHeight
+            public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer f_70264_ # heightRandA
+            public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer f_70265_ # heightRandB
+            public net.minecraft.world.entity.animal.Parrot f_29358_ # MOB_SOUND_MAP
+            public net.minecraft.world.level.block.ComposterBlock m_51920_(FLnet/minecraft/world/level/ItemLike;)V # add
+            public-f net.minecraft.world.item.AxeItem f_150683_ # STRIPPABLES
+            public-f net.minecraft.world.entity.player.Inventory f_35978_ # player
+            public net.minecraft.world.level.BaseSpawner f_45451_ # maxNearbyEntities
+            public net.minecraft.world.level.BaseSpawner f_45449_ # spawnCount
+            public net.minecraft.world.level.BaseSpawner f_45453_ # spawnRange
+            public net.minecraft.world.level.levelgen.carver.CaveCarverConfiguration f_159157_ #floorLevel
+            public net.minecraft.world.level.block.FlowerPotBlock m_153267_()Z # isEmpty
+            public net.minecraft.server.level.ChunkMap m_183719_()Lnet/minecraft/world/level/chunk/ChunkGenerator; # generator
+            public net.minecraft.world.level.biome.Biome f_47435_ # TEMPERATURE_NOISE
+            public net.minecraft.world.entity.decoration.Painting m_218891_(Lnet/minecraft/core/Holder;)V # setVariant
+            public net.minecraft.world.level.block.DispenserBlock f_52661_ # DISPENSER_REGISTRY
+            public net.minecraft.client.gui.Gui m_93024_(Lnet/minecraft/world/phys/HitResult;)Z # canRenderCrosshairForSpectator
+            public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData f_256718_ # centerX
+            public net.minecraft.world.level.levelgen.feature.TreeFeature m_225251_(Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/world/level/levelgen/structure/BoundingBox;Ljava/util/Set;Ljava/util/Set;Ljava/util/Set;)Lnet/minecraft/world/phys/shapes/DiscreteVoxelShape; # updateLeaves
+            public net.minecraft.world.level.levelgen.carver.WorldCarver m_159418_(Lnet/minecraft/world/level/levelgen/carver/CarvingContext;Lnet/minecraft/world/level/levelgen/carver/CarverConfiguration;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/levelgen/Aquifer;)Lnet/minecraft/world/level/block/state/BlockState; # getCarveState
+            public net.minecraft.world.level.levelgen.synth.BlendedNoise f_192799_ # xzScale
+            public net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecorator${'$'}Context f_226046_ # decorationSetter
+            public net.minecraft.world.level.chunk.ChunkGenerator m_223104_(Lnet/minecraft/world/level/levelgen/structure/StructureSet${'$'}StructureSelectionEntry;Lnet/minecraft/world/level/StructureManager;Lnet/minecraft/core/RegistryAccess;Lnet/minecraft/world/level/levelgen/RandomState;Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplateManager;JLnet/minecraft/world/level/chunk/ChunkAccess;Lnet/minecraft/world/level/ChunkPos;Lnet/minecraft/core/SectionPos;)Z # tryGenerateStructure
+            public net.minecraft.world.level.storage.loot.LootTable m_230924_(Lit/unimi/dsi/fastutil/objects/ObjectArrayList;ILnet/minecraft/util/RandomSource;)V # shuffleAndSplitItems
+            public net.minecraft.world.level.block.state.BlockBehaviour f_60442_ # material
         """.trimIndent())
 
         pass.apply(projectDir)
@@ -3235,11 +3291,48 @@ class BuildSystemTest {
         val at = atDir.resolve("accesstransformer.cfg").readText()
         assertTrue(at.contains("public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacerType <init>(Lcom/mojang/serialization/MapCodec;)V # ctor"))
         assertTrue(at.contains("public net.minecraft.world.entity.ai.goal.GoalSelector availableGoals # availableGoals"))
+        assertTrue(at.contains("protected net.minecraft.world.level.levelgen.structure.StructurePiece rotation # rotation"))
+        assertTrue(at.contains("public net.minecraft.world.entity.LivingEntity isDamageSourceBlocked(Lnet/minecraft/world/damagesource/DamageSource;)Z # isDamageSourceBlocked"))
+        assertTrue(at.contains("public net.minecraft.client.model.HumanoidModel poseRightArm(Lnet/minecraft/world/entity/LivingEntity;)V # poseRightArm"))
+        assertTrue(at.contains("public net.minecraft.world.level.block.FireBlock setFlammable(Lnet/minecraft/world/level/block/Block;II)V # setFlammable"))
+        assertTrue(at.contains("public net.minecraft.world.level.saveddata.maps.MapItemSavedData decorations # decorations"))
+        assertTrue(at.contains("public net.minecraft.client.multiplayer.ClientAdvancements progress # advancementToProgress"))
+        assertTrue(at.contains("public net.minecraft.world.entity.Entity dimensions # dimensions"))
+        assertTrue(at.contains("public net.minecraft.client.gui.Gui vignetteBrightness # vignetteBrightness"))
+        assertTrue(at.contains("public net.minecraft.world.entity.ai.control.MoveControl operation # operation"))
+        assertTrue(at.contains("public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer baseHeight # baseHeight"))
+        assertTrue(at.contains("public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer heightRandA # heightRandA"))
+        assertTrue(at.contains("public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer heightRandB # heightRandB"))
+        assertTrue(at.contains("public net.minecraft.world.entity.animal.Parrot MOB_SOUND_MAP # MOB_SOUND_MAP"))
+        assertTrue(at.contains("public net.minecraft.world.level.block.ComposterBlock add(FLnet/minecraft/world/level/ItemLike;)V # add"))
+        assertTrue(at.contains("public-f net.minecraft.world.item.AxeItem STRIPPABLES # STRIPPABLES"))
+        assertTrue(at.contains("public-f net.minecraft.world.entity.player.Inventory player # player"))
+        assertTrue(at.contains("public net.minecraft.world.level.BaseSpawner maxNearbyEntities # maxNearbyEntities"))
+        assertTrue(at.contains("public net.minecraft.world.level.BaseSpawner spawnCount # spawnCount"))
+        assertTrue(at.contains("public net.minecraft.world.level.BaseSpawner spawnRange # spawnRange"))
+        assertTrue(at.contains("public net.minecraft.world.level.levelgen.carver.CaveCarverConfiguration floorLevel # floorLevel"))
+        assertTrue(at.contains("public net.minecraft.world.level.block.FlowerPotBlock isEmpty()Z # isEmpty"))
+        assertTrue(at.contains("public net.minecraft.server.level.ChunkMap generator()Lnet/minecraft/world/level/chunk/ChunkGenerator; # generator"))
+        assertTrue(at.contains("public net.minecraft.world.level.biome.Biome TEMPERATURE_NOISE # TEMPERATURE_NOISE"))
+        assertTrue(at.contains("public net.minecraft.world.entity.decoration.Painting setVariant(Lnet/minecraft/core/Holder;)V # setVariant"))
+        assertTrue(at.contains("public net.minecraft.world.level.block.DispenserBlock DISPENSER_REGISTRY # DISPENSER_REGISTRY"))
+        assertTrue(at.contains("public net.minecraft.client.gui.Gui canRenderCrosshairForSpectator(Lnet/minecraft/world/phys/HitResult;)Z # canRenderCrosshairForSpectator"))
+        assertTrue(at.contains("public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData centerX # centerX"))
+        assertTrue(at.contains("public net.minecraft.world.level.levelgen.feature.TreeFeature updateLeaves(Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/world/level/levelgen/structure/BoundingBox;Ljava/util/Set;Ljava/util/Set;Ljava/util/Set;)Lnet/minecraft/world/phys/shapes/DiscreteVoxelShape; # updateLeaves"))
+        assertTrue(at.contains("public net.minecraft.world.level.levelgen.carver.WorldCarver getCarveState(Lnet/minecraft/world/level/levelgen/carver/CarvingContext;Lnet/minecraft/world/level/levelgen/carver/CarverConfiguration;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/levelgen/Aquifer;)Lnet/minecraft/world/level/block/state/BlockState; # getCarveState"))
+        assertTrue(at.contains("public net.minecraft.world.level.levelgen.synth.BlendedNoise xzScale # xzScale"))
+        assertTrue(at.contains("public net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecorator${'$'}Context decorationSetter # decorationSetter"))
+        assertTrue(at.contains("public net.minecraft.world.level.chunk.ChunkGenerator tryGenerateStructure(Lnet/minecraft/world/level/levelgen/structure/StructureSet${'$'}StructureSelectionEntry;Lnet/minecraft/world/level/StructureManager;Lnet/minecraft/core/RegistryAccess;Lnet/minecraft/world/level/levelgen/RandomState;Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplateManager;JLnet/minecraft/world/level/chunk/ChunkAccess;Lnet/minecraft/world/level/ChunkPos;Lnet/minecraft/core/SectionPos;)Z # tryGenerateStructure"))
+        assertTrue(at.contains("public net.minecraft.world.level.storage.loot.LootTable shuffleAndSplitItems(Lit/unimi/dsi/fastutil/objects/ObjectArrayList;ILnet/minecraft/util/RandomSource;)V # shuffleAndSplitItems"))
         assertFalse(at.contains("Lcom/mojang/serialization/Codec;)V"))
         assertFalse(at.contains("UNREFERENCED_TEXTURES"))
         assertFalse(at.contains("getPlacementsForStructure"))
         assertFalse(at.contains("f_119234_"))
         assertFalse(at.contains("m_223138_"))
+        assertFalse(at.contains("f_60442_"))
+        assertFalse(at.contains("BlockBehaviour material"))
+        assertFalse(at.contains("m_21424_"))
+        assertFalse(at.contains("maybeDisableShield"))
     }
 
     @Test
@@ -3711,6 +3804,31 @@ class BuildSystemTest {
         val before = javaFile.readText()
         val result = pass.apply(projectDir)
 
+        assertFalse(result.changes.any { it.ruleId == "build-cleanup-split-tick-phase" })
+        assertEquals(before, javaFile.readText())
+    }
+
+    @Test
+    fun `split tick cleanup scans large unrelated java files linearly`() {
+        val projectDir = tempDir.resolve("split-tick-large-noop")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val javaFile = srcDir.resolve("LargeTickReferences.java")
+        javaFile.writeText(buildString {
+            appendLine("package com.example;")
+            appendLine("public class LargeTickReferences {")
+            repeat(25_000) { index ->
+                appendLine("    String note$index = \"TickEvent reference $index without executable phase\";")
+            }
+            appendLine("}")
+        })
+        val before = javaFile.readText()
+
+        val result = assertTimeoutPreemptively(Duration.ofSeconds(10)) {
+            pass.apply(projectDir)
+        }
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
         assertFalse(result.changes.any { it.ruleId == "build-cleanup-split-tick-phase" })
         assertEquals(before, javaFile.readText())
     }
@@ -4519,6 +4637,79 @@ class BuildSystemTest {
         assertFalse(result.changes.any { it.ruleId == "build-legacy-armor-material-registry" })
         assertTrue(material.contains("enum ExampleArmorMaterials implements ArmorMaterial"))
         assertFalse(material.contains("DeferredRegister.create(Registries.ARMOR_MATERIAL, \"item\")"))
+    }
+
+    @Test
+    fun `legacy armor material migration uses unique project mod id evidence for plain material names`() {
+        val projectDir = tempDir.resolve("p15-armor-project-modid")
+        val itemDir = projectDir.resolve("src/main/java/com/example/item")
+        val modDir = projectDir.resolve("src/main/java/com/example")
+        itemDir.createDirectories()
+        modDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        modDir.resolve("TestMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(TestMod.ID)
+            public class TestMod {
+                public static final String ID = "example";
+
+                public TestMod(ModContainer container) {
+                    IEventBus modEventBus = container.getEventBus();
+                }
+            }
+        """.trimIndent())
+        itemDir.resolve("ExampleArmorMaterials.java").writeText("""
+            package com.example.item;
+
+            import net.minecraft.sounds.SoundEvent;
+            import net.minecraft.sounds.SoundEvents;
+            import net.minecraft.world.item.ArmorMaterial;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import java.util.function.Supplier;
+
+            public enum ExampleArmorMaterials implements ArmorMaterial {
+                STRAW("straw", "strawhat", 6, new int[]{0, 0, 0, 1}, 30,
+                        SoundEvents.ARMOR_EQUIP_LEATHER, 0.0F, 0.0F, () -> Ingredient.of(Items.WHEAT));
+
+                private final String name;
+                private final String textureName;
+                private final SoundEvent sound;
+                private final Supplier<Ingredient> repairIngredient;
+
+                ExampleArmorMaterials(String name, String textureName, int durabilityMult, int[] protections, int enchant,
+                                       SoundEvent sound, float tough, float kb, Supplier<Ingredient> repair) {
+                    this.name = name;
+                    this.textureName = textureName;
+                    this.sound = sound;
+                    this.repairIngredient = repair;
+                }
+
+                @Override
+                public String getName() {
+                    return this.name;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val material = itemDir.resolve("ExampleArmorMaterials.java").readText()
+        val mod = modDir.resolve("TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-legacy-armor-material-registry" })
+        assertTrue(material.contains("DeferredRegister.create(Registries.ARMOR_MATERIAL, com.example.TestMod.ID)"))
+        assertTrue(material.contains("ResourceLocation.fromNamespaceAndPath(com.example.TestMod.ID, textureName)"))
+        assertTrue(mod.contains("ExampleArmorMaterials.ARMOR_MATERIALS.register(modEventBus);"))
+        assertTrue(result.errors.none { it.contains("Cannot derive mod id expression for legacy ArmorMaterial enum") })
     }
 
     @Test
@@ -5912,6 +6103,90 @@ class BuildSystemTest {
         assertFalse(carvers.contains("@SubscribeEvent"))
         assertTrue(mod.contains("com.example.init.ExampleCarvers.CARVER_TYPES.register(modbus);"))
         assertFalse(mod.contains("ExampleCarvers::register"))
+    }
+
+    @Test
+    fun `world carver migration derives mod id from source backed resource location factory`() {
+        val projectDir = tempDir.resolve("p19-world-carvers-source-factory")
+        val initDir = projectDir.resolve("src/main/java/com/example/init")
+        val rootDir = projectDir.resolve("src/main/java/com/example")
+        initDir.createDirectories()
+        rootDir.createDirectories()
+        initDir.resolve("ExampleCarvers.java").writeText("""
+            package com.example.init;
+
+            import com.example.ExampleMod;
+            import com.example.world.ExampleCavesCarver;
+            import net.minecraft.core.HolderGetter;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.data.worldgen.BootstrapContext;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.tags.BlockTags;
+            import net.minecraft.util.valueproviders.ConstantFloat;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.levelgen.VerticalAnchor;
+            import net.minecraft.world.level.levelgen.carver.CaveCarverConfiguration;
+            import net.minecraft.world.level.levelgen.carver.ConfiguredWorldCarver;
+            import net.minecraft.world.level.levelgen.heightproviders.UniformHeight;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.registries.ForgeRegistries;
+            import net.neoforged.neoforge.registries.RegisterEvent;
+
+            public class ExampleCarvers {
+                public static final ExampleCavesCarver EXAMPLE_CAVES = new ExampleCavesCarver(CaveCarverConfiguration.CODEC, false);
+
+                @SubscribeEvent
+                public static void register(RegisterEvent evt) {
+                    evt.register(ForgeRegistries.Keys.WORLD_CARVERS, helper -> helper.register(ExampleMod.prefix("example_caves"), EXAMPLE_CAVES));
+                }
+
+                public static final ResourceKey<ConfiguredWorldCarver<?>> EXAMPLE_CAVES_CONFIGURED = registerKey("example_caves");
+
+                private static ResourceKey<ConfiguredWorldCarver<?>> registerKey(String name) {
+                    return ResourceKey.create(Registries.CONFIGURED_CARVER, ExampleMod.prefix(name));
+                }
+
+                public static void bootstrap(BootstrapContext<ConfiguredWorldCarver<?>> context) {
+                    HolderGetter<Block> blocks = context.lookup(Registries.BLOCK);
+                    context.register(EXAMPLE_CAVES_CONFIGURED, EXAMPLE_CAVES.configured(new CaveCarverConfiguration(0.1F, UniformHeight.of(VerticalAnchor.aboveBottom(5), VerticalAnchor.absolute(-8)), ConstantFloat.of(0.6F), VerticalAnchor.bottom(), blocks.getOrThrow(BlockTags.OVERWORLD_CARVER_REPLACEABLES), ConstantFloat.of(1.0F), ConstantFloat.of(1.0F), ConstantFloat.of(-0.7F))));
+                }
+            }
+        """.trimIndent())
+        rootDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import java.util.Locale;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.bus.api.IEventBus;
+
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public ExampleMod(IEventBus modbus) {
+                    modbus.addListener(com.example.init.ExampleCarvers::register);
+                }
+
+                public static ResourceLocation prefix(String path) {
+                    return ResourceLocation.fromNamespaceAndPath(ID, path.toLowerCase(Locale.ROOT));
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val carvers = initDir.resolve("ExampleCarvers.java").readText()
+        val mod = rootDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(
+            result.errors.none { it.contains("Cannot derive mod id for world carver registration") },
+            result.errors.joinToString("\n")
+        )
+        assertTrue(result.changes.any { it.ruleId == "build-world-carver-deferred-register" })
+        assertTrue(carvers.contains("DeferredRegister<WorldCarver<?>> CARVER_TYPES = DeferredRegister.create(Registries.CARVER, ExampleMod.ID)"))
+        assertTrue(carvers.contains("DeferredHolder<WorldCarver<?>, ExampleCavesCarver> EXAMPLE_CAVES = CARVER_TYPES.register(\"example_caves\""))
+        assertTrue(carvers.contains("EXAMPLE_CAVES.value().configured(new CaveCarverConfiguration"))
+        assertFalse(carvers.contains("RegisterEvent"))
+        assertFalse(carvers.contains("ForgeRegistries.WORLD_CARVERS"))
+        assertTrue(mod.contains("com.example.init.ExampleCarvers.CARVER_TYPES.register(modbus);"))
     }
 
     @Test

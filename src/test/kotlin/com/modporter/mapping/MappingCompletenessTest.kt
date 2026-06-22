@@ -77,6 +77,24 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `text replacement regexes do not emulate java block parsing`() {
+        val db = MappingDatabase.loadDefault()
+        val offenders = db.getTextReplacements()
+            .filter { rule ->
+                rule.isRegex &&
+                    rule.pattern.contains("[^{}]") &&
+                    rule.pattern.contains("\\{") &&
+                    rule.pattern.contains("\\}")
+            }
+            .map { it.id }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Text replacements must not parse nested Java blocks with regex; use executable-source scanners: $offenders"
+        )
+    }
+
+    @Test
     fun `auto pipeline detection does not fall back to registered defaults`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val registrySource = projectRoot
@@ -1702,7 +1720,7 @@ class MappingCompletenessTest {
             "executable RenderFrameEvent replacement" to Regex("""replaceExecutableRegex\(\s*modified,\s*Regex\("{3}\\bRenderFrameEvent\\\.Post\\b"{3}\)"""),
             "executable event phase replacements" to Regex("""replaceExecutableRegex\(\s*modified,\s*Regex\("{3}[^"]*event\\\.phase"""),
             "executable residual mask" to Regex("""val\s+executableModified\s*=\s*maskJavaCommentsAndLiterals\(modified\)"""),
-            "executable residual scan" to Regex("""containsMatchIn\(executableModified\)""")
+            "bounded residual identifier scan" to Regex("""containsJavaIdentifier\(executableModified,\s*"TickEvent"\)""")
         )
             .filterNot { (_, marker) -> marker.containsMatchIn(body) }
             .map { (label, _) -> "split tick phase cleanup missing $label" }
@@ -2840,6 +2858,10 @@ class MappingCompletenessTest {
         assertTrue(
             body.contains("public net.minecraft.client.resources.model.ModelBakery f_119234_") &&
                 body.contains("public net.minecraft.world.level.chunk.ChunkGenerator m_223138_") &&
+                body.contains("protected net.minecraft.world.level.levelgen.structure.StructurePiece f_73379_") &&
+                body.contains("public net.minecraft.world.level.levelgen.carver.WorldCarver m_159418_") &&
+                body.contains("public net.minecraft.client.multiplayer.ClientAdvancements f_104390_") &&
+                body.contains("public net.minecraft.world.level.BaseSpawner f_45449_") &&
                 body.contains("else -> entry"),
             "Access transformer migration must use explicit legacy member mappings and leave unknown SRG entries for validation"
         )
@@ -5586,10 +5608,13 @@ class MappingCompletenessTest {
                 body.contains("val executableAfterBlockEdits = maskJavaCommentsAndLiterals(result)") &&
                 body.contains("entityIfPresentPattern.findAll(executableAfterBlockEdits)") &&
                 body.contains("isEntityCapabilityReceiver(executableAfterBlockEdits") &&
+                body.contains("entityNoSidePattern.findAll(executableAfterEntityEdits)") &&
+                body.contains("Capabilities.ItemHandler.ENTITY") &&
                 body.contains("applyStringEdits(result, blockEdits)") &&
                 body.contains("applyStringEdits(result, entityEdits)") &&
                 body.contains("javaLocalVariableTypes(scope)[receiver]") &&
-                body.contains("javaInheritanceIndex.inherits(receiverType, entityBaseTypes)"),
+                body.contains("javaInheritanceIndex.inherits(receiverType, entityBaseTypes)") &&
+                body.contains("isEntityCollectionForEachLambdaReceiver(scope, receiver)"),
             "Legacy block/entity capability migration must use executable Java and typed receiver evidence"
         )
         assertTrue(
@@ -6706,13 +6731,16 @@ class MappingCompletenessTest {
             body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
                 body.contains("""\bdeserializeNBT\s*\(\s*CompoundTag\b""") &&
                 body.contains("containsMatchIn(executableCode)") &&
-                body.contains("inbtSerializableTypeBodyRanges(source).isEmpty()") &&
+                body.contains("inbtSerializableTypeBodyRanges(source, projectSerializableTypeFqns).isEmpty()") &&
                 body.contains("replaceExecutableRegex(current, pattern)") &&
                 body.contains("ranges.any { match.range.first in it }") &&
-                body.contains("private fun inbtSerializableTypeBodyRanges(source: String)") &&
-                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
-                body.contains("""\b(?:implements|extends)\b""") &&
-                body.contains("""\bINBTSerializable\b""") &&
+                body.contains("private fun collectProjectINBTSerializableTypes(javaFiles: List<Path>)") &&
+                body.contains("resolveJavaTypeReference(reference, type.source, type.packageName, knownFqns)") &&
+                body.contains("private fun resolveJavaTypeReference(") &&
+                body.contains("private fun inbtSerializableTypeBodyRanges(") &&
+                body.contains("projectSerializableTypeFqns") &&
+                body.contains("fqn !in projectSerializableTypeFqns") &&
+                body.contains("net.neoforged.neoforge.common.util.INBTSerializable") &&
                 body.contains("findMatchingBrace(executableCode, openBrace)"),
             "INBTSerializable holder lookup migration must use executable serializable type body ranges"
         )
@@ -8872,8 +8900,9 @@ class MappingCompletenessTest {
         assertTrue(
             body.contains("val code = maskJavaComments(content)") &&
                 body.contains("val executableCode = maskJavaCommentsAndLiterals(content)") &&
-                body.contains(".find(code)") &&
                 body.contains(".findAll(code)") &&
+                body.contains("val typeDeclarations = findJavaTypeDeclarations(code)") &&
+                body.contains("declaration.start > match.range.last") &&
                 body.contains("javaTypeNameContainingOffset(code, match.range.first)") &&
                 body.contains("executableSegment.contains(\"static\")") &&
                 body.contains("executableSegment.contains(\"final\")") &&
@@ -9168,7 +9197,8 @@ class MappingCompletenessTest {
                 "post-loop type lookup" to "return typePattern.findAll(source)",
                 "raw type declaration scan" to "typePattern.findAll(source)",
                 "raw type open brace scan" to "source.indexOf('{', match.range.last)",
-                "raw type brace matching" to Regex("""findMatching(?:Java)?Brace\(source,\s*openBrace\)""")
+                "raw type brace matching" to Regex("""findMatching(?:Java)?Brace\(source,\s*openBrace\)"""),
+                "ambiguous modifier whitespace regex" to Regex("""\(\?:public\|protected\|private\|abstract\|final\|static\|\\s\)\*""")
             )
                 .filter { (_, marker) ->
                     when (marker) {
@@ -9184,17 +9214,36 @@ class MappingCompletenessTest {
             sources.all { (_, source) ->
                 val body = helperBody(source)
                 body.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
-                    body.contains("typePattern.findAll(executableSource)") &&
-                    body.contains("val openBrace = executableSource.indexOf('{', match.range.last)") &&
-                    Regex("""findMatching(?:Java)?Brace\(executableSource,\s*openBrace\)""").containsMatchIn(body) &&
-                    body.contains("offset in openBrace..closeBrace") &&
-                    Regex("""return\s+null\s*\}\s*$""").containsMatchIn(body)
+                    body.contains("findJavaTypeDeclarations(source)") &&
+                    body.contains("offset in declaration.openBrace..declaration.closeBrace") &&
+                    body.contains("return containingType?.name")
             },
             "Java owner resolution must locate type bodies in executable Java and return a type only when the offset is inside that body"
         )
         assertTrue(
             offenders.isEmpty(),
             "Java owner resolution must not assign orphaned declarations or comments/text blocks to a type: $offenders"
+        )
+    }
+
+    @Test
+    fun `production java declaration scans do not use ambiguous modifier whitespace regex`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val forbidden = Regex("""\(\?:public\|protected\|private\|abstract\|final(?:\|static)?\|\\s\)\*""")
+        val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) }
+                .filter { it.extension == "kt" }
+                .toList()
+                .flatMap { file ->
+                    val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                    forbidden.findAll(file.readText()).map { "$relative contains ${it.value}" }.toList()
+                }
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Java declaration scanning must use structured declaration spans, not ambiguous modifier/whitespace regex: $offenders"
         )
     }
 
@@ -9543,14 +9592,15 @@ class MappingCompletenessTest {
                 modIds.contains("val code = maskJavaComments(source)") &&
                 modIds.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
                 modIds.contains(".findAll(code)") &&
-                modIds.contains(".find(code)") &&
+                modIds.contains("val typeDeclarations = findJavaTypeDeclarations(code)") &&
+                modIds.contains("declaration.start > match.range.last") &&
                 modIds.contains("val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)") &&
                 modIds.contains("executableSegment.contains(\"static\")") &&
                 modIds.contains("executableSegment.contains(\"String\")") &&
                 modIds.contains("executableSegment.contains(\"@Mod\")") &&
                 modIds.contains("executableSegment.contains(\"class\")") &&
-                classIndex.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
-                classIndex.contains("classPattern.findAll(executableSource)") &&
+                classIndex.contains("findJavaTypeDeclarations(source)") &&
+                classIndex.contains(".filter { it.kind == \"class\" }") &&
                 registrations.contains("val code = maskJavaComments(source)") &&
                 registrations.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
                 registrations.contains("executableCode.contains(\"DeferredRegister\")") &&
@@ -11265,10 +11315,15 @@ class MappingCompletenessTest {
             "SimpleChannel payload TYPE and registrar namespaces must come from channel namespace evidence"
         )
         assertTrue(
-            body.contains("simpleChannelNamespaceExpression(content, channelName)") &&
+            body.contains("simpleChannelNamespaceExpression(content, channelName, srcDir)") &&
                 body.contains("namespaceExpression = namespaceExpression") &&
                 body.contains("event.registrar(${'$'}registrarNamespaceExpression)"),
             "SimpleChannel payload migration must thread parsed channel namespace evidence into generated payloads and registrar"
+        )
+        assertTrue(
+            source.contains("resourceLocationFactoryNamespaceExpression") &&
+                source.contains("resourceLocationFactoryMethodNamespaceArgument"),
+            "SimpleChannel namespace evidence must include same-project ResourceLocation factory method parsing"
         )
     }
 
@@ -11280,7 +11335,8 @@ class MappingCompletenessTest {
             .readText()
         val helpers = listOf(
             "inferModIdExpression",
-            "detectWorldCarverModIdExpression"
+            "detectWorldCarverModIdExpression",
+            "resolveResourceLocationNamespaceExpression"
         )
         val forbidden = listOf(
             "prefix owner namespace shortcut" to ".prefix\\(",
@@ -11303,6 +11359,11 @@ class MappingCompletenessTest {
             if (it < 0) source.length else it
         }
         val worldCarverBody = source.substring(worldCarverStart, worldCarverEnd)
+        assertTrue(
+            worldCarverBody.contains("extractWorldCarverRegisterIdExpressions(source)") &&
+                worldCarverBody.contains("resolveResourceLocationNamespaceExpression"),
+            "World-carver mod id detection must inspect RegisterEvent id expressions instead of falling back to project identity"
+        )
         val worldCarverFallbackOffenders = listOf(
             "project mod id fallback" to "projectModIdExpression",
             "unique metadata mod id fallback" to "detectUniqueProjectModId"
@@ -11313,6 +11374,18 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty() && worldCarverFallbackOffenders.isEmpty(),
             "Build-system mod id helpers must use scoped @Mod/subscriber evidence, not arbitrary constants or world-carver project fallbacks: ${offenders + worldCarverFallbackOffenders}"
+        )
+
+        val resolverStart = source.indexOf("private fun resolveResourceLocationNamespaceExpression")
+        assertTrue(resolverStart >= 0, "resolveResourceLocationNamespaceExpression is missing")
+        val resolverEnd = source.indexOf("\n    private fun ", resolverStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val resolverBody = source.substring(resolverStart, resolverEnd)
+        assertTrue(
+            resolverBody.contains("findStaticResourceLocationMethodBody") &&
+                resolverBody.contains("resourceLocationFactoryNamespaceFromReturn"),
+            "ResourceLocation namespace resolution must be source-backed by the factory method body"
         )
     }
 
@@ -11378,6 +11451,7 @@ class MappingCompletenessTest {
             "legacy mod id raw annotation scan" to (legacyDetectModId to Regex("""@Mod[\s\S]{0,160}\.findAll\(text\)""")),
             "legacy mod id raw constant scan" to (legacyDetectModId to Regex("""\.find\(text\)""")),
             "unique mod id raw annotation scan" to (uniqueModId to Regex("""@Mod[\s\S]{0,160}\.findAll\(text\)""")),
+            "unique metadata mod id whole-file scan" to (uniqueModId to Regex("""modId[\s\S]{0,120}\.findAll\(text\)""")),
             "string constant raw scan" to (stringConstant to Regex("""\.find\(source\)"""))
         )
         val offenders = forbidden
@@ -11395,6 +11469,7 @@ class MappingCompletenessTest {
                 legacyDetectModId.contains("val executableCode = maskJavaCommentsAndLiterals(text)") &&
                 legacyDetectModId.contains(".findAll(code)") &&
                 legacyDetectModId.contains("return candidates.singleOrNull()") &&
+                uniqueModId.contains("projectModIdsFromToml(text).forEach(::addCandidate)") &&
                 uniqueModId.contains("val code = maskJavaComments(text)") &&
                 uniqueModId.contains("val executableCode = maskJavaCommentsAndLiterals(text)") &&
                 uniqueModId.contains(".findAll(code)") &&
@@ -11742,6 +11817,47 @@ class MappingCompletenessTest {
             assertEquals(expected, mapping.neoForgeClass,
                 "$forge should map to $expected, got ${mapping.neoForgeClass}")
         }
+    }
+
+    @Test
+    fun `executable regex helpers preserve source capture groups`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val structural = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val text = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+
+        fun functionBody(source: String, name: String): String {
+            val start = source.indexOf("private fun $name")
+            assertTrue(start >= 0, "$name is missing")
+            val end = source.indexOf("\n    private fun ", start + 1).let {
+                if (it < 0) source.length else it
+            }
+            return source.substring(start, end)
+        }
+
+        val structuralReplace = functionBody(structural, "replaceExecutableRegex")
+        val textReplace = functionBody(text, "replaceExecutableRegex")
+        val commentMaskedReplace = functionBody(text, "replaceCommentMaskedRegex")
+
+        assertTrue(
+            structuralReplace.contains("pattern.find(source, match.range.first)") &&
+                structuralReplace.contains("takeIf { it.range == match.range }") &&
+                structuralReplace.contains("val replacementMatch = sourceMatch ?: match") &&
+                structuralReplace.contains("replacement(replacementMatch)"),
+            "Structural executable regex replacement must use source MatchResult groups when masked matching preserves ranges"
+        )
+        assertTrue(
+            textReplace.contains("pattern.find(source, match.range.first)") &&
+                textReplace.contains("takeIf { it.range == match.range }") &&
+                textReplace.contains("val groupValues = sourceMatch?.groupValues ?: match.groupValues") &&
+                textReplace.contains("ExecutableRegexMatch(originalValue, groupValues)") &&
+                commentMaskedReplace.contains("val groupValues = sourceMatch?.groupValues ?: match.groupValues") &&
+                commentMaskedReplace.contains("ExecutableRegexMatch(originalValue, groupValues)"),
+            "Text executable regex replacement must not pass masked string-literal capture groups to replacement lambdas"
+        )
     }
 
     @Test

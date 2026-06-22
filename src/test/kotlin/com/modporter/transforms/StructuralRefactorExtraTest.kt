@@ -2411,6 +2411,99 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `packet migration resolves ResourceLocation factory namespace and bidirectional registerMessage`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.network.NetworkHandler;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(IEventBus modEventBus) {
+                    NetworkHandler.init();
+                    Registry.ITEMS.register(modEventBus);
+                }
+
+                public static ResourceLocation id(String path) {
+                    return ResourceLocation.fromNamespaceAndPath(MODID, path);
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("NetworkHandler.java").writeText("""
+            package com.example.network;
+
+            import com.example.ExampleMod;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            public class NetworkHandler {
+                private static final String PROTOCOL_VERSION = "1";
+                public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
+                    ExampleMod.id("main"),
+                    () -> PROTOCOL_VERSION,
+                    PROTOCOL_VERSION::equals,
+                    PROTOCOL_VERSION::equals
+                );
+
+                public static void init() {
+                    int id = 0;
+                    CHANNEL.registerMessage(id++, NoticePacket.class, NoticePacket::encode, NoticePacket::new, NoticePacket.Handler::onMessage);
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("NoticePacket.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.neoforged.neoforge.network.handling.IPayloadContext;
+
+            public class NoticePacket {
+                public NoticePacket(FriendlyByteBuf buf) {
+                }
+
+                public void encode(FriendlyByteBuf buf) {
+                }
+
+                public static class Handler {
+                    public static boolean onMessage(NoticePacket packet, IPayloadContext context) {
+                        return true;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val packet = networkDir.resolve("NoticePacket.java").readText()
+        val handler = networkDir.resolve("NetworkHandler.java").readText()
+        val modNetwork = networkDir.resolve("ModNetwork.java").readText()
+        val main = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-packet-payload" })
+        assertTrue(result.changes.any { it.ruleId == "struct-generate-mod-network" })
+        assertTrue(packet.contains("public class NoticePacket implements CustomPacketPayload"), packet)
+        assertTrue(packet.contains("ResourceLocation.fromNamespaceAndPath(\"example\", \"notice\")"), packet)
+        assertTrue(packet.contains("StreamCodec.of((buf, packet) -> packet.encode(buf), NoticePacket::new)"), packet)
+        assertTrue(modNetwork.contains("final PayloadRegistrar registrar = event.registrar(\"example\").versioned(\"1\");"), modNetwork)
+        assertTrue(modNetwork.contains("registrar.playBidirectional("), modNetwork)
+        assertFalse(handler.contains("SimpleChannel"), handler)
+        assertFalse(handler.contains("registerMessage"), handler)
+        assertTrue(main.contains("modEventBus.addListener(ModNetwork::register);"), main)
+        assertTrue(main.contains("Registry.ITEMS.register(modEventBus);"), main)
+    }
+
+    @Test
     fun `simplechannel cleanup removes legacy marker comments by cleanup shape`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -4725,6 +4818,40 @@ bus.addListener(ActualListenerRegistry::register);
                 }
             }
         """.trimIndent())
+        srcDir.resolve("HolderReachTool.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+
+            public interface HolderReachTool {
+                net.minecraft.resources.ResourceLocation REACH_DISTANCE_MODIFIER_UUID = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, "distance_modifier");
+                net.minecraft.resources.ResourceLocation ATTACK_RANGE_MODIFIER_UUID = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, "range_modifier");
+
+                default Multimap<Holder<Attribute>, AttributeModifier> extendReachModifier(Multimap<Holder<Attribute>, AttributeModifier> map, EquipmentSlot slot) {
+                    if (slot == EquipmentSlot.MAINHAND) {
+                        ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier> attributeBuilder = ImmutableMultimap.builder();
+                        attributeBuilder.putAll(map);
+                        attributeBuilder.put(Attributes.BLOCK_INTERACTION_RANGE, new AttributeModifier(REACH_DISTANCE_MODIFIER_UUID, this.getModifier(), AttributeModifier.Operation.ADD_VALUE));
+                        attributeBuilder.put(Attributes.ENTITY_INTERACTION_RANGE, new AttributeModifier(ATTACK_RANGE_MODIFIER_UUID, this.getModifier(), AttributeModifier.Operation.ADD_VALUE));
+                        map = attributeBuilder.build();
+                    }
+                    return map;
+                }
+
+                /**
+                 * @return The default reach modifier value as a {@link Double}.
+                 */
+                private double getModifier() {
+                    return 3.5;
+                }
+            }
+        """.trimIndent())
         srcDir.resolve("LongSwordItem.java").writeText("""
             package com.example;
 
@@ -4745,6 +4872,52 @@ bus.addListener(ActualListenerRegistry::register);
                 @Override
                 public Multimap<Holder<Attribute>, AttributeModifier> getAttributeModifiers(EquipmentSlot slot, ItemStack stack) {
                     return this.extendReach(super.getAttributeModifiers(slot, stack), slot);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyLongAxeItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.AxeItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Tier;
+
+            public class LegacyLongAxeItem extends AxeItem implements ReachTool {
+                public LegacyLongAxeItem(Tier tier, Properties properties) {
+                    super(tier, 5.0F, -3.3F, properties);
+                }
+
+                @Override
+                public Multimap<Holder<Attribute>, AttributeModifier> getAttributeModifiers(EquipmentSlot slot, ItemStack stack) {
+                    return this.extendReach(super.getAttributeModifiers(slot, stack), slot);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("HolderReachPickaxeItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.PickaxeItem;
+
+            public class HolderReachPickaxeItem extends PickaxeItem implements HolderReachTool {
+                public HolderReachPickaxeItem() {
+                    super(ExampleTiers.REACH, new Item.Properties().rarity(ExampleItems.LOOT).attributes(net.minecraft.world.item.DiggerItem.createAttributes(ExampleTiers.REACH, 1, -3.1F)));
+                }
+
+                @Override
+                public Multimap<Attribute, AttributeModifier> getAttributeModifiers(EquipmentSlot slot, ItemStack stack) {
+                    return this.extendReachModifier(super.getAttributeModifiers(slot, stack), slot);
                 }
             }
         """.trimIndent())
@@ -4811,7 +4984,10 @@ bus.addListener(ActualListenerRegistry::register);
         val migrated = srcDir.resolve("GiantSwordItem.java").readText()
         val migratedPick = srcDir.resolve("GiantPickItem.java").readText()
         val migratedLongSword = srcDir.resolve("LongSwordItem.java").readText()
+        val migratedLegacyLongAxe = srcDir.resolve("LegacyLongAxeItem.java").readText()
         val migratedReachTool = srcDir.resolve("ReachTool.java").readText()
+        val migratedHolderReachPickaxe = srcDir.resolve("HolderReachPickaxeItem.java").readText()
+        val migratedHolderReachTool = srcDir.resolve("HolderReachTool.java").readText()
         val stackScaledSword = srcDir.resolve("StackScaledSwordItem.java").readText()
         val stackScaledWeapon = srcDir.resolve("StackScaledWeapon.java").readText()
 
@@ -4849,14 +5025,27 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(!migratedLongSword.contains("import com.google.common.collect.Multimap;"), migratedLongSword)
         assertTrue(!migratedLongSword.contains("import net.minecraft.world.entity.EquipmentSlot;"), migratedLongSword)
         assertTrue(!migratedLongSword.contains("import net.minecraft.core.Holder;"), migratedLongSword)
+        assertTrue(migratedLegacyLongAxe.contains("net.minecraft.world.item.DiggerItem.createAttributes(tier, 5.0F, -3.3F)"), migratedLegacyLongAxe)
+        assertTrue(migratedLegacyLongAxe.contains(".withModifierAdded(Attributes.BLOCK_INTERACTION_RANGE"), migratedLegacyLongAxe)
+        assertFalse(migratedLegacyLongAxe.contains("getAttributeModifiers"), migratedLegacyLongAxe)
+        assertFalse(migratedLegacyLongAxe.contains("super.getAttributeModifiers"), migratedLegacyLongAxe)
         assertTrue(!migratedReachTool.contains("extendReach("), migratedReachTool)
         assertTrue(!migratedReachTool.contains("getModifier()"), migratedReachTool)
         assertTrue(!migratedReachTool.contains("ImmutableMultimap"), migratedReachTool)
         assertTrue(!migratedReachTool.contains("Multimap<"), migratedReachTool)
+        assertTrue(migratedHolderReachPickaxe.contains(".attributes(net.minecraft.world.item.DiggerItem.createAttributes(ExampleTiers.REACH, 1, -3.1F)"), migratedHolderReachPickaxe)
+        assertTrue(migratedHolderReachPickaxe.contains(".withModifierAdded(Attributes.BLOCK_INTERACTION_RANGE"), migratedHolderReachPickaxe)
+        assertTrue(migratedHolderReachPickaxe.contains("REACH_DISTANCE_MODIFIER_UUID, 3.5, AttributeModifier.Operation.ADD_VALUE"), migratedHolderReachPickaxe)
+        assertFalse(migratedHolderReachPickaxe.contains("getAttributeModifiers"), migratedHolderReachPickaxe)
+        assertFalse(migratedHolderReachPickaxe.contains("super.getAttributeModifiers"), migratedHolderReachPickaxe)
+        assertTrue(!migratedHolderReachTool.contains("extendReachModifier("), migratedHolderReachTool)
+        assertTrue(!migratedHolderReachTool.contains("getModifier()"), migratedHolderReachTool)
+        assertTrue(!migratedHolderReachTool.contains("ImmutableMultimap"), migratedHolderReachTool)
+        assertTrue(!migratedHolderReachTool.contains("Multimap<"), migratedHolderReachTool)
         assertTrue(stackScaledSword.contains("import net.minecraft.world.item.component.ItemAttributeModifiers;"), stackScaledSword)
         assertTrue(stackScaledSword.contains("super(tier, properties.attributes(SwordItem.createAttributes(tier, 5, -2.4F)));"), stackScaledSword)
         assertTrue(stackScaledSword.contains("public ItemAttributeModifiers getDefaultAttributeModifiers(ItemStack stack)"), stackScaledSword)
-        assertTrue(stackScaledSword.contains("return this.scaleDamage(super.getDefaultAttributeModifiers(), stack);"), stackScaledSword)
+        assertTrue(stackScaledSword.contains("return this.scaleDamage(super.getDefaultAttributeModifiers(stack), stack);"), stackScaledSword)
         assertTrue(!stackScaledSword.contains("getAttributeModifiers(EquipmentSlot slot, ItemStack stack)"), stackScaledSword)
         assertTrue(!stackScaledSword.contains("super.getAttributeModifiers"), stackScaledSword)
         assertTrue(!stackScaledSword.contains("import com.google.common.collect.Multimap;"), stackScaledSword)
@@ -4912,6 +5101,177 @@ bus.addListener(ActualListenerRegistry::register);
 
         assertTrue(migratedHoe.contains("super(tier, properties.attributes(net.minecraft.world.item.DiggerItem.createAttributes(tier, -3, 0.0F)));"), migratedHoe)
         assertTrue(migratedShovel.contains("super(tier, new Item.Properties().stacksTo(1).attributes(net.minecraft.world.item.DiggerItem.createAttributes(tier, 1.5F, -3.0F)));"), migratedShovel)
+    }
+
+    @Test
+    fun `aether shaped shared item attribute helpers migrate without project specific rules`() {
+        val root = tempDir.resolve("src/main/java/com/aetherteam/aether")
+        root.createDirectories()
+        root.resolve("Aether.java").writeText("""
+            package com.aetherteam.aether;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(Aether.MODID)
+            public class Aether {
+                public static final String MODID = "aether";
+            }
+        """.trimIndent())
+        root.resolve("item/tools/abilities").createDirectories()
+        root.resolve("item/tools/abilities/ValkyrieTool.java").writeText("""
+            package com.aetherteam.aether.item.tools.abilities;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+
+            public interface ValkyrieTool {
+                net.minecraft.resources.ResourceLocation REACH_DISTANCE_MODIFIER_UUID = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(com.aetherteam.aether.Aether.MODID, "distance_modifier");
+                net.minecraft.resources.ResourceLocation ATTACK_RANGE_MODIFIER_UUID = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(com.aetherteam.aether.Aether.MODID, "range_modifier");
+
+                /**
+                 * Sets up the attributes for the item if it is in the entity's main hand, adding attributes for the mining reach distance and the attack range distance alongside the default item attributes.<br><br>
+                 * @param map The item's default attributes ({@link Multimap Multimap&lt;Attribute, AttributeModifier&gt;}).
+                 * @param slot The {@link EquipmentSlot} the stack is in.
+                 * @return The new attributes ({@link Multimap Multimap&lt;Attribute, AttributeModifier&gt;}) made up of the old attributes and the reach attributes.
+                 * @see com.aetherteam.aether.item.tools.valkyrie
+                 * @see com.aetherteam.aether.item.combat.loot.ValkyrieLanceItem
+                 */
+                default Multimap<Holder<Attribute>, AttributeModifier> extendReachModifier(Multimap<Holder<Attribute>, AttributeModifier> map, EquipmentSlot slot) {
+                    if (slot == EquipmentSlot.MAINHAND) {
+                        ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier> attributeBuilder = ImmutableMultimap.builder();
+                        attributeBuilder.putAll(map);
+                        attributeBuilder.put(Attributes.BLOCK_INTERACTION_RANGE, new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(com.aetherteam.aether.Aether.MODID, "reach_distance_modifier"), this.getModifier(), AttributeModifier.Operation.ADD_VALUE));
+                        attributeBuilder.put(Attributes.ENTITY_INTERACTION_RANGE, new AttributeModifier(net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(com.aetherteam.aether.Aether.MODID, "attack_range_modifier"), this.getModifier(), AttributeModifier.Operation.ADD_VALUE));
+                        map = attributeBuilder.build();
+                    }
+                    return map;
+                }
+
+                private double getModifier() {
+                    return 3.5;
+                }
+            }
+        """.trimIndent())
+        root.resolve("item/tools/valkyrie").createDirectories()
+        root.resolve("item/tools/valkyrie/ValkyriePickaxeItem.java").writeText("""
+            package com.aetherteam.aether.item.tools.valkyrie;
+
+            import com.aetherteam.aether.item.AetherItems;
+            import com.aetherteam.aether.item.combat.AetherItemTiers;
+            import com.aetherteam.aether.item.tools.abilities.ValkyrieTool;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.PickaxeItem;
+
+            public class ValkyriePickaxeItem extends PickaxeItem implements ValkyrieTool {
+                public ValkyriePickaxeItem() {
+                    super(AetherItemTiers.VALKYRIE, new Item.Properties().rarity(AetherItems.AETHER_LOOT).attributes(net.minecraft.world.item.DiggerItem.createAttributes(AetherItemTiers.VALKYRIE, 1, -3.1F)));
+                }
+
+                @Override
+                public Multimap<Attribute, AttributeModifier> getAttributeModifiers(EquipmentSlot slot, ItemStack stack) {
+                    return this.extendReachModifier(super.getAttributeModifiers(slot, stack), slot);
+                }
+            }
+        """.trimIndent())
+        root.resolve("item/combat/abilities/weapon").createDirectories()
+        root.resolve("item/combat/abilities/weapon/ZaniteWeapon.java").writeText("""
+            package com.aetherteam.aether.item.combat.abilities.weapon;
+
+            import com.aetherteam.aether.item.EquipmentUtil;
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import java.util.Iterator;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.item.ItemStack;
+
+            public interface ZaniteWeapon {
+                net.minecraft.resources.ResourceLocation DAMAGE_MODIFIER_UUID = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(com.aetherteam.aether.Aether.MODID, "damage_modifier");
+
+                default Multimap<Holder<Attribute>, AttributeModifier> increaseDamage(Multimap<Holder<Attribute>, AttributeModifier> map, ItemStack stack, EquipmentSlot slot) {
+                    if (slot == EquipmentSlot.MAINHAND) {
+                        ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier> attributeBuilder = ImmutableMultimap.builder();
+                        attributeBuilder.putAll(map);
+                        attributeBuilder.put(Attributes.ATTACK_DAMAGE, new AttributeModifier(DAMAGE_MODIFIER_UUID, this.calculateIncrease(map, stack), AttributeModifier.Operation.ADD_VALUE));
+                        map = attributeBuilder.build();
+                    }
+                    return map;
+                }
+
+                /**
+                 * @param map The item's default attributes ({@link Multimap Multimap&lt;Attribute, AttributeModifier&gt;}).
+                 * @param stack The {@link ItemStack} correlating to the item.
+                 * @return The damage bonus value for the zanite weapon, as an {@link Integer}.
+                 */
+                private int calculateIncrease(Multimap<Holder<Attribute>, AttributeModifier> map, ItemStack stack) {
+                    double baseDamage = 0.0;
+                    for (Iterator<AttributeModifier> it = map.get(Attributes.ATTACK_DAMAGE).stream().iterator(); it.hasNext();) {
+                        AttributeModifier modifier = it.next();
+                        baseDamage += modifier.amount();
+                    }
+                    double boostedDamage = EquipmentUtil.calculateZaniteBuff(stack, baseDamage);
+                    boostedDamage -= baseDamage;
+                    if (boostedDamage < 0.0) {
+                        boostedDamage = 0.0;
+                    }
+                    return (int) Math.round(boostedDamage);
+                }
+            }
+        """.trimIndent())
+        root.resolve("item/combat").createDirectories()
+        root.resolve("item/combat/ZaniteSwordItem.java").writeText("""
+            package com.aetherteam.aether.item.combat;
+
+            import com.aetherteam.aether.item.combat.abilities.weapon.ZaniteWeapon;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.SwordItem;
+
+            public class ZaniteSwordItem extends SwordItem implements ZaniteWeapon {
+                public ZaniteSwordItem() {
+                    super(AetherItemTiers.ZANITE, new Item.Properties().attributes(SwordItem.createAttributes(AetherItemTiers.ZANITE, 3, -2.4F)));
+                }
+
+                @Override
+                public Multimap<Attribute, AttributeModifier> getAttributeModifiers(EquipmentSlot slot, ItemStack stack) {
+                    return this.increaseDamage(super.getAttributeModifiers(slot, stack), stack, slot);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val valkyrieItem = root.resolve("item/tools/valkyrie/ValkyriePickaxeItem.java").readText()
+        val valkyrieHelper = root.resolve("item/tools/abilities/ValkyrieTool.java").readText()
+        val zaniteItem = root.resolve("item/combat/ZaniteSwordItem.java").readText()
+        val zaniteHelper = root.resolve("item/combat/abilities/weapon/ZaniteWeapon.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(
+            valkyrieItem.contains("getAttributeModifiers"),
+            valkyrieItem
+        )
+        assertTrue(valkyrieItem.contains(".withModifierAdded(Attributes.BLOCK_INTERACTION_RANGE"), valkyrieItem)
+        assertFalse(valkyrieHelper.contains("extendReachModifier("), valkyrieHelper)
+        assertTrue(zaniteItem.contains("public ItemAttributeModifiers getDefaultAttributeModifiers(ItemStack stack)"), zaniteItem)
+        assertTrue(zaniteItem.contains("return this.increaseDamage(super.getDefaultAttributeModifiers(stack), stack);"), zaniteItem)
+        assertTrue(zaniteHelper.contains("default ItemAttributeModifiers increaseDamage(ItemAttributeModifiers modifiers, ItemStack stack)"), zaniteHelper)
     }
 
     @Test
@@ -5346,6 +5706,65 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `INBTSerializable holder lookup migration follows project interface inheritance`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/cap")
+        srcDir.createDirectories()
+
+        srcDir.resolve("PlayerState.java").writeText("""
+            package com.example.cap;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.neoforged.neoforge.common.util.INBTSerializable;
+
+            public interface PlayerState extends INBTSerializable<CompoundTag> {
+                boolean enabled();
+            }
+        """.trimIndent())
+
+        srcDir.resolve("PlayerStateImpl.java").writeText("""
+            package com.example.cap;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            public class PlayerStateImpl implements PlayerState {
+                @Override
+                public boolean enabled() {
+                    return true;
+                }
+
+                @Override
+                public CompoundTag serializeNBT() {
+                    return new CompoundTag();
+                }
+
+                @Override
+                public void deserializeNBT(CompoundTag tag) {
+                }
+            }
+
+            class PlainData {
+                public CompoundTag serializeNBT() {
+                    return new CompoundTag();
+                }
+
+                public void deserializeNBT(CompoundTag tag) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val impl = srcDir.resolve("PlayerStateImpl.java").readText()
+        val plainData = impl.substringAfter("class PlainData")
+
+        assertTrue(result.changes.any { it.ruleId == "struct-inbtserializable-holderlookup" })
+        assertTrue(impl.contains("public CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider)"), impl)
+        assertTrue(impl.contains("public void deserializeNBT(net.minecraft.core.HolderLookup.Provider provider, CompoundTag tag)"), impl)
+        assertTrue(plainData.contains("public CompoundTag serializeNBT()"), impl)
+        assertTrue(plainData.contains("public void deserializeNBT(CompoundTag tag)"), impl)
+        assertFalse(plainData.contains("HolderLookup.Provider"), impl)
+    }
+
+    @Test
     fun `legacy capability facade migration rejects placeholder attachment ids`() {
         val srcDir = tempDir.resolve("src/main/java/com/example/invalid")
         srcDir.createDirectories()
@@ -5756,6 +6175,10 @@ bus.addListener(ActualListenerRegistry::register);
                     this.setSynched(Direction.CLIENT, "setValue", value);
                 }
 
+                public void requestServer(boolean value) {
+                    this.setSynched(Direction.SERVER, "setValue", value);
+                }
+
                 public CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider) {
                     return new CompoundTag();
                 }
@@ -5791,6 +6214,10 @@ bus.addListener(ActualListenerRegistry::register);
 
                 public static void syncFromLocal(SynchedData data, boolean value) {
                     data.setSynched(INBTSynchable.Direction.CLIENT, "setValue", value);
+                }
+
+                public static void syncToServer(SynchedData data, boolean value) {
+                    data.setSynched(INBTSynchable.Direction.SERVER, "setValue", value);
                 }
             }
         """.trimIndent())
@@ -5911,10 +6338,12 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(impl.contains("public SyncPacket getSyncPacket(int entityID, String key, Type type, Object value)"), impl)
         assertTrue(impl.contains("new SynchedDataSyncPacket(entityID, key, type, value)"), impl)
         assertTrue(impl.contains("this.setSynched(this.getPlayer().getId(), Direction.CLIENT, \"setValue\", value);"), impl)
+        assertTrue(impl.contains("this.setSynched(this.getPlayer().getId(), Direction.SERVER, \"setValue\", value);"), impl)
         assertFalse(impl.contains("getPacketChannel"), impl)
         assertFalse(impl.contains("BasePacket"), impl)
         assertTrue(hooks.contains("synchedData.setSynched(synchedData.getPlayer().getId(), INBTSynchable.Direction.CLIENT, \"setValue\", value);"), hooks)
         assertTrue(hooks.contains("data.setSynched(data.getPlayer().getId(), INBTSynchable.Direction.CLIENT, \"setValue\", value);"), hooks)
+        assertTrue(hooks.contains("data.setSynched(data.getPlayer().getId(), INBTSynchable.Direction.SERVER, \"setValue\", value);"), hooks)
         assertTrue(packet.contains("import com.aetherteam.nitrogen.attachment.INBTSynchable;"), packet)
         assertTrue(packet.contains("RegistryFriendlyByteBuf buf"), packet)
         assertTrue(packet.contains("CustomPacketPayload.Type<SynchedDataSyncPacket> TYPE"), packet)
@@ -7604,6 +8033,55 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("LocationPredicate.Builder.inStructure(registries.lookupOrThrow(Registries.STRUCTURE).getOrThrow(structure));"), migrated)
         assertTrue(migrated.contains("""private static final String DOC = "LocationPredicate.inDimension(dimension); LocationPredicate.inBiome(biome); LocationPredicate.inStructure(structure);";"""), migrated)
         assertTrue(migrated.contains("// LocationPredicate.inBiome(biome);"), migrated)
+    }
+
+    @Test
+    fun `legacy advancement datagen holder migration preserves string literal arguments`() {
+        val sourceFile = createFile("AdvancementLiteralArguments.java", """
+            package com.example;
+
+            import java.util.function.Consumer;
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.advancements.FrameType;
+            import net.minecraft.advancements.RequirementsStrategy;
+            import net.minecraft.advancements.critereon.LocationPredicate;
+            import net.minecraft.advancements.critereon.PlayerTrigger;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.Level;
+
+            public class AdvancementLiteralArguments {
+                public void generate(HolderLookup.Provider registries, Consumer<Advancement> consumer) {
+                    Advancement root = Advancement.Builder.advancement()
+                        .display(
+                            null,
+                            Component.translatable("advancement.example.root"),
+                            Component.translatable("advancement.example.root.desc"),
+                            new ResourceLocation("example", "textures/gui/root.png"),
+                            FrameType.TASK,
+                            true,
+                            false,
+                            false)
+                        .requirements(RequirementsStrategy.OR)
+                        .addCriterion("in_tf", PlayerTrigger.TriggerInstance.located(LocationPredicate.inDimension(Level.OVERWORLD)))
+                        .save(consumer, "example:root");
+                }
+            }
+        """.trimIndent()).resolve("src/main/java/com/example/AdvancementLiteralArguments.java")
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("AdvancementHolder root = Advancement.Builder.advancement()"), migrated)
+        assertTrue(migrated.contains("""Component.translatable("advancement.example.root")"""), migrated)
+        assertTrue(migrated.contains("""Component.translatable("advancement.example.root.desc")"""), migrated)
+        assertTrue(migrated.contains("""ResourceLocation.fromNamespaceAndPath("example", "textures/gui/root.png")"""), migrated)
+        assertTrue(migrated.contains("""addCriterion("in_tf", PlayerTrigger.TriggerInstance.located(LocationPredicate.Builder.inDimension(Level.OVERWORLD)))"""), migrated)
+        assertTrue(migrated.contains(""".save(consumer, "example:root")"""), migrated)
+        assertFalse(migrated.contains("Component.translatable(                        )"), migrated)
+        assertFalse(migrated.contains("addCriterion(       ,"), migrated)
     }
 
     @Test
@@ -30607,6 +31085,8 @@ bus.addListener(ActualListenerRegistry::register);
         srcDir.resolve("UseDurationSurface.java").writeText("""
             package com.example;
 
+            import net.minecraft.client.renderer.item.ItemProperties;
+            import net.minecraft.resources.ResourceLocation;
             import net.minecraft.world.entity.LivingEntity;
             import net.minecraft.world.item.Item;
             import net.minecraft.world.item.ItemStack;
@@ -30618,6 +31098,31 @@ bus.addListener(ActualListenerRegistry::register);
 
                 public int itemDuration(Item item, ItemStack stack) {
                     return item.getUseDuration(stack);
+                }
+
+                public void itemProperty(Item item) {
+                    ItemProperties.register(item, ResourceLocation.parse("pull"), (stack, world, entity, seed) ->
+                        entity != null ? stack.getUseDuration(entity) : 0);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BucketPickupSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.LevelAccessor;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.BucketPickup;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class BucketPickupSurface {
+                public ItemStack pickup(LevelAccessor level, BlockPos pos, BlockState state) {
+                    Block block = state.getBlock();
+                    if (block instanceof BucketPickup bucketPickup) {
+                        return bucketPickup.pickupBlock(level, pos, state);
+                    }
+                    return ItemStack.EMPTY;
                 }
             }
         """.trimIndent())
@@ -30862,6 +31367,7 @@ bus.addListener(ActualListenerRegistry::register);
         val ghost = srcDir.resolve("GhostAccessorSurface.java").readText()
         val comment = srcDir.resolve("CommentContainerSurface.java").readText()
         val duration = srcDir.resolve("UseDurationSurface.java").readText()
+        val bucketPickup = srcDir.resolve("BucketPickupSurface.java").readText()
         val recipe = srcDir.resolve("RecipeSurface.java").readText()
         val containerScope = srcDir.resolve("ContainerScopeSurface.java").readText()
         val collectionSize = srcDir.resolve("CollectionSizeSurface.java").readText()
@@ -30891,6 +31397,9 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(!comment.contains("entities.getContainerSize()"))
         assertTrue(duration.contains("entity.getUseItem().getUseDuration(entity)"))
         assertTrue(duration.contains("item.getUseDuration(stack, null)"))
+        assertTrue(duration.contains("stack.getUseDuration(entity) : 0"), duration)
+        assertFalse(duration.contains("stack.getUseDuration(entity, null)"), duration)
+        assertTrue(bucketPickup.contains("bucketPickup.pickupBlock(null, level, pos, state)"), bucketPickup)
         assertTrue(recipe.contains("matches(CraftingInput container, Level level)"))
         assertTrue(recipe.contains("assemble(CraftingInput container, HolderLookup.Provider access)"))
         assertTrue(recipe.contains("container.size() > 0"))
@@ -31015,9 +31524,16 @@ bus.addListener(ActualListenerRegistry::register);
             import net.minecraft.core.BlockPos;
             import net.minecraft.core.Direction;
             import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.LivingEntity;
             import net.minecraft.world.level.Level;
             import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.phys.AABB;
             import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import java.util.ArrayList;
+            import java.util.HashMap;
+            import java.util.List;
+            import java.util.Map;
 
             public class CapabilityDocsSurface {
                 private static final String DOC = "entity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());";
@@ -31034,6 +31550,21 @@ bus.addListener(ActualListenerRegistry::register);
                     blockEntity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
                     entity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
                     unknown.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
+                }
+
+                public boolean entityNoSide(LivingEntity living) {
+                    return living.getCapability(Capabilities.ItemHandler.BLOCK) != null;
+                }
+
+                public void entityCollectionCaps(Level level, BlockPos pos, Direction side) {
+                    level.getEntities((Entity) null, new AABB(pos).inflate(2), entity -> entity.isAlive()).forEach(entity -> {
+                        List<IItemHandler> handlers = new ArrayList<>();
+                        entity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handlers::add);
+                    });
+                    level.getEntitiesOfClass(Entity.class, new AABB(pos).inflate(16)).forEach(entity -> {
+                        Map<IItemHandler, Object> outputMap = new HashMap<>();
+                        entity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> outputMap.put(handler, entity.position()));
+                    });
                 }
             }
         """.trimIndent())
@@ -31064,6 +31595,10 @@ bus.addListener(ActualListenerRegistry::register);
         )
         assertTrue(migrated.contains("fake.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent"), migrated)
         assertTrue(migrated.contains("mystery.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent"), migrated)
+        assertTrue(migrated.contains("entity.getCapability(Capabilities.ItemHandler.ENTITY_AUTOMATION, side)"), migrated)
+        assertTrue(migrated.contains("handlers.add(modporterItemHandler"), migrated)
+        assertTrue(migrated.contains("outputMap.put(modporterItemHandler"), migrated)
+        assertTrue(migrated.contains("living.getCapability(Capabilities.ItemHandler.ENTITY) != null"), migrated)
     }
 
     @Test
@@ -32645,6 +33180,51 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(placement.contains("register(ResourceLocation.parse(\"config\"), ConfigFilter.CODEC)"), placement)
         assertFalse(placement.contains("DeferredRegister.create(Registries.PLACEMENT_MODIFIER_TYPE, \"main_mod\")"), placement)
         assertFalse(placement.contains("DeferredHolder<PlacementModifierType<?>"), placement)
+    }
+
+    @Test
+    fun `damage bonus mob type migration uses server guard and hurt damage source evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ChainBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.phys.EntityHitResult;
+
+            public class ChainBlock {
+                private final ItemStack stack = ItemStack.EMPTY;
+
+                public Level level() {
+                    return null;
+                }
+
+                protected void onHitEntity(EntityHitResult result) {
+                    if (!this.level().isClientSide() && result.getEntity() != null) {
+                        float damage = 0.0F;
+                        if (result.getEntity() instanceof LivingEntity living) {
+                            damage = 10 + EnchantmentHelper.getDamageBonus(this.stack, living.getMobType());
+                        }
+                        if (damage > 0.0F) {
+                            result.getEntity().hurt(DamageTypes.example(this.level(), this), damage);
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val chainBlock = srcDir.resolve("ChainBlock.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(chainBlock.contains("import net.minecraft.server.level.ServerLevel;"), chainBlock)
+        assertTrue(chainBlock.contains("EnchantmentHelper.modifyDamage((ServerLevel) this.level(), this.stack, living, DamageTypes.example(this.level(), this), 10)"), chainBlock)
+        assertFalse(chainBlock.contains("getMobType()"), chainBlock)
+        assertFalse(chainBlock.contains("EnchantmentHelper.getDamageBonus"), chainBlock)
     }
 
     @Test

@@ -209,6 +209,24 @@ class RealModBenchmarkTest {
     }
 
     @Test
+    fun `runtime log audit allows Mojang public key network timeout with evidence`(@TempDir tempDir: Path) {
+        val logFile = tempDir.resolve("public-key-timeout.log")
+        logFile.writeText("""
+            [16:19:19] [Yggdrasil Key Fetcher/ERROR] [mojang/YggdrasilServicesKeyInfo]: Failed to request yggdrasil public key
+            com.mojang.authlib.exceptions.MinecraftClientException: Failed to read from https://api.minecraftservices.com/publickeys due to Connect timed out
+            Caused by: java.net.SocketTimeoutException: Connect timed out
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true)
+
+        assertTrue(audit.findings.isEmpty(), "Public-key timeout is external Mojang network noise: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("https://api.minecraftservices.com/publickeys") },
+            "Expected explicit public-key endpoint evidence in allowlist trace, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
     fun `runtime log audit allows external dependency optional mixin warning only with project absence evidence`(@TempDir tempDir: Path) {
         val projectDir = tempDir.resolve("work/aether")
         projectDir.createDirectories()
@@ -2664,6 +2682,9 @@ class RealModBenchmarkTest {
         index: Int,
         evidenceCache: RuntimeLogEvidenceCache
     ): String? {
+        mojangPublicKeyNetworkTimeoutEvidence(lines, index)?.let {
+            return "external Mojang public-key lookup network timeout ($it)"
+        }
         externalDependencyMissingMixinEvidence(lines, index, evidenceCache)?.let {
             return "external dependency optional mixin target warning ($it)"
         }
@@ -2683,6 +2704,19 @@ class RealModBenchmarkTest {
             return "source-inherited missing sound definition warning ($it)"
         }
         return null
+    }
+
+    private fun mojangPublicKeyNetworkTimeoutEvidence(lines: List<String>, index: Int): String? {
+        val line = lines[index]
+        if (!line.contains("[mojang/YggdrasilServicesKeyInfo]: Failed to request yggdrasil public key")) return null
+        val evidenceWindow = lines.drop(index).take(32).joinToString("\n")
+        val endpoint = "https://api.minecraftservices.com/publickeys"
+        if (!evidenceWindow.contains(endpoint)) return null
+        val timedOut = evidenceWindow.contains("Connect timed out") ||
+            evidenceWindow.contains("Read timed out") ||
+            evidenceWindow.contains("java.net.SocketTimeoutException")
+        if (!timedOut) return null
+        return "authlib request to $endpoint timed out"
     }
 
     private fun externalDependencyMissingMixinEvidence(

@@ -37,11 +37,30 @@ class TextReplacementPass(
 
         val javaFiles = findJavaFiles(projectDir)
         logger.info { "Found ${javaFiles.size} Java files to process" }
-        val legacyDyeableLeatherItemClasses = collectLegacyDyeableLeatherItemClasses(javaFiles)
-        val legacyLootCodecOwners = collectLegacyLootCodecOwners(javaFiles)
+        val legacyDyeableLeatherItemClasses = try {
+            collectLegacyDyeableLeatherItemClasses(javaFiles)
+        } catch (error: StackOverflowError) {
+            throw IllegalStateException(
+                "Text Replacement pre-scan collectLegacyDyeableLeatherItemClasses overflowed the Java regex stack",
+                error
+            )
+        }
+        val legacyLootCodecOwners = try {
+            collectLegacyLootCodecOwners(javaFiles)
+        } catch (error: StackOverflowError) {
+            throw IllegalStateException(
+                "Text Replacement pre-scan collectLegacyLootCodecOwners overflowed the Java regex stack",
+                error
+            )
+        }
 
         try {
             migrateLegacyCustomEnchantmentData(projectDir, javaFiles, changes, errors, dryRun)
+        } catch (error: StackOverflowError) {
+            throw IllegalStateException(
+                "Text Replacement pre-scan migrateLegacyCustomEnchantmentData overflowed the Java regex stack",
+                error
+            )
         } catch (e: Exception) {
             errors.add("Error extracting legacy custom enchantment data: ${e.message}")
             logger.error(e) { "Error extracting legacy custom enchantment data" }
@@ -136,7 +155,14 @@ class TextReplacementPass(
         }
 
         for (rule in rules) {
-            val replacement = replaceTextRuleInExecutableJava(content, rule)
+            val replacement = try {
+                replaceTextRuleInExecutableJava(content, rule)
+            } catch (error: StackOverflowError) {
+                throw IllegalStateException(
+                    "Text replacement rule ${rule.id} overflowed the Java regex stack while scanning ${file.toAbsolutePath()}",
+                    error
+                )
+            }
             replacement.changes.forEach { change ->
                 changes.add(
                     Change(
@@ -151,6 +177,38 @@ class TextReplacementPass(
                 )
             }
             content = replacement.content
+        }
+
+        val beforeItemPropertiesUseDuration = content
+        content = migrateItemPropertiesUseDurationCalls(content)
+        if (content != beforeItemPropertiesUseDuration) {
+            changes.add(
+                Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate ItemProperties item-stack use duration calls to LivingEntity-aware 1.21 API",
+                    before = "ItemProperties.register(..., (stack, world, entity, seed) -> stack.getUseDuration())",
+                    after = "stack.getUseDuration(entity)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "itemproperties-use-duration-livingentity"
+                )
+            )
+        }
+
+        val beforeLegacyEnchantmentSubclasses = content
+        content = removeLegacyPrivateStaticEnchantmentSubclasses(content)
+        if (content != beforeLegacyEnchantmentSubclasses) {
+            changes.add(
+                Change(
+                    file = file,
+                    line = 1,
+                    description = "Remove legacy private static custom Enchantment subclasses; 1.21 enchantments are data-driven",
+                    before = "private static class ... extends Enchantment",
+                    after = "",
+                    confidence = Confidence.HIGH,
+                    ruleId = "custom-enchantment-remove-subclasses"
+                )
+            )
         }
 
         val beforeRemainingRegistryObjectWildcards = content
@@ -1496,12 +1554,20 @@ private boolean $methodName(Iterable<net.minecraft.core.Holder<Enchantment>> enc
     }
 
     private fun legacyLootCodecOwner(source: String): String? {
-        val className = javaTopLevelTypeName(source) ?: return null
+        val inferenceSource = normalizeLegacyLootCodecInferenceSource(source)
+        val className = javaTopLevelTypeName(inferenceSource) ?: return null
         return className.takeIf {
-            lootConditionCodecFieldSource(source, className) != null ||
-                lootConditionalFunctionCodecFieldSource(source, className) != null
+            lootConditionCodecFieldSource(inferenceSource, className) != null ||
+                lootConditionalFunctionCodecFieldSource(inferenceSource, className) != null
         }
     }
+
+    private fun normalizeLegacyLootCodecInferenceSource(source: String): String =
+        source
+            .replace("net.minecraftforge.registries.ForgeRegistries.ITEMS", "BuiltInRegistries.ITEM")
+            .replace("ForgeRegistries.ITEMS", "BuiltInRegistries.ITEM")
+            .replace("net.minecraftforge.registries.ForgeRegistries.ENTITY_TYPES", "BuiltInRegistries.ENTITY_TYPE")
+            .replace("ForgeRegistries.ENTITY_TYPES", "BuiltInRegistries.ENTITY_TYPE")
 
     private fun migrateLootSerializerCodecs(source: String, codecOwners: Set<String> = emptySet()): String {
         val executableCode = maskJavaCommentsAndLiterals(source)
@@ -1800,6 +1866,62 @@ ${codecFields.joinToString(",\n")}
             Regex("""MapCodec\s*<\s*${Regex.escape(owner)}\s*>\s+CODEC\b""").containsMatchIn(maskJavaCommentsAndLiterals(source))
     }
 
+    private fun migrateItemPropertiesUseDurationCalls(source: String): String {
+        if (!source.contains("ItemProperties.register(") || !source.contains(".getUseDuration()")) return source
+
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val replacements = mutableListOf<Pair<IntRange, String>>()
+        val callToken = "ItemProperties.register("
+        val lambdaPattern = Regex(
+            """^\s*\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*->"""
+        )
+        var cursor = 0
+        while (cursor < executableCode.length) {
+            val callIndex = executableCode.indexOf(callToken, cursor)
+            if (callIndex < 0) break
+            val openParen = callIndex + "ItemProperties.register".length
+            val closeParen = findMatchingDelimiter(executableCode, openParen, '(', ')')
+            if (closeParen < 0) {
+                cursor = callIndex + callToken.length
+                continue
+            }
+
+            val args = splitTopLevelArgumentExpressions(
+                source.substring(openParen + 1, closeParen),
+                baseOffset = openParen + 1
+            )
+            val lambdaArg = args.getOrNull(2)
+            val lambdaMatch = lambdaArg?.let { lambdaPattern.find(it.text) }
+            if (lambdaArg == null || lambdaMatch == null) {
+                cursor = closeParen + 1
+                continue
+            }
+
+            val stackParam = lambdaMatch.groupValues[1]
+            val entityParam = lambdaMatch.groupValues[3]
+            val lambdaBodyStart = lambdaArg.offset + lambdaMatch.range.last + 1
+            val lambdaEnd = lambdaArg.offset + lambdaArg.text.length
+            val zeroArgUseDuration = Regex("""\b${Regex.escape(stackParam)}\.getUseDuration\s*\(\s*\)""")
+            zeroArgUseDuration.findAll(executableCode, lambdaBodyStart)
+                .takeWhile { it.range.first < lambdaEnd }
+                .filter { it.range.last < lambdaEnd }
+                .forEach { match ->
+                    replacements += match.range to "$stackParam.getUseDuration($entityParam)"
+                }
+            cursor = closeParen + 1
+        }
+
+        if (replacements.isEmpty()) return source
+        var result = source
+        replacements
+            .distinctBy { it.first }
+            .asReversed()
+            .forEach { (range, replacement) ->
+                result = result.replaceRange(range, replacement)
+            }
+        return result
+    }
+
     private fun removeLegacyLootSerializerImports(source: String): String {
         var result = source
         result = removeImportLine(result, "net.minecraft.world.level.storage.loot.Serializer")
@@ -2043,12 +2165,24 @@ ${codecFields.joinToString(",\n")}
     ) {
         if (javaFiles.isEmpty()) return
         val javaSources = javaFiles.map { it to it.readText() }
-        val modIds = detectLegacyJavaModIds(javaSources)
-        val classSources = indexJavaClassSources(javaSources)
-        val registryEntries = collectLegacyRegistryEntries(javaSources, modIds)
-        val itemRegistryEntries = collectLegacyItemRegistryEntries(javaSources, modIds)
-        val categories = collectLegacyEnchantmentCategories(javaSources)
-        val registrations = collectLegacyCustomEnchantmentRegistrations(javaSources, modIds, classSources, errors)
+        val modIds = customEnchantmentDataStep("detectLegacyJavaModIds") {
+            detectLegacyJavaModIds(javaSources)
+        }
+        val classSources = customEnchantmentDataStep("indexJavaClassSources") {
+            indexJavaClassSources(javaSources)
+        }
+        val registryEntries = customEnchantmentDataStep("collectLegacyRegistryEntries") {
+            collectLegacyRegistryEntries(javaSources, modIds)
+        }
+        val itemRegistryEntries = customEnchantmentDataStep("collectLegacyItemRegistryEntries") {
+            collectLegacyItemRegistryEntries(javaSources, modIds)
+        }
+        val categories = customEnchantmentDataStep("collectLegacyEnchantmentCategories") {
+            collectLegacyEnchantmentCategories(javaSources)
+        }
+        val registrations = customEnchantmentDataStep("collectLegacyCustomEnchantmentRegistrations") {
+            collectLegacyCustomEnchantmentRegistrations(javaSources, modIds, classSources, errors)
+        }
         if (registrations.isEmpty()) return
 
         val enchantmentRefs = legacyReferenceIndex(
@@ -2103,6 +2237,17 @@ ${codecFields.joinToString(",\n")}
                     tagTarget.writeText(legacyItemTagJson(tag.values))
                 }
             }
+        }
+    }
+
+    private inline fun <T> customEnchantmentDataStep(step: String, block: () -> T): T {
+        return try {
+            block()
+        } catch (error: StackOverflowError) {
+            throw IllegalStateException(
+                "Legacy custom enchantment data step '$step' overflowed the Java regex stack",
+                error
+            )
         }
     }
 
@@ -2261,49 +2406,83 @@ ${codecFields.joinToString(",\n")}
                         ids["$packageName.$ownerClass.${match.groupValues[1]}"] = match.groupValues[2]
                     }
                 }
-            Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)\s*(?:public|protected|private|abstract|final|\s)*class\s+([A-Za-z_$][\w$]*)""")
-                .find(code)
-                ?.takeIf { match ->
-                    val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
-                    executableSegment.contains("@Mod") &&
-                        executableSegment.contains("class")
-                }
-                ?.let { match ->
-                    ids[match.groupValues[2]] = match.groupValues[1]
+            val typeDeclarations = findJavaTypeDeclarations(code)
+            Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)""")
+                .findAll(code)
+                .forEach { match ->
+                    val declaration = typeDeclarations.firstOrNull { declaration ->
+                        declaration.kind == "class" &&
+                            declaration.start > match.range.last &&
+                            executableCode.substring(match.range.last + 1, declaration.start)
+                                .none { it == ';' || it == '{' || it == '}' }
+                    } ?: return@forEach
+                    val executableSegment = executableCode.substring(match.range.first, declaration.openBrace + 1)
+                    if (!executableSegment.contains("@Mod") ||
+                        !executableSegment.contains("class")) {
+                        return@forEach
+                    }
+                    ids[declaration.name] = match.groupValues[1]
                     if (packageName.isNotBlank()) {
-                        ids["$packageName.${match.groupValues[2]}"] = match.groupValues[1]
+                        ids["$packageName.${declaration.name}"] = match.groupValues[1]
                     }
                 }
         }
         return ids
     }
 
-    private fun javaTypeNameContainingOffset(source: String, offset: Int): String? {
-        val typePattern = Regex(
-            """\b(?:public|protected|private|abstract|final|static|\s)*(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b"""
-        )
+    private data class JavaTypeDeclaration(
+        val kind: String,
+        val name: String,
+        val start: Int,
+        val openBrace: Int,
+        val closeBrace: Int
+    )
+
+    private fun findJavaTypeDeclarations(source: String): List<JavaTypeDeclaration> {
         val executableSource = maskJavaCommentsAndLiterals(source)
+        val declarations = mutableListOf<JavaTypeDeclaration>()
+        val typePattern = Regex("""\b(class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b""")
         for (match in typePattern.findAll(executableSource)) {
             val openBrace = executableSource.indexOf('{', match.range.last)
             val closeBrace = if (openBrace >= 0) findMatchingBrace(executableSource, openBrace) else -1
-            if (openBrace >= 0 && closeBrace > openBrace && offset in openBrace..closeBrace) {
-                return match.groupValues[1]
+            if (openBrace >= 0 && closeBrace > openBrace) {
+                declarations += JavaTypeDeclaration(
+                    kind = match.groupValues[1],
+                    name = match.groupValues[2],
+                    start = match.range.first,
+                    openBrace = openBrace,
+                    closeBrace = closeBrace
+                )
             }
         }
-        return null
+        return declarations
+    }
+
+    private fun javaTypeNameContainingOffset(source: String, offset: Int): String? {
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        var containingType: JavaTypeDeclaration? = null
+        for (declaration in findJavaTypeDeclarations(source)) {
+            if (offset in declaration.openBrace..declaration.closeBrace &&
+                executableSource.substring(declaration.start, declaration.openBrace + 1).contains(declaration.kind)) {
+                if (containingType == null || declaration.openBrace > containingType.openBrace) {
+                    containingType = declaration
+                }
+            }
+        }
+        return containingType?.name
     }
 
     private fun indexJavaClassSources(javaSources: List<Pair<Path, String>>): Map<String, List<Pair<Path, String>>> {
         val result = linkedMapOf<String, MutableList<Pair<Path, String>>>()
-        val classPattern = Regex("""\b(?:public|protected|private|static|final|\s)*class\s+([A-Za-z_$][\w$]*)\b""")
         for ((file, source) in javaSources) {
             val packageName = legacyJavaPackageName(source)
-            val executableSource = maskJavaCommentsAndLiterals(source)
-            classPattern.findAll(executableSource).forEach { match ->
-                val className = match.groupValues[1]
-                val key = if (packageName.isBlank()) className else "$packageName.$className"
-                result.getOrPut(key) { mutableListOf() }.add(file to source)
-            }
+            findJavaTypeDeclarations(source)
+                .filter { it.kind == "class" }
+                .forEach { declaration ->
+                    val className = declaration.name
+                    val key = if (packageName.isBlank()) className else "$packageName.$className"
+                    result.getOrPut(key) { mutableListOf() }.add(file to source)
+                }
         }
         return result
     }
@@ -4148,9 +4327,12 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         var result = source
         for (match in matches.asReversed()) {
             val originalValue = source.substring(match.range.first, match.range.last + 1)
+            val sourceMatch = pattern.find(source, match.range.first)
+                ?.takeIf { it.range == match.range }
+            val groupValues = sourceMatch?.groupValues ?: match.groupValues
             result = result.replaceRange(
                 match.range,
-                replacement(ExecutableRegexMatch(originalValue, match.groupValues))
+                replacement(ExecutableRegexMatch(originalValue, groupValues))
             )
         }
         return result
@@ -4168,9 +4350,12 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         var result = source
         for (match in matches.asReversed()) {
             val originalValue = source.substring(match.range.first, match.range.last + 1)
+            val sourceMatch = pattern.find(source, match.range.first)
+                ?.takeIf { it.range == match.range }
+            val groupValues = sourceMatch?.groupValues ?: match.groupValues
             result = result.replaceRange(
                 match.range,
-                replacement(ExecutableRegexMatch(originalValue, match.groupValues))
+                replacement(ExecutableRegexMatch(originalValue, groupValues))
             )
         }
         return result
@@ -4249,6 +4434,45 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
             if (!source[index].isWhitespace()) return index
         }
         return null
+    }
+
+    private fun removeLegacyPrivateStaticEnchantmentSubclasses(source: String): String {
+        if (!source.contains("Enchantment")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val headerPattern = Regex(
+            """(?m)^[ \t]*private\s+static\s+(?:final\s+|abstract\s+)?class\s+[A-Za-z_$][\w$]*\s+extends\s+(?:[A-Za-z_$][\w$]*\.)*Enchantment\s*\{"""
+        )
+        val removals = mutableListOf<IntRange>()
+        var searchStart = 0
+        while (searchStart < executableCode.length) {
+            val match = headerPattern.find(executableCode, searchStart) ?: break
+            val openBrace = match.range.last
+            val closeBrace = findMatchingBrace(source, openBrace)
+            if (closeBrace >= 0) {
+                removals += match.range.first until endOfLine(source, closeBrace)
+                searchStart = closeBrace + 1
+            } else {
+                searchStart = match.range.last + 1
+            }
+        }
+        if (removals.isEmpty()) return source
+
+        var result = source
+        for (range in removals.asReversed()) {
+            result = result.removeRange(range)
+        }
+        return result
+    }
+
+    private fun endOfLine(source: String, index: Int): Int {
+        var end = (index + 1).coerceAtMost(source.length)
+        if (source.getOrNull(end) == '\r' && source.getOrNull(end + 1) == '\n') {
+            return end + 2
+        }
+        if (source.getOrNull(end) == '\n') {
+            return end + 1
+        }
+        return end
     }
 
     private data class ParticleField(

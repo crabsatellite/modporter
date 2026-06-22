@@ -1164,6 +1164,53 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `legacy private static enchantment subclass removal uses executable java structure`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.Enchantment;
+
+            public final class ModEnchantments {
+                private static final String DOC = "private static class Docs extends Enchantment { }";
+
+                public static boolean stillMigrates(ItemStack stack) {
+                    return stack.isEmpty();
+                }
+
+                // private static class CommentedEnchantment extends Enchantment { }
+                private static final class NestedEnchantment extends net.minecraft.world.item.enchantment.Enchantment {
+                    private NestedEnchantment() {
+                        super(Rarity.RARE, null, new EquipmentSlot[]{EquipmentSlot.MAINHAND});
+                    }
+
+                    boolean accepts(ItemStack stack) {
+                        if (stack.isEmpty()) {
+                            return false;
+                        }
+                        return "{ not a block }".length() > 0;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "custom-enchantment-remove-subclasses" }, result.changes.joinToString("\n"))
+        assertTrue(transformed.contains("public final class ModEnchantments"))
+        assertTrue(transformed.contains("public static boolean stillMigrates(ItemStack stack)"))
+        assertFalse(transformed.contains("private static final class NestedEnchantment"), transformed)
+        assertFalse(transformed.contains("private NestedEnchantment()"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"private static class Docs extends Enchantment { }\";"))
+        assertTrue(transformed.contains("// private static class CommentedEnchantment extends Enchantment { }"))
+    }
+
+    @Test
     fun `legacy custom enchantment registrations generate source derived data json and item tags`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -5657,6 +5704,115 @@ class TextReplacementTest {
         assertFalse(docTag.exists(), "Commented registerTier must not emit generated tag resources")
         assertFalse(transformed.contains("import net.neoforged.neoforge.common.TierSortingRegistry;"), transformed)
         assertFalse(transformed.contains("DOC = \"(getHarvestLevel"), transformed)
+    }
+
+    @Test
+    fun `item property use duration calls use lambda living entity parameter`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.client.renderer.item.ItemProperties;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class TestMod {
+                public void register() {
+                    ItemProperties.register(ModItems.BOW.get(), ResourceLocation.parse("pull"), (stack, world, entity, seed) -> {
+                        if (entity == null) return 0.0F;
+                        return entity.getUseItem() != stack ? 0.0F : (stack.getUseDuration() - entity.getUseItemRemainingTicks()) / 20.0F;
+                    });
+                    String docs = "stack.getUseDuration()";
+                }
+            }
+        """.trimIndent())
+
+        val pass = TextReplacementPass(MappingDatabase.loadDefault())
+        val result = pass.apply(projectDir)
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "itemproperties-use-duration-livingentity" })
+        assertTrue(transformed.contains("stack.getUseDuration(entity) - entity.getUseItemRemainingTicks()"), transformed)
+        assertTrue(transformed.contains("String docs = \"stack.getUseDuration()\";"), transformed)
+    }
+
+    @Test
+    fun `loot codec owner pre scan recognizes forge registry serializer sources`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ModItemSwap.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonDeserializationContext;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSerializationContext;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.storage.loot.LootContext;
+            import net.minecraft.world.level.storage.loot.functions.LootItemConditionalFunction;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.minecraft.world.level.storage.loot.predicates.LootItemCondition;
+            import net.minecraftforge.registries.ForgeRegistries;
+
+            public class ModItemSwap extends LootItemConditionalFunction {
+                private final Item item;
+                private final Item oldItem;
+                private final boolean success;
+
+                protected ModItemSwap(LootItemCondition[] conditions, Item item, Item old, boolean success) {
+                    super(conditions);
+                    this.item = item;
+                    this.oldItem = old;
+                    this.success = success;
+                }
+
+                public LootItemFunctionType getType() {
+                    return TestLoot.ITEM_OR_DEFAULT.get();
+                }
+
+                public ItemStack run(ItemStack stack, LootContext context) {
+                    return new ItemStack(this.item, stack.getCount());
+                }
+
+                public static class Serializer extends LootItemConditionalFunction.Serializer<ModItemSwap> {
+                    public void serialize(JsonObject object, ModItemSwap function, JsonSerializationContext context) {
+                        if (function.success) object.addProperty("item", ForgeRegistries.ITEMS.getKey(function.item).toString());
+                        else object.addProperty("default", ForgeRegistries.ITEMS.getKey(function.item).toString());
+                        object.addProperty("default", ForgeRegistries.ITEMS.getKey(function.oldItem).toString());
+                    }
+
+                    public ModItemSwap deserialize(JsonObject object, JsonDeserializationContext context, LootItemCondition[] conditions) {
+                        Item item = GsonHelper.getAsItem(object, "item");
+                        Item oldItem = GsonHelper.getAsItem(object, "default");
+                        return new ModItemSwap(conditions, item, oldItem, true);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TestLoot.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class TestLoot {
+                public static final DeferredRegister<LootItemFunctionType> FUNCTIONS = DeferredRegister.create(Registries.LOOT_FUNCTION_TYPE, "example");
+                public static final DeferredHolder<LootItemFunctionType, LootItemFunctionType> ITEM_OR_DEFAULT =
+                        FUNCTIONS.register("item_or_default", () -> new LootItemFunctionType(new ModItemSwap.Serializer()));
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
+        val registry = srcDir.resolve("TestLoot.java").readText()
+        val function = srcDir.resolve("ModItemSwap.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "loot-serializer-mapcodec" })
+        assertTrue(function.contains("public static final MapCodec<ModItemSwap> CODEC"), function)
+        assertTrue(registry.contains("DeferredRegister<LootItemFunctionType<?>> FUNCTIONS"), registry)
+        assertTrue(registry.contains("DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<ModItemSwap>> ITEM_OR_DEFAULT"), registry)
+        assertTrue(registry.contains("new LootItemFunctionType<>(ModItemSwap.CODEC)"), registry)
+        assertFalse(registry.contains("new ModItemSwap.Serializer()"), registry)
     }
 
     @Test

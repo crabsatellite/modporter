@@ -225,7 +225,6 @@ class ResourceMigrationPass(
                 transformAssetJsonFiles(assetsDir, changes, errors)
                 fillMissingSoundSubtitleTranslations(assetsDir, changes, errors)
                 generateMissingItemModels(projectDir, resourceDir, changes, errors)
-                generateLegacyNitrogenFuelSprites(projectDir, assetsDir, changes, errors)
                 normalizeItemTextureMipDimensions(assetsDir, changes, errors)
             }
 
@@ -244,6 +243,10 @@ class ResourceMigrationPass(
                     updatePackFormat(packMcmeta)
                 }
             }
+        }
+
+        if (!dryRun) {
+            generateLegacyNitrogenFuelSprites(projectDir, resourceDirs, changes, errors)
         }
 
         // Handle template mods.toml files (used by Groovy template expansion)
@@ -613,36 +616,70 @@ class ResourceMigrationPass(
                         ids["$packageName.$ownerClass.${match.groupValues[1]}"] = match.groupValues[2]
                     }
                 }
-            Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)\s*(?:public|protected|private|abstract|final|\s)*class\s+([A-Za-z_$][\w$]*)""")
-                .find(code)
-                ?.takeIf { match ->
-                    val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
-                    executableSegment.contains("@Mod") &&
-                        executableSegment.contains("class")
-                }
-                ?.let { match ->
-                    ids[match.groupValues[2]] = match.groupValues[1]
+            val typeDeclarations = findJavaTypeDeclarations(code)
+            Regex("""@Mod\s*\(\s*"([^"]+)"\s*\)""")
+                .findAll(code)
+                .forEach { match ->
+                    val declaration = typeDeclarations.firstOrNull { declaration ->
+                        declaration.kind == "class" &&
+                            declaration.start > match.range.last &&
+                            executableCode.substring(match.range.last + 1, declaration.start)
+                                .none { it == ';' || it == '{' || it == '}' }
+                    } ?: return@forEach
+                    val executableSegment = executableCode.substring(match.range.first, declaration.openBrace + 1)
+                    if (!executableSegment.contains("@Mod") ||
+                        !executableSegment.contains("class")) {
+                        return@forEach
+                    }
+                    ids[declaration.name] = match.groupValues[1]
                     if (packageName.isNotBlank()) {
-                        ids["$packageName.${match.groupValues[2]}"] = match.groupValues[1]
+                        ids["$packageName.${declaration.name}"] = match.groupValues[1]
                     }
                 }
         }
         return ids
     }
 
-    private fun javaTypeNameContainingOffset(source: String, offset: Int): String? {
-        val typePattern = Regex(
-            """\b(?:public|protected|private|abstract|final|static|\s)*(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b"""
-        )
+    private data class JavaTypeDeclaration(
+        val kind: String,
+        val name: String,
+        val start: Int,
+        val openBrace: Int,
+        val closeBrace: Int
+    )
+
+    private fun findJavaTypeDeclarations(source: String): List<JavaTypeDeclaration> {
         val executableSource = maskJavaCommentsAndLiterals(source)
+        val declarations = mutableListOf<JavaTypeDeclaration>()
+        val typePattern = Regex("""\b(class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b""")
         for (match in typePattern.findAll(executableSource)) {
             val openBrace = executableSource.indexOf('{', match.range.last)
             val closeBrace = if (openBrace >= 0) findMatchingJavaBrace(executableSource, openBrace) else -1
-            if (openBrace >= 0 && closeBrace > openBrace && offset in openBrace..closeBrace) {
-                return match.groupValues[1]
+            if (openBrace >= 0 && closeBrace > openBrace) {
+                declarations += JavaTypeDeclaration(
+                    kind = match.groupValues[1],
+                    name = match.groupValues[2],
+                    start = match.range.first,
+                    openBrace = openBrace,
+                    closeBrace = closeBrace
+                )
             }
         }
-        return null
+        return declarations
+    }
+
+    private fun javaTypeNameContainingOffset(source: String, offset: Int): String? {
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        var containingType: JavaTypeDeclaration? = null
+        for (declaration in findJavaTypeDeclarations(source)) {
+            if (offset in declaration.openBrace..declaration.closeBrace &&
+                executableSource.substring(declaration.start, declaration.openBrace + 1).contains(declaration.kind)) {
+                if (containingType == null || declaration.openBrace > containingType.openBrace) {
+                    containingType = declaration
+                }
+            }
+        }
+        return containingType?.name
     }
 
     private fun resolveModIdExpression(
@@ -3249,7 +3286,7 @@ class ResourceMigrationPass(
 
     private fun generateLegacyNitrogenFuelSprites(
         projectDir: Path,
-        assetsDir: Path,
+        resourceDirs: List<Path>,
         changes: MutableList<Change>,
         errors: MutableList<String>
     ) {
@@ -3257,20 +3294,29 @@ class ResourceMigrationPass(
             val specs = collectNitrogenFuelSpriteSpecs(projectDir, errors)
             if (specs.isEmpty()) return
 
+            val assetRoots = resourceDirs
+                .map { it.resolve("assets") }
+                .filter { it.exists() }
+            if (assetRoots.isEmpty()) return
+
             specs.forEach { spec ->
-                val sourceTexture = assetsDir.resolve(spec.namespace).resolve(spec.menuTexturePath)
-                if (!sourceTexture.exists()) {
+                val sourceAssetsDir = assetRoots.firstOrNull { assetsDir ->
+                    assetsDir.resolve(spec.namespace).resolve(spec.menuTexturePath).exists()
+                }
+                if (sourceAssetsDir == null) {
                     errors.add(
                         "Cannot generate Nitrogen fuel sprites for namespace '${spec.namespace}': " +
-                            "legacy texture is missing at ${spec.menuTexturePath}"
+                            "legacy texture is missing from all resource roots at ${spec.menuTexturePath}"
                     )
                     return@forEach
                 }
 
-                val iconTarget = assetsDir
+                val sourceTexture = sourceAssetsDir.resolve(spec.namespace).resolve(spec.menuTexturePath)
+
+                val iconTarget = sourceAssetsDir
                     .resolve(spec.namespace)
                     .resolve("textures/gui/sprites/modporter/nitrogen_fuel_${spec.spriteStem}_icon.png")
-                val backgroundTarget = assetsDir
+                val backgroundTarget = sourceAssetsDir
                     .resolve(spec.namespace)
                     .resolve("textures/gui/sprites/modporter/nitrogen_fuel_${spec.spriteStem}_background.png")
 

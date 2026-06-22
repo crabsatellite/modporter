@@ -1990,8 +1990,12 @@ $header
             val directionArg = match.groupValues[2]
             val enclosingMethod = findJavaMethodSourceContaining(code, match.range.first)
             val hasTypedArguments = enclosingMethod != null &&
-                javaMethodHeaderDeclaresParameter(enclosingMethod, "HangingEntity", entityArg) &&
-                javaMethodHeaderDeclaresParameter(enclosingMethod, "Direction", directionArg)
+                javaMethodDeclaresAssignableType(
+                    enclosingMethod,
+                    entityArg,
+                    setOf("HangingEntity", "Painting", "ItemFrame", "GlowItemFrame")
+                ) &&
+                javaMethodDeclaresAssignableType(enclosingMethod, directionArg, setOf("Direction"))
             if (!hasTypedArguments) {
                 searchStart = match.range.last + 1
                 continue
@@ -2026,6 +2030,19 @@ $header
         return Regex(
             """(?:^|[,(]\s*)(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(typeSimpleName)}\s+${Regex.escape(variableName)}\b"""
         ).containsMatchIn(header)
+    }
+
+    private fun javaMethodDeclaresAssignableType(
+        methodSource: String,
+        variableName: String,
+        assignableSimpleTypes: Set<String>
+    ): Boolean {
+        return assignableSimpleTypes.any { typeSimpleName ->
+            javaMethodHeaderDeclaresParameter(methodSource, typeSimpleName, variableName) ||
+                Regex(
+                    """(?:^|[;{}\r\n]\s*)(?:final\s+)?(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(typeSimpleName)}\s+${Regex.escape(variableName)}\b"""
+                ).containsMatchIn(methodSource)
+        }
     }
 
     private fun removeObfuscationMethodHandleScaffolding(source: String): String {
@@ -3077,16 +3094,11 @@ config="$configName"
                 ) { "" }
 
                 val executableModified = maskJavaCommentsAndLiterals(modified)
-                if (!Regex("""\bTickEvent\.Phase\b""").containsMatchIn(executableModified) &&
-                    Regex("""\bTickEvent\b|import\s+net\.(?:minecraftforge|neoforged\.neoforge)\.event(?:\.tick)?\.TickEvent;""")
-                        .containsMatchIn(executableModified)) {
+                if (!executableModified.contains("TickEvent.Phase") &&
+                    (containsJavaIdentifier(executableModified, "TickEvent") || hasTickEventImportLine(executableModified))) {
                     modified = removeJavaImport(modified, "net.minecraftforge.event.TickEvent")
                     modified = removeJavaImport(modified, "net.neoforged.neoforge.event.TickEvent")
                     modified = removeJavaImport(modified, "net.neoforged.neoforge.event.tick.TickEvent")
-                    modified = replaceExecutableRegex(
-                        modified,
-                        Regex("""(?m)^[ \t]*import\s+net\.(?:minecraftforge|neoforged\.neoforge)\.event(?:\.tick)?\.TickEvent;\s*(?:\r?\n)?""")
-                    ) { "" }
                     modified = modified.lines()
                         .filterNot { line ->
                             line.trim() == "import net.minecraftforge.event.TickEvent;" ||
@@ -3112,6 +3124,30 @@ config="$configName"
 
         return changes
     }
+
+    private fun containsJavaIdentifier(source: String, identifier: String): Boolean {
+        var index = source.indexOf(identifier)
+        while (index >= 0) {
+            val before = source.getOrNull(index - 1)
+            val after = source.getOrNull(index + identifier.length)
+            if ((before == null || !Character.isJavaIdentifierPart(before)) &&
+                (after == null || !Character.isJavaIdentifierPart(after))) {
+                return true
+            }
+            index = source.indexOf(identifier, index + identifier.length)
+        }
+        return false
+    }
+
+    private fun hasTickEventImportLine(executableSource: String): Boolean =
+        executableSource.lineSequence().any { line ->
+            when (line.trim()) {
+                "import net.minecraftforge.event.TickEvent;",
+                "import net.neoforged.neoforge.event.TickEvent;",
+                "import net.neoforged.neoforge.event.tick.TickEvent;" -> true
+                else -> false
+            }
+        }
 
     private fun migrateRemovedTitleScreenAccessors(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
@@ -3328,8 +3364,112 @@ config="$configName"
     private fun migrateAccessTransformerLine(line: String): String {
         val entry = normalizeAccessTransformerEntry(line) ?: return line
         val migrated = when (entry) {
+            "protected net.minecraft.world.level.levelgen.structure.StructurePiece f_73379_" ->
+                "protected net.minecraft.world.level.levelgen.structure.StructurePiece rotation"
+            "protected net.minecraft.world.level.levelgen.structure.StructurePiece f_73378_" ->
+                "protected net.minecraft.world.level.levelgen.structure.StructurePiece mirror"
+            "protected net.minecraft.world.level.levelgen.structure.StructurePiece f_73377_" ->
+                "protected net.minecraft.world.level.levelgen.structure.StructurePiece orientation"
+            "public net.minecraft.world.entity.LivingEntity m_21275_(Lnet/minecraft/world/damagesource/DamageSource;)Z" ->
+                "public net.minecraft.world.entity.LivingEntity isDamageSourceBlocked(Lnet/minecraft/world/damagesource/DamageSource;)Z"
+            "protected net.minecraft.world.entity.animal.Sheep m_29823_(Lnet/minecraft/world/entity/animal/Animal;Lnet/minecraft/world/entity/animal/Animal;)Lnet/minecraft/world/item/DyeColor;" ->
+                "protected net.minecraft.world.entity.animal.Sheep getOffspringColor(Lnet/minecraft/world/entity/animal/Animal;Lnet/minecraft/world/entity/animal/Animal;)Lnet/minecraft/world/item/DyeColor;"
+            "public net.minecraft.world.entity.LivingEntity m_21278_(Lnet/minecraft/world/item/ItemStack;)V" ->
+                "public net.minecraft.world.entity.LivingEntity breakItem(Lnet/minecraft/world/item/ItemStack;)V"
+            "public net.minecraft.client.model.HumanoidModel m_102875_(Lnet/minecraft/world/entity/LivingEntity;)V" ->
+                "public net.minecraft.client.model.HumanoidModel poseRightArm(Lnet/minecraft/world/entity/LivingEntity;)V"
+            "public net.minecraft.client.model.HumanoidModel m_102878_(Lnet/minecraft/world/entity/LivingEntity;)V" ->
+                "public net.minecraft.client.model.HumanoidModel poseLeftArm(Lnet/minecraft/world/entity/LivingEntity;)V"
+            "public net.minecraft.client.model.HumanoidModel m_102856_(Lnet/minecraft/world/entity/LivingEntity;)Lnet/minecraft/world/entity/HumanoidArm;" ->
+                "public net.minecraft.client.model.HumanoidModel getAttackArm(Lnet/minecraft/world/entity/LivingEntity;)Lnet/minecraft/world/entity/HumanoidArm;"
             "public net.minecraft.world.entity.ai.goal.GoalSelector f_25345_" ->
                 "public net.minecraft.world.entity.ai.goal.GoalSelector availableGoals"
+            "public net.minecraft.world.level.block.state.BlockBehaviour f_60442_" ->
+                "public net.minecraft.world.level.block.state.BlockBehaviour material"
+            "public net.minecraft.world.level.block.FireBlock m_53444_(Lnet/minecraft/world/level/block/Block;II)V" ->
+                "public net.minecraft.world.level.block.FireBlock setFlammable(Lnet/minecraft/world/level/block/Block;II)V"
+            "public net.minecraft.world.level.saveddata.maps.MapItemSavedData f_77894_" ->
+                "public net.minecraft.world.level.saveddata.maps.MapItemSavedData decorations"
+            "public net.minecraft.client.multiplayer.ClientAdvancements f_104390_" ->
+                "public net.minecraft.client.multiplayer.ClientAdvancements progress"
+            "public net.minecraft.world.entity.Entity f_19815_" ->
+                "public net.minecraft.world.entity.Entity dimensions"
+            "public net.minecraft.world.entity.Mob m_21424_(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ItemStack;)V" ->
+                "public net.minecraft.world.entity.Mob maybeDisableShield(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ItemStack;)V"
+            "public net.minecraft.client.gui.Gui f_92980_" ->
+                "public net.minecraft.client.gui.Gui vignetteBrightness"
+            "public net.minecraft.world.entity.ai.control.MoveControl f_24981_" ->
+                "public net.minecraft.world.entity.ai.control.MoveControl operation"
+            "public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer f_70263_" ->
+                "public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer baseHeight"
+            "public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer f_70264_" ->
+                "public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer heightRandA"
+            "public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer f_70265_" ->
+                "public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer heightRandB"
+            "public net.minecraft.world.entity.animal.Parrot f_29358_" ->
+                "public net.minecraft.world.entity.animal.Parrot MOB_SOUND_MAP"
+            "public net.minecraft.world.level.block.ComposterBlock m_51920_(FLnet/minecraft/world/level/ItemLike;)V" ->
+                "public net.minecraft.world.level.block.ComposterBlock add(FLnet/minecraft/world/level/ItemLike;)V"
+            "public-f net.minecraft.world.item.AxeItem f_150683_" ->
+                "public-f net.minecraft.world.item.AxeItem STRIPPABLES"
+            "public-f net.minecraft.world.entity.player.Inventory f_35978_" ->
+                "public-f net.minecraft.world.entity.player.Inventory player"
+            "public net.minecraft.world.level.BaseSpawner f_45451_" ->
+                "public net.minecraft.world.level.BaseSpawner maxNearbyEntities"
+            "public net.minecraft.world.level.BaseSpawner f_45449_" ->
+                "public net.minecraft.world.level.BaseSpawner spawnCount"
+            "public net.minecraft.world.level.BaseSpawner f_45453_" ->
+                "public net.minecraft.world.level.BaseSpawner spawnRange"
+            "public net.minecraft.world.level.levelgen.carver.CaveCarverConfiguration f_159157_" ->
+                "public net.minecraft.world.level.levelgen.carver.CaveCarverConfiguration floorLevel"
+            "public net.minecraft.world.level.block.FlowerPotBlock m_153267_()Z" ->
+                "public net.minecraft.world.level.block.FlowerPotBlock isEmpty()Z"
+            "public net.minecraft.server.level.ChunkMap m_183719_()Lnet/minecraft/world/level/chunk/ChunkGenerator;" ->
+                "public net.minecraft.server.level.ChunkMap generator()Lnet/minecraft/world/level/chunk/ChunkGenerator;"
+            "public net.minecraft.world.level.biome.Biome f_47435_" ->
+                "public net.minecraft.world.level.biome.Biome TEMPERATURE_NOISE"
+            "public net.minecraft.world.entity.decoration.Painting m_218891_(Lnet/minecraft/core/Holder;)V" ->
+                "public net.minecraft.world.entity.decoration.Painting setVariant(Lnet/minecraft/core/Holder;)V"
+            "public net.minecraft.world.level.block.DispenserBlock f_52661_" ->
+                "public net.minecraft.world.level.block.DispenserBlock DISPENSER_REGISTRY"
+            "public net.minecraft.client.gui.Gui m_93024_(Lnet/minecraft/world/phys/HitResult;)Z" ->
+                "public net.minecraft.client.gui.Gui canRenderCrosshairForSpectator(Lnet/minecraft/world/phys/HitResult;)Z"
+            "public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData f_77885_" ->
+                "public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData centerX"
+            "public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData f_77886_" ->
+                "public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData centerZ"
+            "public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData f_77897_" ->
+                "public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData bannerMarkers"
+            "public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData f_77898_" ->
+                "public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData frameMarkers"
+            "public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData f_181308_" ->
+                "public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData trackedDecorationCount"
+            "public net.minecraft.world.level.levelgen.feature.TreeFeature m_225251_(Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/world/level/levelgen/structure/BoundingBox;Ljava/util/Set;Ljava/util/Set;Ljava/util/Set;)Lnet/minecraft/world/phys/shapes/DiscreteVoxelShape;" ->
+                "public net.minecraft.world.level.levelgen.feature.TreeFeature updateLeaves(Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/world/level/levelgen/structure/BoundingBox;Ljava/util/Set;Ljava/util/Set;Ljava/util/Set;)Lnet/minecraft/world/phys/shapes/DiscreteVoxelShape;"
+            "public net.minecraft.world.level.levelgen.Heightmap m_64245_(III)V" ->
+                "public net.minecraft.world.level.levelgen.Heightmap setHeight(III)V"
+            "public net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator f_64316_" ->
+                "public net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator defaultBlock"
+            "public net.minecraft.world.level.levelgen.carver.WorldCarver m_159423_(Lnet/minecraft/world/level/levelgen/carver/CarverConfiguration;)Z" ->
+                "public net.minecraft.world.level.levelgen.carver.WorldCarver isDebugEnabled(Lnet/minecraft/world/level/levelgen/carver/CarverConfiguration;)Z"
+            "public net.minecraft.world.level.levelgen.carver.WorldCarver m_159418_(Lnet/minecraft/world/level/levelgen/carver/CarvingContext;Lnet/minecraft/world/level/levelgen/carver/CarverConfiguration;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/levelgen/Aquifer;)Lnet/minecraft/world/level/block/state/BlockState;" ->
+                "public net.minecraft.world.level.levelgen.carver.WorldCarver getCarveState(Lnet/minecraft/world/level/levelgen/carver/CarvingContext;Lnet/minecraft/world/level/levelgen/carver/CarverConfiguration;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/levelgen/Aquifer;)Lnet/minecraft/world/level/block/state/BlockState;"
+            "protected net.minecraft.world.level.levelgen.structure.templatesystem.BlockRotProcessor f_74075_" ->
+                "protected net.minecraft.world.level.levelgen.structure.templatesystem.BlockRotProcessor integrity"
+            "public net.minecraft.world.level.levelgen.synth.BlendedNoise f_164290_" ->
+                "public net.minecraft.world.level.levelgen.synth.BlendedNoise mainNoise"
+            "public net.minecraft.world.level.levelgen.synth.BlendedNoise f_164289_" ->
+                "public net.minecraft.world.level.levelgen.synth.BlendedNoise maxLimitNoise"
+            "public net.minecraft.world.level.levelgen.synth.BlendedNoise f_164288_" ->
+                "public net.minecraft.world.level.levelgen.synth.BlendedNoise minLimitNoise"
+            "public net.minecraft.world.level.levelgen.synth.BlendedNoise f_192799_" ->
+                "public net.minecraft.world.level.levelgen.synth.BlendedNoise xzScale"
+            "public net.minecraft.world.level.levelgen.synth.BlendedNoise f_192800_" ->
+                "public net.minecraft.world.level.levelgen.synth.BlendedNoise yScale"
+            "public net.minecraft.world.level.levelgen.synth.BlendedNoise f_230458_" ->
+                "public net.minecraft.world.level.levelgen.synth.BlendedNoise xzFactor"
+            "public net.minecraft.world.level.levelgen.synth.BlendedNoise f_230459_" ->
+                "public net.minecraft.world.level.levelgen.synth.BlendedNoise yFactor"
             "public net.minecraft.server.level.ServerLevel m_143288_(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/BlockPos;" ->
                 "public net.minecraft.server.level.ServerLevel findLightningTargetAround(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/BlockPos;"
             "public net.minecraft.client.renderer.LevelRenderer f_109450_" ->
@@ -3344,8 +3484,28 @@ config="$configName"
                 "public net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates"
             "public net.minecraft.client.resources.model.ModelBakery f_119234_" ->
                 "public net.minecraft.client.resources.model.ModelBakery UNREFERENCED_TEXTURES"
+            "public net.minecraft.world.level.levelgen.structure.pieces.StructurePiecesBuilder f_192778_" ->
+                "public net.minecraft.world.level.levelgen.structure.pieces.StructurePiecesBuilder pieces"
+            "public net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecorator\$Context f_226046_" ->
+                "public net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecorator\$Context decorationSetter"
+            "public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData f_256718_" ->
+                "public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData centerX"
+            "public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData f_256789_" ->
+                "public-f net.minecraft.world.level.saveddata.maps.MapItemSavedData centerZ"
+            "public net.minecraft.world.effect.MobEffectInstance f_19504_" ->
+                "public net.minecraft.world.effect.MobEffectInstance amplifier"
+            "public net.minecraft.world.level.block.entity.SignBlockEntity f_276598_" ->
+                "public net.minecraft.world.level.block.entity.SignBlockEntity frontText"
+            "public net.minecraft.world.level.biome.BiomeManager f_47863_" ->
+                "public net.minecraft.world.level.biome.BiomeManager biomeZoomSeed"
+            "public net.minecraft.data.models.ItemModelGenerators f_265952_" ->
+                "public net.minecraft.data.models.ItemModelGenerators GENERATED_TRIM_MODELS"
             "public net.minecraft.world.level.chunk.ChunkGenerator m_223138_(Lnet/minecraft/core/Holder;Lnet/minecraft/world/level/levelgen/RandomState;)Ljava/util/List;" ->
                 "public net.minecraft.world.level.chunk.ChunkGenerator getPlacementsForStructure(Lnet/minecraft/core/Holder;Lnet/minecraft/world/level/levelgen/RandomState;)Ljava/util/List;"
+            "public net.minecraft.world.level.chunk.ChunkGenerator m_223104_(Lnet/minecraft/world/level/levelgen/structure/StructureSet\$StructureSelectionEntry;Lnet/minecraft/world/level/StructureManager;Lnet/minecraft/core/RegistryAccess;Lnet/minecraft/world/level/levelgen/RandomState;Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplateManager;JLnet/minecraft/world/level/chunk/ChunkAccess;Lnet/minecraft/world/level/ChunkPos;Lnet/minecraft/core/SectionPos;)Z" ->
+                "public net.minecraft.world.level.chunk.ChunkGenerator tryGenerateStructure(Lnet/minecraft/world/level/levelgen/structure/StructureSet\$StructureSelectionEntry;Lnet/minecraft/world/level/StructureManager;Lnet/minecraft/core/RegistryAccess;Lnet/minecraft/world/level/levelgen/RandomState;Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplateManager;JLnet/minecraft/world/level/chunk/ChunkAccess;Lnet/minecraft/world/level/ChunkPos;Lnet/minecraft/core/SectionPos;)Z"
+            "public net.minecraft.world.level.storage.loot.LootTable m_230924_(Lit/unimi/dsi/fastutil/objects/ObjectArrayList;ILnet/minecraft/util/RandomSource;)V" ->
+                "public net.minecraft.world.level.storage.loot.LootTable shuffleAndSplitItems(Lit/unimi/dsi/fastutil/objects/ObjectArrayList;ILnet/minecraft/util/RandomSource;)V"
             else -> entry
         }
         val finalized = finalizeAccessTransformerEntry(migrated) ?: return ""
@@ -4479,7 +4639,7 @@ $body
         return Regex("""\b${Regex.escape(simpleName)}\b""").containsMatchIn(withoutImports)
     }
 
-    private fun detectWorldCarverModIdExpression(source: String): String? {
+    private fun detectWorldCarverModIdExpression(source: String, projectDir: Path, javaFile: Path): String? {
         Regex("""@(?:Mod\.)?EventBusSubscriber\s*\([^)]*\bmodid\s*=\s*([^,)]+)""")
             .find(source)
             ?.groupValues
@@ -4487,6 +4647,203 @@ $body
             ?.trim()
             ?.takeIf { it.isNotBlank() }
             ?.let { return it }
+
+        val namespaces = extractWorldCarverRegisterIdExpressions(source)
+            .mapNotNull { idExpression ->
+                resolveResourceLocationNamespaceExpression(idExpression, source, projectDir, javaFile)
+            }
+            .distinct()
+
+        return namespaces.singleOrNull()
+    }
+
+    private fun extractWorldCarverRegisterIdExpressions(source: String): List<String> {
+        val expressions = mutableListOf<String>()
+        var searchStart = 0
+        while (searchStart < source.length) {
+            val callStart = source.indexOf(".register(", searchStart)
+            if (callStart < 0) break
+            val openParen = source.indexOf('(', callStart)
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen > openParen) {
+                val args = splitTopLevel(source.substring(openParen + 1, closeParen), ',')
+                    .map { it.trim() }
+                if (args.size >= 2 && Regex("""[A-Za-z_$][\w$]*""").matches(args[1])) {
+                    expressions.add(args[0])
+                }
+                searchStart = callStart + ".register(".length
+            } else {
+                searchStart = callStart + ".register(".length
+            }
+        }
+        return expressions
+    }
+
+    private fun resolveResourceLocationNamespaceExpression(
+        idExpression: String,
+        source: String,
+        projectDir: Path,
+        javaFile: Path
+    ): String? {
+        resourceLocationFactoryNamespace(idExpression)?.let { return it }
+
+        val call = parseResourceLocationFactoryCall(idExpression) ?: return null
+        val ownerSource = resolveJavaSourceForType(call.owner, source, projectDir, javaFile) ?: return null
+        val methodBody = findStaticResourceLocationMethodBody(ownerSource.source, call.methodName) ?: return null
+        val namespace = resourceLocationFactoryNamespaceFromReturn(methodBody) ?: return null
+        return qualifyFactoryNamespaceExpression(namespace, ownerSource.reference, ownerSource.source)
+    }
+
+    private data class JavaSourceReference(
+        val source: String,
+        val reference: String
+    )
+
+    private data class ResourceLocationFactoryCall(
+        val owner: String,
+        val methodName: String
+    )
+
+    private fun parseResourceLocationFactoryCall(idExpression: String): ResourceLocationFactoryCall? {
+        val openParen = idExpression.indexOf('(')
+        if (openParen <= 0 || findMatchingParen(idExpression, openParen) != idExpression.length - 1) return null
+        val callee = idExpression.substring(0, openParen).trim()
+        val owner = callee.substringBeforeLast('.', missingDelimiterValue = "")
+        val methodName = callee.substringAfterLast('.')
+        if (owner.isBlank() ||
+            !Regex("""[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*""").matches(owner) ||
+            !Regex("""[A-Za-z_$][\w$]*""").matches(methodName)
+        ) {
+            return null
+        }
+        return ResourceLocationFactoryCall(owner, methodName)
+    }
+
+    private fun resourceLocationFactoryNamespace(idExpression: String): String? {
+        val trimmed = idExpression.trim()
+        val knownFactories = listOf(
+            "ResourceLocation.fromNamespaceAndPath",
+            "ResourceLocation.tryBuild"
+        )
+        for (factory in knownFactories) {
+            val prefix = "$factory("
+            if (!trimmed.startsWith(prefix) || !trimmed.endsWith(")")) continue
+            val openParen = trimmed.indexOf('(')
+            val closeParen = findMatchingParen(trimmed, openParen)
+            if (closeParen != trimmed.length - 1) continue
+            val args = splitTopLevel(trimmed.substring(openParen + 1, closeParen), ',')
+                .map { it.trim() }
+            return args.firstOrNull()?.takeIf { it.isNotBlank() }
+        }
+
+        if (trimmed.startsWith("new ResourceLocation(") && trimmed.endsWith(")")) {
+            val openParen = trimmed.indexOf('(')
+            val closeParen = findMatchingParen(trimmed, openParen)
+            if (closeParen == trimmed.length - 1) {
+                return splitTopLevel(trimmed.substring(openParen + 1, closeParen), ',')
+                    .map { it.trim() }
+                    .firstOrNull()
+                    ?.takeIf { it.isNotBlank() }
+            }
+        }
+
+        return null
+    }
+
+    private fun resourceLocationFactoryNamespaceFromReturn(methodBody: String): String? {
+        val namespaces = mutableListOf<String>()
+        var searchStart = 0
+        while (searchStart < methodBody.length) {
+            val returnStart = methodBody.indexOf("return", searchStart)
+            if (returnStart < 0) break
+            val semicolon = methodBody.indexOf(';', returnStart)
+            if (semicolon < 0) break
+            resourceLocationFactoryNamespace(methodBody.substring(returnStart + "return".length, semicolon).trim())
+                ?.let(namespaces::add)
+            searchStart = semicolon + 1
+        }
+        return namespaces.distinct().singleOrNull()
+    }
+
+    private fun resolveJavaSourceForType(
+        owner: String,
+        currentSource: String,
+        projectDir: Path,
+        currentFile: Path
+    ): JavaSourceReference? {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return null
+
+        val currentPackage = Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+            .find(maskJavaCommentsAndLiterals(currentSource))
+            ?.groupValues
+            ?.get(1)
+        val imports = Regex("""(?m)^\s*import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+            .findAll(maskJavaCommentsAndLiterals(currentSource))
+            .map { it.groupValues[1] }
+            .toList()
+
+        val candidates = linkedSetOf<Pair<String, String>>()
+        if (owner.contains(".")) {
+            val firstSegment = owner.substringBefore('.')
+            if (firstSegment.firstOrNull()?.isLowerCase() == true) {
+                candidates.add(owner to owner)
+            } else {
+                imports.firstOrNull { it.substringAfterLast('.') == firstSegment }?.let { imported ->
+                    candidates.add(imported to firstSegment)
+                }
+                currentPackage?.let { candidates.add("$it.$firstSegment" to firstSegment) }
+            }
+        } else {
+            imports.firstOrNull { it.substringAfterLast('.') == owner }?.let { imported ->
+                candidates.add(imported to owner)
+            }
+            currentPackage?.let { candidates.add("$it.$owner" to owner) }
+        }
+
+        val matches = candidates.mapNotNull { (qualifiedName, reference) ->
+            val path = srcDir.resolve(qualifiedName.replace('.', '/') + ".java")
+            path.takeIf { it.exists() }?.let { JavaSourceReference(it.readText(), reference) }
+        }
+        return matches.singleOrNull()
+            ?: currentFile.takeIf { owner == it.fileName.toString().removeSuffix(".java") && it.exists() }
+                ?.let { JavaSourceReference(it.readText(), owner) }
+    }
+
+    private fun findStaticResourceLocationMethodBody(source: String, methodName: String): String? {
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        val candidates = mutableListOf<String>()
+        Regex("""\b${Regex.escape(methodName)}\s*\(""")
+            .findAll(executableSource)
+            .forEach { match ->
+                val lineStart = executableSource.lastIndexOf('\n', match.range.first).let { if (it < 0) 0 else it + 1 }
+                val openParen = executableSource.indexOf('(', match.range.first)
+                val closeParen = findMatchingParen(executableSource, openParen)
+                if (closeParen < 0) return@forEach
+                val openBrace = executableSource.indexOf('{', closeParen)
+                if (openBrace < 0) return@forEach
+                val signature = executableSource.substring(lineStart, openBrace)
+                if (!Regex("""\bstatic\b""").containsMatchIn(signature) ||
+                    !Regex("""\bResourceLocation\b""").containsMatchIn(signature)
+                ) {
+                    return@forEach
+                }
+                val closeBrace = findMatchingBrace(executableSource, openBrace)
+                if (closeBrace > openBrace) {
+                    candidates.add(source.substring(openBrace + 1, closeBrace))
+                }
+            }
+        return candidates.distinct().singleOrNull()
+    }
+
+    private fun qualifyFactoryNamespaceExpression(namespace: String, ownerReference: String, ownerSource: String): String? {
+        val trimmed = namespace.trim()
+        if (Regex(""""[^"]*"""").matches(trimmed)) return trimmed
+        if (Regex("""[A-Za-z_$][\w$]*""").matches(trimmed)) {
+            findJavaStringConstant(ownerSource, trimmed) ?: return null
+            return "$ownerReference.$trimmed"
+        }
+        if (Regex("""[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+""").matches(trimmed)) return trimmed
         return null
     }
 
@@ -5428,9 +5785,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
             toml.takeIf { it.exists() }
                 ?.readText()
                 ?.let { text ->
-                    Regex("(?m)^\\s*modId\\s*=\\s*\"([^\"]+)\"")
-                        .findAll(text)
-                        .forEach { addCandidate(it.groupValues[1]) }
+                    projectModIdsFromToml(text).forEach(::addCandidate)
                 }
         }
 
@@ -5465,6 +5820,26 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         }
 
         return candidates.singleOrNull()
+    }
+
+    private fun projectModIdsFromToml(text: String): List<String> {
+        val ids = mutableListOf<String>()
+        var inModsTable = false
+        text.lineSequence().forEach { line ->
+            val trimmed = line.trim()
+            when {
+                trimmed.startsWith("[[") -> inModsTable = trimmed == "[[mods]]"
+                trimmed.startsWith("[") -> inModsTable = false
+                inModsTable -> {
+                    Regex("""^modId\s*=\s*"([^"]+)"""")
+                        .find(trimmed)
+                        ?.groupValues
+                        ?.get(1)
+                        ?.let(ids::add)
+                }
+            }
+        }
+        return ids
     }
 
     private fun findJavaStringConstant(source: String, constantName: String): String? {
@@ -5787,7 +6162,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                     .associate { it.groupValues[2] to it.groupValues[1] }
                     .toMutableMap()
                 val migratedFields = linkedSetOf<String>()
-                val modIdExpr = detectWorldCarverModIdExpression(original)
+                val modIdExpr = detectWorldCarverModIdExpression(original, projectDir, javaFile)
                     ?: throw IllegalStateException(
                         "Cannot derive mod id for world carver registration in " +
                             projectDir.relativize(javaFile).toString().replace('\\', '/')
@@ -5949,11 +6324,12 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
             .find(content)?.groupValues?.get(1)
             ?: Regex("""\b([A-Za-z_$][\w$]*\.MODID)\b""").find(content)?.groupValues?.get(1)
             ?: Regex("""\b([A-Za-z_$][\w$]*\.ID)\b""").find(content)?.groupValues?.get(1)
+            ?: projectModIdExpression(projectDir)
         if (modIdExpr == null) {
             val relative = projectDir.relativize(path).toString().replace('\\', '/')
             errors.add(
                 "Cannot derive mod id expression for legacy ArmorMaterial enum $enumName in $relative: " +
-                    "expected a source MODID/ID reference in the enum"
+                    "expected a source MODID/ID reference in the enum or a unique project @Mod/mod metadata id"
             )
             return null
         }
@@ -8429,6 +8805,9 @@ rootProject.name = '%%PROJECT_NAME%%'
          */
         fun findMatchingBrace(content: String, openIndex: Int): Int =
             findClosing(content, openIndex, '{', '}')
+
+        fun findMatchingParen(content: String, openIndex: Int): Int =
+            findClosing(content, openIndex, '(', ')')
 
         /**
          * Generic bracket matcher: find the closing delimiter matching the opener at [openIndex].
