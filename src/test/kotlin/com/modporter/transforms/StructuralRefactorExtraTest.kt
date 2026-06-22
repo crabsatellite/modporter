@@ -11734,6 +11734,7 @@ bus.addListener(ActualListenerRegistry::register);
 
     @Test
     fun `migrates DeferredHolder registry base generics for entity types and multiline block item helpers`() {
+        val textBlockDelimiter = "\"\"\""
         val projectDir = createFile("RegistryUse.java", """
             package com.example;
 
@@ -11750,6 +11751,10 @@ bus.addListener(ActualListenerRegistry::register);
             public class RegistryUse {
                 public static final DeferredRegister<Block> BLOCKS = null;
                 public static final DeferredRegister<EntityType<?>> ENTITY_TYPES = null;
+                private static final String GENERIC_DOC = $textBlockDelimiter
+                    public static final DeferredHolder<EntityType<RubberDuckEntity>, EntityType<RubberDuckEntity>> DOC_DUCK =
+                            ENTITY_TYPES.register("doc_duck", () -> EntityType.Builder.<RubberDuckEntity>of(RubberDuckEntity::new, MobCategory.MISC).build("doc_duck"));
+                    $textBlockDelimiter;
 
                 public static final DeferredHolder<EntityType<RubberDuckEntity>, EntityType<RubberDuckEntity>> RUBBER_DUCK =
                         ENTITY_TYPES.register("rubber_duck", () -> EntityType.Builder.<RubberDuckEntity>of(RubberDuckEntity::new, MobCategory.MISC).build("rubber_duck"));
@@ -11775,7 +11780,8 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("DeferredHolder<EntityType<?>, EntityType<RubberDuckEntity>> RUBBER_DUCK"))
         assertTrue(migrated.contains("DeferredHolder<Block, T> registerBlock(String name, Supplier<T> block)"))
         assertTrue(migrated.contains("registerBlockItem(String name, DeferredHolder<Block, T> block)"))
-        assertTrue(!migrated.contains("DeferredHolder<EntityType<RubberDuckEntity>, EntityType<RubberDuckEntity>>"))
+        assertTrue(migrated.contains("DeferredHolder<EntityType<RubberDuckEntity>, EntityType<RubberDuckEntity>> DOC_DUCK"))
+        assertFalse(migrated.contains("DeferredHolder<EntityType<RubberDuckEntity>, EntityType<RubberDuckEntity>> RUBBER_DUCK"))
         assertTrue(!migrated.contains("DeferredHolder<T, T> block"))
     }
 

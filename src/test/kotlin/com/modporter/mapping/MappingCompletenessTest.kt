@@ -4516,6 +4516,87 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `deferred holder register base generic migration uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateDeferredHolderRegisterBaseGenerics")
+        assertTrue(start >= 0, "migrateDeferredHolderRegisterBaseGenerics is missing")
+        val end = source.indexOf("private fun replaceMethodBody", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw DeferredRegister prefilter" to "source.contains(\"DeferredRegister<\")",
+            "raw DeferredHolder prefilter" to "source.contains(\"DeferredHolder\")",
+            "raw registry declaration scan" to ".findAll(source)",
+            "raw holder scan" to "holderPattern.find(result, cursor)",
+            "raw holder open angle scan" to "result.indexOf('<', match.range.first)",
+            "raw holder angle matching" to "findMatchingAngle(result, openAngle)",
+            "raw assignment tail scan" to "val afterHolder = result.substring(closeAngle + 1)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val sourceExecutableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("sourceExecutableCode.contains(\"DeferredRegister<\")") &&
+                body.contains("sourceExecutableCode.contains(\"DeferredHolder\")") &&
+                body.contains(".findAll(sourceExecutableCode)") &&
+                body.contains("var executableResult = sourceExecutableCode") &&
+                body.contains("holderPattern.find(executableResult, cursor)") &&
+                body.contains("val openAngle = executableResult.indexOf('<', match.range.first)") &&
+                body.contains("val closeAngle = findMatchingAngle(executableResult, openAngle)") &&
+                body.contains("val afterHolder = executableResult.substring(closeAngle + 1)") &&
+                body.contains("executableResult = maskJavaCommentsAndLiterals(result)"),
+            "DeferredHolder register base generic migration must derive register/holder/assignment evidence from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "DeferredHolder register base generic migration must not rewrite comments, strings, or text blocks: $offenders"
+        )
+    }
+
+    @Test
+    fun `deferred holder generic migration rewrites executable source only`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateDeferredHolderGenericsSource")
+        assertTrue(start >= 0, "migrateDeferredHolderGenericsSource is missing")
+        val end = source.indexOf("private fun migrateDeferredHolderRegisterBaseGenerics", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw literal replacement" to ".replace(",
+            "raw regex replacement" to ".replace(result",
+            "raw item prefilter" to "result.contains(\"DeferredRegister<Item>\")",
+            "raw block prefilter" to "result.contains(\"DeferredRegister<Block>\")",
+            "raw import trigger" to "result.contains(\"DeferredHolder<"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("fun replaceExecutable(pattern: Regex, replacement: (MatchResult) -> String)") &&
+                body.contains("result = replaceExecutableRegex(result, pattern, replacement)") &&
+                body.contains("fun replaceExecutableLiteral(literal: String, replacement: String)") &&
+                body.contains("replaceExecutable(Regex(Regex.escape(literal)))") &&
+                body.contains("maskJavaCommentsAndLiterals(result).contains(\"DeferredRegister<Item>\")") &&
+                body.contains("maskJavaCommentsAndLiterals(result).contains(\"DeferredRegister<Block>\")") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)"),
+            "DeferredHolder generic migration must route generic rewrites and prefilters through executable Java evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "DeferredHolder generic migration must not rewrite comments, strings, or text blocks: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy registry utility migrations use executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

@@ -41626,14 +41626,21 @@ $writeLines
         deferredHolderRegistryBaseHints: Map<String, String> = emptyMap()
     ): String {
         var result = source
-        result = result.replace("DeferredRegister<LootItemFunctionType>", "DeferredRegister<LootItemFunctionType<?>>")
-        deferredHolderRegistryBaseHints.forEach { (concrete, base) ->
-            result = Regex("""DeferredHolder\s*<\s*${Regex.escape(concrete)}\s*,\s*${Regex.escape(concrete)}\s*>""")
-                .replace(result, "DeferredHolder<$base, $concrete>")
+        fun replaceExecutable(pattern: Regex, replacement: (MatchResult) -> String) {
+            result = replaceExecutableRegex(result, pattern, replacement)
         }
-        result = result.replace("DeferredHolder<LiquidBlock, LiquidBlock>", "DeferredHolder<Block, LiquidBlock>")
-        result = result.replace("DeferredHolder<DynamicFluidType, DynamicFluidType>", "DeferredHolder<FluidType, DynamicFluidType>")
-        result = result.replace("DeferredHolder<ItemFoodBase, ItemFoodBase>", "DeferredHolder<Item, ItemFoodBase>")
+        fun replaceExecutableLiteral(literal: String, replacement: String) {
+            replaceExecutable(Regex(Regex.escape(literal))) { replacement }
+        }
+        replaceExecutableLiteral("DeferredRegister<LootItemFunctionType>", "DeferredRegister<LootItemFunctionType<?>>")
+        deferredHolderRegistryBaseHints.forEach { (concrete, base) ->
+            replaceExecutable(
+                Regex("""DeferredHolder\s*<\s*${Regex.escape(concrete)}\s*,\s*${Regex.escape(concrete)}\s*>""")
+            ) { "DeferredHolder<$base, $concrete>" }
+        }
+        replaceExecutableLiteral("DeferredHolder<LiquidBlock, LiquidBlock>", "DeferredHolder<Block, LiquidBlock>")
+        replaceExecutableLiteral("DeferredHolder<DynamicFluidType, DynamicFluidType>", "DeferredHolder<FluidType, DynamicFluidType>")
+        replaceExecutableLiteral("DeferredHolder<ItemFoodBase, ItemFoodBase>", "DeferredHolder<Item, ItemFoodBase>")
         listOf(
             "BaseEntityBlock",
             "BlockAttachedEntity",
@@ -41661,8 +41668,9 @@ $writeLines
             "WallSignBlock",
             "WaterlilyBlock"
         ).forEach { blockSubtype ->
-            result = Regex("""DeferredHolder\s*<\s*${Regex.escape(blockSubtype)}\s*,\s*${Regex.escape(blockSubtype)}\s*>""")
-                .replace(result, "DeferredHolder<Block, $blockSubtype>")
+            replaceExecutable(
+                Regex("""DeferredHolder\s*<\s*${Regex.escape(blockSubtype)}\s*,\s*${Regex.escape(blockSubtype)}\s*>""")
+            ) { "DeferredHolder<Block, $blockSubtype>" }
         }
         listOf(
             "ArmorItem",
@@ -41676,142 +41684,149 @@ $writeLines
             "TieredItem",
             "TridentItem"
         ).forEach { itemSubtype ->
-            result = Regex("""DeferredHolder\s*<\s*${Regex.escape(itemSubtype)}\s*,\s*${Regex.escape(itemSubtype)}\s*>""")
-                .replace(result, "DeferredHolder<Item, $itemSubtype>")
+            replaceExecutable(
+                Regex("""DeferredHolder\s*<\s*${Regex.escape(itemSubtype)}\s*,\s*${Regex.escape(itemSubtype)}\s*>""")
+            ) { "DeferredHolder<Item, $itemSubtype>" }
         }
-        if (result.contains("DeferredRegister<Item>")) {
-            result = Regex("""DeferredHolder\s*<\s*(?!Item\b)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*,\s*\1\s*>""")
-                .replace(result) { match -> "DeferredHolder<Item, ${match.groupValues[1]}>" }
-            result = Regex(
+        if (maskJavaCommentsAndLiterals(result).contains("DeferredRegister<Item>")) {
+            replaceExecutable(Regex("""DeferredHolder\s*<\s*(?!Item\b)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*,\s*\1\s*>""")) { match ->
+                "DeferredHolder<Item, ${match.groupValues[1]}>"
+            }
+            replaceExecutable(Regex(
                 """(?m)^([ \t]*)(?!@SuppressWarnings\("unchecked"\)\s*\r?\n)\s*private\s+static\s+<V\s+extends\s+Item>\s+DeferredHolder\s*<\s*V\s*,\s*V\s*>\s+register\("""
-            ).replace(result) { match ->
+            )) { match ->
                 "${match.groupValues[1]}@SuppressWarnings(\"unchecked\")\n" +
                     "${match.groupValues[1]}private static <V extends Item> DeferredHolder<Item, V> register("
             }
-            if (result.contains("DeferredHolder<Item, V> register(")) {
-                result = result.replace(
+            if (maskJavaCommentsAndLiterals(result).contains("DeferredHolder<Item, V> register(")) {
+                replaceExecutableLiteral(
                     "return ITEMS.register(name, item);",
                     "return (DeferredHolder<Item, V>) (DeferredHolder<?, ?>) ITEMS.register(name, item);"
                 )
             }
         }
-        if (result.contains("DeferredRegister<Block>")) {
-            result = Regex("""DeferredHolder\s*<\s*(?!Block\b|Item\b)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*,\s*\1\s*>""")
-                .replace(result) { match -> "DeferredHolder<Block, ${match.groupValues[1]}>" }
+        if (maskJavaCommentsAndLiterals(result).contains("DeferredRegister<Block>")) {
+            replaceExecutable(Regex("""DeferredHolder\s*<\s*(?!Block\b|Item\b)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*,\s*\1\s*>""")) { match ->
+                "DeferredHolder<Block, ${match.groupValues[1]}>"
+            }
         }
-        result = Regex("""DeferredHolder<EntityType<\s*([^>]+?)\s*>,\s*EntityType<\s*([^>]+?)\s*>>""")
-            .replace(result) { match -> "DeferredHolder<EntityType<?>, EntityType<${match.groupValues[2].trim()}>>" }
-        result = Regex("""DeferredHolder<BlockEntityType<\s*([^>]+?)\s*>,\s*BlockEntityType<\s*([^>]+?)\s*>>""")
-            .replace(result) { match -> "DeferredHolder<BlockEntityType<?>, BlockEntityType<${match.groupValues[2].trim()}>>" }
-        result = Regex(
+        replaceExecutable(Regex("""DeferredHolder<EntityType<\s*([^>]+?)\s*>,\s*EntityType<\s*([^>]+?)\s*>>""")) { match ->
+            "DeferredHolder<EntityType<?>, EntityType<${match.groupValues[2].trim()}>>"
+        }
+        replaceExecutable(Regex("""DeferredHolder<BlockEntityType<\s*([^>]+?)\s*>,\s*BlockEntityType<\s*([^>]+?)\s*>>""")) { match ->
+            "DeferredHolder<BlockEntityType<?>, BlockEntityType<${match.groupValues[2].trim()}>>"
+        }
+        replaceExecutable(Regex(
             """(?s)DeferredHolder\s*<\s*RecipeSerializer\s*<\s*([^>]+?)\s*>\s*,\s*RecipeSerializer\s*<\s*\1\s*>\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]*?\b((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)::new\s*\))"""
-        ).replace(result) { match ->
+        )) { match ->
             "DeferredHolder<RecipeSerializer<?>, ${match.groupValues[4]}> ${match.groupValues[2]} = ${match.groupValues[3]}"
         }
-        result = Regex("""DeferredHolder<RecipeSerializer<\s*([^>]+?)\s*>,\s*RecipeSerializer<\s*([^>]+?)\s*>>""")
-            .replace(result) { match -> "DeferredHolder<RecipeSerializer<?>, RecipeSerializer<${match.groupValues[2].trim()}>>" }
-        result = Regex(
-            """DeferredHolder<RecipeSerializer<\?>,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)>\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\.register\(\s*"([^"]+)"\s*,\s*\(\)\s*->\s*new\s+SimpleCraftingRecipeSerializer<>\(\s*\1::new\s*\)\s*\)"""
-        ).replace(result) { match ->
-            "DeferredHolder<RecipeSerializer<?>, SimpleCraftingRecipeSerializer<${match.groupValues[1]}>> ${match.groupValues[2]} = ${match.groupValues[3]}.register(\"${match.groupValues[4]}\", () -> new SimpleCraftingRecipeSerializer<>(${match.groupValues[1]}::new))"
+        replaceExecutable(Regex("""DeferredHolder<RecipeSerializer<\s*([^>]+?)\s*>,\s*RecipeSerializer<\s*([^>]+?)\s*>>""")) { match ->
+            "DeferredHolder<RecipeSerializer<?>, RecipeSerializer<${match.groupValues[2].trim()}>>"
         }
-        result = Regex("""DeferredHolder<RecipeType<\s*([^>]+?)\s*>,\s*RecipeType<\s*([^>]+?)\s*>>""")
-            .replace(result) { match -> "DeferredHolder<RecipeType<?>, RecipeType<${match.groupValues[2].trim()}>>" }
-        result = Regex("""DeferredHolder<Feature<\s*([^>]+?)\s*>,\s*Feature<\s*([^>]+?)\s*>>""")
-            .replace(result) { match -> "DeferredHolder<Feature<?>, Feature<${match.groupValues[2].trim()}>>" }
-        result = Regex("""DeferredHolder<StructureType<\s*([^>]+?)\s*>,\s*StructureType<\s*([^>]+?)\s*>>""")
-            .replace(result) { match -> "DeferredHolder<StructureType<?>, StructureType<${match.groupValues[2].trim()}>>" }
-        result = Regex("""DeferredHolder<StructureProcessorType<\s*([^>]+?)\s*>,\s*StructureProcessorType<\s*([^>]+?)\s*>>""")
-            .replace(result) { match -> "DeferredHolder<StructureProcessorType<?>, StructureProcessorType<${match.groupValues[2].trim()}>>" }
-        result = Regex("""DeferredHolder<StructurePlacementType<\s*([^>]+?)\s*>,\s*StructurePlacementType<\s*([^>]+?)\s*>>""")
-            .replace(result) { match -> "DeferredHolder<StructurePlacementType<?>, StructurePlacementType<${match.groupValues[2].trim()}>>" }
-        result = Regex("""DeferredHolder<TrunkPlacerType<\s*([^>]+?)\s*>,\s*TrunkPlacerType<\s*([^>]+?)\s*>>""")
-            .replace(result) { match -> "DeferredHolder<TrunkPlacerType<?>, TrunkPlacerType<${match.groupValues[2].trim()}>>" }
-        result = Regex("""DeferredHolder<FoliagePlacerType<\s*([^>]+?)\s*>,\s*FoliagePlacerType<\s*([^>]+?)\s*>>""")
-            .replace(result) { match -> "DeferredHolder<FoliagePlacerType<?>, FoliagePlacerType<${match.groupValues[2].trim()}>>" }
-        result = Regex("""DeferredHolder<TreeDecoratorType<\s*([^>]+?)\s*>,\s*TreeDecoratorType<\s*([^>]+?)\s*>>""")
-            .replace(result) { match -> "DeferredHolder<TreeDecoratorType<?>, TreeDecoratorType<${match.groupValues[2].trim()}>>" }
-        result = Regex("""DeferredHolder<PlacementModifierType<\s*([^>]+?)\s*>,\s*PlacementModifierType<\s*([^>]+?)\s*>>""")
-            .replace(result) { match -> "DeferredHolder<PlacementModifierType<?>, PlacementModifierType<${match.groupValues[2].trim()}>>" }
-        result = Regex("""DeferredHolder<StructurePoolElementType<\s*([^>]+?)\s*>,\s*StructurePoolElementType<\s*([^>]+?)\s*>>""")
-            .replace(result) { match -> "DeferredHolder<StructurePoolElementType<?>, StructurePoolElementType<${match.groupValues[2].trim()}>>" }
-        result = Regex(
+        replaceExecutable(Regex(
+            """(?s)DeferredHolder<RecipeSerializer<\?>,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)>\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]*?\bnew\s+SimpleCraftingRecipeSerializer<>\(\s*\1::new\s*\))"""
+        )) { match ->
+            val rhsRange = match.groups[3]?.range ?: match.range
+            val rhs = result.substring(rhsRange.first, rhsRange.last + 1)
+            "DeferredHolder<RecipeSerializer<?>, SimpleCraftingRecipeSerializer<${match.groupValues[1]}>> ${match.groupValues[2]} = $rhs"
+        }
+        listOf(
+            "RecipeType",
+            "Feature",
+            "StructureType",
+            "StructureProcessorType",
+            "StructurePlacementType",
+            "TrunkPlacerType",
+            "FoliagePlacerType",
+            "TreeDecoratorType",
+            "PlacementModifierType",
+            "StructurePoolElementType"
+        ).forEach { registryType ->
+            replaceExecutable(Regex("""DeferredHolder<${Regex.escape(registryType)}<\s*([^>]+?)\s*>,\s*${Regex.escape(registryType)}<\s*([^>]+?)\s*>>""")) { match ->
+                "DeferredHolder<$registryType<?>, $registryType<${match.groupValues[2].trim()}>>"
+            }
+        }
+        replaceExecutable(Regex(
             """DeferredHolder<T,\s*T>\s+([A-Za-z_$][\w$]*)\((String\s+name,\s*(?:java\.util\.function\.)?Supplier)\s*<\s*(?:Block|T)\s*>\s+block\)"""
-        ).replace(result) { match ->
+        )) { match ->
             "DeferredHolder<Block, T> ${match.groupValues[1]}(${match.groupValues[2]}<T> block)"
         }
-        result = Regex(
+        replaceExecutable(Regex(
             """DeferredHolder<Block,\s*T>\s+([A-Za-z_$][\w$]*)\((String\s+name,\s*(?:java\.util\.function\.)?Supplier)\s*<\s*Block\s*>\s+block\)"""
-        ).replace(result) { match ->
+        )) { match ->
             "DeferredHolder<Block, T> ${match.groupValues[1]}(${match.groupValues[2]}<T> block)"
         }
-        if (Regex("""<\s*T\s+extends\s+Block\s*>""").containsMatchIn(result) &&
-            result.contains("DeferredHolder<Block, T>")
+        if (Regex("""<\s*T\s+extends\s+Block\s*>""").containsMatchIn(maskJavaCommentsAndLiterals(result)) &&
+            maskJavaCommentsAndLiterals(result).contains("DeferredHolder<Block, T>")
         ) {
-            result = Regex(
+            replaceExecutable(Regex(
                 """DeferredHolder\s*<\s*Block\s*,\s*\?\s+extends\s+Block\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Z][A-Z0-9_]*)\.register\("""
-            ).replace(result) { match -> "DeferredHolder<Block, T> ${match.groupValues[1]} = ${match.groupValues[2]}.register(" }
-            result = Regex("""return\s+\(DeferredHolder<T,\s*T>\)\s+([A-Za-z_$][\w$]*)\s*;""")
-                .replace(result) { match -> "return ${match.groupValues[1]};" }
-            result = Regex("""return\s+\(DeferredHolder<Block,\s*T>\)\s+([A-Za-z_$][\w$]*)\s*;""")
-                .replace(result) { match -> "return ${match.groupValues[1]};" }
-            result = Regex("""return\s+\(DeferredHolder<Block,\s*T>\)\s+\(DeferredHolder<\?,\s*\?>\)\s+([A-Za-z_$][\w$]*)\s*;""")
-                .replace(result) { match -> "return ${match.groupValues[1]};" }
+            )) { match -> "DeferredHolder<Block, T> ${match.groupValues[1]} = ${match.groupValues[2]}.register(" }
+            replaceExecutable(Regex("""return\s+\(DeferredHolder<T,\s*T>\)\s+([A-Za-z_$][\w$]*)\s*;""")) { match -> "return ${match.groupValues[1]};" }
+            replaceExecutable(Regex("""return\s+\(DeferredHolder<Block,\s*T>\)\s+([A-Za-z_$][\w$]*)\s*;""")) { match -> "return ${match.groupValues[1]};" }
+            replaceExecutable(Regex("""return\s+\(DeferredHolder<Block,\s*T>\)\s+\(DeferredHolder<\?,\s*\?>\)\s+([A-Za-z_$][\w$]*)\s*;""")) { match -> "return ${match.groupValues[1]};" }
         }
         listOf(
             "StructureType",
             "StructureProcessorType",
             "StructurePlacementType"
         ).forEach { registryType ->
-            result = Regex(
+            replaceExecutable(Regex(
                 """DeferredHolder<${Regex.escape(registryType)}<P>,\s*${Regex.escape(registryType)}<P>>\s+([A-Za-z_$][\w$]*)\("""
-            ).replace(result) { match ->
+            )) { match ->
                 "DeferredHolder<$registryType<?>, $registryType<P>> ${match.groupValues[1]}("
             }
         }
         result = migrateDeferredHolderRegisterBaseGenerics(result)
-        result = Regex("""registerBlockItem\s*\(\s*String\s+name\s*,\s*DeferredHolder\s*<\s*T\s*,\s*T\s*>\s+block\s*\)""")
-            .replace(result, "registerBlockItem(String name, DeferredHolder<Block, T> block)")
-        result = Regex("""registerBlockItem\s*\(\s*String\s+name\s*,\s*DeferredHolder\s*<\s*Block\s*,\s*T\s*>\s+block\s*\)""")
-            .replace(result, "registerBlockItem(String name, DeferredHolder<Block, T> block)")
-        result = Regex("""DeferredHolder\s*<\s*Block\s*,\s*Item\s*>\s+(registerBlockItem\s*\()""")
-            .replace(result, "DeferredHolder<Item, BlockItem> $1")
-        if (result.contains("DeferredHolder<Item,") || result.contains("DeferredHolder<Item,")) {
+        replaceExecutable(Regex("""registerBlockItem\s*\(\s*String\s+name\s*,\s*DeferredHolder\s*<\s*T\s*,\s*T\s*>\s+block\s*\)""")) {
+            "registerBlockItem(String name, DeferredHolder<Block, T> block)"
+        }
+        replaceExecutable(Regex("""registerBlockItem\s*\(\s*String\s+name\s*,\s*DeferredHolder\s*<\s*Block\s*,\s*T\s*>\s+block\s*\)""")) {
+            "registerBlockItem(String name, DeferredHolder<Block, T> block)"
+        }
+        replaceExecutable(Regex("""DeferredHolder\s*<\s*Block\s*,\s*Item\s*>\s+(registerBlockItem\s*\()""")) { match ->
+            "DeferredHolder<Item, BlockItem> ${match.groupValues[1]}"
+        }
+        val executableResult = maskJavaCommentsAndLiterals(result)
+        if (executableResult.contains("DeferredHolder<Item,") || executableResult.contains("DeferredHolder<Item,")) {
             result = addImportIfMissing(result, "net.minecraft.world.item.Item")
         }
-        if (result.contains("DeferredHolder<Item, BlockItem>")) {
+        if (maskJavaCommentsAndLiterals(result).contains("DeferredHolder<Item, BlockItem>")) {
             result = addImportIfMissing(result, "net.minecraft.world.item.BlockItem")
         }
-        if (result.contains("DeferredHolder<Block,") || result.contains("DeferredHolder<Block,")) {
+        if (maskJavaCommentsAndLiterals(result).contains("DeferredHolder<Block,") || maskJavaCommentsAndLiterals(result).contains("DeferredHolder<Block,")) {
             result = addImportIfMissing(result, "net.minecraft.world.level.block.Block")
         }
         return result
     }
 
     private fun migrateDeferredHolderRegisterBaseGenerics(source: String): String {
-        if (!source.contains("DeferredRegister<") || !source.contains("DeferredHolder")) return source
+        val sourceExecutableCode = maskJavaCommentsAndLiterals(source)
+        if (!sourceExecutableCode.contains("DeferredRegister<") || !sourceExecutableCode.contains("DeferredHolder")) return source
         val registryBaseByName = Regex(
             """\bDeferredRegister\s*<\s*(.+?)\s*>\s+([A-Za-z_$][\w$]*)\s*="""
-        ).findAll(source)
+        ).findAll(sourceExecutableCode)
             .associate { match -> match.groupValues[2] to match.groupValues[1].trim() }
         if (registryBaseByName.isEmpty()) return source
 
         var result = source
+        var executableResult = sourceExecutableCode
         var cursor = 0
         val holderPattern = Regex("""DeferredHolder\s*<""")
         while (true) {
-            val match = holderPattern.find(result, cursor) ?: break
-            val openAngle = result.indexOf('<', match.range.first)
+            val match = holderPattern.find(executableResult, cursor) ?: break
+            val openAngle = executableResult.indexOf('<', match.range.first)
             if (openAngle < 0) {
                 cursor = match.range.last + 1
                 continue
             }
-            val closeAngle = findMatchingAngle(result, openAngle)
+            val closeAngle = findMatchingAngle(executableResult, openAngle)
             if (closeAngle < 0) {
                 cursor = match.range.last + 1
                 continue
             }
-            val afterHolder = result.substring(closeAngle + 1)
+            val afterHolder = executableResult.substring(closeAngle + 1)
             val assignment = Regex("""^\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\.register\s*\(""")
                 .find(afterHolder)
             if (assignment == null) {
@@ -41831,6 +41846,7 @@ $writeLines
             }
             val replacementArgs = "$registryBase, ${holderArgs[1].trim()}"
             result = result.substring(0, openAngle + 1) + replacementArgs + result.substring(closeAngle)
+            executableResult = maskJavaCommentsAndLiterals(result)
             cursor = openAngle + 1 + replacementArgs.length
         }
         return result
