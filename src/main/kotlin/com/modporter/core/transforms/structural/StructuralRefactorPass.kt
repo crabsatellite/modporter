@@ -21068,7 +21068,8 @@ ${indent}}
             }
         }
 
-        if (result.contains(".hasNbt(")) {
+        if (maskJavaCommentsAndLiterals(result).contains(".hasNbt(")) {
+            val beforeCustomDataPredicate = result
             result = rewriteJavaCall(result, "hasNbt") { receiver, args ->
                 val tagArg = args.singleOrNull()?.trim() ?: return@rewriteJavaCall null
                 "$receiver.hasComponents(DataComponentPredicate.builder().expect(DataComponents.CUSTOM_DATA, CustomData.of($tagArg)).build())"
@@ -21078,12 +21079,14 @@ ${indent}}
                 val migrated = migrateCustomDataPredicateFromStackTag(componentPredicate)
                 if (migrated != null) "$receiver.hasComponents($migrated)" else null
             }
-            result = addImportIfMissing(result, "net.minecraft.core.component.DataComponentPredicate")
-            result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
-            result = addImportIfMissing(result, "net.minecraft.world.item.component.CustomData")
+            if (result != beforeCustomDataPredicate) {
+                result = addExecutableImportIfMissing(result, "net.minecraft.core.component.DataComponentPredicate")
+                result = addExecutableImportIfMissing(result, "net.minecraft.core.component.DataComponents")
+                result = addExecutableImportIfMissing(result, "net.minecraft.world.item.component.CustomData")
+            }
         }
 
-        result = rewriteJavaInvocationArguments(result, "addStat") { args ->
+        result = rewriteExecutableJavaInvocationArguments(result, "addStat") { args ->
             if (args.size == 2 && args[0].trim().startsWith("Stats.CUSTOM.get(")) {
                 val statArg = args[0].trim()
                 val openParen = statArg.indexOf('(')
@@ -21102,24 +21105,25 @@ ${indent}}
                 null
             }
         }
-        if (result.contains("ResourceKey.create(Registries.CUSTOM_STAT")) {
-            result = addImportIfMissing(result, "net.minecraft.resources.ResourceKey")
-            result = addImportIfMissing(result, "net.minecraft.core.registries.BuiltInRegistries")
-            result = addImportIfMissing(result, "net.minecraft.core.registries.Registries")
+        if (maskJavaCommentsAndLiterals(result).contains("ResourceKey.create(Registries.CUSTOM_STAT")) {
+            result = addExecutableImportIfMissing(result, "net.minecraft.resources.ResourceKey")
+            result = addExecutableImportIfMissing(result, "net.minecraft.core.registries.BuiltInRegistries")
+            result = addExecutableImportIfMissing(result, "net.minecraft.core.registries.Registries")
         }
 
-        if (result != source && result.contains("AdvancementHolder")) {
-            result = addImportIfMissing(result, "net.minecraft.advancements.AdvancementHolder")
-            val withoutAdvancementImport = removeImport(result, "net.minecraft.advancements.Advancement")
-            if (!Regex("""\bAdvancement\b""").containsMatchIn(withoutAdvancementImport)) {
+        if (result != source && maskJavaCommentsAndLiterals(result).contains("AdvancementHolder")) {
+            result = addExecutableImportIfMissing(result, "net.minecraft.advancements.AdvancementHolder")
+            val withoutAdvancementImport = removeExecutableImport(result, "net.minecraft.advancements.Advancement")
+            if (!Regex("""\bAdvancement\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutAdvancementImport))) {
                 result = withoutAdvancementImport
             }
         }
-        if (result.contains("Criterion<")) {
-            result = addImportIfMissing(result, "net.minecraft.advancements.Criterion")
+        val executableResult = maskJavaCommentsAndLiterals(result)
+        if (executableResult.contains("Criterion<")) {
+            result = addExecutableImportIfMissing(result, "net.minecraft.advancements.Criterion")
         }
-        if (result.contains("CriteriaTriggers.")) {
-            result = addImportIfMissing(result, "net.minecraft.advancements.CriteriaTriggers")
+        if (executableResult.contains("CriteriaTriggers.")) {
+            result = addExecutableImportIfMissing(result, "net.minecraft.advancements.CriteriaTriggers")
         }
         return result
     }

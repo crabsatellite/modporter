@@ -6818,6 +6818,56 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy advancement datagen import decisions use executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyAdvancementDatagenSource")
+        assertTrue(start >= 0, "migrateLegacyAdvancementDatagenSource is missing")
+        val end = source.indexOf("private fun legacyCriteriaTriggerExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw hasNbt prefilter" to "if (result.contains(\".hasNbt(\"))",
+            "raw addStat invocation rewrite" to "rewriteJavaInvocationArguments(result, \"addStat\")",
+            "raw custom stat import prefilter" to "if (result.contains(\"ResourceKey.create(Registries.CUSTOM_STAT\"))",
+            "raw data component import" to "addImportIfMissing(result, \"net.minecraft.core.component.DataComponentPredicate\")",
+            "raw custom stat import" to "addImportIfMissing(result, \"net.minecraft.core.registries.BuiltInRegistries\")",
+            "raw AdvancementHolder import prefilter" to "result.contains(\"AdvancementHolder\")",
+            "raw AdvancementHolder import addition" to "addImportIfMissing(result, \"net.minecraft.advancements.AdvancementHolder\")",
+            "raw Advancement import removal" to "removeImport(result, \"net.minecraft.advancements.Advancement\")",
+            "raw Advancement import retention check" to "containsMatchIn(withoutAdvancementImport)",
+            "raw Criterion import prefilter" to "result.contains(\"Criterion<\")",
+            "raw CriteriaTriggers import prefilter" to "result.contains(\"CriteriaTriggers.\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("maskJavaCommentsAndLiterals(result).contains(\".hasNbt(\")") &&
+                body.contains("val beforeCustomDataPredicate = result") &&
+                body.contains("if (result != beforeCustomDataPredicate)") &&
+                body.contains("rewriteExecutableJavaInvocationArguments(result, \"addStat\")") &&
+                body.contains("maskJavaCommentsAndLiterals(result).contains(\"ResourceKey.create(Registries.CUSTOM_STAT\")") &&
+                body.contains("addExecutableImportIfMissing(result, \"net.minecraft.core.component.DataComponentPredicate\")") &&
+                body.contains("addExecutableImportIfMissing(result, \"net.minecraft.core.registries.BuiltInRegistries\")") &&
+                body.contains("maskJavaCommentsAndLiterals(result).contains(\"AdvancementHolder\")") &&
+                body.contains("removeExecutableImport(result, \"net.minecraft.advancements.Advancement\")") &&
+                body.contains("maskJavaCommentsAndLiterals(withoutAdvancementImport)") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("executableResult.contains(\"Criterion<\")") &&
+                body.contains("executableResult.contains(\"CriteriaTriggers.\")"),
+            "Legacy advancement datagen import and cleanup decisions must use executable Java evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy advancement datagen imports must not be added or retained because of comments or string literals: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy neoforge model api constructors use executable constructor evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

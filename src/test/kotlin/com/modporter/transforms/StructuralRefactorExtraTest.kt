@@ -7488,6 +7488,42 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy advancement datagen imports use executable migration evidence`() {
+        val sourceFile = createFile("AdvancementDatagenImportDocs.java", """
+            package com.example;
+
+            import net.minecraft.advancements.critereon.LocationPredicate;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.world.level.Level;
+
+            public class AdvancementDatagenImportDocs {
+                private static final String DOC = "ItemPredicate.Builder.item().hasNbt(tag); ResourceKey.create(Registries.CUSTOM_STAT, id); CriteriaTriggers.SLEPT_IN_BED; Criterion<Example>; AdvancementHolder holder";
+
+                public void build(ResourceKey<Level> dimension) {
+                    // CriteriaTriggers.SLEPT_IN_BED;
+                    LocationPredicate.inDimension(dimension);
+                }
+            }
+        """.trimIndent()).resolve("src/main/java/com/example/AdvancementDatagenImportDocs.java")
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("LocationPredicate.Builder.inDimension(dimension);"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.core.component.DataComponentPredicate;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.core.component.DataComponents;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.world.item.component.CustomData;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.core.registries.BuiltInRegistries;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.core.registries.Registries;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.advancements.Criterion;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.advancements.CriteriaTriggers;"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.advancements.AdvancementHolder;"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "ItemPredicate.Builder.item().hasNbt(tag); ResourceKey.create(Registries.CUSTOM_STAT, id); CriteriaTriggers.SLEPT_IN_BED; Criterion<Example>; AdvancementHolder holder";"""), migrated)
+        assertTrue(migrated.contains("// CriteriaTriggers.SLEPT_IN_BED;"), migrated)
+    }
+
+    @Test
     fun `migrates transparent block beacon color and legacy plant APIs`() {
         val blockDir = tempDir.resolve("src/main/java/com/example/block")
         blockDir.createDirectories()
