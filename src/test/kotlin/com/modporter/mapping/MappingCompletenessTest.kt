@@ -3445,6 +3445,44 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `structural import removal uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val removeIfPresentStart = source.indexOf("private fun removeImportIfPresent")
+        assertTrue(removeIfPresentStart >= 0, "removeImportIfPresent is missing")
+        val removeIfPresentEnd = source.indexOf("private fun annotationStartBefore", removeIfPresentStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val removeIfPresentBody = source.substring(removeIfPresentStart, removeIfPresentEnd)
+        val removeImportStart = source.indexOf("private fun removeImport(source: String, importName: String)")
+        assertTrue(removeImportStart >= 0, "removeImport is missing")
+        val removeImportEnd = source.indexOf("private fun packageNameOf", removeImportStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val removeImportBody = source.substring(removeImportStart, removeImportEnd)
+        val combinedBody = removeIfPresentBody + "\n" + removeImportBody
+        val forbidden = listOf(
+            "raw regex import removal" to "Regex(\"\"\"(?m)^[ \\t]*import",
+            "raw source replace removal" to ".replace(source, \"\")",
+            "raw source replace call" to "source.replace("
+        )
+            .filter { (_, marker) -> combinedBody.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            removeIfPresentBody.contains("removeExecutableImport(source, importName)") &&
+                removeImportBody.contains("removeExecutableImport(source, importName)"),
+            "Structural import removal helpers must use comment/literal-masked executable Java evidence"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "Structural import removal must not delete imports from comments or string literals: $forbidden"
+        )
+    }
+
+    @Test
     fun `legacy static FML mod event bus migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()

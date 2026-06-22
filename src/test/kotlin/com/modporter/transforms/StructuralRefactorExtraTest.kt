@@ -6689,6 +6689,7 @@ bus.addListener(ActualListenerRegistry::register);
 
     @Test
     fun `json reload deserializer migration ignores comments and string literals`() {
+        val textBlockDelimiter = "\"\"\""
         val srcDir = tempDir.resolve("src/main/java/com/example/data")
         srcDir.createDirectories()
         srcDir.resolve("ReloadListenerDocs.java").writeText("""
@@ -6699,6 +6700,9 @@ bus.addListener(ActualListenerRegistry::register);
 
             public class ReloadListenerDocs {
                 private static final String DOC = "Deserializers.createFunctionSerializer().create()";
+                private static final String IMPORT_DOC = $textBlockDelimiter
+                    import net.minecraft.world.level.storage.loot.Deserializers;
+                    $textBlockDelimiter;
 
                 /*
                  Deserializers.createFunctionSerializer().create();
@@ -6713,9 +6717,21 @@ bus.addListener(ActualListenerRegistry::register);
         val migrated = srcDir.resolve("ReloadListenerDocs.java").readText()
 
         assertTrue(migrated.contains("import com.google.gson.GsonBuilder;"), migrated)
-        assertFalse(migrated.contains("import net.minecraft.world.level.storage.loot.Deserializers;"), migrated)
+        assertFalse(
+            Regex("""(?m)^import net\.minecraft\.world\.level\.storage\.loot\.Deserializers;$""")
+                .containsMatchIn(migrated),
+            migrated
+        )
+        assertEquals(
+            1,
+            Regex("""import net\.minecraft\.world\.level\.storage\.loot\.Deserializers;""")
+                .findAll(migrated)
+                .count(),
+            migrated
+        )
         assertTrue(migrated.contains("public static final Gson GSON_INSTANCE = new GsonBuilder().create();"), migrated)
         assertTrue(migrated.contains("private static final String DOC = \"Deserializers.createFunctionSerializer().create()\";"), migrated)
+        assertTrue(migrated.contains("private static final String IMPORT_DOC = \"\"\""), migrated)
         assertTrue(migrated.contains("Deserializers.createFunctionSerializer().create();"), migrated)
         assertFalse(migrated.contains("DOC = \"new GsonBuilder().create()\""), migrated)
     }
@@ -7130,6 +7146,7 @@ bus.addListener(ActualListenerRegistry::register);
 
     @Test
     fun `migrates SimpleCriterionTrigger classes and CriteriaTriggers registry fields`() {
+        val textBlockDelimiter = "\"\"\""
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val advancementDir = srcDir.resolve("advancements")
         val blockDir = srcDir.resolve("block")
@@ -7159,6 +7176,10 @@ bus.addListener(ActualListenerRegistry::register);
             import net.minecraft.advancements.CriteriaTriggers;
 
             public class TFAdvancements {
+                private static final String DOC = $textBlockDelimiter
+                    import net.minecraft.advancements.CriteriaTriggers;
+                    $textBlockDelimiter;
+
                 public static final ActivateGhastTrapTrigger ACTIVATED_GHAST_TRAP = CriteriaTriggers.register(new ActivateGhastTrapTrigger());
 
                 public static void init() {}
@@ -7230,7 +7251,10 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(registry.contains("DeferredRegister<CriterionTrigger<?>> TRIGGERS"))
         assertTrue(registry.contains("DeferredHolder<CriterionTrigger<?>, ActivateGhastTrapTrigger> ACTIVATED_GHAST_TRAP"))
         assertTrue(registry.contains("TRIGGERS.register(\"activate_ghast_trap\", ActivateGhastTrapTrigger::new)"))
-        assertTrue(!registry.contains("CriteriaTriggers"))
+        assertFalse(Regex("""(?m)^import net\.minecraft\.advancements\.CriteriaTriggers;$""").containsMatchIn(registry), registry)
+        assertEquals(1, Regex("""import net\.minecraft\.advancements\.CriteriaTriggers;""").findAll(registry).count(), registry)
+        assertFalse(registry.contains("= CriteriaTriggers.register"), registry)
+        assertTrue(registry.contains("private static final String DOC = \"\"\""), registry)
         assertTrue(trigger.contains("public record Instance(Optional<ContextAwarePredicate> player) implements SimpleInstance"))
         assertTrue(trigger.contains("public Codec<ActivateGhastTrapTrigger.Instance> codec()"))
         assertTrue(trigger.contains("public static Criterion<ActivateGhastTrapTrigger.Instance> activateTrap()"))

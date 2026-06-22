@@ -1288,8 +1288,7 @@ ${indent}}
         addExecutableImportIfMissing(source, importName)
 
     private fun removeImportIfPresent(source: String, importName: String): String =
-        Regex("""(?m)^[ \t]*import\s+${Regex.escape(importName)};\s*\r?\n""")
-            .replace(source, "")
+        removeExecutableImport(source, importName)
 
     private fun annotationStartBefore(source: String, declarationIndex: Int): Int {
         val lineStart = source.lastIndexOf('\n', declarationIndex).let { if (it < 0) 0 else it + 1 }
@@ -41805,10 +41804,7 @@ $writeLines
     }
 
     private fun removeImport(source: String, importName: String): String =
-        source.replace(
-            Regex("""(?m)^[ \t]*import\s+${Regex.escape(importName)};\s*\r?\n"""),
-            ""
-        )
+        removeExecutableImport(source, importName)
 
     private fun packageNameOf(source: String): String =
         Regex("""(?m)^package\s+([\w.]+)\s*;""")
