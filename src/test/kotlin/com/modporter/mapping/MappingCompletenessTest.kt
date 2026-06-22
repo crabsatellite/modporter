@@ -8863,6 +8863,62 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `record component access migration uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val collectorStart = source.indexOf("private fun collectJavaRecordComponents")
+        assertTrue(collectorStart >= 0, "collectJavaRecordComponents is missing")
+        val collectorEnd = source.indexOf("private fun collectFinalMapDecorationSubclassClasses", collectorStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val collectorBody = source.substring(collectorStart, collectorEnd)
+        val migrationStart = source.indexOf("private fun migrateRecordComponentFieldAccessSource")
+        assertTrue(migrationStart >= 0, "migrateRecordComponentFieldAccessSource is missing")
+        val migrationEnd = source.indexOf("private fun migrateRecordCodecBuilderWitnessSource", migrationStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val migrationBody = source.substring(migrationStart, migrationEnd)
+
+        val collectorOffenders = listOf(
+            "raw record declaration scan" to Regex("""findAll\(source\)"""),
+            "raw record paren match" to Regex("""findMatchingParen\(source,\s*openParen\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(collectorBody) }
+            .map { (label, _) -> label }
+        val migrationOffenders = listOf(
+            "raw record type prefilter" to Regex("""result\.contains\(typeName\)"""),
+            "raw record variable scan" to Regex("""findAll\(result\)"""),
+            "raw local record declaration scan" to Regex("""containsMatchIn\(result\)"""),
+            "raw component accessor replacement" to Regex("""\.replace\(result,\s*"\${'$'}variable\.\${'$'}component\(\)"\)"""),
+            "raw lambda component replacement" to Regex("""\.replace\(result,\s*"\${'$'}1\.\${'$'}component\(\)"\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(migrationBody) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            collectorBody.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                collectorBody.contains(".findAll(executableCode)") &&
+                collectorBody.contains("findMatchingParen(executableCode, openParen)"),
+            "Record component collection must parse declarations from executable Java, not comments or strings"
+        )
+        assertTrue(
+            migrationBody.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                migrationBody.contains("executableResult.contains(typeName)") &&
+                migrationBody.contains(".findAll(executableResult)") &&
+                migrationBody.contains("containsMatchIn(executableResult)") &&
+                migrationBody.contains("replaceExecutableRegex(") &&
+                migrationBody.contains("match.groupValues[1]"),
+            "Record component access migration must locate and rewrite executable Java only"
+        )
+        assertTrue(
+            collectorOffenders.isEmpty() && migrationOffenders.isEmpty(),
+            "Record component access migration must not use raw source scans or raw replacements: collector=$collectorOffenders migration=$migrationOffenders"
+        )
+    }
+
+    @Test
     fun `placement modifier type registry collectors do not infer owners from java file names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

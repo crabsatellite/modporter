@@ -30173,9 +30173,48 @@ class StructuralRefactorExtraTest {
             import com.mojang.blaze3d.vertex.VertexConsumer;
 
             public class RecordAccessorSurface {
+                private static final String DOC = "definition.color";
+
                 public int read(CustomFluidDefinition definition, VertexConsumer consumer) {
+                    // definition.color
                     consumer.color(255, 255, 255, 255);
-                    return definition.setColor();
+                    return definition.setColor() + definition.color;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LocalRecordAccessorSurface.java").writeText("""
+            package com.example;
+
+            public class LocalRecordAccessorSurface {
+                public record LocalRecord(int value) {
+                }
+
+                private static final String DOC = "local.value fn -> fn.value";
+
+                public int read(LocalRecord local) {
+                    // local.value
+                    java.util.function.Function<LocalRecord, Integer> getter = fn -> fn.value;
+                    java.util.function.Function<LocalRecord, Integer> castGetter = (fn) -> fn.value;
+                    return local.value + getter.apply(local) + castGetter.apply(local);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Ghost.java").writeText("""
+            package com.example;
+
+            public class Ghost {
+                public int alpha;
+            }
+        """.trimIndent())
+        srcDir.resolve("GhostAccessorSurface.java").writeText("""
+            package com.example;
+
+            public class GhostAccessorSurface {
+                // public record Ghost(int alpha) {}
+                private static final String DOC = "Ghost ghost; ghost.alpha";
+
+                public int read(Ghost ghost) {
+                    return ghost.alpha;
                 }
             }
         """.trimIndent())
@@ -30446,6 +30485,8 @@ class StructuralRefactorExtraTest {
         val result = StructuralRefactorPass().apply(tempDir)
 
         val record = srcDir.resolve("RecordAccessorSurface.java").readText()
+        val localRecord = srcDir.resolve("LocalRecordAccessorSurface.java").readText()
+        val ghost = srcDir.resolve("GhostAccessorSurface.java").readText()
         val comment = srcDir.resolve("CommentContainerSurface.java").readText()
         val duration = srcDir.resolve("UseDurationSurface.java").readText()
         val recipe = srcDir.resolve("RecipeSurface.java").readText()
@@ -30460,8 +30501,19 @@ class StructuralRefactorExtraTest {
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
         assertTrue(record.contains("consumer.setColor(255, 255, 255, 255)"))
-        assertTrue(record.contains("return definition.color();"))
+        assertTrue(record.contains("""private static final String DOC = "definition.color";"""), record)
+        assertTrue(record.contains("// definition.color"), record)
+        assertTrue(record.contains("return definition.color() + definition.color();"))
         assertTrue(!record.contains("definition.setColor()"))
+        assertTrue(localRecord.contains("""private static final String DOC = "local.value fn -> fn.value";"""), localRecord)
+        assertTrue(localRecord.contains("// local.value"), localRecord)
+        assertTrue(localRecord.contains("java.util.function.Function<LocalRecord, Integer> getter = fn -> fn.value();"), localRecord)
+        assertTrue(localRecord.contains("java.util.function.Function<LocalRecord, Integer> castGetter = (fn) -> fn.value();"), localRecord)
+        assertTrue(localRecord.contains("return local.value() + getter.apply(local) + castGetter.apply(local);"), localRecord)
+        assertTrue(ghost.contains("return ghost.alpha;"), ghost)
+        assertFalse(ghost.contains("ghost.alpha()"), ghost)
+        assertTrue(ghost.contains("// public record Ghost(int alpha) {}"), ghost)
+        assertTrue(ghost.contains("""private static final String DOC = "Ghost ghost; ghost.alpha";"""), ghost)
         assertTrue(comment.contains("return entities.size();"))
         assertTrue(!comment.contains("entities.getContainerSize()"))
         assertTrue(duration.contains("entity.getUseItem().getUseDuration(entity)"))

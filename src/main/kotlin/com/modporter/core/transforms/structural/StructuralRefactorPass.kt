@@ -14120,9 +14120,10 @@ ${entries.joinToString(",\n")}
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val source = javaFile.readText()
-                Regex("""\brecord\s+([A-Za-z_$][\w$]*)\s*\(""").findAll(source).forEach { match ->
+                val executableCode = maskJavaCommentsAndLiterals(source)
+                Regex("""\brecord\s+([A-Za-z_$][\w$]*)\s*\(""").findAll(executableCode).forEach { match ->
                     val openParen = match.range.last
-                    val closeParen = findMatchingParen(source, openParen)
+                    val closeParen = findMatchingParen(executableCode, openParen)
                     if (closeParen < 0) return@forEach
                     val components = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
                         .mapNotNull { component ->
@@ -14783,27 +14784,34 @@ ${entries.joinToString(",\n")}
         val localRecordComponents = linkedMapOf<String, Set<String>>()
 
         recordComponents.forEach { (typeName, components) ->
-            if (!result.contains(typeName)) return@forEach
+            val executableResult = maskJavaCommentsAndLiterals(result)
+            if (!executableResult.contains(typeName)) return@forEach
             val variables = Regex("""\b(?:final\s+)?(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(typeName)}\s+([A-Za-z_$][\w$]*)\b""")
-                .findAll(result)
+                .findAll(executableResult)
                 .map { it.groupValues[1] }
                 .toMutableSet()
-            if (Regex("""\brecord\s+${Regex.escape(typeName)}\s*\(""").containsMatchIn(result)) {
+            if (Regex("""\brecord\s+${Regex.escape(typeName)}\s*\(""").containsMatchIn(executableResult)) {
                 localRecordComponents[typeName] = components
             }
             variables.forEach { variable ->
                 components.forEach { component ->
-                    result = Regex("""\b${Regex.escape(variable)}\.${Regex.escape(component)}\b(?!\s*\()""")
-                        .replace(result, "$variable.$component()")
+                    result = replaceExecutableRegex(
+                        result,
+                        Regex("""\b${Regex.escape(variable)}\.${Regex.escape(component)}\b(?!\s*\()""")
+                    ) { "$variable.$component()" }
                 }
             }
         }
 
         localRecordComponents.values.flatten().toSet().forEach { component ->
-            result = Regex("""(\b[A-Za-z_$][\w$]*\s*->\s*[A-Za-z_$][\w$]*)\.${Regex.escape(component)}\b(?!\s*\()""")
-                .replace(result, "$1.$component()")
-            result = Regex("""(\(\s*[A-Za-z_$][\w$]*\s*\)\s*->\s*[A-Za-z_$][\w$]*)\.${Regex.escape(component)}\b(?!\s*\()""")
-                .replace(result, "$1.$component()")
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(\b[A-Za-z_$][\w$]*\s*->\s*[A-Za-z_$][\w$]*)\.${Regex.escape(component)}\b(?!\s*\()""")
+            ) { match -> "${match.groupValues[1]}.$component()" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(\(\s*[A-Za-z_$][\w$]*\s*\)\s*->\s*[A-Za-z_$][\w$]*)\.${Regex.escape(component)}\b(?!\s*\()""")
+            ) { match -> "${match.groupValues[1]}.$component()" }
         }
         return result
     }
