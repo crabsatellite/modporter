@@ -1104,6 +1104,91 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `entity visibility reflection migration ignores comments strings and text blocks`() {
+        val projectDir = tempDir.resolve("entity-visibility-reflection-docs")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BossVisibility.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.entity.Entity;
+            import java.lang.reflect.Method;
+
+            public class BossVisibility {
+                String note = "declaresVisibilityHook .getMethod( startSeenByPlayer stopSeenByPlayer";
+                String docs = ${"\"\"\""}
+                    private static boolean hasNativePlayerVisibilityHook(Entity entity) {
+                        return declaresVisibilityHook(entity.getClass(), "startSeenByPlayer")
+                                || declaresVisibilityHook(entity.getClass(), "stopSeenByPlayer");
+                    }
+
+                    private static boolean declaresVisibilityHook(Class<?> entityClass, String methodName) {
+                        return entityClass.getMethod(methodName, ServerPlayer.class) != null;
+                    }
+                    ${"\"\"\""};
+
+                private static boolean hasNativePlayerVisibilityHook(Entity entity) {
+                    // declaresVisibilityHook(entity.getClass(), "startSeenByPlayer");
+                    return declaresVisibilityHook(entity.getClass(), "startSeenByPlayer")
+                            || declaresVisibilityHook(entity.getClass(), "stopSeenByPlayer");
+                }
+
+                private static boolean declaresVisibilityHook(Class<?> entityClass, String methodName) {
+                    try {
+                        Method method = entityClass.getMethod(methodName, ServerPlayer.class);
+                        return method.getDeclaringClass() != Entity.class;
+                    } catch (ReflectiveOperationException e) {
+                        return true;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val content = srcDir.resolve("BossVisibility.java").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-entity-visibility-hook-no-reflection" })
+        assertTrue(content.contains("return entity instanceof WitherBoss;"), content)
+        assertTrue(content.contains("String note = \"declaresVisibilityHook .getMethod( startSeenByPlayer stopSeenByPlayer\";"), content)
+        assertTrue(content.contains("entityClass.getMethod(methodName, ServerPlayer.class) != null;"), content)
+        assertTrue(content.contains("declaresVisibilityHook(entity.getClass(), \"startSeenByPlayer\")"), content)
+    }
+
+    @Test
+    fun `entity visibility reflection migration ignores documentation only`() {
+        val projectDir = tempDir.resolve("entity-visibility-reflection-docs-only")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("BossNotes.java")
+        file.writeText("""
+            package com.example;
+
+            public class BossNotes {
+                String note = "declaresVisibilityHook .getMethod( startSeenByPlayer stopSeenByPlayer";
+                String docs = ${"\"\"\""}
+                    private static boolean hasNativePlayerVisibilityHook(Entity entity) {
+                        return declaresVisibilityHook(entity.getClass(), "startSeenByPlayer")
+                                || declaresVisibilityHook(entity.getClass(), "stopSeenByPlayer");
+                    }
+
+                    private static boolean declaresVisibilityHook(Class<?> entityClass, String methodName) {
+                        return entityClass.getMethod(methodName, ServerPlayer.class) != null;
+                    }
+                    ${"\"\"\""};
+            }
+        """.trimIndent())
+        val before = file.readText()
+
+        val result = pass.apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-entity-visibility-hook-no-reflection" })
+        assertEquals(before, file.readText())
+    }
+
+    @Test
     fun `registers existing mixin configs when migrating away from manifest registration`() {
         val projectDir = tempDir.resolve("existing-mixin-config-registration")
         val resourcesDir = projectDir.resolve("src/main/resources")

@@ -1480,6 +1480,60 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `entity visibility reflection migration uses executable method evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateEntityVisibilityReflectionHooks")
+        assertTrue(start >= 0, "migrateEntityVisibilityReflectionHooks is missing")
+        val end = source.indexOf("private fun migrateClientEventPackageTargets", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "raw declaresVisibilityHook prefilter" to """original.contains("declaresVisibilityHook")""",
+            "raw getMethod prefilter" to """original.contains(".getMethod(")""",
+            "raw startSeenByPlayer prefilter" to """original.contains("startSeenByPlayer")""",
+            "raw stopSeenByPlayer prefilter" to """original.contains("stopSeenByPlayer")""",
+            "raw hook method search" to Regex("""\)\.find\(modified\)"""),
+            "raw hook brace match" to "findMatchingBrace(modified, hookOpenBrace)",
+            "raw hook body scan" to "val hookBody = modified.substring(hookOpenBrace + 1, hookCloseBrace)",
+            "raw declares helper search" to Regex("""declaresMethod[\s\S]{0,180}\)\.find\(modified\)"""),
+            "raw declares helper brace match" to "findMatchingBrace(modified, openBrace)"
+        )
+            .filter { (_, marker) ->
+                when (marker) {
+                    is String -> body.contains(marker)
+                    is Regex -> marker.containsMatchIn(body)
+                    else -> false
+                }
+            }
+            .map { (label, _) -> "entity visibility reflection migration contains $label" }
+
+        assertTrue(
+            body.contains("val executableOriginal = maskJavaCommentsAndLiterals(original)") &&
+                body.contains("val codeWithStringArguments = maskJavaCommentsAndTextBlocks(original)") &&
+                body.contains("codeWithStringArguments.contains(\"declaresVisibilityHook\")") &&
+                body.contains("executableOriginal.contains(\".getMethod(\")") &&
+                body.contains("codeWithStringArguments.contains(\"startSeenByPlayer\")") &&
+                body.contains("codeWithStringArguments.contains(\"stopSeenByPlayer\")") &&
+                body.contains(").find(executableOriginal)") &&
+                body.contains("findMatchingBrace(executableOriginal, hookOpenBrace)") &&
+                body.contains("val executableHookBody = executableOriginal.substring(hookOpenBrace + 1, hookCloseBrace)") &&
+                body.contains("val hookBodyWithStringArguments = codeWithStringArguments.substring(hookOpenBrace + 1, hookCloseBrace)") &&
+                body.contains(").find(maskJavaCommentsAndLiterals(modified))") &&
+                body.contains("val executableModified = maskJavaCommentsAndLiterals(modified)") &&
+                body.contains("findMatchingBrace(executableModified, openBrace)"),
+            "Entity visibility reflection migration must prove reflected visibility hooks from executable Java while preserving getMethod string-argument evidence"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "Entity visibility reflection migration must not infer or rewrite from comments, strings, or text blocks: $forbidden"
+        )
+    }
+
+    @Test
     fun `creative selected tab reflection migration uses method local evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

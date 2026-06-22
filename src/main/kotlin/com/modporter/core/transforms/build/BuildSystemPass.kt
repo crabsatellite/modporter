@@ -1213,26 +1213,29 @@ private static void clearPendingBlockEntities(LevelChunk $chunkParam) {
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val original = javaFile.readText()
-                if (!original.contains("declaresVisibilityHook") ||
-                    !original.contains(".getMethod(") ||
-                    !original.contains("startSeenByPlayer") ||
-                    !original.contains("stopSeenByPlayer")) {
+                val executableOriginal = maskJavaCommentsAndLiterals(original)
+                val codeWithStringArguments = maskJavaCommentsAndTextBlocks(original)
+                if (!codeWithStringArguments.contains("declaresVisibilityHook") ||
+                    !executableOriginal.contains(".getMethod(") ||
+                    !codeWithStringArguments.contains("startSeenByPlayer") ||
+                    !codeWithStringArguments.contains("stopSeenByPlayer")) {
                     return@forEach
                 }
 
                 var modified = original
                 val hookMethod = Regex(
                     """private\s+static\s+boolean\s+hasNativePlayerVisibilityHook\s*\(\s*Entity\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
-                ).find(modified) ?: return@forEach
+                ).find(executableOriginal) ?: return@forEach
                 val entityParam = hookMethod.groupValues[1]
-                val hookOpenBrace = modified.indexOf('{', hookMethod.range.first)
-                val hookCloseBrace = if (hookOpenBrace >= 0) findMatchingBrace(modified, hookOpenBrace) else -1
+                val hookOpenBrace = executableOriginal.indexOf('{', hookMethod.range.first)
+                val hookCloseBrace = if (hookOpenBrace >= 0) findMatchingBrace(executableOriginal, hookOpenBrace) else -1
                 if (hookCloseBrace <= hookOpenBrace) return@forEach
 
-                val hookBody = modified.substring(hookOpenBrace + 1, hookCloseBrace)
-                if (!hookBody.contains("declaresVisibilityHook") ||
-                    !hookBody.contains("startSeenByPlayer") ||
-                    !hookBody.contains("stopSeenByPlayer")) {
+                val executableHookBody = executableOriginal.substring(hookOpenBrace + 1, hookCloseBrace)
+                val hookBodyWithStringArguments = codeWithStringArguments.substring(hookOpenBrace + 1, hookCloseBrace)
+                if (!executableHookBody.contains("declaresVisibilityHook") ||
+                    !hookBodyWithStringArguments.contains("startSeenByPlayer") ||
+                    !hookBodyWithStringArguments.contains("stopSeenByPlayer")) {
                     return@forEach
                 }
 
@@ -1247,10 +1250,11 @@ private static boolean hasNativePlayerVisibilityHook(Entity $entityParam) {
 
                 val declaresMethod = Regex(
                     """private\s+static\s+boolean\s+declaresVisibilityHook\s*\(\s*Class<\?>\s+[A-Za-z_$][\w$]*\s*,\s*String\s+[A-Za-z_$][\w$]*\s*\)\s*\{"""
-                ).find(modified)
+                ).find(maskJavaCommentsAndLiterals(modified))
                 if (declaresMethod != null) {
-                    val openBrace = modified.indexOf('{', declaresMethod.range.first)
-                    val closeBrace = if (openBrace >= 0) findMatchingBrace(modified, openBrace) else -1
+                    val executableModified = maskJavaCommentsAndLiterals(modified)
+                    val openBrace = executableModified.indexOf('{', declaresMethod.range.first)
+                    val closeBrace = if (openBrace >= 0) findMatchingBrace(executableModified, openBrace) else -1
                     if (closeBrace > openBrace) {
                         modified = modified.substring(0, declaresMethod.range.first).trimEnd() +
                             "\n\n" +
