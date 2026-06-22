@@ -20918,18 +20918,19 @@ ${indent}}
         source: String,
         criterionFactoryHints: CriterionInstanceFactoryHints
     ): String {
-        if (!source.contains("Advancement") &&
-            !source.contains("LocationPredicate.") &&
-            !source.contains("ContextAwarePredicate.ANY") &&
-            !source.contains("ItemDurabilityTrigger.TriggerInstance.changedDurability") &&
-            !source.contains(".hasNbt(") &&
-            !source.contains(".addStat(Stats.CUSTOM.get(")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("Advancement") &&
+            !executableCode.contains("LocationPredicate.") &&
+            !executableCode.contains("ContextAwarePredicate.ANY") &&
+            !executableCode.contains("ItemDurabilityTrigger.TriggerInstance.changedDurability") &&
+            !executableCode.contains(".hasNbt(") &&
+            !executableCode.contains(".addStat(Stats.CUSTOM.get(")) {
             return source
         }
 
         var result = source
         val providerName = Regex("""\bHolderLookup\.Provider\s+([A-Za-z_$][\w$]*)\b""")
-            .find(result)
+            .find(executableCode)
             ?.groupValues
             ?.get(1)
 
@@ -20966,18 +20967,27 @@ ${indent}}
             ".getAdvancement().id()"
         }
 
-        result = result.replace("LocationPredicate.inDimension(", "LocationPredicate.Builder.inDimension(")
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\bLocationPredicate\.inDimension\s*\(""")
+        ) { "LocationPredicate.Builder.inDimension(" }
         if (providerName != null) {
-            result = result.replace("LocationPredicate.inBiome(", "LocationPredicate.Builder.inBiome(")
-            result = result.replace("LocationPredicate.inStructure(", "LocationPredicate.Builder.inStructure(")
-            result = rewriteJavaInvocationArguments(result, "LocationPredicate.Builder.inBiome") { args ->
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\bLocationPredicate\.inBiome\s*\(""")
+            ) { "LocationPredicate.Builder.inBiome(" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\bLocationPredicate\.inStructure\s*\(""")
+            ) { "LocationPredicate.Builder.inStructure(" }
+            result = rewriteExecutableJavaInvocationArguments(result, "LocationPredicate.Builder.inBiome") { args ->
                 if (args.size == 1 && !args[0].contains("lookupOrThrow")) {
                     listOf("$providerName.lookupOrThrow(Registries.BIOME).getOrThrow(${args[0].trim()})")
                 } else {
                     null
                 }
             }
-            result = rewriteJavaInvocationArguments(result, "LocationPredicate.Builder.inStructure") { args ->
+            result = rewriteExecutableJavaInvocationArguments(result, "LocationPredicate.Builder.inStructure") { args ->
                 if (args.size == 1 && !args[0].contains("lookupOrThrow")) {
                     listOf("$providerName.lookupOrThrow(Registries.STRUCTURE).getOrThrow(${args[0].trim()})")
                 } else {

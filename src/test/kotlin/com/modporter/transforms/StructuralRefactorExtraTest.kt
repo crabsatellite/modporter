@@ -7353,6 +7353,71 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `legacy advancement datagen location predicates use executable provider evidence`() {
+        val sourceFile = createFile("AdvancementLocationPredicates.java", """
+            package com.example;
+
+            import net.minecraft.advancements.critereon.LocationPredicate;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.biome.Biome;
+            import net.minecraft.world.level.levelgen.structure.Structure;
+
+            public class AdvancementLocationPredicates {
+                private static final String DOC = "LocationPredicate.inDimension(dimension); LocationPredicate.inBiome(biome); LocationPredicate.inStructure(structure);";
+
+                public void build(HolderLookup.Provider registries, ResourceKey<Level> dimension, ResourceKey<Biome> biome, ResourceKey<Structure> structure) {
+                    // LocationPredicate.inBiome(biome);
+                    LocationPredicate.inDimension(dimension);
+                    LocationPredicate.inBiome(biome);
+                    LocationPredicate.inStructure(structure);
+                }
+            }
+        """.trimIndent()).resolve("src/main/java/com/example/AdvancementLocationPredicates.java")
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(migrated.contains("LocationPredicate.Builder.inDimension(dimension);"), migrated)
+        assertTrue(migrated.contains("LocationPredicate.Builder.inBiome(registries.lookupOrThrow(Registries.BIOME).getOrThrow(biome));"), migrated)
+        assertTrue(migrated.contains("LocationPredicate.Builder.inStructure(registries.lookupOrThrow(Registries.STRUCTURE).getOrThrow(structure));"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "LocationPredicate.inDimension(dimension); LocationPredicate.inBiome(biome); LocationPredicate.inStructure(structure);";"""), migrated)
+        assertTrue(migrated.contains("// LocationPredicate.inBiome(biome);"), migrated)
+    }
+
+    @Test
+    fun `legacy advancement datagen location predicates do not use commented provider fallback`() {
+        val sourceFile = createFile("AdvancementLocationPredicateNoProvider.java", """
+            package com.example;
+
+            import net.minecraft.advancements.critereon.LocationPredicate;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.world.level.biome.Biome;
+
+            public class AdvancementLocationPredicateNoProvider {
+                private static final String DOC = "HolderLookup.Provider registries";
+                // public void build(HolderLookup.Provider registries) {}
+
+                public void build(ResourceKey<Biome> biome) {
+                    LocationPredicate.inBiome(biome);
+                }
+            }
+        """.trimIndent()).resolve("src/main/java/com/example/AdvancementLocationPredicateNoProvider.java")
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = sourceFile.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertTrue(migrated.contains("LocationPredicate.inBiome(biome);"), migrated)
+    }
+
+    @Test
     fun `migrates transparent block beacon color and legacy plant APIs`() {
         val blockDir = tempDir.resolve("src/main/java/com/example/block")
         blockDir.createDirectories()

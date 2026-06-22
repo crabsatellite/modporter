@@ -6709,6 +6709,45 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `legacy advancement datagen location predicates use executable provider evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyAdvancementDatagenSource")
+        assertTrue(start >= 0, "migrateLegacyAdvancementDatagenSource is missing")
+        val end = source.indexOf("private fun legacyCriteriaTriggerExpression", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw provider name search" to ".find(result)\n            ?.groupValues\n            ?.get(1)",
+            "raw inDimension replacement" to "result.replace(\"LocationPredicate.inDimension(",
+            "raw inBiome replacement" to "result.replace(\"LocationPredicate.inBiome(",
+            "raw inStructure replacement" to "result.replace(\"LocationPredicate.inStructure(",
+            "raw inBiome invocation rewrite" to "rewriteJavaInvocationArguments(result, \"LocationPredicate.Builder.inBiome\")",
+            "raw inStructure invocation rewrite" to "rewriteJavaInvocationArguments(result, \"LocationPredicate.Builder.inStructure\")"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains(".find(executableCode)") &&
+                body.contains("replaceExecutableRegex(\n            result,\n            Regex(\"\"\"\\bLocationPredicate\\.inDimension") &&
+                body.contains("replaceExecutableRegex(\n                result,\n                Regex(\"\"\"\\bLocationPredicate\\.inBiome") &&
+                body.contains("replaceExecutableRegex(\n                result,\n                Regex(\"\"\"\\bLocationPredicate\\.inStructure") &&
+                body.contains("rewriteExecutableJavaInvocationArguments(result, \"LocationPredicate.Builder.inBiome\")") &&
+                body.contains("rewriteExecutableJavaInvocationArguments(result, \"LocationPredicate.Builder.inStructure\")"),
+            "Legacy advancement datagen LocationPredicate migration must use executable Java providers, tokens, and invocation arguments"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Legacy advancement datagen LocationPredicate migration must not use comments or string literals as provider or rewrite evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy neoforge model api constructors use executable constructor evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
