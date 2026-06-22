@@ -11401,6 +11401,34 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `Nitrogen tooltip predicate migration ignores comments and text blocks`() {
+        val projectDir = createFile("NitrogenTooltipOverrides.java", """
+            package com.example;
+
+            import com.aetherteam.nitrogen.client.event.listeners.TooltipListeners;
+
+            public class NitrogenTooltipOverrides {
+                void register() {
+                    String docs = ${"\"\"\""}
+                    TooltipListeners.PREDICATES.put(ModItems.DOC, (player, stack, components, component) -> component);
+                    ${"\"\"\""};
+                    // TooltipListeners.PREDICATES.put(ModItems.COMMENT, (player, stack, components, component) -> component);
+                    TooltipListeners.PREDICATES.put(ModItems.REAL, (player, stack, components, component) -> component);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val transformed = tempDir.resolve("src/main/java/com/example/NitrogenTooltipOverrides.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-verified-compat-121-api" })
+        assertTrue(transformed.contains("TooltipListeners.PREDICATES.put(ModItems.REAL, (player, stack, components, context, component) -> component);"), transformed)
+        assertTrue(transformed.contains("TooltipListeners.PREDICATES.put(ModItems.DOC, (player, stack, components, component) -> component);"), transformed)
+        assertTrue(transformed.contains("// TooltipListeners.PREDICATES.put(ModItems.COMMENT, (player, stack, components, component) -> component);"), transformed)
+        assertFalse(transformed.contains("TooltipListeners.PREDICATES.put(ModItems.REAL, (player, stack, components, component) -> component);"), transformed)
+    }
+
+    @Test
     fun `migrates ModLoadingContext config registration when constructor already has ModContainer`() {
         val projectDir = createFile("ExampleMod.java", """
             package com.example;

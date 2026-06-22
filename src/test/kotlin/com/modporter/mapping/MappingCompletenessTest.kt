@@ -9801,6 +9801,42 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `nitrogen tooltip predicate migration uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateNitrogenTooltipPredicateLambdas")
+        assertTrue(start >= 0, "migrateNitrogenTooltipPredicateLambdas is missing")
+        val end = source.indexOf("private fun migrateNitrogenTooltipPredicateLambda", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw token prefilter" to body.contains("source.contains(token)"),
+            "raw token scan" to body.contains("source.indexOf(token, cursor)"),
+            "raw open paren scan" to body.contains("source[openParen]"),
+            "raw matching paren scan" to body.contains("findMatchingParen(source, openParen)")
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("if (!executableCode.contains(token)) return source") &&
+                body.contains("val tokenIndex = executableCode.indexOf(token, cursor)") &&
+                body.contains("executableCode[openParen]") &&
+                body.contains("findMatchingParen(executableCode, openParen)") &&
+                body.contains("source.substring(openParen + 1, closeParen)"),
+            "Nitrogen tooltip predicate migration must locate calls in executable Java while preserving original source text"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Nitrogen tooltip predicate migration must not use comments or strings as call-site evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `nitrogen block property pair runtime migration uses executable source evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

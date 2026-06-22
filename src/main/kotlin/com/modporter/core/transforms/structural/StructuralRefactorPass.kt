@@ -40698,20 +40698,21 @@ $encodeLines
 
     private fun migrateNitrogenTooltipPredicateLambdas(source: String): String {
         val token = "TooltipListeners.PREDICATES.put"
-        if (!source.contains(token)) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(token)) return source
         val migrated = StringBuilder()
         var cursor = 0
         var changed = false
         while (cursor < source.length) {
-            val tokenIndex = source.indexOf(token, cursor)
+            val tokenIndex = executableCode.indexOf(token, cursor)
             if (tokenIndex < 0) break
             val openParen = tokenIndex + token.length
-            if (openParen >= source.length || source[openParen] != '(') {
+            if (openParen >= executableCode.length || executableCode[openParen] != '(') {
                 migrated.append(source, cursor, openParen)
                 cursor = openParen
                 continue
             }
-            val closeParen = findMatchingParen(source, openParen)
+            val closeParen = findMatchingParen(executableCode, openParen)
             if (closeParen < 0) break
             val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
             if (args.size != 2) {
