@@ -3160,6 +3160,64 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `client color handler mixin retarget ignores comments strings and text blocks`() {
+        val projectDir = tempDir.resolve("client-colorhandler-package-docs")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ColorHandlerMixin.java").writeText("""
+            package com.example;
+
+            import org.spongepowered.asm.mixin.Mixin;
+            import examplemod.client.ColorHandler;
+
+            @Mixin(ColorHandler.class)
+            public class ColorHandlerMixin {
+                String note = "@Mixin(examplemod.client.ColorHandler.class)";
+                String docs = ${"\"\"\""}
+                    import docs.client.ColorHandler;
+                    @Mixin(docs.client.ColorHandler.class)
+                    ${"\"\"\""};
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ColorHandlerMixin.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-client-event-colorhandler-target" })
+        assertTrue(content.contains("import examplemod.client.event.ColorHandler;"), content)
+        assertTrue(content.contains("String note = \"@Mixin(examplemod.client.ColorHandler.class)\";"), content)
+        assertTrue(content.contains("import docs.client.ColorHandler;"), content)
+        assertFalse(content.contains("import docs.client.event.ColorHandler;"), content)
+    }
+
+    @Test
+    fun `client color handler mixin retarget ignores documentation only`() {
+        val projectDir = tempDir.resolve("client-colorhandler-package-docs-only")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ColorHandlerNotes.java")
+        file.writeText("""
+            package com.example;
+
+            public class ColorHandlerNotes {
+                String note = "@Mixin(examplemod.client.ColorHandler.class)";
+                String docs = ${"\"\"\""}
+                    import examplemod.client.ColorHandler;
+                    @Mixin(examplemod.client.ColorHandler.class)
+                    ${"\"\"\""};
+            }
+        """.trimIndent())
+        val before = file.readText()
+
+        val result = pass.apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-client-event-colorhandler-target" })
+        assertEquals(before, file.readText())
+    }
+
+    @Test
     fun `migrates stale access transformers to explicit valid 121 targets`() {
         val projectDir = tempDir.resolve("legacy-at")
         val atDir = projectDir.resolve("src/main/resources/META-INF")

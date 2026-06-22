@@ -1294,12 +1294,13 @@ private static boolean hasNativePlayerVisibilityHook(Entity $entityParam) {
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val original = javaFile.readText()
-                if (!original.contains("@Mixin(") || !original.contains(".client.ColorHandler")) {
+                val executableOriginal = maskJavaCommentsAndLiterals(original)
+                if (!executableOriginal.contains("@Mixin(") || !executableOriginal.contains(".client.ColorHandler")) {
                     return@forEach
                 }
 
                 val importPattern = Regex("""(?m)^([ \t]*import\s+)([a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)*)\.client\.ColorHandler;\s*$""")
-                val modified = importPattern.replace(original) { match ->
+                val modified = replaceExecutableRegex(original, importPattern) { match ->
                     "${match.groupValues[1]}${match.groupValues[2]}.client.event.ColorHandler;"
                 }
 

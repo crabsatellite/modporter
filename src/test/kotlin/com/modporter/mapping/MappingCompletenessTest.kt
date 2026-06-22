@@ -1632,6 +1632,50 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `client color handler mixin retarget uses executable import evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateClientEventPackageTargets")
+        assertTrue(start >= 0, "migrateClientEventPackageTargets is missing")
+        val end = source.indexOf("private data class JavaClassInfo", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "raw Mixin prefilter" to """original.contains("@Mixin(")""",
+            "raw ColorHandler prefilter" to """original.contains(".client.ColorHandler")""",
+            "raw import replacement" to Regex("""importPattern\.replace\(original""")
+        )
+            .filter { (_, marker) ->
+                when (marker) {
+                    is String -> body.contains(marker)
+                    is Regex -> marker.containsMatchIn(body)
+                    else -> false
+                }
+            }
+            .map { (label, _) -> "client color handler mixin retarget contains $label" }
+        val required = listOf(
+            "executable mask" to Regex("""val\s+executableOriginal\s*=\s*maskJavaCommentsAndLiterals\(original\)"""),
+            "executable Mixin prefilter" to Regex("""executableOriginal\.contains\("@Mixin\("\)"""),
+            "executable ColorHandler prefilter" to Regex("""executableOriginal\.contains\("\.client\.ColorHandler"\)"""),
+            "executable import replacement" to Regex("""val\s+modified\s*=\s*replaceExecutableRegex\(\s*original\s*,\s*importPattern""")
+        )
+            .filterNot { (_, marker) -> marker.containsMatchIn(body) }
+            .map { (label, _) -> "client color handler mixin retarget missing $label" }
+
+        assertTrue(
+            required.isEmpty(),
+            "Client ColorHandler mixin retarget must prove executable Mixin/import evidence and edit executable imports only: $required"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "Client ColorHandler mixin retarget must not infer or rewrite from comments, strings, or text blocks: $forbidden"
+        )
+    }
+
+    @Test
     fun `creative selected tab reflection migration uses method local evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
