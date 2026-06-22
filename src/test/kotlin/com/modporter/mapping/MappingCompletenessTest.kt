@@ -2489,6 +2489,55 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `pending block entity reflection to access transformer migration uses executable method evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migratePendingBlockEntityReflectionFields")
+        assertTrue(start >= 0, "migratePendingBlockEntityReflectionFields is missing")
+        val end = source.indexOf("private fun migrateEntityVisibilityReflectionHooks", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "raw getDeclaredFields prefilter" to """original.contains("LevelChunk.class.getDeclaredFields()")""",
+            "raw pending field prefilter" to """original.contains("pendingBlockEntitiesField")""",
+            "raw helper method prefilter" to """original.contains("clearPendingBlockEntities")""",
+            "raw pending field declaration deletion" to Regex("""Regex\("{3}[^"]*pendingBlockEntitiesField[\s\S]{0,160}\.replace\(modified,\s*""\)"""),
+            "raw pending init declaration deletion" to Regex("""Regex\("{3}[^"]*pendingBEFieldInitialized[\s\S]{0,160}\.replace\(modified,\s*""\)"""),
+            "raw helper method search" to Regex("""\)\.find\(modified\)"""),
+            "raw helper brace match" to "findMatchingBrace(modified, openBrace)",
+            "raw helper body logger scan" to "val methodBody = modified.substring(openBrace + 1, closeBrace)"
+        )
+            .filter { (_, marker) ->
+                when (marker) {
+                    is String -> body.contains(marker)
+                    is Regex -> marker.containsMatchIn(body)
+                    else -> false
+                }
+            }
+            .map { (label, _) -> "pending block entity reflection migration contains $label" }
+
+        assertTrue(
+            body.contains("val executableOriginal = maskJavaCommentsAndLiterals(original)") &&
+                body.contains("executableOriginal.contains(\"LevelChunk.class.getDeclaredFields()\")") &&
+                body.contains("executableOriginal.contains(\"pendingBlockEntitiesField\")") &&
+                body.contains("executableOriginal.contains(\"clearPendingBlockEntities\")") &&
+                body.contains("modified = replaceExecutableRegex(") &&
+                body.contains("val executableModified = maskJavaCommentsAndLiterals(modified)") &&
+                body.contains(").find(executableModified)") &&
+                body.contains("findMatchingBrace(executableModified, openBrace)") &&
+                body.contains("val methodBody = executableModified.substring(openBrace + 1, closeBrace)"),
+            "Pending block entity reflection migration must prove reflection helper structure from executable Java before replacing it with AT-backed direct access"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "Pending block entity reflection migration must not infer or rewrite from comments, strings, or text blocks: $forbidden"
+        )
+    }
+
+    @Test
     fun `access transformer migration does not derive members from comments`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

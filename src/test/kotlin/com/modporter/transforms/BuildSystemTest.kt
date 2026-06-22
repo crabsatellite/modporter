@@ -905,6 +905,111 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `pending block entity reflection migration ignores comments strings and text blocks`() {
+        val projectDir = tempDir.resolve("pending-be-reflection-docs")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ChunkCleaner.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.chunk.LevelChunk;
+            import java.lang.reflect.Field;
+            import java.util.Map;
+
+            public class ChunkCleaner {
+                String note = "LevelChunk.class.getDeclaredFields() pendingBlockEntitiesField clearPendingBlockEntities";
+                String docs = ${"\"\"\""}
+                    private static Field pendingBlockEntitiesField = null;
+                    private static boolean pendingBEFieldInitialized = false;
+                    private static void clearPendingBlockEntities(LevelChunk chunk) {
+                        LevelChunk.class.getDeclaredFields();
+                    }
+                    ${"\"\"\""};
+
+                private static Field pendingBlockEntitiesField = null;
+                private static boolean pendingBEFieldInitialized = false;
+
+                private static void clearPendingBlockEntities(LevelChunk chunk) {
+                    // LevelChunk.class.getDeclaredFields();
+                    try {
+                        if (!pendingBEFieldInitialized) {
+                            pendingBEFieldInitialized = true;
+                            for (java.lang.reflect.Field field : LevelChunk.class.getDeclaredFields()) {
+                                if (java.util.Map.class.isAssignableFrom(field.getType())) {
+                                    field.setAccessible(true);
+                                    Object testValue = field.get(chunk);
+                                    if (testValue instanceof java.util.Map<?, ?> testMap && !testMap.isEmpty()) {
+                                        Object firstKey = testMap.keySet().iterator().next();
+                                        if (firstKey instanceof BlockPos) {
+                                            pendingBlockEntitiesField = field;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (pendingBlockEntitiesField != null) {
+                            Object value = pendingBlockEntitiesField.get(chunk);
+                            if (value instanceof java.util.Map<?, ?> map && !map.isEmpty()) {
+                                int count = map.size();
+                                map.clear();
+                                if (count > 0) {
+                                    ExampleMod.LOGGER.debug("Cleared {} pending block entities from chunk", count);
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        ExampleMod.LOGGER.debug("Could not clear pending BEs via reflection: {}", e.getMessage());
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val content = srcDir.resolve("ChunkCleaner.java").readText()
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-levelchunk-pending-blockentities-at" })
+        assertTrue(content.contains("Map<BlockPos, CompoundTag> pendingBlockEntities = chunk.pendingBlockEntities;"), content)
+        assertTrue(content.contains("String note = \"LevelChunk.class.getDeclaredFields() pendingBlockEntitiesField clearPendingBlockEntities\";"), content)
+        assertTrue(content.contains("private static Field pendingBlockEntitiesField = null;"), content)
+        assertTrue(content.contains("LevelChunk.class.getDeclaredFields();"), content)
+        assertTrue(at.contains("public net.minecraft.world.level.chunk.ChunkAccess pendingBlockEntities"))
+    }
+
+    @Test
+    fun `pending block entity reflection migration ignores documentation only`() {
+        val projectDir = tempDir.resolve("pending-be-reflection-docs-only")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ChunkNotes.java")
+        file.writeText("""
+            package com.example;
+
+            public class ChunkNotes {
+                String note = "LevelChunk.class.getDeclaredFields() pendingBlockEntitiesField clearPendingBlockEntities";
+                String docs = ${"\"\"\""}
+                    private static Field pendingBlockEntitiesField = null;
+                    private static void clearPendingBlockEntities(LevelChunk chunk) {
+                        LevelChunk.class.getDeclaredFields();
+                    }
+                    ${"\"\"\""};
+            }
+        """.trimIndent())
+        val before = file.readText()
+
+        val result = pass.apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-levelchunk-pending-blockentities-at" })
+        assertFalse(projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").exists())
+        assertEquals(before, file.readText())
+    }
+
+    @Test
     fun `adds pending block entity access transformer only for typed chunk field access`() {
         val projectDir = tempDir.resolve("pending-be-direct-at")
         val srcDir = projectDir.resolve("src/main/java/com/example")

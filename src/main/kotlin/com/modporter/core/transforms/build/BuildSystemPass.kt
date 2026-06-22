@@ -1129,28 +1129,34 @@ tasks.register('sourceJar', Jar) {
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val original = javaFile.readText()
-                if (!original.contains("LevelChunk.class.getDeclaredFields()") ||
-                    !original.contains("pendingBlockEntitiesField") ||
-                    !original.contains("clearPendingBlockEntities")) {
+                val executableOriginal = maskJavaCommentsAndLiterals(original)
+                if (!executableOriginal.contains("LevelChunk.class.getDeclaredFields()") ||
+                    !executableOriginal.contains("pendingBlockEntitiesField") ||
+                    !executableOriginal.contains("clearPendingBlockEntities")) {
                     return@forEach
                 }
 
                 var modified = original
                 modified = removeJavaImport(modified, "java.lang.reflect.Field")
-                modified = Regex("""(?m)^[ \t]*private\s+static\s+Field\s+pendingBlockEntitiesField\s*=\s*null\s*;\s*\r?\n""")
-                    .replace(modified, "")
-                modified = Regex("""(?m)^[ \t]*private\s+static\s+boolean\s+pendingBEFieldInitialized\s*=\s*false\s*;\s*\r?\n""")
-                    .replace(modified, "")
+                modified = replaceExecutableRegex(
+                    modified,
+                    Regex("""(?m)^[ \t]*private\s+static\s+Field\s+pendingBlockEntitiesField\s*=\s*null\s*;\s*\r?\n""")
+                ) { "" }
+                modified = replaceExecutableRegex(
+                    modified,
+                    Regex("""(?m)^[ \t]*private\s+static\s+boolean\s+pendingBEFieldInitialized\s*=\s*false\s*;\s*\r?\n""")
+                ) { "" }
 
+                val executableModified = maskJavaCommentsAndLiterals(modified)
                 val methodMatch = Regex(
                     """private\s+static\s+void\s+clearPendingBlockEntities\s*\(\s*LevelChunk\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
-                ).find(modified) ?: return@forEach
+                ).find(executableModified) ?: return@forEach
                 val chunkParam = methodMatch.groupValues[1]
-                val openBrace = modified.indexOf('{', methodMatch.range.first)
-                val closeBrace = if (openBrace >= 0) findMatchingBrace(modified, openBrace) else -1
+                val openBrace = executableModified.indexOf('{', methodMatch.range.first)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(executableModified, openBrace) else -1
                 if (closeBrace <= openBrace) return@forEach
 
-                val methodBody = modified.substring(openBrace + 1, closeBrace)
+                val methodBody = executableModified.substring(openBrace + 1, closeBrace)
                 val logger = Regex("""([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.LOGGER)\.(?:trace|debug|info)\s*\(""")
                     .find(methodBody)
                     ?.groupValues
