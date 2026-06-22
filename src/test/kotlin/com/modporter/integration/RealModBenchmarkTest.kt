@@ -108,8 +108,11 @@ class RealModBenchmarkTest {
 
         val reportPath = reportsDir.resolve(options.reportFileName())
         reportPath.writeText(renderReport(outcomes, options))
+        val telemetryPath = reportsDir.resolve(options.telemetryFileName())
+        telemetryPath.writeText(renderTelemetry(outcomes, options))
 
         println("Real mod benchmark report: $reportPath")
+        println("Real mod benchmark telemetry: $telemetryPath")
 
         val failures = outcomes.filter { it.status == Status.FAIL || (options.strict && it.status == Status.SKIP) }
         assertTrue(
@@ -918,6 +921,64 @@ class RealModBenchmarkTest {
             issues.any { it.contains("Strict source-shape gate failed") },
             "Expected strict source-shape skipped parsing to fail converted-project validation; got: $issues"
         )
+    }
+
+    @Test
+    fun `benchmark telemetry records pass metrics and review signals`() {
+        val outcome = BenchmarkOutcome(
+            case = BenchmarkCase(
+                id = "example",
+                displayName = "Example Mod",
+                provider = "git",
+                location = "https://example.invalid/mod.git",
+                ref = "1.20.1",
+                subdir = ".",
+                required = true
+            ),
+            source = "git:https://example.invalid/mod.git#1.20.1@0123456789abcdef0123456789abcdef01234567",
+            outputDir = "build/real-mod-benchmark/tmp/work/example",
+            status = Status.PASS,
+            note = "OK; allowedRuntimeIssues=line 7: source-inherited missing sound definition warning (source declares it)",
+            pipelineResult = PipelineResult(
+                passResults = listOf(
+                    com.modporter.core.pipeline.PassResult(
+                        passName = "Text Replacement",
+                        changes = listOf(
+                            com.modporter.core.pipeline.Change(
+                                file = Path.of("src/main/java/example/Example.java"),
+                                line = 12,
+                                description = "Rename API",
+                                before = "oldCall()",
+                                after = "newCall()",
+                                confidence = Confidence.HIGH,
+                                ruleId = "text-example"
+                            )
+                        )
+                    ),
+                    com.modporter.core.pipeline.PassResult(
+                        passName = "Structural Refactor",
+                        changes = emptyList(),
+                        skipped = listOf("Could not parse generated source")
+                    )
+                ),
+                dryRun = false,
+                pipelineName = "Forge 1.20.1 to NeoForge 1.21.1"
+            ),
+            compile = CheckResult(CheckStatus.PASS, "Passed"),
+            runServer = CheckResult(CheckStatus.PASS, "Passed"),
+            runGameTestServer = CheckResult.notRun("not requested"),
+            runClient = CheckResult.notRun("not requested"),
+            runClientWorld = CheckResult.notRun("not requested")
+        )
+
+        val telemetry = renderTelemetry(listOf(outcome), strictBenchmarkOptions())
+
+        assertTrue(telemetry.contains("\"id\": \"example\""), telemetry)
+        assertTrue(telemetry.contains("\"passName\": \"Text Replacement\""), telemetry)
+        assertTrue(telemetry.contains("\"changes\": 1"), telemetry)
+        assertTrue(telemetry.contains("\"skipped\": 1"), telemetry)
+        assertTrue(telemetry.contains("\"reviewSignalCount\": 1"), telemetry)
+        assertTrue(telemetry.contains("\"source-inherited\""), telemetry)
     }
 
     @Test
@@ -3481,6 +3542,173 @@ class RealModBenchmarkTest {
         }
     }
 
+    private fun renderTelemetry(outcomes: List<BenchmarkOutcome>, options: BenchmarkOptions): String {
+        val payload = linkedMapOf(
+            "schema" to "modporter.real-mod-benchmark.telemetry.v1",
+            "options" to linkedMapOf(
+                "strict" to options.strict,
+                "strictRuntime" to options.strictRuntime,
+                "handsOff" to options.handsOff,
+                "compile" to options.compile,
+                "runServer" to options.runServer,
+                "runGameTestServer" to options.runGameTestServer,
+                "runClient" to options.runClient,
+                "runClientWorld" to options.runClientWorld,
+                "logClean" to options.logClean,
+                "keepWork" to options.keepWork,
+                "timeoutSeconds" to options.timeoutSeconds,
+                "progressGraceSeconds" to options.progressGraceSeconds,
+                "requestedCases" to (options.caseIds ?: listOf("all")),
+                "resolvedCases" to outcomes.map { it.case.id }
+            ),
+            "outcomes" to outcomes.map { it.toTelemetryMap() },
+            "totals" to linkedMapOf(
+                "targets" to outcomes.size,
+                "passed" to outcomes.count { it.status == Status.PASS },
+                "failed" to outcomes.count { it.status == Status.FAIL },
+                "skipped" to outcomes.count { it.status == Status.SKIP },
+                "changes" to outcomes.sumOf { it.pipelineResult?.totalChanges ?: 0 },
+                "high" to outcomes.sumOf { it.pipelineResult?.passResults?.sumOf { pass -> pass.highConfidence } ?: 0 },
+                "medium" to outcomes.sumOf { it.pipelineResult?.passResults?.sumOf { pass -> pass.mediumConfidence } ?: 0 },
+                "low" to outcomes.sumOf { it.pipelineResult?.passResults?.sumOf { pass -> pass.lowConfidence } ?: 0 },
+                "skippedTransforms" to outcomes.sumOf { it.pipelineResult?.totalSkipped ?: 0 },
+                "errors" to outcomes.sumOf { it.pipelineResult?.totalErrors ?: 0 },
+                "reviewSignalCount" to outcomes.sumOf { it.reviewSignalCount() }
+            )
+        )
+        return jsonValue(payload) + "\n"
+    }
+
+    private fun BenchmarkOutcome.toTelemetryMap(): Map<String, Any?> {
+        val result = pipelineResult
+        val passRows = result?.passResults.orEmpty().map { pass ->
+            linkedMapOf(
+                "passName" to pass.passName,
+                "changes" to pass.changeCount,
+                "high" to pass.highConfidence,
+                "medium" to pass.mediumConfidence,
+                "low" to pass.lowConfidence,
+                "skipped" to pass.skipped.size,
+                "errors" to pass.errors.size
+            )
+        }
+        return linkedMapOf(
+            "id" to case.id,
+            "displayName" to case.displayName,
+            "provider" to case.provider,
+            "required" to case.required,
+            "source" to source,
+            "status" to status.name,
+            "outputDir" to outputDir,
+            "totalChanges" to (result?.totalChanges ?: 0),
+            "high" to (result?.passResults?.sumOf { it.highConfidence } ?: 0),
+            "medium" to (result?.passResults?.sumOf { it.mediumConfidence } ?: 0),
+            "low" to (result?.passResults?.sumOf { it.lowConfidence } ?: 0),
+            "skippedTransforms" to (result?.totalSkipped ?: 0),
+            "errors" to (result?.totalErrors ?: 0),
+            "reviewSignalCount" to reviewSignalCount(),
+            "manualInterventionRequired" to (reviewSignalCount() > 0),
+            "allowedRuntimeIssueClasses" to allowedRuntimeIssueClasses(),
+            "passes" to passRows,
+            "checks" to linkedMapOf(
+                "compileJava" to compile.toTelemetryMap(),
+                "runServer" to runServer.toTelemetryMap(),
+                "runGameTestServer" to runGameTestServer.toTelemetryMap(),
+                "runClient" to runClient.toTelemetryMap(),
+                "runClientWorld" to runClientWorld.toTelemetryMap()
+            ),
+            "note" to note
+        )
+    }
+
+    private fun BenchmarkOutcome.reviewSignalCount(): Int {
+        val result = pipelineResult ?: return 0
+        return result.passResults.sumOf { it.mediumConfidence + it.lowConfidence + it.skipped.size + it.errors.size }
+    }
+
+    private fun BenchmarkOutcome.allowedRuntimeIssueClasses(): List<String> {
+        val classes = linkedSetOf<String>()
+        if (note.contains("external dependency")) classes.add("external dependency")
+        if (note.contains("source-inherited")) classes.add("source-inherited")
+        if (note.contains("external Mojang")) classes.add("external service")
+        return classes.toList()
+    }
+
+    private fun CheckResult.toTelemetryMap(): Map<String, Any?> =
+        linkedMapOf(
+            "status" to status.name,
+            "note" to note,
+            "allowedRuntimeIssueClasses" to allowedRuntimeIssueClasses(note)
+        )
+
+    private fun allowedRuntimeIssueClasses(note: String): List<String> {
+        val classes = linkedSetOf<String>()
+        if (note.contains("external dependency")) classes.add("external dependency")
+        if (note.contains("source-inherited")) classes.add("source-inherited")
+        if (note.contains("external Mojang")) classes.add("external service")
+        return classes.toList()
+    }
+
+    private fun jsonValue(value: Any?, indent: String = ""): String =
+        when (value) {
+            null -> "null"
+            is String -> jsonString(value)
+            is Number, is Boolean -> value.toString()
+            is Map<*, *> -> {
+                if (value.isEmpty()) {
+                    "{}"
+                } else {
+                    val nextIndent = "$indent  "
+                    value.entries.joinToString(
+                        prefix = "{\n",
+                        postfix = "\n$indent}",
+                        separator = ",\n"
+                    ) { entry ->
+                        "$nextIndent${jsonString(entry.key.toString())}: ${jsonValue(entry.value, nextIndent)}"
+                    }
+                }
+            }
+            is Iterable<*> -> {
+                val list = value.toList()
+                if (list.isEmpty()) {
+                    "[]"
+                } else {
+                    val nextIndent = "$indent  "
+                    list.joinToString(
+                        prefix = "[\n",
+                        postfix = "\n$indent]",
+                        separator = ",\n"
+                    ) { item -> "$nextIndent${jsonValue(item, nextIndent)}" }
+                }
+            }
+            else -> jsonString(value.toString())
+        }
+
+    private fun jsonString(value: String): String =
+        buildString {
+            append('"')
+            for (char in value) {
+                when (char) {
+                    '\\' -> append("\\\\")
+                    '"' -> append("\\\"")
+                    '\b' -> append("\\b")
+                    '\u000C' -> append("\\f")
+                    '\n' -> append("\\n")
+                    '\r' -> append("\\r")
+                    '\t' -> append("\\t")
+                    else -> {
+                        if (char.code < 0x20) {
+                            append("\\u")
+                            append(char.code.toString(16).padStart(4, '0'))
+                        } else {
+                            append(char)
+                        }
+                    }
+                }
+            }
+            append('"')
+        }
+
     data class BenchmarkCase(
         val id: String,
         val displayName: String,
@@ -3555,6 +3783,8 @@ class RealModBenchmarkTest {
             if (logClean) append("-log-clean")
             append(".md")
         }
+
+        fun telemetryFileName(): String = reportFileName().removeSuffix(".md") + ".json"
     }
 
     private fun strictBenchmarkOptions(): BenchmarkOptions =
