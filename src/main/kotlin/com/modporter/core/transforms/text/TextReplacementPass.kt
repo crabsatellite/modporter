@@ -2666,8 +2666,9 @@ ${codecFields.joinToString(",\n")}
         slots: List<String>,
         errors: MutableList<String>
     ): LegacyItemTarget? {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val canEnchantItemClass = Regex("""stack\.getItem\(\)\s+instanceof\s+([A-Za-z_$][\w$]*)""")
-            .find(source)
+            .find(executableCode)
             ?.groupValues
             ?.get(1)
         if (canEnchantItemClass == "ArmorItem") {
@@ -2770,15 +2771,19 @@ ${codecFields.joinToString(",\n")}
     }
 
     private fun extractLegacyConstructorSuperArgs(source: String, className: String): List<LegacyExpression>? {
-        val constructor = Regex("""(?s)\b${Regex.escape(className.substringAfterLast('.'))}\s*\([^)]*\)\s*\{""").find(source) ?: return null
-        val openBrace = source.indexOf('{', constructor.range.last)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val constructor = Regex("""(?s)\b${Regex.escape(className.substringAfterLast('.'))}\s*\([^)]*\)\s*\{""")
+            .find(executableCode)
+            ?: return null
+        val openBrace = executableCode.indexOf('{', constructor.range.last)
         if (openBrace < 0) return null
-        val closeBrace = findMatchingBrace(source, openBrace)
+        val closeBrace = findMatchingBrace(executableCode, openBrace)
         if (closeBrace < 0) return null
         val body = source.substring(openBrace + 1, closeBrace)
-        val superCall = Regex("""\bsuper\s*\(""").find(body) ?: return null
-        val openParen = body.indexOf('(', superCall.range.first)
-        val closeParen = findMatchingDelimiter(body, openParen, '(', ')')
+        val executableBody = executableCode.substring(openBrace + 1, closeBrace)
+        val superCall = Regex("""\bsuper\s*\(""").find(executableBody) ?: return null
+        val openParen = executableBody.indexOf('(', superCall.range.first)
+        val closeParen = findMatchingDelimiter(executableBody, openParen, '(', ')')
         if (closeParen < 0) return null
         return splitTopLevelArgumentExpressions(
             body.substring(openParen + 1, closeParen),
@@ -2799,12 +2804,14 @@ ${codecFields.joinToString(",\n")}
 
     private fun parseLegacyIntReturnMethod(source: String, methodName: String): Int? {
         val body = legacyMethodBody(source, methodName) ?: return null
-        return Regex("""return\s+(-?\d+)\s*;""").find(body)?.groupValues?.get(1)?.toIntOrNull()
+        val executableBody = maskJavaCommentsAndLiterals(body)
+        return Regex("""return\s+(-?\d+)\s*;""").find(executableBody)?.groupValues?.get(1)?.toIntOrNull()
     }
 
     private fun parseLegacyCostMethod(source: String, methodName: String, minCost: LinearIntValue?): LinearIntValue? {
         val body = legacyMethodBody(source, methodName) ?: return null
-        val expression = Regex("""return\s+([^;]+);""").find(body)?.groupValues?.get(1)?.trim() ?: return null
+        val executableBody = maskJavaCommentsAndLiterals(body)
+        val expression = Regex("""return\s+([^;]+);""").find(executableBody)?.groupValues?.get(1)?.trim() ?: return null
         if (methodName == "getMaxCost" && minCost != null) {
             Regex("""(?:this\.)?getMinCost\(\s*level\s*\)\s*\+\s*(\d+)""").find(expression)?.let {
                 val add = it.groupValues[1].toInt()
@@ -2846,7 +2853,8 @@ ${codecFields.joinToString(",\n")}
 
     private fun legacyBooleanReturn(source: String, methodName: String): Boolean? {
         val body = legacyMethodBody(source, methodName) ?: return null
-        return when (Regex("""return\s+(true|false)\s*;""").find(body)?.groupValues?.get(1)) {
+        val executableBody = maskJavaCommentsAndLiterals(body)
+        return when (Regex("""return\s+(true|false)\s*;""").find(executableBody)?.groupValues?.get(1)) {
             "true" -> true
             "false" -> false
             else -> null
@@ -2870,8 +2878,9 @@ ${codecFields.joinToString(",\n")}
             }
             val source = uniqueLegacyClassSource(name, classSources)?.second ?: return false
             if (predicate(source)) return true
+            val executableSource = maskJavaCommentsAndLiterals(source)
             val base = Regex("""\bclass\s+${Regex.escape(name.substringAfterLast('.'))}\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)""")
-                .find(source)
+                .find(executableSource)
                 ?.groupValues
                 ?.get(1)
                 ?: return false
@@ -2897,8 +2906,9 @@ ${codecFields.joinToString(",\n")}
             }
             val source = uniqueLegacyClassSource(name, classSources)?.second ?: return null
             legacyBooleanReturn(source, methodName)?.let { return it }
+            val executableSource = maskJavaCommentsAndLiterals(source)
             val base = Regex("""\bclass\s+${Regex.escape(name.substringAfterLast('.'))}\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)""")
-                .find(source)
+                .find(executableSource)
                 ?.groupValues
                 ?.get(1)
                 ?: return null

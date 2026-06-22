@@ -1995,6 +1995,79 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `custom enchantment data ignores constructor and item support examples in text blocks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModItems.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModItems {
+                public static final DeferredRegister<Item> ITEMS = DeferredRegister.create(ForgeRegistries.ITEMS, ExampleMod.MODID);
+                public static final DeferredHolder<Item, Item> CHAIN_BLOCK = ITEMS.register("chain_block", () -> new ChainBlockItem());
+            }
+
+            class ChainBlockItem {
+            }
+        """.trimIndent())
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> FLAME = ENCHANTMENTS.register("flame", FlameEnchantment::new);
+            }
+        """.trimIndent())
+        srcDir.resolve("FlameEnchantment.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+
+            public class FlameEnchantment extends Enchantment {
+                private static final String README = ${"\"\"\""}
+                    public FlameEnchantment() {
+                        super(Rarity.RARE, EnchantmentCategory.WEAPON, new EquipmentSlot[]{EquipmentSlot.MAINHAND});
+                    }
+
+                    @Override
+                    public boolean canEnchant(ItemStack stack) {
+                        return stack.getItem() instanceof ChainBlockItem;
+                    }
+                    ${"\"\"\""};
+
+                public FlameEnchantment() {
+                    super(Rarity.COMMON, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.CHEST});
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        val flame = tempDir.resolve("src/generated/resources/data/example/enchantment/flame.json").readText()
+        assertTrue(flame.contains(""""supported_items": "#minecraft:enchantable/chest_armor""""), flame)
+        assertFalse(flame.contains("#example:enchantable/flame"), flame)
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/tags/item/enchantable/flame.json").exists())
+    }
+
+    @Test
     fun `legacy enchantment category runtime checks migrate to holder item support`() {
         val projectDir = createTestFile("""
             package com.example;

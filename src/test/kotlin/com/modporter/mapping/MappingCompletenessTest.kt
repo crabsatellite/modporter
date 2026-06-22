@@ -9230,6 +9230,70 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `custom enchantment class derivation uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+
+        fun functionBody(name: String): String {
+            val start = source.indexOf("private fun $name")
+            assertTrue(start >= 0, "$name is missing")
+            val end = source.indexOf("\n    private fun ", start + 1).let {
+                if (it < 0) source.length else it
+            }
+            return source.substring(start, end)
+        }
+
+        val itemTarget = functionBody("deriveLegacyEnchantmentItemTarget")
+        val constructorArgs = functionBody("extractLegacyConstructorSuperArgs")
+        val intReturn = functionBody("parseLegacyIntReturnMethod")
+        val costReturn = functionBody("parseLegacyCostMethod")
+        val booleanReturn = functionBody("legacyBooleanReturn")
+        val classChainAny = functionBody("legacyClassChainAny")
+        val classChainFirst = functionBody("legacyClassChainFirstBoolean")
+        val forbidden = listOf(
+            "raw item support scan" to (itemTarget to Regex("""\.find\(source\)""")),
+            "raw constructor declaration scan" to (constructorArgs to Regex("""\.find\(source\)""")),
+            "raw constructor brace match" to (constructorArgs to Regex("""findMatchingBrace\(source""")),
+            "raw constructor delimiter match" to (constructorArgs to Regex("""findMatchingDelimiter\(body""")),
+            "raw integer return scan" to (intReturn to Regex("""\.find\(body\)""")),
+            "raw cost return scan" to (costReturn to Regex("""\.find\(body\)""")),
+            "raw boolean return scan" to (booleanReturn to Regex("""\.find\(body\)""")),
+            "raw class-chain extends scan" to (classChainAny to Regex("""\.find\(source\)""")),
+            "raw first-boolean class-chain extends scan" to (classChainFirst to Regex("""\.find\(source\)"""))
+        )
+        val offenders = forbidden
+            .filter { (_, scoped) -> scoped.second.containsMatchIn(scoped.first) }
+            .map { (label, _) -> "TextReplacementPass contains $label" }
+
+        assertTrue(
+            itemTarget.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                itemTarget.contains(".find(executableCode)") &&
+                constructorArgs.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                constructorArgs.contains(".find(executableCode)") &&
+                constructorArgs.contains("findMatchingBrace(executableCode, openBrace)") &&
+                constructorArgs.contains("val executableBody = executableCode.substring(openBrace + 1, closeBrace)") &&
+                constructorArgs.contains("findMatchingDelimiter(executableBody, openParen, '(', ')')") &&
+                intReturn.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
+                intReturn.contains(".find(executableBody)") &&
+                costReturn.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
+                costReturn.contains(".find(executableBody)") &&
+                booleanReturn.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
+                booleanReturn.contains(".find(executableBody)") &&
+                classChainAny.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                classChainAny.contains(".find(executableSource)") &&
+                classChainFirst.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                classChainFirst.contains(".find(executableSource)"),
+            "Custom enchantment class derivation must prove constructors, returns, item support, and extends clauses from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Custom enchantment class derivation must not treat comments, strings, or text blocks as class semantics: $offenders"
+        )
+    }
+
+    @Test
     fun `loot table registry migrations do not use class name suffix inference`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
