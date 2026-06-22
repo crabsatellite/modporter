@@ -557,6 +557,62 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `structure pool reflection migration ignores comments strings and text blocks`() {
+        val projectDir = tempDir.resolve("structure-pool-reflection-docs")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("VillageStructures.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool;
+            import net.neoforged.fml.util.ObfuscationReflectionHelper;
+            import java.lang.reflect.Field;
+
+            public class VillageStructures {
+                String inline = "templatesField.get(pool) rawTemplatesField.set(pool, rawTemplates)";
+                String docs = ${"\"\"\""}
+                    Field templatesField = ObfuscationReflectionHelper.findField(StructureTemplatePool.class, "f_210560_");
+                    Object fake = templatesField.get(pool);
+                    rawTemplatesField.set(pool, rawTemplates);
+                    templatesField.setAccessible(true);
+                    ${"\"\"\""};
+
+                void add(StructureTemplatePool pool) throws Exception {
+                    // templatesField.get(pool);
+                    Field templatesField = ObfuscationReflectionHelper.findField(
+                            StructureTemplatePool.class, "f_210560_"); // templates
+                    Field rawTemplatesField = ObfuscationReflectionHelper.findField(
+                            StructureTemplatePool.class, "f_210559_"); // rawTemplates
+                    Object templates = templatesField.get(pool);
+                    Object rawTemplates = rawTemplatesField.get(pool);
+                    templatesField.set(pool, templates);
+                    rawTemplatesField.set(pool, rawTemplates);
+                    // rawTemplatesField.set(pool, rawTemplates);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val content = srcDir.resolve("VillageStructures.java").readText()
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-structure-pool-at-direct-fields" })
+        assertTrue(content.contains("Object templates = pool.templates;"), content)
+        assertTrue(content.contains("Object rawTemplates = pool.rawTemplates;"), content)
+        assertTrue(content.contains("pool.templates = templates;"), content)
+        assertTrue(content.contains("pool.rawTemplates = rawTemplates;"), content)
+        assertTrue(content.contains("String inline = \"templatesField.get(pool) rawTemplatesField.set(pool, rawTemplates)\";"), content)
+        assertTrue(content.contains("Object fake = templatesField.get(pool);"), content)
+        assertTrue(content.contains("rawTemplatesField.set(pool, rawTemplates);"), content)
+        assertTrue(content.contains("templatesField.setAccessible(true);"), content)
+        assertTrue(content.contains("// templatesField.get(pool);"), content)
+        assertTrue(content.contains("// rawTemplatesField.set(pool, rawTemplates);"), content)
+        assertTrue(at.contains("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool templates"))
+        assertTrue(at.contains("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates"))
+    }
+
+    @Test
     fun `adds structure pool access transformers only for typed direct field access`() {
         val projectDir = tempDir.resolve("structure-pool-direct-at")
         val srcDir = projectDir.resolve("src/main/java/com/example")

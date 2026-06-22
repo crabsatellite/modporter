@@ -2426,6 +2426,69 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `structure pool reflection to access transformer migration uses executable rewrite evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+
+        fun functionBody(name: String): String {
+            val start = source.indexOf("private fun $name")
+            assertTrue(start >= 0, "$name is missing")
+            val end = source.indexOf("\n    private fun ", start + 1).let {
+                if (it < 0) source.length else it
+            }
+            return source.substring(start, end)
+        }
+
+        val migration = functionBody("migrateStructureTemplatePoolReflectionFields")
+        val fieldAccess = functionBody("replaceStructurePoolFieldAccess")
+        val executableReplace = functionBody("replaceExecutableRegex")
+        val stringArgumentReplace = functionBody("replaceCommentAndTextBlockMaskedRegex")
+        val maskedReplace = functionBody("replaceMaskedRegex")
+        val forbidden = listOf(
+            "raw StructureTemplatePool prefilter" to (migration to """original.contains("StructureTemplatePool.class")"""),
+            "raw obfuscation helper import retention" to (migration to """modified.contains("ObfuscationReflectionHelper.findField(")"""),
+            "raw Field import retention" to (migration to Regex("""containsMatchIn\(modified\)""")),
+            "raw reflection wording rewrite" to (migration to Regex("""\.replace\("via reflection""")),
+            "raw field access regex replacement" to (fieldAccess to Regex("""\.replace\(result""")),
+            "raw setAccessible line replacement" to (fieldAccess to Regex("""setAccessible[\s\S]{0,120}\.replace\(result"""))
+        )
+        val offenders = forbidden
+            .filter { (_, scoped) ->
+                when (val marker = scoped.second) {
+                    is String -> scoped.first.contains(marker)
+                    is Regex -> marker.containsMatchIn(scoped.first)
+                    else -> false
+                }
+            }
+            .map { (label, _) -> "BuildSystemPass contains $label" }
+
+        assertTrue(
+            migration.contains("val codeWithStringArguments = maskJavaCommentsAndTextBlocks(original)") &&
+                migration.contains("codeWithStringArguments.contains(\"StructureTemplatePool.class\")") &&
+                migration.contains("val executableModified = maskJavaCommentsAndLiterals(modified)") &&
+                migration.contains("executableModified.contains(\"ObfuscationReflectionHelper.findField(\")") &&
+                migration.contains("containsMatchIn(maskJavaCommentsAndLiterals(modified))") &&
+                fieldAccess.contains("replaceExecutableRegex(result") &&
+                fieldAccess.contains("replaceCommentAndTextBlockMaskedRegex(result") &&
+                executableReplace.contains("maskJavaCommentsAndLiterals(source)") &&
+                executableReplace.contains("replaceMaskedRegex(source") &&
+                stringArgumentReplace.contains("maskJavaCommentsAndTextBlocks(source)") &&
+                stringArgumentReplace.contains("replaceMaskedRegex(source") &&
+                maskedReplace.contains("pattern.findAll(maskedSource)") &&
+                maskedReplace.contains("match.groups.size") &&
+                maskedReplace.contains("source.substring(range.first, range.last + 1)") &&
+                maskedReplace.contains("result.replaceRange("),
+            "StructureTemplatePool reflection migration must replace only source-proven Java ranges and preserve original source group text"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "StructureTemplatePool reflection migration must not rewrite comments, strings, or text blocks while converting reflection to AT-backed fields: $offenders"
+        )
+    }
+
+    @Test
     fun `access transformer migration does not derive members from comments`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

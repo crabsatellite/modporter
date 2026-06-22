@@ -1044,25 +1044,23 @@ tasks.register('sourceJar', Jar) {
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val original = javaFile.readText()
-                if (!original.contains("StructureTemplatePool.class") ||
-                    (!original.contains("\"f_210560_\"") && !original.contains("\"f_210559_\""))) {
+                val codeWithStringArguments = maskJavaCommentsAndTextBlocks(original)
+                if (!codeWithStringArguments.contains("StructureTemplatePool.class") ||
+                    (!codeWithStringArguments.contains("\"f_210560_\"") && !codeWithStringArguments.contains("\"f_210559_\""))) {
                     return@forEach
                 }
 
                 var modified = original
                 modified = replaceStructurePoolFieldAccess(modified, "templatesField", "f_210560_", "templates")
                 modified = replaceStructurePoolFieldAccess(modified, "rawTemplatesField", "f_210559_", "rawTemplates")
-                modified = modified
-                    .replace("via reflection (the fields are private in StructureTemplatePool)", "through access-transformer-backed fields")
-                    .replace("via reflection.", "through access-transformer-backed fields.")
-                    .replace("via reflection", "through access-transformer-backed fields")
-                if (!modified.contains("ObfuscationReflectionHelper.findField(")) {
+                val executableModified = maskJavaCommentsAndLiterals(modified)
+                if (!executableModified.contains("ObfuscationReflectionHelper.findField(")) {
                     modified = modified.replace(
                         Regex("""(?m)^[ \t]*import\s+net\.neoforged\.fml\.util\.ObfuscationReflectionHelper;\s*\r?\n"""),
                         ""
                     )
                 }
-                if (!Regex("""\bField\s+\w+""").containsMatchIn(modified)) {
+                if (!Regex("""\bField\s+\w+""").containsMatchIn(maskJavaCommentsAndLiterals(modified))) {
                     modified = removeJavaImport(modified, "java.lang.reflect.Field")
                 }
 
@@ -1099,26 +1097,26 @@ tasks.register('sourceJar', Jar) {
         newFieldName: String
     ): String {
         var result = content
-        result = Regex("""\(\s*[^()]+?\s*\)\s*$variableName\.get\(([^()]+)\)""").replace(result) { match ->
+        result = replaceExecutableRegex(result, Regex("""\(\s*[^()]+?\s*\)\s*$variableName\.get\(([^()]+)\)""")) { match ->
             "${match.groupValues[1].trim()}.$newFieldName"
         }
-        result = Regex("""\b$variableName\.get\(([^()]+)\)""").replace(result) { match ->
+        result = replaceExecutableRegex(result, Regex("""\b$variableName\.get\(([^()]+)\)""")) { match ->
             "${match.groupValues[1].trim()}.$newFieldName"
         }
-        result = Regex("""\b$variableName\.set\(\s*([^,()]+)\s*,\s*([^;]+?)\s*\)\s*;""").replace(result) { match ->
+        result = replaceExecutableRegex(result, Regex("""\b$variableName\.set\(\s*([^,()]+)\s*,\s*([^;]+?)\s*\)\s*;""")) { match ->
             "${match.groupValues[1].trim()}.$newFieldName = ${match.groupValues[2].trim()};"
         }
 
         val multiline = Regex(
             """(?m)^([ \t]*)Field\s+$variableName\s*=\s*ObfuscationReflectionHelper\.findField\(\s*\r?\n[ \t]*StructureTemplatePool\.class,\s*"${Regex.escape(oldFieldName)}"\);\s*(?://[^\r\n]*)?"""
         )
-        result = multiline.replace(result, "")
+        result = replaceCommentAndTextBlockMaskedRegex(result, multiline) { "" }
 
         val singleLine = Regex(
             """(?m)^([ \t]*)Field\s+$variableName\s*=\s*ObfuscationReflectionHelper\.findField\(\s*StructureTemplatePool\.class,\s*"${Regex.escape(oldFieldName)}"\s*\);\s*(?://[^\r\n]*)?"""
         )
-        result = singleLine.replace(result, "")
-        result = Regex("""(?m)^[ \t]*$variableName\.setAccessible\(true\);\s*\r?\n""").replace(result, "")
+        result = replaceCommentAndTextBlockMaskedRegex(result, singleLine) { "" }
+        result = replaceExecutableRegex(result, Regex("""(?m)^[ \t]*$variableName\.setAccessible\(true\);\s*\r?\n""")) { "" }
         return result
     }
 
@@ -3513,6 +3511,69 @@ config="$configName"
         return String(chars)
     }
 
+    private fun maskJavaCommentsAndTextBlocks(source: String): String {
+        val chars = source.toCharArray()
+        var index = 0
+        while (index < chars.size) {
+            when {
+                index + 1 < chars.size && chars[index] == '/' && chars[index + 1] == '/' -> {
+                    chars[index] = ' '
+                    chars[index + 1] = ' '
+                    index += 2
+                    while (index < chars.size && chars[index] != '\n' && chars[index] != '\r') {
+                        chars[index++] = ' '
+                    }
+                }
+                index + 1 < chars.size && chars[index] == '/' && chars[index + 1] == '*' -> {
+                    chars[index] = ' '
+                    chars[index + 1] = ' '
+                    index += 2
+                    while (index + 1 < chars.size && !(chars[index] == '*' && chars[index + 1] == '/')) {
+                        if (chars[index] != '\n' && chars[index] != '\r') chars[index] = ' '
+                        index++
+                    }
+                    if (index + 1 < chars.size) {
+                        chars[index] = ' '
+                        chars[index + 1] = ' '
+                        index += 2
+                    }
+                }
+                index + 2 < chars.size && chars[index] == '"' && chars[index + 1] == '"' && chars[index + 2] == '"' -> {
+                    chars[index] = ' '
+                    chars[index + 1] = ' '
+                    chars[index + 2] = ' '
+                    index += 3
+                    while (index + 2 < chars.size && !(chars[index] == '"' && chars[index + 1] == '"' && chars[index + 2] == '"')) {
+                        if (chars[index] != '\n' && chars[index] != '\r') chars[index] = ' '
+                        index++
+                    }
+                    if (index + 2 < chars.size) {
+                        chars[index] = ' '
+                        chars[index + 1] = ' '
+                        chars[index + 2] = ' '
+                        index += 3
+                    }
+                }
+                chars[index] == '"' || chars[index] == '\'' -> {
+                    val quote = chars[index++]
+                    var escaped = false
+                    while (index < chars.size) {
+                        val current = chars[index++]
+                        if (escaped) {
+                            escaped = false
+                        } else if (current == '\\') {
+                            escaped = true
+                        } else if (current == quote) {
+                            break
+                        }
+                    }
+                }
+                else -> index++
+            }
+        }
+        return String(chars)
+    }
+
     private fun maskJavaCommentsAndLiterals(source: String): String {
         val chars = source.toCharArray()
         var index = 0
@@ -3577,6 +3638,46 @@ config="$configName"
             }
         }
         return String(chars)
+    }
+
+    private data class ExecutableRegexMatch(
+        val groupValues: List<String>
+    )
+
+    private fun replaceExecutableRegex(
+        source: String,
+        pattern: Regex,
+        replacement: (ExecutableRegexMatch) -> String
+    ): String = replaceMaskedRegex(source, maskJavaCommentsAndLiterals(source), pattern, replacement)
+
+    private fun replaceCommentAndTextBlockMaskedRegex(
+        source: String,
+        pattern: Regex,
+        replacement: (ExecutableRegexMatch) -> String
+    ): String = replaceMaskedRegex(source, maskJavaCommentsAndTextBlocks(source), pattern, replacement)
+
+    private fun replaceMaskedRegex(
+        source: String,
+        maskedSource: String,
+        pattern: Regex,
+        replacement: (ExecutableRegexMatch) -> String
+    ): String {
+        val matches = pattern.findAll(maskedSource).toList()
+        if (matches.isEmpty()) return source
+
+        var result = source
+        for (match in matches.asReversed()) {
+            val groupValues = (0 until match.groups.size).map { index ->
+                match.groups[index]?.range?.let { range ->
+                    source.substring(range.first, range.last + 1)
+                } ?: ""
+            }
+            result = result.replaceRange(
+                match.range,
+                replacement(ExecutableRegexMatch(groupValues))
+            )
+        }
+        return result
     }
 
     private fun ensureAccessTransformerEntries(
