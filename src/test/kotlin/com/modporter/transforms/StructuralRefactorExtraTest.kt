@@ -2768,11 +2768,14 @@ bus.addListener(ActualListenerRegistry::register);
         val packet = networkDir.resolve("S2CStatusPacket.java").readText()
         val networkHandler = networkDir.resolve("NetworkHandler.java").readText()
 
-        assertTrue(result.changes.none { it.ruleId.startsWith("struct-packet-payload") }, "changes=${result.changes}")
-        assertFalse(networkDir.resolve("ModNetwork.java").exists())
-        assertTrue(packet.contains("public class S2CStatusPacket"))
-        assertFalse(packet.contains("implements CustomPacketPayload"), packet)
-        assertTrue(networkHandler.contains("INSTANCE.registerMessage"), networkHandler)
+        val modNetwork = networkDir.resolve("ModNetwork.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-packet-payload" }, "changes=${result.changes}")
+        assertTrue(modNetwork.contains("registrar.playBidirectional("), modNetwork)
+        assertFalse(modNetwork.contains("registrar.playToClient("), modNetwork)
+        assertFalse(modNetwork.contains("registrar.playToServer("), modNetwork)
+        assertTrue(packet.contains("implements CustomPacketPayload"), packet)
+        assertFalse(networkHandler.contains("INSTANCE.registerMessage"), networkHandler)
     }
 
     @Test
@@ -24483,6 +24486,7 @@ bus.addListener(ActualListenerRegistry::register);
             package com.example;
 
             import net.minecraft.core.BlockPos;
+            import net.minecraft.core.dispenser.BlockSource;
             import net.minecraft.world.item.ItemStack;
             import net.minecraft.world.entity.player.Player;
             import net.minecraft.world.level.LevelAccessor;
@@ -24523,6 +24527,17 @@ bus.addListener(ActualListenerRegistry::register);
                     bucketPickup.pickupBlock(level, pos, state);
                 }
 
+                public ItemStack execute(BlockSource source, ItemStack stack) {
+                    LevelAccessor level = source.level();
+                    BlockPos pos = source.pos();
+                    BlockState state = level.getBlockState(pos);
+                    Block block = state.getBlock();
+                    if (block instanceof BucketPickup bucketPickup) {
+                        return bucketPickup.pickupBlock(level, pos, state);
+                    }
+                    return stack;
+                }
+
                 private static class Other {
                     void pickupBlock(LevelAccessor level, BlockPos pos, BlockState state) {
                     }
@@ -24540,8 +24555,9 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("void fromPlayerParameter(BucketPickup bucketPickup, Player player, LevelAccessor level, BlockPos pos, BlockState state) {\n        bucketPickup.pickupBlock(player, level, pos, state);"))
         assertTrue(migrated.contains("void fromDeclaration(LevelAccessor level, BlockPos pos, BlockState state) {\n        BucketPickup bucketPickup = null;\n        bucketPickup.pickupBlock(level, pos, state);"))
         assertTrue(migrated.contains("void fromPlayerDeclaration(Player player, LevelAccessor level, BlockPos pos, BlockState state) {\n        BucketPickup bucketPickup = null;\n        bucketPickup.pickupBlock(player, level, pos, state);"))
+        assertTrue(migrated.contains("public ItemStack execute(BlockSource source, ItemStack stack) {\n        LevelAccessor level = source.level();\n        BlockPos pos = source.pos();\n        BlockState state = level.getBlockState(pos);\n        Block block = state.getBlock();\n        if (block instanceof BucketPickup bucketPickup) {\n            return bucketPickup.pickupBlock(null, level, pos, state);"))
         assertTrue(migrated.contains("Other bucketPickup = new Other();\n        bucketPickup.pickupBlock(level, pos, state);"))
-        assertFalse(migrated.contains("pickupBlock(null, level, pos, state);"), migrated)
+        assertEquals(1, Regex("""pickupBlock\(null, level, pos, state\)""").findAll(migrated).count(), migrated)
     }
 
     @Test
@@ -31111,13 +31127,14 @@ bus.addListener(ActualListenerRegistry::register);
 
             import net.minecraft.core.BlockPos;
             import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.entity.player.Player;
             import net.minecraft.world.level.LevelAccessor;
             import net.minecraft.world.level.block.Block;
             import net.minecraft.world.level.block.BucketPickup;
             import net.minecraft.world.level.block.state.BlockState;
 
             public class BucketPickupSurface {
-                public ItemStack pickup(LevelAccessor level, BlockPos pos, BlockState state) {
+                public ItemStack pickup(Player player, LevelAccessor level, BlockPos pos, BlockState state) {
                     Block block = state.getBlock();
                     if (block instanceof BucketPickup bucketPickup) {
                         return bucketPickup.pickupBlock(level, pos, state);
@@ -31399,7 +31416,7 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(duration.contains("item.getUseDuration(stack, null)"))
         assertTrue(duration.contains("stack.getUseDuration(entity) : 0"), duration)
         assertFalse(duration.contains("stack.getUseDuration(entity, null)"), duration)
-        assertTrue(bucketPickup.contains("bucketPickup.pickupBlock(null, level, pos, state)"), bucketPickup)
+        assertTrue(bucketPickup.contains("bucketPickup.pickupBlock(player, level, pos, state)"), bucketPickup)
         assertTrue(recipe.contains("matches(CraftingInput container, Level level)"))
         assertTrue(recipe.contains("assemble(CraftingInput container, HolderLookup.Provider access)"))
         assertTrue(recipe.contains("container.size() > 0"))

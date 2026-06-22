@@ -45,7 +45,7 @@ Migrates Forge 1.20.1 mods to NeoForge 1.21.1 using a 5-pass pipeline:
 
 ### Rule Policy
 
-ModPorter should not use benchmark-specific shortcuts to make a particular mod pass. Production migration rules are expected to be source-structure or API-surface rules with regression coverage, and strict validation rejects placeholder behavior such as TODO migrations, commented-out source logic, source excludes, skipped structural parsing, and unverified runtime warnings.
+ModPorter should not use benchmark-specific shortcuts to make a particular mod pass. Production migration rules are expected to be source-structure or API-surface rules with regression coverage, and strict validation rejects incomplete behavior such as TODO migrations, commented-out source logic, source excludes, skipped structural parsing, and unverified runtime warnings.
 
 The codebase does contain explicit adapters and dependency mappings for real modding APIs and libraries such as Nitrogen, Cumulus, Quark, JEI, Jade, Curios, and similar ecosystem surfaces. Those are treated as API compatibility rules, not per-target bypasses: they must be triggered by source/dependency evidence and covered by tests or strict benchmark gates.
 

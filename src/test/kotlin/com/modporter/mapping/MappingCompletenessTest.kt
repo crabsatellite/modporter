@@ -948,7 +948,7 @@ class MappingCompletenessTest {
     }
 
     @Test
-    fun `bucket pickup call site migration requires source player evidence`() {
+    fun `bucket pickup call site migration requires source player or dispenser evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
             .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
@@ -970,11 +970,16 @@ class MappingCompletenessTest {
 
         assertTrue(
                 body.contains("private fun bucketPickupPlayerArgumentForEnclosingMethod(source: String, offset: Int): String?") &&
-                body.contains("lastOrNull() ?: return null") &&
-                body.contains("if (closeBrace <= offset) return null") &&
+                body.contains("javaMethodRangesIncludingDefault(source).firstOrNull { offset in it.range } ?: return null") &&
+                body.contains("val paramsText = javaMethodParameterText(method.header) ?: return null") &&
+                body.contains("if (playerArgument != null) return playerArgument") &&
+                body.contains("if (isDispenserExecuteMethod(method, paramsText)) return \"null\"") &&
+                body.contains("private fun isDispenserExecuteMethod(method: JavaMethodRange, paramsText: String): Boolean") &&
+                body.contains("simpleJavaTypeName(params[0].type) == \"BlockSource\"") &&
+                body.contains("simpleJavaTypeName(params[1].type) == \"ItemStack\"") &&
                 body.contains("if (playerArgument == null)") &&
-                body.contains("return singlePlayerParameterName(method.groupValues[1])"),
-            "BucketPickup call-site migration must rewrite only when the current Java method exposes a Player or ServerPlayer parameter"
+                body.contains("val playerArgument = singlePlayerParameterName(paramsText)"),
+            "BucketPickup call-site migration must rewrite only when the current Java method exposes a Player/ServerPlayer parameter or an execute(BlockSource, ItemStack) dispenser method"
         )
         assertTrue(
             offenders.isEmpty(),
@@ -1868,8 +1873,8 @@ class MappingCompletenessTest {
                 body.contains("binding.handleFieldName") &&
                 body.contains("methodHandleFieldsForUnreflectedMethod(code, methodFieldName, declaredHandleFields)") &&
                 body.contains("val code = maskJavaComments(source)") &&
-                body.contains("javaMethodHeaderDeclaresParameter(enclosingMethod, \"HangingEntity\", entityArg)") &&
-                body.contains("javaMethodHeaderDeclaresParameter(enclosingMethod, \"Direction\", directionArg)"),
+                body.contains("javaMethodDeclaresAssignableType(\n                    enclosingMethod,\n                    entityArg,\n                    setOf(\"HangingEntity\", \"Painting\", \"ItemFrame\", \"GlowItemFrame\")\n                )") &&
+                body.contains("javaMethodDeclaresAssignableType(enclosingMethod, directionArg, setOf(\"Direction\"))"),
             "Obfuscation method-handle migration must bind findMethod, unreflect, handle field, and invoke calls from source structure"
         )
         assertTrue(

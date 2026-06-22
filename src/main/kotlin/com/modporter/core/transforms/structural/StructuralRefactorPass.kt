@@ -33118,14 +33118,28 @@ ${indent}}
     }
 
     private fun bucketPickupPlayerArgumentForEnclosingMethod(source: String, offset: Int): String? {
-        val methodPattern = Regex(
-            """\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?[\w<>\[\].?,\s]+\s+[A-Za-z_$][\w$]*\s*\(([^;{}()]*)\)\s*(?:throws\s+[^{]+)?\{"""
-        )
-        val method = methodPattern.findAll(source.substring(0, offset)).lastOrNull() ?: return null
-        val openBrace = method.range.last
-        val closeBrace = findMatchingBrace(source, openBrace)
-        if (closeBrace <= offset) return null
-        return singlePlayerParameterName(method.groupValues[1])
+        val method = javaMethodRangesIncludingDefault(source).firstOrNull { offset in it.range } ?: return null
+        val paramsText = javaMethodParameterText(method.header) ?: return null
+        val playerArgument = singlePlayerParameterName(paramsText)
+        if (playerArgument != null) return playerArgument
+        if (isDispenserExecuteMethod(method, paramsText)) return "null"
+        return null
+    }
+
+    private fun javaMethodParameterText(methodHeader: String): String? {
+        val openParen = methodHeader.indexOf('(')
+        if (openParen < 0) return null
+        val closeParen = findMatchingParen(methodHeader, openParen)
+        if (closeParen <= openParen) return null
+        return methodHeader.substring(openParen + 1, closeParen)
+    }
+
+    private fun isDispenserExecuteMethod(method: JavaMethodRange, paramsText: String): Boolean {
+        if (method.name != "execute") return false
+        val params = parseJavaParameters(paramsText)
+        return params.size == 2 &&
+            simpleJavaTypeName(params[0].type) == "BlockSource" &&
+            simpleJavaTypeName(params[1].type) == "ItemStack"
     }
 
     private fun singlePlayerParameterName(parameters: String): String? {
@@ -33719,11 +33733,12 @@ ${indent}}
             }
             val receiver = result.substring(receiverStart, tokenIndex).trim()
             val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen)).map { it.trim() }
-            if (args.size != 3 || !bucketPickupReceiverHasTypeEvidence(executableCode, receiver)) {
+            val playerArgument = bucketPickupPlayerArgumentForEnclosingMethod(result, tokenIndex)
+            if (args.size != 3 || playerArgument == null || !bucketPickupReceiverHasTypeEvidence(executableCode, receiver)) {
                 cursor = closeParen + 1
                 continue
             }
-            val replacement = "$receiver.pickupBlock(null, ${args.joinToString(", ")})"
+            val replacement = "$receiver.pickupBlock($playerArgument, ${args.joinToString(", ")})"
             result = result.substring(0, receiverStart) + replacement + result.substring(closeParen + 1)
             cursor = receiverStart + replacement.length
         }
