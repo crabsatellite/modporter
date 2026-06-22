@@ -9294,6 +9294,74 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `custom enchantment effect derivation uses executable source evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+
+        fun functionBody(name: String): String {
+            val start = source.indexOf("private fun $name")
+            assertTrue(start >= 0, "$name is missing")
+            val end = source.indexOf("\n    private fun ", start + 1).let {
+                if (it < 0) source.length else it
+            }
+            return source.substring(start, end)
+        }
+
+        val exclusiveSet = functionBody("deriveLegacyExclusiveSet")
+        val igniteEffect = functionBody("derivePostHurtIgniteEffect")
+        val mobEffect = functionBody("derivePostHurtMobEffect")
+        val methodCalls = functionBody("legacyMethodCalls")
+        val damageBonus = functionBody("deriveDamageBonusEffect")
+        val chance = functionBody("legacyRandomChancePerLevel")
+        val forbidden = listOf(
+            "raw exclusive-set reference scan" to (exclusiveSet to Regex("""\.findAll\(body\)""")),
+            "raw ignite effect containment" to (igniteEffect to Regex("""body\.contains\("setSecondsOnFire\("\)""")),
+            "raw ignite effect scan" to (igniteEffect to Regex("""\.find\(body\)""")),
+            "raw helper body effect containment" to (mobEffect to Regex("""legacyMethodBody\(source,\s*call\.name\)[\s\S]{0,120}\?\.contains\("new MobEffectInstance\("\)""")),
+            "raw helper effect reference scan" to (mobEffect to Regex("""\.find\(helperBody\)""")),
+            "raw method call scan" to (methodCalls to Regex("""pattern\.findAll\(source\)""")),
+            "raw method call open paren" to (methodCalls to Regex("""source\.indexOf\('\(',\s*match\.range\.first\)""")),
+            "raw method call delimiter" to (methodCalls to Regex("""findMatchingDelimiter\(source""")),
+            "raw method call argument extraction" to (methodCalls to Regex("""splitTopLevelArguments\(source\.substring""")),
+            "raw damage bonus return scan" to (damageBonus to Regex("""\.find\(body\)""")),
+            "raw random chance scan" to (chance to Regex("""\.find\(source\)"""))
+        )
+        val offenders = forbidden
+            .filter { (_, scoped) -> scoped.second.containsMatchIn(scoped.first) }
+            .map { (label, _) -> "TextReplacementPass contains $label" }
+
+        assertTrue(
+            exclusiveSet.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
+                exclusiveSet.contains(".findAll(executableBody)") &&
+                igniteEffect.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
+                igniteEffect.contains("executableBody.contains(\"setSecondsOnFire(\")") &&
+                igniteEffect.contains(".find(executableBody)") &&
+                mobEffect.contains("call.executableArguments[3].contains(\"shouldHit\")") &&
+                mobEffect.contains("maskJavaCommentsAndLiterals(it).contains(\"new MobEffectInstance(\")") &&
+                mobEffect.contains("val executableHelperBody = maskJavaCommentsAndLiterals(helperBody)") &&
+                mobEffect.contains(".find(executableHelperBody)") &&
+                mobEffect.contains("helperCall.executableArguments[1].trim().toDoubleOrNull()") &&
+                mobEffect.contains("parseLegacyAmplifierExpression(helperCall.executableArguments[2].trim())") &&
+                methodCalls.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                methodCalls.contains("pattern.findAll(executableSource)") &&
+                methodCalls.contains("executableSource.indexOf('(', match.range.first)") &&
+                methodCalls.contains("findMatchingDelimiter(executableSource, openParen, '(', ')')") &&
+                methodCalls.contains("executableArguments = splitTopLevelArguments(executableSource.substring(openParen + 1, closeParen))") &&
+                damageBonus.contains("val executableBody = maskJavaCommentsAndLiterals(body)") &&
+                damageBonus.contains(".find(executableBody)") &&
+                chance.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
+                chance.contains(".find(executableSource)"),
+            "Custom enchantment effect derivation must prove helper calls, effects, chance, damage, and exclusions from executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Custom enchantment effect derivation must not treat comments, strings, or text blocks as gameplay semantics: $offenders"
+        )
+    }
+
+    @Test
     fun `loot table registry migrations do not use class name suffix inference`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot

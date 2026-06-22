@@ -1726,6 +1726,123 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `custom enchantment data ignores post hurt helper calls in text blocks`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            final class ExampleMod {
+                static final String MODID = "example";
+            }
+
+            final class ModEffects {
+                public static final DeferredRegister<MobEffect> EFFECTS = DeferredRegister.create(ForgeRegistries.MOB_EFFECTS, ExampleMod.MODID);
+                public static final DeferredHolder<MobEffect, MobEffect> FROSTY = EFFECTS.register("frosty", FrostyEffect::new);
+            }
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> CHILL_AURA = ENCHANTMENTS.register("chill_aura", () -> new ChillAuraEnchantment(Enchantment.Rarity.UNCOMMON));
+            }
+
+            class FrostyEffect extends MobEffect {
+            }
+
+            class ChillAuraEnchantment extends Enchantment {
+                public ChillAuraEnchantment(Rarity rarity) {
+                    super(rarity, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET});
+                }
+
+                @Override
+                public void doPostHurt(LivingEntity user, Entity attacker, int level) {
+                    String docs = ${"\"\"\""}
+                        doChillAuraEffect(entity, 200, level - 1, this.shouldHit(level, user.getRandom()));
+                        ${"\"\"\""};
+                    if (attacker instanceof LivingEntity entity && this.shouldHit(level, user.getRandom())) {
+                        entity.setSecondsOnFire(4);
+                    }
+                }
+
+                public static void doChillAuraEffect(LivingEntity victim, int duration, int amplifier, boolean shouldHit) {
+                    if (shouldHit) {
+                        victim.addEffect(new MobEffectInstance(ModEffects.FROSTY.get(), duration, amplifier));
+                    }
+                }
+
+                private boolean shouldHit(int level, RandomSource random) {
+                    return level > 0 && random.nextFloat() < 0.15F * level;
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        val chillAura = tempDir.resolve("src/generated/resources/data/example/enchantment/chill_aura.json").readText()
+        assertTrue(chillAura.contains(""""type": "minecraft:ignite""""), chillAura)
+        assertFalse(chillAura.contains(""""type": "minecraft:apply_mob_effect""""), chillAura)
+        assertFalse(chillAura.contains(""""to_apply": "example:frosty""""), chillAura)
+    }
+
+    @Test
+    fun `custom enchantment data requires executable random chance evidence`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            final class ExampleMod {
+                static final String MODID = "example";
+            }
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> FIRE_REACT = ENCHANTMENTS.register("fire_react", () -> new FireReactEnchantment(Enchantment.Rarity.UNCOMMON));
+            }
+
+            class FireReactEnchantment extends Enchantment {
+                public FireReactEnchantment(Rarity rarity) {
+                    super(rarity, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET});
+                }
+
+                @Override
+                public void doPostHurt(LivingEntity user, Entity attacker, int level) {
+                    String docs = ${"\"\"\""}
+                        return level > 0 && random.nextFloat() < 0.15F * level;
+                        ${"\"\"\""};
+                    if (attacker instanceof LivingEntity entity) {
+                        entity.setSecondsOnFire(4);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any { it.contains("doPostHurt body has no supported effect shape") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/fire_react.json").exists())
+    }
+
+    @Test
     fun `custom enchantment data rejects bare category references from other owners`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

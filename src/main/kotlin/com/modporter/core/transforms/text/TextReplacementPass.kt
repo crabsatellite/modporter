@@ -2941,10 +2941,11 @@ ${codecFields.joinToString(",\n")}
     ): List<String>? {
         val bodySpan = legacyMethodBodySpan(source, "checkCompatibility") ?: return emptyList()
         val body = bodySpan.text
+        val executableBody = maskJavaCommentsAndLiterals(body)
         val results = linkedSetOf<String>()
         var unresolved = false
         Regex("""other\s*!=\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.get\(\)""")
-            .findAll(body)
+            .findAll(executableBody)
             .forEach { match ->
                 val expression = match.groupValues[1]
                 val ref = resolveLegacyReferenceExpression(
@@ -2961,7 +2962,7 @@ ${codecFields.joinToString(",\n")}
                 }
             }
         Regex("""other\s*!=\s*Enchantments\.([A-Z0-9_]+)""")
-            .findAll(body)
+            .findAll(executableBody)
             .forEach { match -> results.add("minecraft:${match.groupValues[1].lowercase()}") }
         if (unresolved) return null
         return results.toList()
@@ -3005,11 +3006,12 @@ ${codecFields.joinToString(",\n")}
 
     private fun derivePostHurtIgniteEffect(source: String): String? {
         val body = legacyMethodBody(source, "doPostHurt") ?: return null
-        if (!body.contains("setSecondsOnFire(")) return null
+        val executableBody = maskJavaCommentsAndLiterals(body)
+        if (!executableBody.contains("setSecondsOnFire(")) return null
         val duration = Regex("""setSecondsOnFire\(\s*(\d+)\s*\+\s*\([^)]*nextInt\(\s*level\s*\)\s*\*\s*(\d+)\s*\)""")
-            .find(body)
+            .find(executableBody)
             ?.let { LinearFloatValue(it.groupValues[1].toDouble(), it.groupValues[2].toDouble()) }
-            ?: Regex("""setSecondsOnFire\(\s*(\d+)""").find(body)?.let { LinearFloatValue(it.groupValues[1].toDouble(), 0.0) }
+            ?: Regex("""setSecondsOnFire\(\s*(\d+)""").find(executableBody)?.let { LinearFloatValue(it.groupValues[1].toDouble(), 0.0) }
             ?: return null
         val chance = legacyRandomChancePerLevel(source) ?: return null
         return """
@@ -3034,16 +3036,18 @@ ${codecFields.joinToString(",\n")}
         val body = legacyMethodBody(source, "doPostHurt") ?: return null
         val helperCall = legacyMethodCalls(body)
             .firstOrNull { call ->
-                call.arguments.size >= 4 &&
-                    call.arguments[3].contains("shouldHit") &&
-                    legacyMethodBody(source, call.name)?.contains("new MobEffectInstance(") == true
+                call.executableArguments.size >= 4 &&
+                    call.executableArguments[3].contains("shouldHit") &&
+                    legacyMethodBody(source, call.name)
+                        ?.let { maskJavaCommentsAndLiterals(it).contains("new MobEffectInstance(") } == true
             }
             ?: return null
         val helperName = helperCall.name
         val helperBodySpan = legacyMethodBodySpan(source, helperName) ?: return null
         val helperBody = helperBodySpan.text
+        val executableHelperBody = maskJavaCommentsAndLiterals(helperBody)
         val effectRef = Regex("""new\s+MobEffectInstance\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.get\(\)""")
-            .find(helperBody)
+            .find(executableHelperBody)
             ?: return null
         val effectId = resolveLegacyReferenceExpression(
             effectRef.groupValues[1],
@@ -3055,8 +3059,8 @@ ${codecFields.joinToString(",\n")}
                 errors.add("Cannot derive custom enchantment data for ${registration.className}: mob effect reference '${effectRef.groupValues[1]}' is unresolved")
                 return null
             }
-        val durationTicks = helperCall.arguments[1].trim().toDoubleOrNull() ?: return null
-        val amplifier = parseLegacyAmplifierExpression(helperCall.arguments[2].trim()) ?: return null
+        val durationTicks = helperCall.executableArguments[1].trim().toDoubleOrNull() ?: return null
+        val amplifier = parseLegacyAmplifierExpression(helperCall.executableArguments[2].trim()) ?: return null
         val chance = legacyRandomChancePerLevel(source) ?: return null
         val durationSeconds = LinearFloatValue(durationTicks / 20.0, 0.0)
         return """
@@ -3076,19 +3080,28 @@ ${codecFields.joinToString(",\n")}
 """.trimIndent()
     }
 
-    private data class LegacyMethodCall(val name: String, val arguments: List<String>)
+    private data class LegacyMethodCall(
+        val name: String,
+        val executableArguments: List<String>
+    )
 
     private fun legacyMethodCalls(source: String): List<LegacyMethodCall> {
+        val executableSource = maskJavaCommentsAndLiterals(source)
         val calls = mutableListOf<LegacyMethodCall>()
         val pattern = Regex("""\b([A-Za-z_$][\w$]*)\s*\(""")
-        for (match in pattern.findAll(source)) {
+        for (match in pattern.findAll(executableSource)) {
             val name = match.groupValues[1]
             if (name in setOf("if", "for", "while", "switch", "catch", "new", "return", "super", "this")) continue
-            val openParen = source.indexOf('(', match.range.first)
+            val openParen = executableSource.indexOf('(', match.range.first)
             if (openParen < 0) continue
-            val closeParen = findMatchingDelimiter(source, openParen, '(', ')')
+            val closeParen = findMatchingDelimiter(executableSource, openParen, '(', ')')
             if (closeParen < 0) continue
-            calls.add(LegacyMethodCall(name, splitTopLevelArguments(source.substring(openParen + 1, closeParen))))
+            calls.add(
+                LegacyMethodCall(
+                    name = name,
+                    executableArguments = splitTopLevelArguments(executableSource.substring(openParen + 1, closeParen))
+                )
+            )
         }
         return calls
     }
@@ -3107,7 +3120,8 @@ ${codecFields.joinToString(",\n")}
 
     private fun deriveDamageBonusEffect(source: String): String? {
         val body = legacyMethodBody(source, "getDamageBonus") ?: return null
-        val expression = Regex("""return\s+([^;]+);""").find(body)?.groupValues?.get(1)?.trim() ?: return null
+        val executableBody = maskJavaCommentsAndLiterals(body)
+        val expression = Regex("""return\s+([^;]+);""").find(executableBody)?.groupValues?.get(1)?.trim() ?: return null
         val value = Regex("""(-?)\s*level\s*\*\s*([0-9]+(?:\.[0-9]+)?)[Ff]?""").find(expression)?.let {
             val sign = if (it.groupValues[1].contains("-")) -1.0 else 1.0
             it.groupValues[2].toDouble() * sign
@@ -3123,14 +3137,15 @@ ${codecFields.joinToString(",\n")}
     }
 
     private fun legacyRandomChancePerLevel(source: String): LinearFloatValue? {
+        val executableSource = maskJavaCommentsAndLiterals(source)
         Regex("""nextFloat\(\)\s*<\s*([0-9]+(?:\.[0-9]+)?)F?\s*\*\s*\(float\)\s*level""")
-            .find(source)
+            .find(executableSource)
             ?.let {
                 val value = it.groupValues[1].toDouble()
                 return LinearFloatValue(value, value)
             }
         Regex("""nextFloat\(\)\s*<\s*([0-9]+(?:\.[0-9]+)?)F?\s*\*\s*level""")
-            .find(source)
+            .find(executableSource)
             ?.let {
                 val value = it.groupValues[1].toDouble()
                 return LinearFloatValue(value, value)
