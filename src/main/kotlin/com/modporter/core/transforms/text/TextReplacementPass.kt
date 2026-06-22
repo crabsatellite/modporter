@@ -2348,13 +2348,23 @@ ${codecFields.joinToString(",\n")}
         val results = mutableListOf<LegacyCustomEnchantmentRegistration>()
 
         for ((file, source) in javaSources) {
-            if (!source.contains("DeferredRegister") || !source.contains(".register(") || !source.contains("Enchantment")) continue
+            val code = maskJavaComments(source)
+            val executableCode = maskJavaCommentsAndLiterals(source)
+            if (!executableCode.contains("DeferredRegister") ||
+                !executableCode.contains(".register(") ||
+                !executableCode.contains("Enchantment")) continue
             val ownerPackage = legacyJavaPackageName(source)
 
-            for (registerMatch in registerPattern.findAll(source)) {
+            for (registerMatch in registerPattern.findAll(code)) {
+                val registerSegment = executableCode.substring(registerMatch.range.first, registerMatch.range.last + 1)
+                if (!registerSegment.contains("static") ||
+                    !registerSegment.contains("final") ||
+                    !registerSegment.contains("DeferredRegister") ||
+                    !registerSegment.contains("Enchantment") ||
+                    !registerSegment.contains("create")) continue
                 val registerField = registerMatch.groupValues[1]
                 val modIdExpression = registerMatch.groupValues[2].trim()
-                val modId = resolveLegacyModIdExpression(modIdExpression, modIds, source, registerMatch.range.first)
+                val modId = resolveLegacyModIdExpression(modIdExpression, modIds, code, registerMatch.range.first)
                 if (modId == null) {
                     errors.add("Cannot derive custom enchantment data in ${file.fileName}: unresolved mod id expression '$modIdExpression'")
                     continue
@@ -2363,8 +2373,14 @@ ${codecFields.joinToString(",\n")}
                 val entryPattern = Regex(
                     """(?s)(?:public\s+)?static\s+final\s+(?:RegistryObject|DeferredHolder)\s*<[^;=]+>\s+($id)\s*=\s*${Regex.escape(registerField)}\.register\(\s*"([^"]+)"\s*,\s*(.*?)\s*\)\s*;"""
                 )
-                for (entryMatch in entryPattern.findAll(source)) {
-                    val ownerClass = javaTypeNameContainingOffset(source, entryMatch.range.first)
+                for (entryMatch in entryPattern.findAll(code)) {
+                    val entrySegment = executableCode.substring(entryMatch.range.first, entryMatch.range.last + 1)
+                    if (!entrySegment.contains("static") ||
+                        !entrySegment.contains("final") ||
+                        !entrySegment.contains(".register(") ||
+                        !entrySegment.contains(registerField) ||
+                        !(entrySegment.contains("RegistryObject") || entrySegment.contains("DeferredHolder"))) continue
+                    val ownerClass = javaTypeNameContainingOffset(code, entryMatch.range.first)
                     if (ownerClass == null) {
                         errors.add("Cannot derive custom enchantment data for ${entryMatch.groupValues[1]}: declaring Java type is unresolved")
                         continue
@@ -2437,9 +2453,17 @@ ${codecFields.joinToString(",\n")}
         )
         val categories = mutableListOf<LegacyEnchantmentCategorySpec>()
         for ((_, source) in javaSources) {
+            val code = maskJavaComments(source)
+            val executableCode = maskJavaCommentsAndLiterals(source)
             val ownerPackage = legacyJavaPackageName(source)
-            for (match in categoryPattern.findAll(source)) {
-                val ownerClass = javaTypeNameContainingOffset(source, match.range.first)
+            for (match in categoryPattern.findAll(code)) {
+                val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                if (!executableSegment.contains("static") ||
+                    !executableSegment.contains("final") ||
+                    !executableSegment.contains("EnchantmentCategory") ||
+                    !executableSegment.contains("create") ||
+                    !executableSegment.contains("instanceof")) continue
+                val ownerClass = javaTypeNameContainingOffset(code, match.range.first)
                     ?: continue
                 val spec = LegacyEnchantmentCategorySpec(
                     ownerPackage = ownerPackage,
@@ -2468,20 +2492,35 @@ ${codecFields.joinToString(",\n")}
         )
         val entries = mutableListOf<RegistryEntryRef>()
         for ((_, source) in javaSources) {
+            val code = maskJavaComments(source)
+            val executableCode = maskJavaCommentsAndLiterals(source)
             val ownerPackage = legacyJavaPackageName(source)
-            for (registerMatch in registerPattern.findAll(source)) {
+            for (registerMatch in registerPattern.findAll(code)) {
+                val registerSegment = executableCode.substring(registerMatch.range.first, registerMatch.range.last + 1)
+                if (!registerSegment.contains("static") ||
+                    !registerSegment.contains("final") ||
+                    !registerSegment.contains("DeferredRegister") ||
+                    !registerSegment.contains("create")) continue
                 val registerField = registerMatch.groupValues[1]
                 val modId = resolveLegacyModIdExpression(
                     expression = registerMatch.groupValues[2],
                     modIds = modIds,
-                    source = source,
+                    source = code,
                     offset = registerMatch.range.first
                 ) ?: continue
                 val entryPattern = Regex(
                     """(?s)(?:public\s+)?static\s+final\s+(?:RegistryObject|DeferredHolder|DeferredItem)\s*<[^;=]+>\s+($id)\s*=\s*${Regex.escape(registerField)}\.register\(\s*"([^"]+)""""
                 )
-                for (entryMatch in entryPattern.findAll(source)) {
-                    val ownerClass = javaTypeNameContainingOffset(source, entryMatch.range.first)
+                for (entryMatch in entryPattern.findAll(code)) {
+                    val entrySegment = executableCode.substring(entryMatch.range.first, entryMatch.range.last + 1)
+                    if (!entrySegment.contains("static") ||
+                        !entrySegment.contains("final") ||
+                        !entrySegment.contains(".register(") ||
+                        !entrySegment.contains(registerField) ||
+                        !(entrySegment.contains("RegistryObject") ||
+                            entrySegment.contains("DeferredHolder") ||
+                            entrySegment.contains("DeferredItem"))) continue
+                    val ownerClass = javaTypeNameContainingOffset(code, entryMatch.range.first)
                         ?: continue
                     val ref = RegistryEntryRef(
                         ownerPackage = ownerPackage,
@@ -2512,18 +2551,28 @@ ${codecFields.joinToString(",\n")}
         )
         val results = linkedMapOf<String, MutableList<String>>()
         for ((_, source) in javaSources) {
-            for (registerMatch in registerPattern.findAll(source)) {
+            val code = maskJavaComments(source)
+            val executableCode = maskJavaCommentsAndLiterals(source)
+            for (registerMatch in registerPattern.findAll(code)) {
+                val registerSegment = executableCode.substring(registerMatch.range.first, registerMatch.range.last + 1)
+                if (!registerSegment.contains("DeferredRegister") ||
+                    !registerSegment.contains("Item") ||
+                    !registerSegment.contains("create")) continue
                 val registerField = registerMatch.groupValues[1]
                 val modId = resolveLegacyModIdExpression(
                     expression = registerMatch.groupValues[2],
                     modIds = modIds,
-                    source = source,
+                    source = code,
                     offset = registerMatch.range.first
                 ) ?: continue
                 val entryPattern = Regex(
                     """(?s)${Regex.escape(registerField)}\.register\(\s*"([^"]+)"\s*,\s*(?:\(\)\s*->\s*)?new\s+($id)\s*\("""
                 )
-                for (entryMatch in entryPattern.findAll(source)) {
+                for (entryMatch in entryPattern.findAll(code)) {
+                    val entrySegment = executableCode.substring(entryMatch.range.first, entryMatch.range.last + 1)
+                    if (!entrySegment.contains(registerField) ||
+                        !entrySegment.contains(".register(") ||
+                        !entrySegment.contains("new")) continue
                     results.getOrPut(entryMatch.groupValues[2]) { mutableListOf() }.add("$modId:${entryMatch.groupValues[1]}")
                 }
             }
@@ -3142,9 +3191,11 @@ ${definition.slots.joinToString(",\n") { """    "$it"""" }}
     }
 
     private fun migrateCustomEnchantmentResourceKeys(source: String): String {
-        if (!source.contains("DeferredRegister<Enchantment>") ||
-            !source.contains("DeferredHolder<Enchantment, Enchantment>") ||
-            !source.contains("ENCHANTMENTS.register(")) {
+        val code = maskJavaComments(source)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("DeferredRegister<Enchantment>") ||
+            !executableCode.contains("DeferredHolder<Enchantment, Enchantment>") ||
+            !executableCode.contains("ENCHANTMENTS.register(")) {
             return source
         }
 
@@ -3152,14 +3203,33 @@ ${definition.slots.joinToString(",\n") { """    "$it"""" }}
             """public\s+static\s+final\s+DeferredRegister<Enchantment>\s+ENCHANTMENTS\s*=\s*DeferredRegister\.create\(\s*[^,]+,\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\)\s*;""",
             RegexOption.DOT_MATCHES_ALL
         )
-        val registerMatch = registerPattern.find(source) ?: return source
+        val registerMatch = registerPattern.find(code)
+            ?.takeIf { match ->
+                val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                executableSegment.contains("static") &&
+                    executableSegment.contains("final") &&
+                    executableSegment.contains("DeferredRegister") &&
+                    executableSegment.contains("Enchantment") &&
+                    executableSegment.contains("create")
+            }
+            ?: return source
         val modIdExpression = registerMatch.groupValues[1]
 
         val entryPattern = Regex(
             """public\s+static\s+final\s+DeferredHolder<Enchantment,\s*Enchantment>\s+([A-Za-z_$][\w$]*)\s*=\s*ENCHANTMENTS\.register\(\s*"([^"]+)"\s*,\s*(?:[A-Za-z_$][\w$]*::new|\(\)\s*->\s*new\s+[A-Za-z_$][\w$]*\([^)]*\))\s*\)\s*;""",
             RegexOption.DOT_MATCHES_ALL
         )
-        val entries = entryPattern.findAll(source).map { it.groupValues[1] to it.groupValues[2] }.toList()
+        val entryMatches = entryPattern.findAll(code)
+            .filter { match ->
+                val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                executableSegment.contains("static") &&
+                    executableSegment.contains("final") &&
+                    executableSegment.contains("DeferredHolder") &&
+                    executableSegment.contains("Enchantment") &&
+                    executableSegment.contains("ENCHANTMENTS.register(")
+            }
+            .toList()
+        val entries = entryMatches.map { it.groupValues[1] to it.groupValues[2] }
         if (entries.isEmpty()) return source
 
         val helper = """
@@ -3168,37 +3238,46 @@ private static net.minecraft.core.Holder<Enchantment> holder(net.minecraft.world
     }
         """.trimIndent()
 
-        var result = registerPattern.replace(source, helper)
-        result = entryPattern.replace(result) { match ->
+        val replacements = mutableListOf(registerMatch.range to helper)
+        for (match in entryMatches) {
             val name = match.groupValues[1]
             val registryName = match.groupValues[2]
-            """
+            replacements += match.range to """
 public static final net.minecraft.resources.ResourceKey<Enchantment> $name =
             net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,
                     net.minecraft.resources.ResourceLocation.fromNamespaceAndPath($modIdExpression, "$registryName"));
             """.trimIndent()
         }
+        var result = source
+        for ((range, replacement) in replacements.sortedByDescending { it.first.first }) {
+            result = result.replaceRange(range, replacement)
+        }
         val keys = entries.joinToString(", ") { it.first }
-        if (keys.isNotBlank() && !Regex("""\bENCHANTMENTS\s*=\s*java\.util\.List\.of\(""").containsMatchIn(result)) {
+        if (keys.isNotBlank() &&
+            !Regex("""\bENCHANTMENTS\s*=\s*java\.util\.List\.of\(""").containsMatchIn(maskJavaCommentsAndLiterals(result))) {
             val listField = """
 
 public static final java.util.List<net.minecraft.resources.ResourceKey<Enchantment>> ENCHANTMENTS =
             java.util.List.of($keys);
             """.trimEnd()
-            val insertAt = result.lastIndexOf('}')
+            val insertAt = maskJavaCommentsAndLiterals(result).lastIndexOf('}')
             if (insertAt >= 0) {
                 result = result.substring(0, insertAt).trimEnd() + "\n" + listField + "\n" + result.substring(insertAt)
             }
         }
 
         for ((name, _) in entries) {
-            result = Regex("""stack\.getEnchantmentLevel\(\s*${Regex.escape(name)}\.get\(\)\s*\)""")
-                .replace(result, "stack.getEnchantmentLevel(holder(level, $name))")
-            result = Regex("""stack\.enchant\(\s*${Regex.escape(name)}\.get\(\)\s*,""")
-                .replace(result, "stack.enchant(holder(level, $name),")
-            result = Regex(
+            result = replaceExecutableRegex(
+                result,
+                Regex("""stack\.getEnchantmentLevel\(\s*${Regex.escape(name)}\.get\(\)\s*\)""")
+            ) { "stack.getEnchantmentLevel(holder(level, $name))" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""stack\.enchant\(\s*${Regex.escape(name)}\.get\(\)\s*,""")
+            ) { "stack.enchant(holder(level, $name)," }
+            result = replaceExecutableRegex(result, Regex(
                 """public\s+static\s+boolean\s+([A-Za-z_$][\w$]*)\s*\(\s*Enchantment\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*return\s+\2\s*==\s*${Regex.escape(name)}\.get\(\)\s*;\s*\}"""
-            ).replace(result) { match ->
+            )) { match ->
                 val methodName = match.groupValues[1]
                 val paramName = match.groupValues[2]
                 """

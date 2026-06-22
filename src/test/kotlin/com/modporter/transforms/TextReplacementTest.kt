@@ -1883,6 +1883,118 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `custom enchantment data ignores registrations declared only in text blocks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("FlameEnchantment.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+
+            public class FlameEnchantment extends Enchantment {
+                public FlameEnchantment() {
+                    super(Rarity.COMMON, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.CHEST});
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Docs.java").writeText("""
+            package com.example;
+
+            public final class Docs {
+                private static final String README = ${"\"\"\""}
+                    import net.minecraft.world.item.enchantment.Enchantment;
+                    import net.neoforged.neoforge.registries.DeferredHolder;
+                    import net.neoforged.neoforge.registries.DeferredRegister;
+
+                    public final class ModEnchantments {
+                        public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                        public static final DeferredHolder<Enchantment, Enchantment> FLAME = ENCHANTMENTS.register("flame", FlameEnchantment::new);
+                    }
+                    ${"\"\"\""};
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
+        val docs = srcDir.resolve("Docs.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "text-custom-enchantment-data" }, result.changes.joinToString("\n"))
+        assertTrue(docs.contains("DeferredHolder<Enchantment, Enchantment> FLAME"))
+        assertFalse(docs.contains("ResourceKey<Enchantment>"))
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/flame.json").exists())
+    }
+
+    @Test
+    fun `custom enchantment data ignores item registry entries declared only in text blocks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                public static final EnchantmentCategory BLOCK_AND_CHAIN = EnchantmentCategory.create("example_block_and_chain", item -> item instanceof ChainBlockItem);
+                public static final DeferredHolder<Enchantment, Enchantment> DESTRUCTION = ENCHANTMENTS.register("destruction", DestructionEnchantment::new);
+            }
+
+            class DestructionEnchantment extends Enchantment {
+                DestructionEnchantment() {
+                    super(Rarity.RARE, ModEnchantments.BLOCK_AND_CHAIN, new EquipmentSlot[]{EquipmentSlot.MAINHAND});
+                }
+            }
+
+            class ChainBlockItem {
+            }
+        """.trimIndent())
+        srcDir.resolve("Docs.java").writeText("""
+            package com.example;
+
+            public final class Docs {
+                private static final String README = ${"\"\"\""}
+                    import net.minecraft.world.item.Item;
+                    import net.neoforged.neoforge.registries.DeferredHolder;
+                    import net.neoforged.neoforge.registries.DeferredRegister;
+
+                    public final class ModItems {
+                        public static final DeferredRegister<Item> ITEMS = DeferredRegister.create(ForgeRegistries.ITEMS, ExampleMod.MODID);
+                        public static final DeferredHolder<Item, Item> BLOCK_AND_CHAIN = ITEMS.register("block_and_chain", () -> new ChainBlockItem());
+                    }
+                    ${"\"\"\""};
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
+
+        assertTrue(
+            result.errors.any { it.contains("item class 'ChainBlockItem' has no source registry entry") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/destruction.json").exists())
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/tags/item/enchantable/destruction.json").exists())
+    }
+
+    @Test
     fun `legacy enchantment category runtime checks migrate to holder item support`() {
         val projectDir = createTestFile("""
             package com.example;

@@ -9117,12 +9117,30 @@ class MappingCompletenessTest {
         val context = functionBody("legacyJavaContext")
         val modIds = functionBody("detectLegacyJavaModIds")
         val classIndex = functionBody("indexJavaClassSources")
+        val registrations = functionBody("collectLegacyCustomEnchantmentRegistrations")
+        val categories = functionBody("collectLegacyEnchantmentCategories")
+        val registryEntries = functionBody("collectLegacyRegistryEntries")
+        val itemEntries = functionBody("collectLegacyItemRegistryEntries")
+        val resourceKeys = functionBody("migrateCustomEnchantmentResourceKeys")
         val forbidden = listOf(
             "raw package scan" to (packageName to Regex("""\.find\(source\)""")),
             "raw import scan" to (context to Regex("""\.findAll\(source\)""")),
             "raw mod id constant scan" to (modIds to Regex("""\.findAll\(source\)""")),
             "raw mod annotation scan" to (modIds to Regex("""\.find\(source\)""")),
-            "raw class source scan" to (classIndex to Regex("""classPattern\.findAll\(source\)"""))
+            "raw class source scan" to (classIndex to Regex("""classPattern\.findAll\(source\)""")),
+            "raw custom enchantment register prefilter" to (registrations to Regex("""source\.contains\("DeferredRegister"\)""")),
+            "raw custom enchantment register scan" to (registrations to Regex("""registerPattern\.findAll\(source\)""")),
+            "raw custom enchantment entry scan" to (registrations to Regex("""entryPattern\.findAll\(source\)""")),
+            "raw enchantment category scan" to (categories to Regex("""categoryPattern\.findAll\(source\)""")),
+            "raw registry register scan" to (registryEntries to Regex("""registerPattern\.findAll\(source\)""")),
+            "raw registry entry scan" to (registryEntries to Regex("""entryPattern\.findAll\(source\)""")),
+            "raw item register scan" to (itemEntries to Regex("""registerPattern\.findAll\(source\)""")),
+            "raw item entry scan" to (itemEntries to Regex("""entryPattern\.findAll\(source\)""")),
+            "raw resource key prefilter" to (resourceKeys to Regex("""source\.contains\("DeferredRegister<Enchantment>"\)""")),
+            "raw resource key register scan" to (resourceKeys to Regex("""registerPattern\.find\(source\)""")),
+            "raw resource key entry scan" to (resourceKeys to Regex("""entryPattern\.findAll\(source\)""")),
+            "raw resource key register replacement" to (resourceKeys to Regex("""registerPattern\.replace\(source""")),
+            "raw resource key entry replacement" to (resourceKeys to Regex("""entryPattern\.replace\(result"""))
         )
         val offenders = forbidden
             .filter { (_, scoped) -> scoped.second.containsMatchIn(scoped.first) }
@@ -9143,7 +9161,38 @@ class MappingCompletenessTest {
                 modIds.contains("executableSegment.contains(\"@Mod\")") &&
                 modIds.contains("executableSegment.contains(\"class\")") &&
                 classIndex.contains("val executableSource = maskJavaCommentsAndLiterals(source)") &&
-                classIndex.contains("classPattern.findAll(executableSource)"),
+                classIndex.contains("classPattern.findAll(executableSource)") &&
+                registrations.contains("val code = maskJavaComments(source)") &&
+                registrations.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                registrations.contains("executableCode.contains(\"DeferredRegister\")") &&
+                registrations.contains("registerPattern.findAll(code)") &&
+                registrations.contains("entryPattern.findAll(code)") &&
+                registrations.contains("val registerSegment = executableCode.substring(registerMatch.range.first, registerMatch.range.last + 1)") &&
+                registrations.contains("val entrySegment = executableCode.substring(entryMatch.range.first, entryMatch.range.last + 1)") &&
+                categories.contains("val code = maskJavaComments(source)") &&
+                categories.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                categories.contains("categoryPattern.findAll(code)") &&
+                categories.contains("val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)") &&
+                categories.contains("executableSegment.contains(\"EnchantmentCategory\")") &&
+                registryEntries.contains("val code = maskJavaComments(source)") &&
+                registryEntries.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                registryEntries.contains("registerPattern.findAll(code)") &&
+                registryEntries.contains("entryPattern.findAll(code)") &&
+                registryEntries.contains("source = code") &&
+                itemEntries.contains("val code = maskJavaComments(source)") &&
+                itemEntries.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                itemEntries.contains("registerPattern.findAll(code)") &&
+                itemEntries.contains("entryPattern.findAll(code)") &&
+                itemEntries.contains("source = code") &&
+                resourceKeys.contains("val code = maskJavaComments(source)") &&
+                resourceKeys.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                resourceKeys.contains("executableCode.contains(\"DeferredRegister<Enchantment>\")") &&
+                resourceKeys.contains("registerPattern.find(code)") &&
+                resourceKeys.contains("entryPattern.findAll(code)") &&
+                resourceKeys.contains("val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)") &&
+                resourceKeys.contains("val replacements = mutableListOf(registerMatch.range to helper)") &&
+                resourceKeys.contains("replacements.sortedByDescending") &&
+                resourceKeys.contains("replaceExecutableRegex("),
             "Custom enchantment Java source evidence must come from executable Java, with string values read only from comment-masked source"
         )
         assertTrue(
