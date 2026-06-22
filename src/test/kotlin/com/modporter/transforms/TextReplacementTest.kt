@@ -4257,6 +4257,66 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `condition serializer migration ignores comments and text blocks when deriving codec shape`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.neoforge.common.conditions.ICondition;
+            import net.neoforged.neoforge.common.conditions.IConditionSerializer;
+
+            public class TestMod implements ICondition {
+                private static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath("example", "enabled");
+                private static final String DOC = ${"\"\"\""}
+                    public static final TestMod INSTANCE = new TestMod();
+                    public MapCodec<? extends ICondition> codec()
+                    ${"\"\"\""};
+
+                @Override
+                public ResourceLocation getID() {
+                    return ID;
+                }
+
+                @Override
+                public boolean test(IContext context) {
+                    return true;
+                }
+
+                public static class Serializer implements IConditionSerializer<TestMod> {
+                    @Override
+                    public ResourceLocation getID() {
+                        return ID;
+                    }
+
+                    @Override
+                    public TestMod read(JsonObject json) {
+                        return new TestMod();
+                    }
+
+                    @Override
+                    public void write(JsonObject json, TestMod value) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "neoforge-condition-serializer-mapcodec" })
+        assertTrue(transformed.contains("public static final MapCodec<TestMod> CODEC = MapCodec.unit(new TestMod());"), transformed)
+        assertFalse(transformed.contains("MapCodec.unit(INSTANCE)"), transformed)
+        assertEquals(2, Regex("""MapCodec<\? extends ICondition>\s+codec\(\)""").findAll(transformed).count(), transformed)
+        assertTrue(transformed.contains("public static final TestMod INSTANCE = new TestMod();"), transformed)
+        assertFalse(transformed.contains("IConditionSerializer"), transformed)
+        assertFalse(transformed.contains("class Serializer"), transformed)
+    }
+
+    @Test
     fun `partial nbt ingredient helpers migrate to data component ingredients`() {
         val projectDir = createTestFile("""
             package com.example;

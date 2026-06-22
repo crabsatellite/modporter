@@ -1836,9 +1836,9 @@ ${codecFields.joinToString(",\n")}
         val executableCode = maskJavaCommentsAndLiterals(source)
         val match = Regex("""(?m)^[ \t]*(?:public|protected|private)?\s*static\s+class\s+${Regex.escape(simpleName)}\b""")
             .find(executableCode) ?: return null
-        val openBrace = source.indexOf('{', match.range.last)
+        val openBrace = executableCode.indexOf('{', match.range.last)
         if (openBrace < 0) return null
-        val closeBrace = findMatchingBrace(source, openBrace)
+        val closeBrace = findMatchingBrace(executableCode, openBrace)
         if (closeBrace < 0) return null
         return source.substring(match.range.first, closeBrace + 1)
     }
@@ -1848,28 +1848,30 @@ ${codecFields.joinToString(",\n")}
         val match = Regex("""(?m)^[ \t]*(?:public|protected|private)?\s*static\s+class\s+${Regex.escape(simpleName)}\b""")
             .find(executableCode) ?: return source
         val start = source.lastIndexOf('\n', match.range.first).let { if (it >= 0) it else match.range.first }
-        val openBrace = source.indexOf('{', match.range.last)
+        val openBrace = executableCode.indexOf('{', match.range.last)
         if (openBrace < 0) return source
-        val closeBrace = findMatchingBrace(source, openBrace)
+        val closeBrace = findMatchingBrace(executableCode, openBrace)
         if (closeBrace < 0) return source
         val end = if (closeBrace + 1 < source.length && source[closeBrace + 1] == '\n') closeBrace + 2 else closeBrace + 1
         return source.removeRange(start, end)
     }
 
     private fun migrateNeoForgeConditionSerializerCodecs(source: String): String {
-        if (!source.contains("implements ICondition") || !source.contains("IConditionSerializer")) {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("implements ICondition") || !executableCode.contains("IConditionSerializer")) {
             return source
         }
         val className = javaTopLevelTypeName(source) ?: return source
         val serializer = innerClassText(source, "Serializer") ?: return source
+        val executableSerializer = maskJavaCommentsAndLiterals(serializer)
         if (!Regex("""implements\s+IConditionSerializer<\s*${Regex.escape(className)}\s*>""")
-                .containsMatchIn(serializer)) {
+                .containsMatchIn(executableSerializer)) {
             return source
         }
 
         val codecValue = when {
-            Regex("""public\s+static\s+final\s+${Regex.escape(className)}\s+INSTANCE\b""").containsMatchIn(source) -> "INSTANCE"
-            Regex("""return\s+new\s+${Regex.escape(className)}\s*\(\s*\)\s*;""").containsMatchIn(serializer) -> "new $className()"
+            Regex("""public\s+static\s+final\s+${Regex.escape(className)}\s+INSTANCE\b""").containsMatchIn(executableCode) -> "INSTANCE"
+            Regex("""return\s+new\s+${Regex.escape(className)}\s*\(\s*\)\s*;""").containsMatchIn(executableSerializer) -> "new $className()"
             else -> return source
         }
 
@@ -1879,7 +1881,8 @@ ${codecFields.joinToString(",\n")}
             "public static final MapCodec<$className> CODEC = MapCodec.unit($codecValue);",
             insertAfterInstance = codecValue == "INSTANCE"
         )
-        if (!result.contains("MapCodec<? extends ICondition> codec()")) {
+        val executableResult = maskJavaCommentsAndLiterals(result)
+        if (!executableResult.contains("MapCodec<? extends ICondition> codec()")) {
             result = insertMethodAfterStaticCodec(
                 result,
                 className,
@@ -1911,11 +1914,12 @@ ${codecFields.joinToString(",\n")}
         fieldSource: String,
         insertAfterInstance: Boolean
     ): String {
-        if (Regex("""MapCodec<\s*${Regex.escape(className)}\s*>\s+CODEC""").containsMatchIn(source)) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (Regex("""MapCodec<\s*${Regex.escape(className)}\s*>\s+CODEC""").containsMatchIn(executableCode)) return source
         if (insertAfterInstance) {
             val instanceField = Regex(
                 """(?m)^[ \t]*(?:public|protected|private)\s+static\s+final\s+${Regex.escape(className)}\s+INSTANCE\s*=\s*[^;\r\n]+;\s*$"""
-            ).find(source)
+            ).find(executableCode)
             if (instanceField != null) {
                 val insertAt = instanceField.range.last + 1
                 return source.substring(0, insertAt) + "\n" + fieldSource.trimEnd() + "\n" + source.substring(insertAt)
@@ -1925,17 +1929,20 @@ ${codecFields.joinToString(",\n")}
     }
 
     private fun replaceUnusedResourceLocationIdConstantWithConditionId(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val match = Regex(
             """(?m)^[ \t]*(?:private|protected|public)\s+static\s+final\s+ResourceLocation\s+([A-Za-z_$][\w$]*)\s*=\s*[^;\r\n]+;\s*\r?\n"""
-        ).find(source) ?: return source
+        ).find(executableCode) ?: return source
         val name = match.groupValues[1]
+        val declaration = source.substring(match.range.first, match.range.last + 1)
         val withoutField = source.removeRange(match.range)
         val bodyWithoutImports = withoutField.lines()
             .filterNot { it.trimStart().startsWith("import ") }
             .joinToString("\n")
-        if (Regex("""\b${Regex.escape(name)}\b""").containsMatchIn(bodyWithoutImports)) return source
-        val path = inferResourceLocationPath(match.value) ?: return withoutField
-        val indent = Regex("""(?m)^([ \t]*)""").find(match.value)?.groupValues?.get(1).orEmpty()
+        val executableBodyWithoutImports = maskJavaCommentsAndLiterals(bodyWithoutImports)
+        if (Regex("""\b${Regex.escape(name)}\b""").containsMatchIn(executableBodyWithoutImports)) return source
+        val path = inferResourceLocationPath(declaration) ?: return source
+        val indent = Regex("""(?m)^([ \t]*)""").find(declaration)?.groupValues?.get(1).orEmpty()
         val replacement = "${indent}public static final String CONDITION_ID = \"$path\";\n"
         return source.replaceRange(match.range, replacement)
     }
@@ -1950,9 +1957,10 @@ ${codecFields.joinToString(",\n")}
     }
 
     private fun insertMethodAfterStaticCodec(source: String, className: String, methodSource: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
         val codecMatch = Regex(
             """public\s+static\s+final\s+MapCodec<\s*${Regex.escape(className)}\s*>\s+CODEC\s*=\s*[\s\S]*?;"""
-        ).find(source) ?: return source
+        ).find(executableCode) ?: return source
         val insertAt = codecMatch.range.last + 1
         return source.substring(0, insertAt) + "\n\n" + methodSource.trimEnd() + "\n" + source.substring(insertAt)
     }

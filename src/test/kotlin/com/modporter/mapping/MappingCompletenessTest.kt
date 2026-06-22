@@ -3127,6 +3127,52 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `condition serializer codec migrations use executable structure`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
+            .readText()
+        val start = source.indexOf("private fun javaTopLevelTypeName")
+        assertTrue(start >= 0, "javaTopLevelTypeName is missing")
+        val end = source.indexOf("private data class LegacyCustomEnchantmentRegistration", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw condition prefilter" to """source.contains("implements ICondition")""",
+            "raw serializer prefilter" to """source.contains("IConditionSerializer")""",
+            "raw serializer interface scan" to "containsMatchIn(serializer)",
+            "raw instance scan" to "containsMatchIn(source) -> \"INSTANCE\"",
+            "raw codec method scan" to """result.contains("MapCodec<? extends ICondition> codec()")""",
+            "raw CODEC field scan" to "containsMatchIn(source)) return source",
+            "raw field lookup" to ".find(source)",
+            "raw brace matching" to "findMatchingBrace(source, openBrace)",
+            "raw ID reference scan" to "containsMatchIn(bodyWithoutImports)",
+            "unproven ID deletion fallback" to "?: return withoutField"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val executableSerializer = maskJavaCommentsAndLiterals(serializer)") &&
+                body.contains("containsMatchIn(executableSerializer)") &&
+                body.contains("containsMatchIn(executableCode) -> \"INSTANCE\"") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("if (!executableResult.contains(\"MapCodec<? extends ICondition> codec()\"))") &&
+                body.contains("findMatchingBrace(executableCode, openBrace)") &&
+                body.contains("val declaration = source.substring(match.range.first, match.range.last + 1)") &&
+                body.contains("val executableBodyWithoutImports = maskJavaCommentsAndLiterals(bodyWithoutImports)") &&
+                body.contains("val path = inferResourceLocationPath(declaration) ?: return source"),
+            "Condition serializer codec migrations must derive class, field, method, and ID evidence from executable Java structure"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Condition serializer codec migrations must not use comments, strings, or unresolved ID deletion as structural evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `loot conditional function codec migrations do not synthesize member names`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
