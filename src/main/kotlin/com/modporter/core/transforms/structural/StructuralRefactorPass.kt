@@ -41836,15 +41836,8 @@ $writeLines
         return result
     }
 
-    private fun replaceMethodBody(source: String, methodName: String, replacement: String): String {
-        val pattern = Regex("""(?m)(?:@\w+(?:\([^)]*\))?\s*)*(?:public|private|protected)\s+(?:static\s+)?[\w<>\[\].?]+\s+${Regex.escape(methodName)}\s*\(""")
-        val match = pattern.find(source) ?: return source
-        val openBrace = source.indexOf('{', match.range.first)
-        if (openBrace < 0) return source
-        val closeBrace = findMatchingBrace(source, openBrace)
-        if (closeBrace < 0) return source
-        return source.substring(0, match.range.first) + replacement + source.substring(closeBrace + 1)
-    }
+    private fun replaceMethodBody(source: String, methodName: String, replacement: String): String =
+        replaceExecutableMethodBody(source, methodName, replacement)
 
     private fun replaceExecutableMethodBody(source: String, methodName: String, replacement: String): String {
         val pattern = Regex("""(?m)(?:@\w+(?:\([^)]*\))?\s*)*(?:public|private|protected)\s+(?:static\s+)?[\w<>\[\].?]+\s+${Regex.escape(methodName)}\s*\(""")

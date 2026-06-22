@@ -10826,6 +10826,7 @@ bus.addListener(ActualListenerRegistry::register);
 
     @Test
     fun `migrates brewing registration to NeoForge brewing event`() {
+        val textBlockDelimiter = "\"\"\""
         val projectDir = createFile("BrewingSurface.java", """
             package com.example;
 
@@ -10838,6 +10839,11 @@ bus.addListener(ActualListenerRegistry::register);
 
             public class BrewingSurface {
                 private static final String DOC = "BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.DOC.get()), Ingredient.EMPTY, ExampleItems.DOC_RESULT.get())";
+                private static final String METHOD_DOC = $textBlockDelimiter
+                    private void registerBrewingRecipes(final FMLCommonSetupEvent fakeEvent) {
+                        BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.DOC.get()), Ingredient.EMPTY, ExampleItems.DOC_RESULT.get());
+                    }
+                    $textBlockDelimiter;
 
                 public BrewingSurface() {
                     NeoForge.EVENT_BUS.register(this);
@@ -10878,6 +10884,9 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("event.getBuilder().addRecipe(Ingredient.of(ExampleItems.BASE.get()), Ingredient.of(ExampleItems.BOOST.get()), ExampleItems.RESULT.get().getDefaultInstance());"))
         assertTrue(migrated.contains("event.getBuilder().addRecipe(new CustomFluidBrewingRecipe());"))
         assertTrue(migrated.contains("""private static final String DOC = "BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.DOC.get()), Ingredient.EMPTY, ExampleItems.DOC_RESULT.get())";"""))
+        assertTrue(migrated.contains("private static final String METHOD_DOC = \"\"\""))
+        assertTrue(migrated.contains("private void registerBrewingRecipes(final FMLCommonSetupEvent fakeEvent)"))
+        assertTrue(migrated.contains("BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.DOC.get()), Ingredient.EMPTY, ExampleItems.DOC_RESULT.get());"))
         assertFalse(migrated.contains("event.getBuilder().addRecipe(Ingredient.of(ExampleItems.DOC.get())"))
         assertFalse(migrated.contains("HONEY_BATH_BOTTLE"))
         assertFalse(migrated.contains("MILK_BATH_BOTTLE"))

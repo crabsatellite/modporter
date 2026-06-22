@@ -4391,6 +4391,36 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `structural method body replacement helper uses executable source evidence`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun replaceMethodBody")
+        assertTrue(start >= 0, "replaceMethodBody is missing")
+        val end = source.indexOf("private fun replaceExecutableMethodBody", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw method declaration scan" to ".find(source)",
+            "raw method open brace scan" to "source.indexOf('{', match.range.first)",
+            "raw method brace matching" to "findMatchingBrace(source, openBrace)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("replaceExecutableMethodBody(source, methodName, replacement)"),
+            "Structural method body replacement must locate declarations and braces in executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Structural method body replacement must not use comments, strings, or text blocks as method evidence: $offenders"
+        )
+    }
+
+    @Test
     fun `legacy registry utility migrations use executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
