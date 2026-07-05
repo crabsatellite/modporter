@@ -72,12 +72,57 @@ class BuildSystemTest {
 
         assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
         assertTrue(result.changes.any { it.ruleId == "build-remove-buildscript" })
-        assertTrue(content.contains("id(\"net.neoforged.moddev\") version \"2.0.140\""), content)
+        assertTrue(content.contains("id 'net.neoforged.moddev' version '2.0.140'"), content)
         assertTrue(content.contains("implementation \"example:library:1.0\""), content)
         assertFalse(content.contains("buildscript"), content)
         assertFalse(content.contains("ForgeGradle"), content)
         assertFalse(content.contains("apply plugin: 'net.minecraftforge.gradle'"), content)
         assertFalse(content.contains("documentation } repositories"), content)
+    }
+
+    @Test
+    fun `hybrid buildscript with existing plugins block merges ModDev into plugins block`() {
+        val projectDir = tempDir.resolve("hybrid-old-style")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            buildscript {
+                repositories {
+                    maven { url = 'https://maven.minecraftforge.net' }
+                    maven { url = 'https://repo.spongepowered.org/repository/maven-public/' }
+                    mavenCentral()
+                }
+                dependencies {
+                    classpath group: 'net.minecraftforge.gradle', name: 'ForgeGradle', version: '5.1.+'
+                    classpath 'org.parchmentmc:librarian:1.+'
+                    classpath 'org.spongepowered:mixingradle:0.7-SNAPSHOT'
+                }
+            }
+            // Only edit below this line, the above code adds and enables the necessary things for Forge to be setup.
+            plugins {
+                id 'eclipse'
+                id 'maven-publish'
+            }
+            apply plugin: 'net.minecraftforge.gradle'
+            apply plugin: 'org.parchmentmc.librarian.forgegradle'
+            apply plugin: 'org.spongepowered.mixin'
+
+            version = '1.0.0'
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+        val pluginsBlock = content.substring(content.indexOf("plugins {"), content.indexOf("}", content.indexOf("plugins {")) + 1)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-merge-plugins-block" })
+        assertTrue(pluginsBlock.contains("id 'net.neoforged.moddev' version '2.0.140'"), content)
+        assertTrue(pluginsBlock.contains("id 'java-library'"), content)
+        assertEquals(content.indexOf("plugins {"), content.lastIndexOf("plugins {"), content)
+        assertFalse(content.contains("buildscript"), content)
+        assertFalse(content.contains("apply plugin: 'net.minecraftforge.gradle'"), content)
+        assertFalse(content.contains("apply plugin: 'org.parchmentmc.librarian.forgegradle'"), content)
+        assertFalse(content.contains("apply plugin: 'org.spongepowered.mixin'"), content)
+        assertFalse(Regex("""(?m)^[ \t]*id\s*\(\s*["']net\.neoforged\.moddev["']\s*\)""").containsMatchIn(content), content)
     }
 
     @Test
@@ -275,6 +320,8 @@ class BuildSystemTest {
             minecraft_version=1.20.1
             nitrogen_version=1.20.1-1.0.12-neoforge
             cumulus_version=1.20.1-1.0.1-neoforge
+            curios_version=5.12.0+1.20.1
+            terrablender_version=1.20.1-3.0.1.7
         """.trimIndent())
 
         val result = pass.apply(projectDir)
@@ -283,8 +330,12 @@ class BuildSystemTest {
         assertTrue(result.changes.any { it.ruleId == "build-props-dependency-version" })
         assertTrue(content.contains("nitrogen_version=1.21.1-1.1.25-neoforge"), content)
         assertTrue(content.contains("cumulus_version=1.21.1-2.0.8-neoforge"), content)
+        assertTrue(content.contains("curios_version=9.2.3+1.21.1"), content)
+        assertTrue(content.contains("terrablender_version=1.21.1-4.1.0.8"), content)
         assertFalse(content.contains("1.20.1-1.0.12-neoforge"), content)
         assertFalse(content.contains("1.20.1-1.0.1-neoforge"), content)
+        assertFalse(content.contains("5.12.0+1.20.1"), content)
+        assertFalse(content.contains("1.20.1-3.0.1.7"), content)
     }
 
     @Test
@@ -3387,6 +3438,7 @@ class BuildSystemTest {
             public net.minecraft.client.Camera m_90568_(DDD)V # move
             public net.minecraft.client.Camera m_90572_(FF)V # setRotation
             public net.minecraft.client.Camera m_90566_(D)D # getMaxZoom
+            public net.minecraft.client.renderer.entity.EntityRenderDispatcher f_114362_ # renderers
             public net.minecraft.client.renderer.entity.EntityRenderDispatcher f_114363_ # playerRenderers
             public net.minecraft.client.renderer.entity.player.PlayerRenderer m_117775_(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ILnet/minecraft/client/player/AbstractClientPlayer;Lnet/minecraft/client/model/geom/ModelPart;Lnet/minecraft/client/model/geom/ModelPart;)V # renderHand
         """.trimIndent())
@@ -3399,13 +3451,54 @@ class BuildSystemTest {
         assertTrue(at.contains("public net.minecraft.client.Camera move(FFF)V # move"), at)
         assertTrue(at.contains("public net.minecraft.client.Camera setRotation(FF)V # setRotation"), at)
         assertTrue(at.contains("public net.minecraft.client.Camera getMaxZoom(F)F # getMaxZoom"), at)
+        assertTrue(at.contains("public net.minecraft.client.renderer.entity.EntityRenderDispatcher renderers # renderers"), at)
         assertTrue(at.contains("public net.minecraft.client.renderer.entity.EntityRenderDispatcher playerRenderers # playerRenderers"), at)
         assertTrue(at.contains("public net.minecraft.client.renderer.entity.player.PlayerRenderer renderHand(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ILnet/minecraft/client/player/AbstractClientPlayer;Lnet/minecraft/client/model/geom/ModelPart;Lnet/minecraft/client/model/geom/ModelPart;)V # renderHand"), at)
         assertFalse(at.contains("m_90568_"), at)
         assertFalse(at.contains("m_90572_"), at)
         assertFalse(at.contains("m_90566_"), at)
+        assertFalse(at.contains("f_114362_"), at)
         assertFalse(at.contains("f_114363_"), at)
         assertFalse(at.contains("m_117775_"), at)
+    }
+
+    @Test
+    fun `adds entity render dispatcher renderers access transformer when source uses renderer map`() {
+        val projectDir = tempDir.resolve("entity-renderer-dispatcher-renderers-at")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.neoforged.moddev' version '2.0.107'
+            }
+        """.trimIndent())
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RendererLookup.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.renderer.entity.EntityRenderDispatcher;
+            import net.minecraft.world.entity.EntityType;
+
+            public class RendererLookup {
+                public Object direct(EntityType<?> type) {
+                    return Minecraft.getInstance().getEntityRenderDispatcher().renderers.get(type);
+                }
+
+                public Object typed(EntityRenderDispatcher dispatcher, EntityType<?> type) {
+                    return dispatcher.renderers.get(type);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        val build = projectDir.resolve("build.gradle").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.client.renderer.entity.EntityRenderDispatcher renderers"), at)
+        assertTrue(build.contains("accessTransformers"), build)
     }
 
     @Test
@@ -5168,6 +5261,43 @@ class BuildSystemTest {
         assertTrue(props.contains("cumulus_version=1.21.1-2.0.8-neoforge"), props)
         assertFalse(build.contains("fg.deobf"), build)
         assertFalse(props.contains("1.20.1-1.0"), props)
+    }
+
+    @Test
+    fun `resolves TerraBlender and Curios Forge coordinates to target NeoForge artifacts`() {
+        val projectDir = tempDir.resolve("p19-btv-public-libraries")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                implementation fg.deobf('com.github.glitchfiend:TerraBlender-forge:1.20.1-3.0.1.7')
+                compileOnly(fg.deobf("top.theillusivec4.curios:curios-forge:${'$'}{curios_version}:api"))
+                runtimeOnly(fg.deobf("top.theillusivec4.curios:curios-forge:${'$'}{curios_version}"))
+            }
+        """.trimIndent())
+        projectDir.resolve("gradle.properties").writeText("""
+            minecraft_version=1.20.1
+            curios_version=5.12.0+1.20.1
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val build = projectDir.resolve("build.gradle").readText()
+        val props = projectDir.resolve("gradle.properties").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(build.contains("""implementation "com.github.glitchfiend:TerraBlender-neoforge:1.21.1-4.1.0.8""""))
+        assertTrue(build.contains("""compileOnly "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1:api""""))
+        assertTrue(build.contains("""runtimeOnly "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1""""))
+        assertTrue(build.contains("https://maven.minecraftforge.net/releases"), build)
+        assertTrue(build.contains("https://maven.theillusivec4.top/"), build)
+        assertTrue(props.contains("curios_version=9.2.3+1.21.1"), props)
+        assertFalse(build.contains("TerraBlender-forge"), build)
+        assertFalse(build.contains("curios-forge"), build)
+        assertFalse(build.contains("fg.deobf"), build)
     }
 
     @Test

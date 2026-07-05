@@ -319,12 +319,45 @@
       "notes": "Valkyrien Skies: check Modrinth"
     },
     {
+      "forgePrefix": "com.github.glitchfiend:TerraBlender",
+      "modrinthSlug": "terrablender",
+      "packagePrefixes": [
+        "terrablender."
+      ],
+      "neoforgeCoords": [
+        { "config": "implementation", "coord": "com.github.glitchfiend:TerraBlender-neoforge:1.21.1-4.1.0.8" }
+      ],
+      "versionProperties": [
+        {
+          "name": "terrablender_version",
+          "value": "1.21.1-4.1.0.8",
+          "notes": "Public NeoForge 1.21.1 TerraBlender build"
+        }
+      ],
+      "mavenUrl": "https://maven.minecraftforge.net/releases",
+      "status": "available",
+      "notes": "TerraBlender: public NeoForge 1.21.1 library build on the Glitchfiend Maven"
+    },
+    {
       "forgePrefix": "top.theillusivec4",
       "modrinthSlug": "curios",
-      "neoforgeCoords": [],
-      "mavenUrl": null,
-      "status": "check_online",
-      "notes": "Curios API: check Modrinth"
+      "packagePrefixes": [
+        "top.theillusivec4.curios."
+      ],
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1:api" },
+        { "config": "runtimeOnly", "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1" }
+      ],
+      "versionProperties": [
+        {
+          "name": "curios_version",
+          "value": "9.2.3+1.21.1",
+          "notes": "Public NeoForge 1.21.1 Curios API/runtime build"
+        }
+      ],
+      "mavenUrl": "https://maven.theillusivec4.top/",
+      "status": "available",
+      "notes": "Curios API: public NeoForge 1.21.1 API classifier plus runtime jar"
     },
     {
       "forgePrefix": "com.blamejared.crafttweaker",

@@ -354,7 +354,7 @@ class EndVertexRemover(
                 description = "Remove endVertex() call (auto-flushed in 1.21)",
                 before = n.toString(),
                 after = replacement,
-                confidence = Confidence.MEDIUM,
+                confidence = Confidence.HIGH,
                 ruleId = "ast-remove-endvertex"
             ))
             // Return the scope expression (the object the method was called on)

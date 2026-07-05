@@ -336,6 +336,7 @@ class AstTransformTest {
         assertFalse(transformed.contains("endVertex()"))
         assertFalse(transformed.contains("endVertex() removed"))
         assertTrue(result.changes.any { it.ruleId == "ast-remove-endvertex" })
+        assertTrue(result.changes.filter { it.ruleId == "ast-remove-endvertex" }.all { it.confidence == Confidence.HIGH })
         assertFalse(result.changes.any { it.after.contains("/*") || it.after.contains("*/") })
     }
 

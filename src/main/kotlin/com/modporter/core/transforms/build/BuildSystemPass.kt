@@ -368,8 +368,8 @@ class BuildSystemPass(
         val hasApplyForgeGradle = Regex("""apply\s+plugin:\s*['"]net\.minecraftforge\.gradle['"]""").containsMatchIn(content)
         val hasPluginsBlock = Regex("""^plugins\s*\{""", RegexOption.MULTILINE).containsMatchIn(content)
 
-        if (hasBuildscript && hasApplyForgeGradle && !hasPluginsBlock) {
-            // Old-style build: remove buildscript block, remove apply plugin lines, add plugins block
+        if (hasBuildscript && hasApplyForgeGradle) {
+            // Old-style and hybrid builds: remove buildscript/apply plugin wiring and merge ModDev into plugins { }.
             content = migrateOldStyleBuild(content, file, changes)
         } else {
             // Modern plugins { } style: just replace the plugin ID
@@ -3514,6 +3514,8 @@ config="$configName"
                 "public net.minecraft.client.Camera getMaxZoom(F)F"
             "public net.minecraft.client.renderer.entity.EntityRenderDispatcher f_114363_" ->
                 "public net.minecraft.client.renderer.entity.EntityRenderDispatcher playerRenderers"
+            "public net.minecraft.client.renderer.entity.EntityRenderDispatcher f_114362_" ->
+                "public net.minecraft.client.renderer.entity.EntityRenderDispatcher renderers"
             "public net.minecraft.client.renderer.entity.player.PlayerRenderer m_117775_(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ILnet/minecraft/client/player/AbstractClientPlayer;Lnet/minecraft/client/model/geom/ModelPart;Lnet/minecraft/client/model/geom/ModelPart;)V" ->
                 "public net.minecraft.client.renderer.entity.player.PlayerRenderer renderHand(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ILnet/minecraft/client/player/AbstractClientPlayer;Lnet/minecraft/client/model/geom/ModelPart;Lnet/minecraft/client/model/geom/ModelPart;)V"
             else -> entry
@@ -3599,6 +3601,9 @@ config="$configName"
                 if (containsLevelRendererFieldAccess(source, "rainSoundTime")) {
                     entries.add("public net.minecraft.client.renderer.LevelRenderer rainSoundTime")
                 }
+                if (containsEntityRenderDispatcherRenderersAccess(source)) {
+                    entries.add("public net.minecraft.client.renderer.entity.EntityRenderDispatcher renderers")
+                }
             }
         return entries
     }
@@ -3665,6 +3670,16 @@ config="$configName"
             """(?:net\.minecraft\.client\.renderer\.)?LevelRenderer""",
             fieldName
         )
+    }
+
+    private fun containsEntityRenderDispatcherRenderersAccess(source: String): Boolean {
+        val code = maskJavaCommentsAndLiterals(source)
+        return containsTypedJavaFieldAccess(
+            source,
+            """(?:net\.minecraft\.client\.renderer\.entity\.)?EntityRenderDispatcher""",
+            "renderers"
+        ) ||
+            Regex("""\bgetEntityRenderDispatcher\s*\(\s*\)\s*\.\s*renderers\b""").containsMatchIn(code)
     }
 
     private fun containsTypedJavaFieldAccess(source: String, typePattern: String, fieldName: String): Boolean {
@@ -4874,6 +4889,7 @@ $body
         input: String, file: Path, changes: MutableList<Change>
     ): String {
         var content = input
+        val isKts = file.fileName.toString().endsWith(".kts")
 
         // 1. Remove the buildscript { } block
         val buildscriptStart = Regex("""(?:^|\n)\s*buildscript\s*\{""").find(content)
@@ -4911,25 +4927,8 @@ $body
             content = content.replace(mixinBlock.value, "")
         }
 
-        // 4. Add plugins { } block at the top, with Java 21 toolchain
-        val pluginsBlock = """plugins {
-    id 'java-library'
-    id 'eclipse'
-    id 'maven-publish'
-    id("net.neoforged.moddev") version "2.0.140"
-}
-
-java.toolchain.languageVersion = JavaLanguageVersion.of(21)
-"""
-        changes.add(Change(
-            file = file, line = 1,
-            description = "Add modern plugins { } block with NeoForge ModDev",
-            before = "buildscript { ... } + apply plugin: ...",
-            after = "plugins { id(\"net.neoforged.moddev\") ... }",
-            confidence = Confidence.HIGH,
-            ruleId = "build-add-plugins-block"
-        ))
-        content = pluginsBlock + content.trimStart()
+        // 4. Add or merge plugins { } block, with Java 21 toolchain
+        content = mergeModernPluginsBlock(content, file, isKts, changes)
 
         // 5. Remove remaining apply plugin lines that are already in plugins { }
         for (pluginId in listOf("eclipse", "maven-publish", "java-library", "java")) {
@@ -4941,6 +4940,86 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
         return content
     }
+
+    private fun mergeModernPluginsBlock(
+        input: String,
+        file: Path,
+        isKts: Boolean,
+        changes: MutableList<Change>
+    ): String {
+        val existingPlugins = Regex("""(?m)^[ \t]*plugins\s*\{""").find(input)
+        val required = listOf(
+            GradlePluginRequirement("java-library"),
+            GradlePluginRequirement("eclipse"),
+            GradlePluginRequirement("maven-publish"),
+            GradlePluginRequirement("net.neoforged.moddev", "2.0.140")
+        )
+
+        if (existingPlugins == null) {
+            val pluginLines = required.joinToString("\n") { "    ${gradlePluginDeclaration(it, isKts)}" }
+            val pluginsBlock = """
+plugins {
+$pluginLines
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+""".trimStart()
+            changes.add(Change(
+                file = file, line = 1,
+                description = "Add modern plugins { } block with NeoForge ModDev",
+                before = "buildscript { ... } + apply plugin: ...",
+                after = "plugins { id(\"net.neoforged.moddev\") ... }",
+                confidence = Confidence.HIGH,
+                ruleId = "build-add-plugins-block"
+            ))
+            return pluginsBlock + input.trimStart()
+        }
+
+        val openBrace = input.indexOf('{', existingPlugins.range.first)
+        val closeBrace = if (openBrace >= 0) findMatchingBrace(input, openBrace) else -1
+        if (closeBrace < 0) return input
+        val block = input.substring(openBrace + 1, closeBrace)
+        val additions = required.filterNot { requirement ->
+            if (requirement.id == "java-library") {
+                gradlePluginsBlockHasPlugin(block, "java") || gradlePluginsBlockHasPlugin(block, "java-library")
+            } else {
+                gradlePluginsBlockHasPlugin(block, requirement.id)
+            }
+        }
+        if (additions.isEmpty()) return input
+
+        val linePrefix = "\n" + additions.joinToString("\n") { "    ${gradlePluginDeclaration(it, isKts)}" } + "\n"
+        changes.add(Change(
+            file = file,
+            line = input.lineNumberAt(existingPlugins.range.first),
+            description = "Merge NeoForge ModDev plugin into existing plugins block",
+            before = "plugins { ... } with ForgeGradle applied outside the block",
+            after = "plugins { ... id(\"net.neoforged.moddev\") ... }",
+            confidence = Confidence.HIGH,
+            ruleId = "build-merge-plugins-block"
+        ))
+        return input.substring(0, closeBrace) + linePrefix + input.substring(closeBrace)
+    }
+
+    private data class GradlePluginRequirement(val id: String, val version: String? = null)
+
+    private fun gradlePluginDeclaration(requirement: GradlePluginRequirement, isKts: Boolean): String =
+        if (isKts) {
+            if (requirement.version == null) {
+                """id("${requirement.id}")"""
+            } else {
+                """id("${requirement.id}") version "${requirement.version}""""
+            }
+        } else {
+            if (requirement.version == null) {
+                """id '${requirement.id}'"""
+            } else {
+                """id '${requirement.id}' version '${requirement.version}'"""
+            }
+        }
+
+    private fun gradlePluginsBlockHasPlugin(block: String, pluginId: String): Boolean =
+        Regex("""\bid\s*(?:\(\s*)?['"]${Regex.escape(pluginId)}['"]""").containsMatchIn(block)
 
     /**
      * Resolve third-party dependencies: find NeoForge 1.21.1 versions and rewrite coordinates.
@@ -8287,6 +8366,14 @@ public final class LazyOptional<T> {
             return current;
         }
         throw exceptionSupplier.get();
+    }
+
+    public T get() {
+        T current = orElse(null);
+        if (current != null) {
+            return current;
+        }
+        throw new java.util.NoSuchElementException("LazyOptional is empty");
     }
 
     public Optional<T> resolve() {

@@ -573,22 +573,6 @@
       "isRegex": true
     },
     {
-      "id": "resourcelocation-new-2arg",
-      "pattern": "new ResourceLocation\\(([^()]*(?:\\([^()]*\\))*[^()]*),\\s*([^()]*(?:\\([^()]*\\))*[^()]*)\\)",
-      "replacement": "ResourceLocation.fromNamespaceAndPath($1, $2)",
-      "description": "new ResourceLocation(ns, path) -> ResourceLocation.fromNamespaceAndPath(ns, path)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "resourcelocation-new-1arg",
-      "pattern": "new ResourceLocation\\(([^()]*(?:\\([^()]*\\))*[^()]*)\\)",
-      "replacement": "ResourceLocation.parse($1)",
-      "description": "new ResourceLocation(string) -> ResourceLocation.parse(string)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "cls-RegistryObject-to-DeferredHolder-extends-block",
       "pattern": "RegistryObject<\\?\\s+extends\\s+Block>",
       "replacement": "DeferredHolder<Block, ? extends Block>",
@@ -1935,22 +1919,6 @@
       "isRegex": true
     },
     {
-      "id": "itemstack-of-compoundtag-parseoptional-player",
-      "pattern": "ItemStack\\.of\\(([^;]+?\\.getCompound\\([^)]*\\))\\)",
-      "replacement": "ItemStack.parseOptional(player.registryAccess(), $1)",
-      "description": "ItemStack.of(CompoundTag) -> parseOptional(registryAccess, tag) in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "itemstack-of-method-reference-parseoptional",
-      "pattern": "\\.map\\(ItemStack::of\\)",
-      "replacement": ".map(tag -> ItemStack.parseOptional(net.minecraft.core.RegistryAccess.EMPTY, tag))",
-      "description": "ItemStack::of method reference -> parseOptional with HolderLookup.Provider",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "itemstack-hurt-crafting-remainder-damagevalue",
       "pattern": "if \\((\\w+)\\.hurt\\(1,\\s*net\\.minecraft\\.util\\.RandomSource\\.create\\(\\),\\s*null\\)\\) \\{\\s*return ItemStack\\.EMPTY;\\s*\\}",
       "replacement": "$1.setDamageValue($1.getDamageValue() + 1);\n        if ($1.getDamageValue() >= $1.getMaxDamage()) {\n            return ItemStack.EMPTY;\n        }",
@@ -1963,38 +1931,6 @@
       "pattern": "public void appendHoverText\\(([^,]+),\\s*(?:@(?:[\\w.]+\\.)?Nullable\\s+)?(?:net\\.minecraft\\.world\\.level\\.)?Level\\s+(\\w+),",
       "replacement": "public void appendHoverText($1, Item.TooltipContext $2,",
       "description": "appendHoverText Level -> Item.TooltipContext in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "saveAdditional-add-provider",
-      "pattern": "protected void saveAdditional\\(CompoundTag (\\w+)\\)\\s*\\{",
-      "replacement": "protected void saveAdditional(CompoundTag $1, net.minecraft.core.HolderLookup.Provider registries) {",
-      "description": "BlockEntity.saveAdditional() now takes HolderLookup.Provider in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "loadAdditional-rename",
-      "pattern": "public void load\\(CompoundTag (\\w+)\\)\\s*\\{",
-      "replacement": "protected void loadAdditional(CompoundTag $1, net.minecraft.core.HolderLookup.Provider registries) {",
-      "description": "BlockEntity.load() -> loadAdditional() with HolderLookup.Provider in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "super-load-to-loadAdditional",
-      "pattern": "super\\.load\\((\\w+)\\)",
-      "replacement": "super.loadAdditional($1, registries)",
-      "description": "super.load() -> super.loadAdditional() in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "super-saveAdditional-add-provider",
-      "pattern": "super\\.saveAdditional\\((\\w+)\\)",
-      "replacement": "super.saveAdditional($1, registries)",
-      "description": "super.saveAdditional() needs provider in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -2139,14 +2075,6 @@
       "replacement": ".getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()",
       "description": "ItemStack.getOrCreateTag() -> DataComponents.CUSTOM_DATA in 1.21",
       "fileGlob": "*.java"
-    },
-    {
-      "id": "nbt-stack-setTag",
-      "pattern": "\\.setTag\\(([^()]*(?:\\([^()]*\\))*[^()]*)\\)",
-      "replacement": ".set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.of($1))",
-      "description": "ItemStack.setTag(tag) -> set(DataComponents.CUSTOM_DATA, CustomData.of(tag)) in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
     },
     {
       "id": "distexecutor-import",
@@ -2406,6 +2334,38 @@
       "fileGlob": "*.java"
     },
     {
+      "id": "gui-overlay-event-bare-type-fix",
+      "pattern": "\\bRenderGuiOverlayEvent\\b",
+      "replacement": "RenderGuiLayerEvent",
+      "description": "RenderGuiOverlayEvent -> RenderGuiLayerEvent (renamed in 1.21)",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gui-overlay-sleep-fade-type-equals",
+      "pattern": "(\\w+)\\.getOverlay\\(\\)\\s*==\\s*VanillaGuiOverlay\\.SLEEP_FADE\\.type\\(\\)",
+      "replacement": "$1.getName().equals(VanillaGuiLayers.SLEEP_OVERLAY)",
+      "description": "RenderGuiOverlayEvent#getOverlay() sleep fade equality -> RenderGuiLayerEvent#getName()",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gui-overlay-sleep-fade-type-not-equals",
+      "pattern": "(\\w+)\\.getOverlay\\(\\)\\s*!=\\s*VanillaGuiOverlay\\.SLEEP_FADE\\.type\\(\\)",
+      "replacement": "!$1.getName().equals(VanillaGuiLayers.SLEEP_OVERLAY)",
+      "description": "RenderGuiOverlayEvent#getOverlay() sleep fade inequality -> RenderGuiLayerEvent#getName()",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "gui-overlay-sleep-fade-type",
+      "pattern": "VanillaGuiOverlay\\.SLEEP_FADE\\.type\\(\\)",
+      "replacement": "VanillaGuiLayers.SLEEP_OVERLAY",
+      "description": "VanillaGuiOverlay.SLEEP_FADE.type() -> VanillaGuiLayers.SLEEP_OVERLAY",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "gui-overlay-id-equals",
       "pattern": "(\\w+)\\.getOverlay\\(\\)\\.id\\(\\)\\s*==\\s*(VanillaGuiOverlay\\.[A-Z_]+\\.id\\(\\)|[A-Za-z_$][\\w$.]*)",
       "replacement": "$1.getName().equals($2)",
@@ -2440,23 +2400,23 @@
     {
       "id": "recipe-ishapedrecipe-import-remove",
       "pattern": "import net.neoforged.neoforge.common.crafting.IShapedRecipe;",
-      "replacement": "",
-      "description": "IShapedRecipe was removed; vanilla ShapedRecipe exposes width and height in 1.21",
+      "replacement": "import net.minecraft.world.item.crafting.ShapedRecipe;",
+      "description": "IShapedRecipe was removed; vanilla ShapedRecipe covers instanceof checks in 1.21",
       "fileGlob": "*.java"
     },
     {
       "id": "recipe-ishapedrecipe-craftinginput-implements-remove",
-      "pattern": ",\\s*IShapedRecipe\\s*<\\s*CraftingInput\\s*>",
+      "pattern": ",\\s*(?:net\\.(?:minecraftforge|neoforged\\.neoforge)\\.common\\.crafting\\.)?IShapedRecipe\\s*<\\s*[^>]+\\s*>",
       "replacement": "",
-      "description": "Remove removed IShapedRecipe<CraftingInput> interface from CraftingRecipe implementations",
+      "description": "Remove removed IShapedRecipe<T> marker interface from custom recipe implementations",
       "fileGlob": "*.java",
       "isRegex": true
     },
     {
-      "id": "recipe-ishapedrecipe-to-shapedrecipe",
-      "pattern": "\\bIShapedRecipe\\s*<\\s*[^>]+\\s*>",
-      "replacement": "ShapedRecipe",
-      "description": "IShapedRecipe<T> -> ShapedRecipe",
+      "id": "recipe-ishapedrecipe-instanceof-to-shapedrecipe",
+      "pattern": "instanceof\\s+(?:net\\.(?:minecraftforge|neoforged\\.neoforge)\\.common\\.crafting\\.)?IShapedRecipe\\s*<\\s*\\?\\s*>\\s+([A-Za-z_$][\\w$]*)",
+      "replacement": "instanceof ShapedRecipe $1",
+      "description": "IShapedRecipe<?> instanceof checks migrate to vanilla ShapedRecipe",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -2915,30 +2875,6 @@
       "pattern": "event\\.accept\\((\\w+Supplier|\\w+Holder)\\)",
       "replacement": "event.accept($1.get())",
       "description": "BuildCreativeModeTabContentsEvent.accept(DeferredHolder) -> accept(DeferredHolder.get())",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "container-loadAllItems-provider",
-      "pattern": "ContainerHelper\\.loadAllItems\\(([^,\\r\\n]+),\\s*([^;\\r\\n]+)\\)",
-      "replacement": "ContainerHelper.loadAllItems($1, $2, net.minecraft.core.RegistryAccess.EMPTY)",
-      "description": "ContainerHelper.loadAllItems gained HolderLookup.Provider parameter in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "container-saveAllItems-provider",
-      "pattern": "ContainerHelper\\.saveAllItems\\(([^,\\r\\n]+),\\s*([^;\\r\\n]+)\\)",
-      "replacement": "ContainerHelper.saveAllItems($1, $2, net.minecraft.core.RegistryAccess.EMPTY)",
-      "description": "ContainerHelper.saveAllItems gained HolderLookup.Provider parameter in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "itemstack-save-compound-tag",
-      "pattern": "(stack|itemStack|item)\\.save\\((\\w+Tag)\\)",
-      "replacement": "$1.save(net.minecraft.core.RegistryAccess.EMPTY, $2)",
-      "description": "ItemStack.save() gained HolderLookup.Provider parameter in 1.21 (narrowed to stack vars)",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -3534,14 +3470,6 @@
       "isRegex": true
     },
     {
-      "id": "mobeffectinstance-save-noarg",
-      "pattern": "(\\w+)\\.save\\(new\\s+CompoundTag\\(\\)\\)",
-      "replacement": "$1.save()",
-      "description": "MobEffectInstance.save(CompoundTag) -> save() in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "blockentity-loadstatic-provider-mirrorworld",
       "pattern": "(ServerLevel\\s+mirrorWorld[\\s\\S]*?BlockEntity\\.loadStatic\\(\\s*([^,]+),\\s*([^,]+),\\s*([^\\)]+)\\s*)\\)",
       "replacement": "$1, mirrorWorld.registryAccess())",
@@ -3582,22 +3510,6 @@
       "isRegex": true
     },
     {
-      "id": "blockentity-loadadditional-provider-signature",
-      "pattern": "(?:public|protected)\\s+void\\s+load\\s*\\(\\s*((?:net\\.minecraft\\.nbt\\.)?CompoundTag\\s+\\w+)\\s*\\)",
-      "replacement": "protected void loadAdditional($1, net.minecraft.core.HolderLookup.Provider registries)",
-      "description": "BlockEntity.load(CompoundTag) override became loadAdditional(CompoundTag, HolderLookup.Provider)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "blockentity-saveadditional-provider-signature",
-      "pattern": "(public|protected)\\s+void\\s+saveAdditional\\s*\\(\\s*((?:net\\.minecraft\\.nbt\\.)?CompoundTag\\s+\\w+)\\s*\\)",
-      "replacement": "$1 void saveAdditional($2, net.minecraft.core.HolderLookup.Provider registries)",
-      "description": "BlockEntity.saveAdditional() gained HolderLookup.Provider in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "blockentity-super-ondatapacket-provider",
       "pattern": "super\\.onDataPacket\\(\\s*net\\s*,\\s*pkt\\s*\\)",
       "replacement": "super.onDataPacket(connection, pkt, lookupProvider)",
@@ -3614,42 +3526,10 @@
       "isRegex": true
     },
     {
-      "id": "blockentity-savewithoutmetadata-provider-any",
-      "pattern": "([A-Za-z_$][\\w$]*)\\.saveWithoutMetadata\\(\\)",
-      "replacement": "$1.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY)",
-      "description": "BlockEntity.saveWithoutMetadata() gained HolderLookup.Provider in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "fluidtank-readfromnbt-provider",
-      "pattern": "([A-Za-z_$][\\w$]*)\\.readFromNBT\\((?!\\s*net\\.minecraft\\.core\\.RegistryAccess\\.EMPTY\\s*,)([^;\\r\\n]+)\\)",
-      "replacement": "$1.readFromNBT(net.minecraft.core.RegistryAccess.EMPTY, $2)",
-      "description": "FluidTank.readFromNBT() gained HolderLookup.Provider in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "fluidtank-writetonbt-provider",
-      "pattern": "([A-Za-z_$][\\w$]*)\\.writeToNBT\\((?!\\s*net\\.minecraft\\.core\\.RegistryAccess\\.EMPTY\\s*,)([^;\\r\\n]+)\\)",
-      "replacement": "$1.writeToNBT(net.minecraft.core.RegistryAccess.EMPTY, $2)",
-      "description": "FluidTank.writeToNBT() gained HolderLookup.Provider in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "itemstackhandler-deserializenbt-provider",
-      "pattern": "([A-Za-z_$][\\w$]*)\\.deserializeNBT\\((?!\\s*net\\.minecraft\\.core\\.RegistryAccess\\.EMPTY\\s*,)([^;\\r\\n]+)\\)",
-      "replacement": "$1.deserializeNBT(net.minecraft.core.RegistryAccess.EMPTY, $2)",
-      "description": "ItemStackHandler.deserializeNBT() gained HolderLookup.Provider in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "itemstackhandler-serializenbt-provider",
-      "pattern": "([A-Za-z_$][\\w$]*)\\.serializeNBT\\(\\)",
-      "replacement": "$1.serializeNBT(net.minecraft.core.RegistryAccess.EMPTY)",
-      "description": "ItemStackHandler.serializeNBT() gained HolderLookup.Provider in 1.21",
+      "id": "capabilities-fluid-handler-item",
+      "pattern": "Capabilities\\.FLUID_HANDLER_ITEM",
+      "replacement": "Capabilities.FluidHandler.ITEM",
+      "description": "NeoForge 1.21 fluid item capability moved under Capabilities.FluidHandler.ITEM",
       "fileGlob": "*.java",
       "isRegex": true
     },

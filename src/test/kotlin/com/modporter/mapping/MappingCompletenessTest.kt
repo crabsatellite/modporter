@@ -6604,6 +6604,25 @@ class MappingCompletenessTest {
     }
 
     @Test
+    fun `text replacements must not inject holder lookup provider fallbacks`() {
+        val mappings = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/resources/mappings/forge2neo/text-replacements.json")
+            .readText()
+        val offenders = listOf(
+            "RegistryAccess.EMPTY" to Regex(""""replacement"\s*:\s*"[^"]*RegistryAccess\.EMPTY""").containsMatchIn(mappings),
+            "player.registryAccess()" to Regex(""""replacement"\s*:\s*"[^"]*player\.registryAccess\(\)""").containsMatchIn(mappings)
+        )
+            .filter { (_, found) -> found }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Text replacements must not manufacture HolderLookup.Provider fallbacks: $offenders"
+        )
+    }
+
+    @Test
     fun `game event listener migration uses executable source evidence`() {
         val source = Path.of("")
             .toAbsolutePath()
@@ -11278,8 +11297,13 @@ class MappingCompletenessTest {
         }
         val body = source.substring(start, end)
         val gateIndex = body.indexOf("val modNetworkFile = file.parent?.resolve(\"ModNetwork.java\")")
-        val packetEvidenceIndex = body.indexOf("val registeredPacketNames = Regex")
+        val packetEvidenceIndex = body.indexOf("val registeredPacketNames = registeredSimpleChannelPacketSimpleNames(content)")
         val wrapperIndex = body.indexOf("val newContent = buildString")
+        val helperStart = source.indexOf("private fun registeredSimpleChannelPacketSimpleNames")
+        val helperEnd = source.indexOf("private fun resourceLocationNamespaceExpression", helperStart + 1).let {
+            if (it < 0) source.length else it
+        }
+        val helperBody = if (helperStart >= 0) source.substring(helperStart, helperEnd) else ""
 
         assertTrue(
             gateIndex >= 0 &&
@@ -11289,11 +11313,14 @@ class MappingCompletenessTest {
         )
         assertTrue(
             packetEvidenceIndex >= 0 &&
-                body.contains("modNetworkText.contains(\"${'$'}packetName.TYPE\")") &&
-                body.contains("implements\\s+CustomPacketPayload") &&
-                body.contains("CustomPacketPayload.Type<${'$'}packetName>") &&
+                helperBody.contains(".registerMessage") &&
+                helperBody.contains(".messageBuilder") &&
+                body.contains("registeredPacketNamesHavePayloadEvidence") &&
+                helperBody.contains("modNetworkTexts.any { it.contains(\"${'$'}packetName.TYPE\") }") &&
+                helperBody.contains("implements\\s+CustomPacketPayload") &&
+                helperBody.contains("CustomPacketPayload.Type<${'$'}packetName>") &&
                 packetEvidenceIndex < wrapperIndex,
-            "Legacy SimpleChannel wrappers must prove registerMessage packet payloads before generating replacement wrappers"
+            "Legacy SimpleChannel wrappers must prove registered packet payloads before generating replacement wrappers"
         )
     }
 

@@ -302,8 +302,8 @@ class TextReplacementTest {
                 transformed.contains("bufferbuilder = Tesselator.getInstance().begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.PARTICLE);")
         )
         assertTrue(transformed.contains("super.tick();"))
-        assertTrue(transformed.contains("ContainerHelper.saveAllItems(tag, this.getItemStacks(), net.minecraft.core.RegistryAccess.EMPTY);"))
-        assertTrue(transformed.contains("ContainerHelper.loadAllItems(tag, this.getItemStacks(), net.minecraft.core.RegistryAccess.EMPTY);"))
+        assertTrue(transformed.contains("ContainerHelper.saveAllItems(tag, this.getItemStacks());"))
+        assertTrue(transformed.contains("ContainerHelper.loadAllItems(tag, this.getItemStacks());"))
         assertTrue(transformed.contains("NetworkRegistry.newSimpleChannel("))
         assertFalse(transformed.contains("TODO: [forge2neo]"))
         assertFalse(transformed.contains("this.getItemStacks(,"))
@@ -346,6 +346,12 @@ class TextReplacementTest {
                         event.setCanceled(true);
                     }
                 }
+
+                public static void anyOverlay(RenderGuiOverlayEvent event) {
+                    if (event.getOverlay() == VanillaGuiOverlay.SLEEP_FADE.type()) {
+                        event.setCanceled(true);
+                    }
+                }
             }
         """.trimIndent())
 
@@ -358,7 +364,9 @@ class TextReplacementTest {
         assertTrue(transformed.contains("import net.neoforged.neoforge.client.event.RenderGuiLayerEvent;"))
         assertTrue(transformed.contains("import net.neoforged.neoforge.client.gui.VanillaGuiLayers;"))
         assertTrue(transformed.contains("preOverlay(RenderGuiLayerEvent.Pre event)"))
+        assertTrue(transformed.contains("anyOverlay(RenderGuiLayerEvent event)"))
         assertTrue(transformed.contains("event.getName().equals(VanillaGuiLayers.VEHICLE_HEALTH)"))
+        assertTrue(transformed.contains("event.getName().equals(VanillaGuiLayers.SLEEP_OVERLAY)"))
         assertFalse(transformed.contains("RenderGuiOverlayEvent"))
         assertFalse(transformed.contains("VanillaGuiOverlay"))
         assertFalse(transformed.contains("getOverlay()"))
@@ -719,6 +727,72 @@ class TextReplacementTest {
         assertTrue(transformed.contains("computeIfAbsent(new SavedData.Factory<>(TestMod::new, TestMod::load), DATA_NAME"))
         assertTrue(!transformed.contains("TestMod::load,\n"))
         assertTrue(!transformed.contains("TestMod::new,\n"))
+    }
+
+    @Test
+    fun `text replacements do not migrate business load compound tag methods without structural owner evidence`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            public abstract class TestMod {
+                public abstract void load(CompoundTag tag);
+
+                public static class Memory extends TestMod {
+                    @Override
+                    public void load(CompoundTag tag) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("public abstract void load(CompoundTag tag);"), transformed)
+        assertTrue(transformed.contains("public void load(CompoundTag tag)"), transformed)
+        assertFalse(transformed.contains("loadAdditional"), transformed)
+        assertFalse(transformed.contains("HolderLookup.Provider registries"), transformed)
+    }
+
+    @Test
+    fun `text replacements do not inject registry access fallbacks for item stack serialization`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import java.util.Optional;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.item.ItemStack;
+
+            public class TestMod {
+                public void save(CompoundTag tag, ItemStack stack) {
+                    ItemStack restored = ItemStack.of(tag.getCompound("Stack"));
+                    Optional.of(tag).map(ItemStack::of);
+                    ContainerHelper.saveAllItems(tag, this.getItemStacks());
+                    ContainerHelper.loadAllItems(tag, this.getItemStacks());
+                    tag.put("Stack", stack.save(new CompoundTag()));
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("ItemStack restored = ItemStack.of(tag.getCompound(\"Stack\"));"), transformed)
+        assertTrue(transformed.contains("Optional.of(tag).map(ItemStack::of);"), transformed)
+        assertTrue(transformed.contains("ContainerHelper.saveAllItems(tag, this.getItemStacks());"), transformed)
+        assertTrue(transformed.contains("ContainerHelper.loadAllItems(tag, this.getItemStacks());"), transformed)
+        assertTrue(transformed.contains("tag.put(\"Stack\", stack.save(new CompoundTag()));"), transformed)
+        assertFalse(transformed.contains("RegistryAccess.EMPTY"), transformed)
+        assertFalse(transformed.contains("player.registryAccess()"), transformed)
     }
 
     @Test
@@ -3483,7 +3557,7 @@ class TextReplacementTest {
         assertTrue(transformed.contains("targetPlayer.disableShield();"))
         assertTrue(transformed.contains("stack.hurtAndBreak(2, player, EquipmentSlot.MAINHAND);"))
         assertTrue(transformed.contains("context.getItemInHand().hurtAndBreak(1, context.getPlayer(), EquipmentSlot.MAINHAND);"))
-        assertTrue(transformed.contains("ItemStack.parseOptional(player.registryAccess(), tag.getCompound(TAG_BLADE))"))
+        assertTrue(transformed.contains("ItemStack blade = ItemStack.of(tag.getCompound(TAG_BLADE));"))
         assertTrue(transformed.contains("copy.setDamageValue(copy.getDamageValue() + 1);"))
         assertTrue(transformed.contains("if (copy.getDamageValue() >= copy.getMaxDamage())"))
         assertFalse(transformed.contains("copy.hurt(1, net.minecraft.util.RandomSource.create(), null)"))
