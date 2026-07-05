@@ -10136,6 +10136,273 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `migrates additional Minecraft 121 executable API surfaces`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+
+        srcDir.resolve("LegacyVanillaSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.component.DataComponents;
+            import net.minecraft.nbt.NbtOps;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectCategory;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.effect.MobEffects;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.MobType;
+            import net.minecraft.world.entity.item.ItemEntity;
+            import net.minecraft.world.entity.npc.VillagerData;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.component.CustomData;
+            import net.minecraft.world.item.component.ResolvableProfile;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.BucketPickup;
+            import net.minecraft.world.level.block.LiquidBlockContainer;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.material.Fluid;
+
+            public class LegacyVanillaSurface {
+                public int level(VillagerData data) {
+                    return data.level();
+                }
+
+                public void turtle(Item held) {
+                    if (held == Items.SCUTE || held == Items.SEAGRASS) {
+                    }
+                }
+
+                public void breakSlot(ItemStack stack, LivingEntity entity, EquipmentSlot equipmentSlot) {
+                    stack.hurtAndBreak(1, entity, LivingEntity.getSlotForHand(equipmentSlot));
+                }
+
+                public void skull(ItemStack head, Player target) {
+                    head.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY).copyTag().put("SkullOwner", ResolvableProfile.CODEC.encodeStart(NbtOps.INSTANCE, target.getGameProfile()).getOrThrow());
+                }
+
+                public void bucket(Player player, BucketPickup pickup, Level level, BlockPos pos, BlockState state, LiquidBlockContainer container, Fluid fluid) {
+                    pickup.pickupBlock(level, pos, state);
+                    container.canPlaceLiquid(level, pos, state, fluid);
+                }
+
+                public boolean canContainWater(Level level, BlockPos pos, BlockState state, LiquidBlockContainer container, Fluid fluid) {
+                    return container.canPlaceLiquid(level, pos, state, fluid);
+                }
+
+                public void thrower(ItemEntity itemEntity, LivingEntity entity) {
+                    itemEntity.setThrower(entity.getUUID());
+                }
+
+                public boolean arthropod(LivingEntity target) {
+                    return target.getMobType() == MobType.ARTHROPOD && target.getMobType() != MobType.UNDEAD;
+                }
+
+                public LegacyEffectType customEffect() {
+                    return new LegacyEffectType(ExampleEffects.CUSTOM.get());
+                }
+            }
+
+            class LegacyEffectType {
+                private final MobEffect effect;
+
+                LegacyEffectType(MobEffect effect) {
+                    this.effect = effect;
+                }
+
+                public net.minecraft.network.chat.Component name() {
+                    return effect.getDisplayName();
+                }
+
+                public void apply(LivingEntity target, int duration, int amplifier) {
+                    amplifier = effect == MobEffects.DAMAGE_RESISTANCE ? Math.min(3, amplifier) : amplifier;
+                    target.addEffect(new MobEffectInstance(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(effect), duration, amplifier));
+                }
+            }
+
+            class LegacyTickEffect extends MobEffect {
+                LegacyTickEffect() {
+                    super(MobEffectCategory.HARMFUL, 0);
+                }
+
+                @Override
+                public boolean applyEffectTick(LivingEntity entity, int amplifier) {
+                    if (entity.level().isClientSide) {
+                        return;
+                    }
+                    return true;
+                }
+            }
+        """.trimIndent())
+
+        srcDir.resolve("ExampleEffects.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.effect.MobEffect;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ExampleEffects {
+                public static final DeferredRegister<MobEffect> EFFECTS = DeferredRegister.create(Registries.MOB_EFFECT, "example");
+                public static final DeferredHolder<MobEffect, MobEffect> CUSTOM = EFFECTS.register("custom", () -> null);
+            }
+        """.trimIndent())
+
+        srcDir.resolve("DeepChestBE.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity;
+
+            public abstract class DeepChestBE extends RandomizableContainerBlockEntity {
+            }
+        """.trimIndent())
+
+        srcDir.resolve("LootPiece.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+
+            public class LootPiece {
+                public void place(BlockEntity blockEntity, RandomSource random) {
+                    if (blockEntity instanceof DeepChestBE be) {
+                        be.setLootTable(ResourceLocation.fromNamespaceAndPath("example", "deep_city_altar"), random.nextLong());
+                    }
+                }
+            }
+        """.trimIndent())
+
+        srcDir.resolve("LegacyProjectile.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.projectile.AbstractHurtingProjectile;
+            import net.minecraft.world.level.Level;
+
+            public class LegacyProjectile extends AbstractHurtingProjectile {
+                public LegacyProjectile(EntityType<? extends AbstractHurtingProjectile> type, double x, double y, double z, double xa, double ya, double za, Level level) {
+                    super(type, x, y, z, xa, ya, za, level);
+                }
+            }
+        """.trimIndent())
+
+        srcDir.resolve("LegacyToast.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.components.toasts.Toast;
+            import net.minecraft.client.gui.components.toasts.ToastComponent;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class LegacyToast implements Toast {
+                private static final Component TITLE_TEXT = Component.literal("title");
+                private static final ResourceLocation TEXTURE = ResourceLocation.withDefaultNamespace("toast/legacy");
+
+                @Override
+                public Visibility render(GuiGraphics pGuiGraphics, ToastComponent toastComponent, long time) {
+                    pGuiGraphics.blit(TEXTURE, 0, 0, 0, 32, this.width(), this.height());
+                    return Visibility.SHOW;
+                }
+            }
+        """.trimIndent())
+
+        srcDir.resolve("LegacyTierClass.java").writeText("""
+            package com.example;
+
+            import net.minecraft.tags.BlockTags;
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.level.block.Block;
+            import org.jetbrains.annotations.Nullable;
+
+            public class LegacyTierClass implements Tier {
+                @Override
+                public int getUses() { return 300; }
+                @Override
+                public float getSpeed() { return 8.0F; }
+                @Override
+                public float getAttackDamageBonus() { return 3.0F; }
+                @Override
+                public int getLevel() { return 3; }
+                @Override
+                public int getEnchantmentValue() { return 10; }
+                @Override
+                public Ingredient getRepairIngredient() { return Ingredient.EMPTY; }
+                @Override
+                public @Nullable TagKey<Block> getTag() { return BlockTags.NEEDS_IRON_TOOL; }
+            }
+        """.trimIndent())
+
+        srcDir.resolve("LegacyStepEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.monster.Monster;
+            import net.minecraft.world.level.Level;
+
+            public class LegacyStepEntity extends Monster {
+                public LegacyStepEntity(EntityType<? extends Monster> type, Level level) {
+                    super(type, level);
+                    this.setMaxUpStep(1.0F);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val surface = srcDir.resolve("LegacyVanillaSurface.java").readText()
+        val projectile = srcDir.resolve("LegacyProjectile.java").readText()
+        val toast = srcDir.resolve("LegacyToast.java").readText()
+        val tier = srcDir.resolve("LegacyTierClass.java").readText()
+        val stepEntity = srcDir.resolve("LegacyStepEntity.java").readText()
+        val lootPiece = srcDir.resolve("LootPiece.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(surface.contains("return data.getLevel();"), surface)
+        assertTrue(surface.contains("held == Items.TURTLE_SCUTE"), surface)
+        assertTrue(surface.contains("stack.hurtAndBreak(1, entity, equipmentSlot);"), surface)
+        assertTrue(surface.contains("head.set(DataComponents.PROFILE, new ResolvableProfile(target.getGameProfile()))"), surface)
+        assertTrue(surface.contains("pickup.pickupBlock(player, level, pos, state);"), surface)
+        assertTrue(surface.contains("container.canPlaceLiquid(player, level, pos, state, fluid);"), surface)
+        assertTrue(surface.contains("return container.canPlaceLiquid(null, level, pos, state, fluid);"), surface)
+        assertTrue(surface.contains("itemEntity.setThrower(entity);"), surface)
+        assertTrue(surface.contains("target.getType().is(EntityTypeTags.ARTHROPOD)"), surface)
+        assertTrue(surface.contains("!target.getType().is(EntityTypeTags.UNDEAD)"), surface)
+        assertTrue(surface.contains("new LegacyEffectType(ExampleEffects.CUSTOM);"), surface)
+        assertTrue(surface.contains("private final Holder<MobEffect> effect;"), surface)
+        assertTrue(surface.contains("LegacyEffectType(Holder<MobEffect> effect)"), surface)
+        assertTrue(surface.contains("return effect.value().getDisplayName();"), surface)
+        assertTrue(surface.contains("effect.is(MobEffects.DAMAGE_RESISTANCE)"), surface)
+        assertTrue(surface.contains("new MobEffectInstance(effect, duration, amplifier)"), surface)
+        assertTrue(surface.contains("return true;"), surface)
+        assertFalse(surface.contains("BuiltInRegistries.MOB_EFFECT.wrapAsHolder(effect)"), surface)
+        assertTrue(projectile.contains("super(type, x, y, z, new Vec3(xa, ya, za), level);"), projectile)
+        assertTrue(toast.contains("pGuiGraphics.blitSprite(BACKGROUND_SPRITE, 0, 0, this.width(), this.height());"), toast)
+        assertTrue(toast.contains("ResourceLocation.withDefaultNamespace(\"toast/advancement\")"), toast)
+        assertTrue(tier.contains("public TagKey<Block> getIncorrectBlocksForDrops()"), tier)
+        assertTrue(tier.contains("return BlockTags.NEEDS_IRON_TOOL;"), tier)
+        assertFalse(tier.contains("getLevel()"), tier)
+        assertFalse(tier.contains("getTag()"), tier)
+        assertFalse(tier.contains("@Nullable"), tier)
+        assertTrue(stepEntity.contains("public float maxUpStep()"), stepEntity)
+        assertTrue(stepEntity.contains("return 1.0F;"), stepEntity)
+        assertFalse(stepEntity.contains("setMaxUpStep"), stepEntity)
+        assertTrue(lootPiece.contains("be.setLootTable(ResourceKey.create(Registries.LOOT_TABLE, ResourceLocation.fromNamespaceAndPath(\"example\", \"deep_city_altar\")));"), lootPiece)
+        assertTrue(lootPiece.contains("            be.setLootTableSeed(random.nextLong());"), lootPiece)
+        assertTrue(lootPiece.contains("import net.minecraft.resources.ResourceKey;"), lootPiece)
+        assertTrue(lootPiece.contains("import net.minecraft.core.registries.Registries;"), lootPiece)
+    }
+
+    @Test
     fun `migrates legacy vanilla advancement criterion constructors without trigger fallback`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -10148,6 +10415,7 @@ bus.addListener(ActualListenerRegistry::register);
             import net.minecraft.advancements.critereon.BlockPredicate;
             import net.minecraft.advancements.critereon.ContextAwarePredicate;
             import net.minecraft.advancements.critereon.EntityPredicate;
+            import net.minecraft.advancements.critereon.ImpossibleTrigger;
             import net.minecraft.advancements.critereon.InventoryChangeTrigger;
             import net.minecraft.advancements.critereon.ItemPredicate;
             import net.minecraft.advancements.critereon.ItemUsedOnLocationTrigger;
@@ -10159,6 +10427,7 @@ bus.addListener(ActualListenerRegistry::register);
             import net.minecraft.advancements.critereon.StartRidingTrigger;
             import net.minecraft.core.BlockPos;
             import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.ItemLike;
             import net.minecraft.world.level.storage.loot.predicates.LocationCheck;
 
             public class LegacyAdvancementData {
@@ -10168,7 +10437,9 @@ bus.addListener(ActualListenerRegistry::register);
                         .addCriterion("ride", StartRidingTrigger.TriggerInstance.playerStartsRiding(EntityPredicate.Builder.entity().vehicle(EntityPredicate.Builder.entity().of(ExampleTypes.MOA).nbt(new NbtPredicate(moaTag)).build())))
                         .addCriterion("sleep", new PlayerTrigger.TriggerInstance(CriteriaTriggers.SLEPT_IN_BED.getId(), EntityPredicate.wrap(EntityPredicate.Builder.entity().located(LocationPredicate.Builder.location()).build())))
                         .addCriterion("custom", itemUsedOnLocationCheckAbove(LocationPredicate.Builder.location().setBlock(BlockPredicate.Builder.block().of(ExampleBlocks.GRASS)), LocationPredicate.Builder.location(), ItemPredicate.Builder.item()))
-                        .addCriterion("stack_components", ItemUsedOnLocationTrigger.TriggerInstance.itemUsedOnBlock(LocationPredicate.Builder.location(), ItemPredicate.Builder.item().hasNbt(ExampleItems.banner().getTag())));
+                        .addCriterion("stack_components", ItemUsedOnLocationTrigger.TriggerInstance.itemUsedOnBlock(LocationPredicate.Builder.location(), ItemPredicate.Builder.item().hasNbt(ExampleItems.banner().getTag())))
+                        .addCriterion("helper", has(ExampleItems.banner()))
+                        .addCriterion("impossible", new ImpossibleTrigger.TriggerInstance());
 
                     Advancement.Builder.advancement()
                         .addCriterion("many_items", new InventoryChangeTrigger.TriggerInstance(ContextAwarePredicate.ANY, MinMaxBounds.Ints.atLeast(10), MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, new ItemPredicate[0]));
@@ -10177,6 +10448,10 @@ bus.addListener(ActualListenerRegistry::register);
                 private static ItemUsedOnLocationTrigger.TriggerInstance itemUsedOnLocationCheckAbove(LocationPredicate.Builder location, LocationPredicate.Builder above, ItemPredicate.Builder item) {
                     ContextAwarePredicate contextawarepredicate = ContextAwarePredicate.create(LocationCheck.checkLocation(location).build(), LocationCheck.checkLocation(above, BlockPos.ZERO.above()).build(), MatchTool.toolMatches(item).build());
                     return new ItemUsedOnLocationTrigger.TriggerInstance(CriteriaTriggers.ITEM_USED_ON_BLOCK.getId(), ContextAwarePredicate.ANY, contextawarepredicate);
+                }
+
+                private InventoryChangeTrigger.TriggerInstance has(ItemLike item) {
+                    return new InventoryChangeTrigger.TriggerInstance(ContextAwarePredicate.ANY, MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, new ItemPredicate[]{ItemPredicate.Builder.item().of(item).build()});
                 }
             }
         """.trimIndent())
@@ -10206,6 +10481,9 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("CriteriaTriggers.SLEPT_IN_BED.createCriterion(new PlayerTrigger.TriggerInstance(java.util.Optional.of(EntityPredicate.wrap(EntityPredicate.Builder.entity().located(LocationPredicate.Builder.location()).build()))))"), migrated)
         assertTrue(migrated.contains("private static Criterion<ItemUsedOnLocationTrigger.TriggerInstance> itemUsedOnLocationCheckAbove"), migrated)
         assertTrue(migrated.contains("return CriteriaTriggers.ITEM_USED_ON_BLOCK.createCriterion(new ItemUsedOnLocationTrigger.TriggerInstance(java.util.Optional.empty(), java.util.Optional.of(contextawarepredicate)));"), migrated)
+        assertTrue(migrated.contains(".addCriterion(\"impossible\", CriteriaTriggers.IMPOSSIBLE.createCriterion(new ImpossibleTrigger.TriggerInstance()))"), migrated)
+        assertTrue(migrated.contains("private Criterion<InventoryChangeTrigger.TriggerInstance> has(ItemLike item)"), migrated)
+        assertTrue(migrated.contains("return CriteriaTriggers.INVENTORY_CHANGED.createCriterion(new InventoryChangeTrigger.TriggerInstance(java.util.Optional.empty(), new InventoryChangeTrigger.TriggerInstance.Slots(MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY), java.util.List.of(ItemPredicate.Builder.item().of(item).build())));"), migrated)
         assertTrue(migrated.contains("DataComponentPredicate.allOf(ExampleItems.banner().getComponents())"), migrated)
         assertTrue(migrated.contains("CriteriaTriggers.INVENTORY_CHANGED.createCriterion(new InventoryChangeTrigger.TriggerInstance(java.util.Optional.empty(), new InventoryChangeTrigger.TriggerInstance.Slots(MinMaxBounds.Ints.atLeast(10), MinMaxBounds.Ints.ANY, MinMaxBounds.Ints.ANY), java.util.List.of()))"), migrated)
         assertFalse(migrated.contains("ContextAwarePredicate.ANY"), migrated)
@@ -13085,8 +13363,12 @@ bus.addListener(ActualListenerRegistry::register);
         srcDir.resolve("LegacyData.java").writeText("""
             package com.example;
 
+            import java.util.Collections;
+            import java.util.List;
             import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.loot.LootTableProvider;
             import net.minecraft.data.PackOutput;
+            import net.minecraft.world.level.storage.loot.parameters.LootContextParamSets;
             import net.neoforged.neoforge.data.event.GatherDataEvent;
 
             public class LegacyData {
@@ -13094,6 +13376,9 @@ bus.addListener(ActualListenerRegistry::register);
                     DataGenerator generator = event.getGenerator();
                     PackOutput output = generator.getPackOutput();
                     generator.addProvider(event.includeServer(), LegacyLootTableFactory.create(output));
+                    generator.addProvider(event.includeServer(), new LootTableProvider(output, Collections.emptySet(), List.of(
+                        new LootTableProvider.SubProviderEntry(LegacyChestLoot::new, LootContextParamSets.CHEST)
+                    )));
                 }
             }
         """.trimIndent())
@@ -13136,6 +13421,8 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(factory.contains("import net.minecraft.core.HolderLookup;"), factory)
         assertTrue(factory.contains("import java.util.concurrent.CompletableFuture;"), factory)
         assertTrue(data.contains("LegacyLootTableFactory.create(output, event.getLookupProvider())"), data)
+        assertTrue(data.contains("new LootTableProvider(output, Collections.emptySet(), List.of("), data)
+        assertTrue(data.contains("), event.getLookupProvider())"), data)
         assertTrue(loot.contains("public static final Set<ResourceKey<LootTable>> LOOT_TABLES"), loot)
         assertTrue(loot.contains("public static final Set<ResourceKey<LootTable>> IMMUTABLE_LOOT_TABLES"), loot)
         assertTrue(loot.contains("public static final ResourceKey<LootTable> ENTITY_DROP = register(\"entities/demo\")"), loot)
@@ -18492,6 +18779,152 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(!syncedPacket.contains("import net.minecraft.network.FriendlyByteBuf;"))
         assertTrue(syncedPacket.contains("encode(RegistryFriendlyByteBuf buffer"))
         assertTrue(syncedPacket.contains("decode(RegistryFriendlyByteBuf buffer"))
+    }
+
+    @Test
+    fun `record component accessors stay bound to proven record receivers and fields`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("OtherWeighted.java").writeText("""
+            package com.example;
+
+            public class OtherWeighted {
+                private record WeightedBuilding(String name, int radius) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("HamletLike.java").writeText("""
+            package com.example;
+
+            public class HamletLike {
+                private record WeightedBuilding(String name, int width, int depth) {
+                }
+
+                private static class BuildingOnGrid {
+                    private final WeightedBuilding type;
+                    private final int width;
+                    private final int depth;
+
+                    BuildingOnGrid(WeightedBuilding type, int width, int depth) {
+                        this.type = type;
+                        this.width = width;
+                        this.depth = depth;
+                    }
+                }
+
+                public int street(BuildingOnGrid piece, WeightedBuilding building) {
+                    return piece.width + piece.depth + piece.type.width + piece.type.depth + building.width;
+                }
+
+                public int switchStreet(BuildingOnGrid piece) {
+                    int x = switch (piece.rotation) {
+                        case NONE -> piece.type.width - 8;
+                        case CLOCKWISE_90 -> piece.width;
+                        case CLOCKWISE_180 -> piece.type.width - piece.type.depth;
+                    };
+                    int z = switch (piece.rotation) {
+                        case NONE -> piece.depth;
+                        case CLOCKWISE_90 -> piece.type.depth - 8;
+                        case CLOCKWISE_180 -> piece.width - piece.type.depth;
+                    };
+                    return x + z;
+                }
+
+                private enum Rotation {
+                    NONE,
+                    CLOCKWISE_90,
+                    CLOCKWISE_180
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("HamletLike.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("piece.width + piece.depth"), migrated)
+        assertTrue(migrated.contains("piece.type.width() + piece.type.depth()"), migrated)
+        assertTrue(migrated.contains("building.width()"), migrated)
+        assertTrue(migrated.contains("case CLOCKWISE_90 -> piece.width;"), migrated)
+        assertTrue(migrated.contains("case NONE -> piece.depth;"), migrated)
+        assertTrue(migrated.contains("piece.type.width() - 8"), migrated)
+        assertTrue(migrated.contains("piece.type.depth() - 8"), migrated)
+        assertFalse(migrated.contains("piece.width()"), migrated)
+        assertFalse(migrated.contains("piece.depth()"), migrated)
+    }
+
+    @Test
+    fun `threads registry providers from inherited entity fields without widening helper signatures`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("WorkerEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.Entity;
+
+            public abstract class WorkerEntity extends Entity {
+            }
+        """.trimIndent())
+        srcDir.resolve("BaseStep.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            public abstract class BaseStep {
+                @Deprecated protected final WorkerEntity worker;
+
+                protected BaseStep(WorkerEntity worker) {
+                    this.worker = worker;
+                }
+
+                public abstract CompoundTag saveToNBT();
+
+                public abstract void loadFromNBT(CompoundTag tag);
+            }
+        """.trimIndent())
+        srcDir.resolve("ItemFluidStep.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.fluids.capability.templates.FluidTank;
+
+            public class ItemFluidStep extends BaseStep {
+                private ItemStack stack = ItemStack.EMPTY;
+                private final FluidTank tank = new FluidTank(1000);
+
+                public ItemFluidStep(WorkerEntity worker) {
+                    super(worker);
+                }
+
+                @Override
+                public CompoundTag saveToNBT() {
+                    CompoundTag tag = new CompoundTag();
+                    tag.put("stack", stack.save(new CompoundTag()));
+                    tag.put("tank", tank.writeToNBT(new CompoundTag()));
+                    return tag;
+                }
+
+                @Override
+                public void loadFromNBT(CompoundTag tag) {
+                    stack = ItemStack.of(tag.getCompound("stack"));
+                    tank.readFromNBT(tag.getCompound("tank"));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val base = srcDir.resolve("BaseStep.java").readText()
+        val step = srcDir.resolve("ItemFluidStep.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(step.contains("stack.save(worker.registryAccess(), new CompoundTag())"), step)
+        assertTrue(step.contains("tank.writeToNBT(worker.registryAccess(), new CompoundTag())"), step)
+        assertTrue(step.contains("ItemStack.parseOptional(worker.registryAccess(), tag.getCompound(\"stack\"))"), step)
+        assertTrue(step.contains("tank.readFromNBT(worker.registryAccess(), tag.getCompound(\"tank\"))"), step)
+        assertTrue(base.contains("public abstract CompoundTag saveToNBT();"), base)
+        assertTrue(base.contains("public abstract void loadFromNBT(CompoundTag tag);"), base)
+        assertFalse(step.contains("HolderLookup.Provider"), step)
     }
 
     @Test
@@ -25124,6 +25557,7 @@ bus.addListener(ActualListenerRegistry::register);
             import java.util.concurrent.CompletableFuture;
             import net.minecraft.core.HolderLookup;
             import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.DataProvider;
             import net.minecraft.data.PackOutput;
             import net.neoforged.neoforge.common.data.DatapackBuiltinEntriesProvider;
             import net.neoforged.neoforge.common.data.ExistingFileHelper;
@@ -25139,6 +25573,7 @@ bus.addListener(ActualListenerRegistry::register);
                     CompletableFuture<HolderLookup.Provider> lookupProvider = datapackProvider.getRegistryProvider();
                     generator.addProvider(event.includeClient(), new LegacySpriteSourceProviderSurface(output, helper));
                     generator.addProvider(event.includeServer(), new LegacyRecipeGenerator(output));
+                    generator.addProvider(event.includeServer(), (DataProvider.Factory<LegacyRecipeGenerator>) LegacyRecipeGenerator::new);
                 }
             }
         """.trimIndent())
@@ -25530,11 +25965,14 @@ bus.addListener(ActualListenerRegistry::register);
             import net.minecraft.world.item.ItemStack;
             import net.minecraft.world.item.Items;
             import net.minecraft.world.item.enchantment.Enchantments;
+            import net.minecraft.resources.ResourceLocation;
             import net.minecraft.world.level.storage.loot.LootTable;
+            import net.minecraft.world.level.storage.loot.entries.DynamicLoot;
             import net.minecraft.world.level.storage.loot.entries.LootItem;
             import net.minecraft.world.level.storage.loot.functions.EnchantRandomlyFunction;
             import net.minecraft.world.level.storage.loot.functions.EnchantWithLevelsFunction;
             import net.minecraft.world.level.storage.loot.functions.SetEnchantmentsFunction;
+            import net.minecraft.world.level.storage.loot.functions.SetContainerContents;
             import net.minecraft.world.level.storage.loot.functions.SetNbtFunction;
             import net.minecraft.world.level.storage.loot.providers.number.ConstantValue;
 
@@ -25544,6 +25982,7 @@ bus.addListener(ActualListenerRegistry::register);
             public class LegacyLootTables implements LootTableSubProvider {
                 @Override
                 public void generate(BiConsumer<ResourceKey<LootTable>, LootTable.Builder> register) {
+                    CompoundTag blockEntityTag = new CompoundTag();
                     LootTable.lootTable()
                         .withPool(net.minecraft.world.level.storage.loot.LootPool.lootPool()
                             .add(LootItem.lootTableItem(Items.POTION).apply(SetNbtFunction.setTag(Util.make(new CompoundTag(), tag -> tag.putString("Potion", "minecraft:strong_regeneration")))))
@@ -25553,6 +25992,9 @@ bus.addListener(ActualListenerRegistry::register);
                                 items.add(new ItemStack(Items.EMERALD, 2).serializeNBT());
                                 tag.put("Items", items);
                             }))))
+                            .add(LootItem.lootTableItem(Items.CHEST)
+                                .apply(SetNbtFunction.setTag(blockEntityTag))
+                                .apply(SetContainerContents.setContents(ExampleBlockEntities.CHEST).withEntry(DynamicLoot.dynamicEntry(ResourceLocation.parse("minecraft:contents")))))
                             .add(LootItem.lootTableItem(Items.IRON_SWORD).apply(EnchantWithLevelsFunction.enchantWithLevels(ConstantValue.exactly(20))))
                             .add(LootItem.lootTableItem(Items.IRON_PICKAXE).apply(new SetEnchantmentsFunction.Builder(false).withEnchantment(Enchantments.ALL_DAMAGE_PROTECTION, ConstantValue.exactly(1))))
                             .add(LootItem.lootTableItem(Items.BOOK).apply(new EnchantRandomlyFunction.Builder().withEnchantment(ExampleEnchantments.CUSTOM.get()))));
@@ -25991,6 +26433,7 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(legacyDataGeneratorSurface.contains("new LegacySpriteSourceProviderSurface(output, provider, helper)"), legacyDataGeneratorSurface)
         assertTrue(!legacyDataGeneratorSurface.contains("new LegacySpriteSourceProviderSurface(output, helper)"), legacyDataGeneratorSurface)
         assertTrue(legacyDataGeneratorSurface.contains("new LegacyRecipeGenerator(output, provider)"), legacyDataGeneratorSurface)
+        assertTrue(legacyDataGeneratorSurface.contains("(DataProvider.Factory<LegacyRecipeGenerator>) output -> new LegacyRecipeGenerator(output, provider)"), legacyDataGeneratorSurface)
         assertTrue(legacyRecipeBase.contains("public LegacyRecipeBase(PackOutput output, CompletableFuture<HolderLookup.Provider> lookupProvider)"), legacyRecipeBase)
         assertTrue(legacyRecipeBase.contains("super(output, lookupProvider);"), legacyRecipeBase)
         assertTrue(legacyRecipeBase.contains("return item.getDefaultInstance().getMaxDamage();"), legacyRecipeBase)
@@ -26053,6 +26496,8 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(legacyLootTables.contains("SetContainerContents.setContents(ContainerComponentManipulators.BUNDLE_CONTENTS)"), legacyLootTables)
         assertTrue(legacyLootTables.contains("withEntry(LootItem.lootTableItem(Items.DIAMOND))"), legacyLootTables)
         assertTrue(legacyLootTables.contains("withEntry(LootItem.lootTableItem(Items.EMERALD).apply(SetItemCountFunction.setCount(ConstantValue.exactly(2))))"), legacyLootTables)
+        assertTrue(legacyLootTables.contains("SetCustomDataFunction.setCustomData(blockEntityTag)"), legacyLootTables)
+        assertTrue(legacyLootTables.contains("SetContainerContents.setContents(ContainerComponentManipulators.CONTAINER).withEntry(DynamicLoot.dynamicEntry(ResourceLocation.parse(\"minecraft:contents\")))"), legacyLootTables)
         assertTrue(legacyLootTables.contains("EnchantWithLevelsFunction.enchantWithLevels(this.registries, ConstantValue.exactly(20))"), legacyLootTables)
         assertTrue(legacyLootTables.contains("withEnchantment(this.registries.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.PROTECTION), ConstantValue.exactly(1))"), legacyLootTables)
         assertTrue(legacyLootTables.contains("withEnchantment(this.registries.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(ExampleEnchantments.CUSTOM))"), legacyLootTables)
