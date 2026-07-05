@@ -10330,8 +10330,9 @@ public final class ${spec.attachmentClassName} {
                 .forEach { match ->
                     val modArgument = match.groupValues[1]
                     val constName = modArgument.substringAfterLast('.')
+                    val ownerExpression = modArgument.substringBeforeLast('.', missingDelimiterValue = "")
                     val owner = if (modArgument.contains('.')) {
-                        val ownerName = modArgument.substringBeforeLast('.').substringAfterLast('.')
+                        val ownerName = ownerExpression.substringAfterLast('.')
                         typeBlocks.singleOrNull { it.name == ownerName }
                     } else {
                         javaTypeBlockForModAnnotation(match.range.last, typeBlocks)
@@ -10341,6 +10342,13 @@ public final class ${spec.attachmentClassName} {
                         if (constValue != null) {
                             references += javaModIdReferenceExpression(mainPackage, generatedPackage, owner, constName)
                                 ?: "\"$constValue\""
+                        }
+                    } else if (ownerExpression.isNotBlank()) {
+                        val ownerName = ownerExpression.substringAfterLast('.')
+                        val importedOwner = singleTypeImportFqn(mainText, ownerName)
+                        when {
+                            importedOwner != null -> references += "$importedOwner.$constName"
+                            ownerExpression.contains('.') -> references += "$ownerExpression.$constName"
                         }
                     }
                 }
@@ -10369,6 +10377,14 @@ public final class ${spec.attachmentClassName} {
         sourcePackage.isBlank() || sourcePackage == targetPackage -> owner.name
         owner.isPublic -> "$sourcePackage.${owner.name}"
         else -> null
+    }
+
+    private fun singleTypeImportFqn(source: String, simpleName: String): String? {
+        val pattern = Regex("""(?m)^[ \t]*import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.${Regex.escape(simpleName)})\s*;\s*$""")
+        return pattern.findAll(maskJavaCommentsAndLiterals(source))
+            .map { it.groupValues[1] }
+            .toSet()
+            .singleOrNull()
     }
 
     private fun javaListenerTypeReferenceExpression(
@@ -41478,6 +41494,23 @@ ${modifierLines.joinToString("\n")}
                     ))
                 }
             }
+        javaFiles.forEach { file ->
+            val original = file.readText()
+            val migrated = migrateConstructorDefaultAttributeModifiers(original, file, mainClass, mainText)
+                ?: return@forEach
+            if (migrated != original) {
+                if (!dryRun) file.writeText(migrated)
+                changes.add(Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate constructor-built default item modifiers to 1.21 item attribute components",
+                    before = "ImmutableMultimap defaultModifiers + getDefaultAttributeModifiers(EquipmentSlot)",
+                    after = "Item.Properties.attributes(ItemAttributeModifiers.builder().add(...).build())",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-item-constructor-default-attribute-component"
+                ))
+            }
+        }
         val migratedHelperNames = linkedSetOf<String>()
         javaFiles.forEach { file ->
             val original = file.readText()
@@ -41571,6 +41604,114 @@ ${modifierLines.joinToString("\n")}
         }
         return changes
     }
+
+    private fun migrateConstructorDefaultAttributeModifiers(
+        source: String,
+        file: Path,
+        mainClass: Path?,
+        mainText: String
+    ): String? {
+        if (!source.contains("defaultModifiers") ||
+            !source.contains("ImmutableMultimap") ||
+            !source.contains("getDefaultAttributeModifiers(EquipmentSlot")) {
+            return null
+        }
+        val className = classNameOfJavaSource(source) ?: return null
+        var result = source
+        var changed = false
+        for (constructor in javaConstructorRanges(source, className)) {
+            val constructorText = source.substring(constructor.range)
+            if (!constructorText.contains("ImmutableMultimap") ||
+                !constructorText.contains("this.defaultModifiers =") ||
+                !constructorText.contains("builder.put(")) {
+                continue
+            }
+            val effectiveConstructorText = inlineConstructorAssignedFieldReferences(constructorText)
+            val modifierLines = legacyItemAttributeModifierLines(
+                effectiveConstructorText,
+                file,
+                mainClass,
+                mainText,
+                slotGroupExpression = "EquipmentSlotGroup.MAINHAND",
+                ownerSource = source
+            ).map { it.replace(".withModifierAdded(", ".add(") }
+            if (modifierLines.isEmpty()) continue
+            val migratedConstructor = migrateConstructorDefaultAttributeModifierBody(constructorText, modifierLines)
+                ?: continue
+            result = result.replace(constructorText, migratedConstructor)
+            changed = true
+        }
+        if (!changed) return null
+        result = Regex(
+            """(?m)^[ \t]*private\s+final\s+Multimap\s*<[^;\r\n]+>\s+defaultModifiers\s*;\s*\r?\n"""
+        ).replace(result, "")
+        result = removeMethodByNameContaining(result, "getDefaultAttributeModifiers", listOf("defaultModifiers"))
+        result = removeUnusedSimpleImport(result, "com.google.common.collect.ImmutableMultimap", "ImmutableMultimap")
+        result = removeUnusedSimpleImport(result, "com.google.common.collect.Multimap", "Multimap")
+        result = removeUnusedSimpleImport(result, "net.minecraft.core.Holder", "Holder")
+        result = removeUnusedSimpleImport(result, "net.minecraft.world.entity.ai.attributes.Attribute", "Attribute")
+        result = addImportIfMissing(result, "net.minecraft.world.entity.EquipmentSlotGroup")
+        result = addImportIfMissing(result, "net.minecraft.world.item.component.ItemAttributeModifiers")
+        return cleanupRedundantBlankLines(result)
+    }
+
+    private fun inlineConstructorAssignedFieldReferences(constructorText: String): String {
+        var result = constructorText
+        Regex("""\bthis\.([A-Za-z_$][\w$]*)\s*=\s*([^;\r\n]+?)\s*;""")
+            .findAll(constructorText)
+            .forEach { assignment ->
+                val field = assignment.groupValues[1]
+                val expression = assignment.groupValues[2].trim()
+                if (!Regex("""\b(?:this|super)\b""").containsMatchIn(expression)) {
+                    result = result.replace("this.$field", "($expression)")
+                }
+            }
+        return result
+    }
+
+    private fun migrateConstructorDefaultAttributeModifierBody(
+        constructorText: String,
+        modifierLines: List<String>
+    ): String? {
+        val superMatch = Regex("""\bsuper\s*\(""").find(constructorText) ?: return null
+        val superOpen = constructorText.indexOf('(', superMatch.range.last - 1)
+        val superClose = if (superOpen >= 0) findMatchingParen(constructorText, superOpen) else -1
+        if (superOpen < 0 || superClose < 0) return null
+        val statementEnd = constructorText.indexOf(';', superClose)
+        if (statementEnd < 0) return null
+        val args = splitTopLevelJavaArgs(constructorText.substring(superOpen + 1, superClose)).toMutableList()
+        val propertyParams = javaMethodParameters(constructorText)
+            .filter { simpleJavaTypeName(it.type) == "Properties" }
+            .map { it.name }
+            .toSet()
+        val propertyIndex = args.indexOfLast { arg -> isItemPropertiesArgument(arg.trim(), propertyParams) }
+        if (propertyIndex < 0) return null
+        val attributesExpression = buildString {
+            append("ItemAttributeModifiers.builder()")
+            modifierLines.forEach { line -> append("\n").append(line) }
+            append("\n\t\t\t.build()")
+        }
+        args[propertyIndex] = appendItemAttributesToPropertiesArgument(args[propertyIndex].trim(), attributesExpression)
+        val replacementSuper = "super(${args.joinToString(", ")});"
+        var result = constructorText.substring(0, superMatch.range.first) +
+            replacementSuper +
+            constructorText.substring(statementEnd + 1)
+        result = Regex(
+            """(?s)\s*ImmutableMultimap\.Builder\s*<[^;]+>\s+([A-Za-z_$][\w$]*)\s*=\s*ImmutableMultimap\.builder\(\)\s*;\s*(?:\s*\1\.put\s*\((?:[^;]|\r|\n)+?\)\s*;\s*)+\s*this\.defaultModifiers\s*=\s*\1\.build\(\)\s*;\s*"""
+        ).replace(result, "\n")
+        return result
+    }
+
+    private fun isItemPropertiesArgument(argument: String, propertyParams: Set<String>): Boolean {
+        if (argument in propertyParams) return true
+        if (argument.contains(".attributes(")) return false
+        return argument.startsWith("new Properties(") ||
+            argument.startsWith("new Item.Properties(") ||
+            argument.startsWith("new net.minecraft.world.item.Item.Properties(")
+    }
+
+    private fun appendItemAttributesToPropertiesArgument(argument: String, attributesExpression: String): String =
+        if (argument.contains(".attributes(")) argument else "$argument.attributes($attributesExpression)"
 
     private fun legacyItemAttributeModifierLines(
         methodText: String,
@@ -42198,11 +42339,23 @@ ${modifierLines.joinToString("\n")}
         when (expression.trim()) {
             "NeoForgeMod.BLOCK_REACH.get()",
             "ForgeMod.BLOCK_REACH.get()",
+            "NeoForgeMod.BLOCK_REACH",
+            "ForgeMod.BLOCK_REACH",
             "Attributes.BLOCK_INTERACTION_RANGE" -> "Attributes.BLOCK_INTERACTION_RANGE"
             "NeoForgeMod.ENTITY_REACH.get()",
             "ForgeMod.ENTITY_REACH.get()",
+            "NeoForgeMod.ENTITY_REACH",
+            "ForgeMod.ENTITY_REACH",
             "Attributes.ENTITY_INTERACTION_RANGE" -> "Attributes.ENTITY_INTERACTION_RANGE"
-            else -> null
+            else -> {
+                val trimmed = expression.trim()
+                when {
+                    Regex("""^Attributes\.[A-Z][A-Z0-9_]*$""").matches(trimmed) -> trimmed
+                    Regex("""^NeoForgeMod\.[A-Z][A-Z0-9_]*(?:\.get\(\))?$""").matches(trimmed) ->
+                        trimmed.removeSuffix(".get()")
+                    else -> null
+                }
+            }
         }
 
     private fun legacyAttributeModifierOperationExpression(expression: String): String? {
@@ -42234,6 +42387,10 @@ ${modifierLines.joinToString("\n")}
 
     private fun legacyResourceLocationModifierIdExpression(expression: String, ownerSource: String): String? {
         val trimmed = expression.trim()
+        when (trimmed) {
+            "BASE_ATTACK_DAMAGE_UUID" -> return "net.minecraft.world.item.Item.BASE_ATTACK_DAMAGE_ID"
+            "BASE_ATTACK_SPEED_UUID" -> return "net.minecraft.world.item.Item.BASE_ATTACK_SPEED_ID"
+        }
         if (trimmed.startsWith("ResourceLocation.") || trimmed.startsWith("net.minecraft.resources.ResourceLocation.")) {
             return trimmed
         }
@@ -42262,9 +42419,20 @@ ${modifierLines.joinToString("\n")}
             ?.get(1)
         if (bareCall != null) return noArgConstantReturnExpression(ownerSource, bareCall)
         if (Regex("""\b(?:this|super)\b""").containsMatchIn(trimmed)) return null
-        if (Regex("""(?<![\w$.])[a-z][A-Za-z0-9_$]*\s*\(""").containsMatchIn(trimmed)) return null
+        val directCalls = Regex("""(?<![\w$.])([a-z][A-Za-z0-9_$]*)\s*\(""")
+            .findAll(trimmed)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (directCalls.any { !isStaticNoArgJavaMethod(ownerSource, it) }) return null
         return trimmed
     }
+
+    private fun isStaticNoArgJavaMethod(source: String, methodName: String): Boolean =
+        javaMethodRangesIncludingDefault(source).any { method ->
+            method.name == methodName &&
+                Regex("""\bstatic\b""").containsMatchIn(method.header) &&
+                javaMethodParameters(source.substring(method.range)).isEmpty()
+        }
 
     private fun noArgConstantReturnExpression(source: String, methodName: String): String? {
         val method = javaMethodRangesIncludingDefault(source)

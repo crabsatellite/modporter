@@ -5687,14 +5687,22 @@ bus.addListener(ActualListenerRegistry::register);
     fun `migrates legacy item attribute modifier overrides to item attribute components`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
+        srcDir.resolve("lib").createDirectories()
+        srcDir.resolve("lib/References.java").writeText("""
+            package com.example.lib;
+
+            public class References {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
         srcDir.resolve("ExampleMod.java").writeText("""
             package com.example;
 
+            import com.example.lib.References;
             import net.neoforged.fml.common.Mod;
 
-            @Mod(ExampleMod.MOD_ID)
+            @Mod(References.MODID)
             public class ExampleMod {
-                public static final String MOD_ID = "example";
             }
         """.trimIndent())
         srcDir.resolve("GiantSwordItem.java").writeText("""
@@ -5973,7 +5981,7 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("public static ItemAttributeModifiers createGiantSwordItemAttributes(Tier tier, int damage, float speed)"))
         assertTrue(migrated.contains("SwordItem.createAttributes(tier, damage, speed)"))
         assertTrue(migrated.contains("Attributes.BLOCK_INTERACTION_RANGE"))
-        assertTrue(migrated.contains("ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, \"reach_modifier\")"))
+        assertTrue(migrated.contains("ResourceLocation.fromNamespaceAndPath(com.example.lib.References.MODID, \"reach_modifier\")"))
         assertTrue(!migrated.contains("getDefaultAttributeModifiers"))
         assertTrue(!migrated.contains("ImmutableMultimap"))
         assertTrue(!migrated.contains("Multimap<Attribute"))
@@ -6242,6 +6250,146 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(zaniteItem.contains("public ItemAttributeModifiers getDefaultAttributeModifiers(ItemStack stack)"), zaniteItem)
         assertTrue(zaniteItem.contains("return this.increaseDamage(super.getDefaultAttributeModifiers(stack), stack);"), zaniteItem)
         assertTrue(zaniteHelper.contains("default ItemAttributeModifiers increaseDamage(ItemAttributeModifiers modifiers, ItemStack stack)"), zaniteHelper)
+    }
+
+    @Test
+    fun `constructor built default item modifiers migrate to item attribute components`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("SurgeryItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Item;
+
+            public class SurgeryItem extends Item {
+                public SurgeryItem(Item.Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("KnifeItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.item.Item;
+
+            public class KnifeItem extends Item {
+                private final Multimap<Holder<Attribute>, AttributeModifier> defaultModifiers;
+
+                public KnifeItem() {
+                    super(new Properties().durability(200));
+                    ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier> builder = ImmutableMultimap.builder();
+                    builder.put(Attributes.ATTACK_DAMAGE, new AttributeModifier(BASE_ATTACK_DAMAGE_UUID, "Weapon modifier", 4, AttributeModifier.Operation.ADD_VALUE));
+                    builder.put(Attributes.ATTACK_SPEED, new AttributeModifier(BASE_ATTACK_SPEED_UUID, "Weapon modifier", -2.4, AttributeModifier.Operation.ADD_VALUE));
+                    this.defaultModifiers = builder.build();
+                }
+
+                public Multimap<Holder<Attribute>, AttributeModifier> getDefaultAttributeModifiers(EquipmentSlot slot) {
+                    return slot == EquipmentSlot.MAINHAND ? this.defaultModifiers : super.getDefaultAttributeModifiers(slot);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ScalpelItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+
+            public class ScalpelItem extends SurgeryItem {
+                private final Multimap<Holder<Attribute>, AttributeModifier> defaultModifiers;
+
+                public ScalpelItem() {
+                    super(new Properties().durability(200));
+                    ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier> builder = ImmutableMultimap.builder();
+                    builder.put(Attributes.ATTACK_DAMAGE, new AttributeModifier(BASE_ATTACK_DAMAGE_UUID, "Weapon modifier", 4, AttributeModifier.Operation.ADD_VALUE));
+                    builder.put(Attributes.ATTACK_SPEED, new AttributeModifier(BASE_ATTACK_SPEED_UUID, "Weapon modifier", -2.4, AttributeModifier.Operation.ADD_VALUE));
+                    this.defaultModifiers = builder.build();
+                }
+
+                public Multimap<Holder<Attribute>, AttributeModifier> getDefaultAttributeModifiers(EquipmentSlot slot) {
+                    return slot == EquipmentSlot.MAINHAND ? this.defaultModifiers : super.getDefaultAttributeModifiers(slot);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("HammerItem.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.ImmutableMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.item.TieredItem;
+
+            public class HammerItem extends TieredItem {
+                private final Multimap<Holder<Attribute>, AttributeModifier> defaultModifiers;
+                private final float attackDamageBaseline;
+
+                public HammerItem(int attackDamage, float attackSpeed, Properties properties) {
+                    super(makeTier(), properties);
+                    this.attackDamageBaseline = attackDamage + makeTier().getAttackDamageBonus();
+                    ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier> builder = ImmutableMultimap.builder();
+                    builder.put(Attributes.ATTACK_DAMAGE, new AttributeModifier(BASE_ATTACK_DAMAGE_UUID, "Tool modifier", (double)this.attackDamageBaseline, AttributeModifier.Operation.ADD_VALUE));
+                    builder.put(Attributes.ATTACK_SPEED, new AttributeModifier(BASE_ATTACK_SPEED_UUID, "Tool modifier", (double)attackSpeed, AttributeModifier.Operation.ADD_VALUE));
+                    this.defaultModifiers = builder.build();
+                }
+
+                private static Tier makeTier() {
+                    return null;
+                }
+
+                public Multimap<Holder<Attribute>, AttributeModifier> getDefaultAttributeModifiers(EquipmentSlot slot) {
+                    return slot == EquipmentSlot.MAINHAND ? this.defaultModifiers : super.getDefaultAttributeModifiers(slot);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val knife = srcDir.resolve("KnifeItem.java").readText()
+        val scalpel = srcDir.resolve("ScalpelItem.java").readText()
+        val hammer = srcDir.resolve("HammerItem.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        listOf(knife, scalpel, hammer).forEach { migrated ->
+            assertTrue(migrated.contains("import net.minecraft.world.item.component.ItemAttributeModifiers;"), migrated)
+            assertTrue(migrated.contains("import net.minecraft.world.entity.EquipmentSlotGroup;"), migrated)
+            assertTrue(migrated.contains(".attributes(ItemAttributeModifiers.builder()"), migrated)
+            assertTrue(migrated.contains(".add(Attributes.ATTACK_SPEED"), migrated)
+            assertTrue(migrated.contains(".build())"), migrated)
+            assertFalse(migrated.contains("defaultModifiers"), migrated)
+            assertFalse(migrated.contains("ImmutableMultimap"), migrated)
+            assertFalse(migrated.contains("getDefaultAttributeModifiers(EquipmentSlot"), migrated)
+        }
+        assertTrue(knife.contains(".add(Attributes.ATTACK_DAMAGE"), knife)
+        assertTrue(scalpel.contains(".add(Attributes.ATTACK_DAMAGE"), scalpel)
+        assertTrue(hammer.contains(".add(Attributes.ATTACK_DAMAGE"), hammer)
+        assertTrue(hammer.contains("net.minecraft.world.item.Item.BASE_ATTACK_DAMAGE_ID"), hammer)
+        assertTrue(hammer.contains("net.minecraft.world.item.Item.BASE_ATTACK_SPEED_ID"), hammer)
+        assertTrue(hammer.contains("(double)(attackDamage + makeTier().getAttackDamageBonus())"), hammer)
     }
 
     @Test
