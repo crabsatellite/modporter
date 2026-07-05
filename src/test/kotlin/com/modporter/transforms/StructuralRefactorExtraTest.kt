@@ -37513,10 +37513,18 @@ bus.addListener(ActualListenerRegistry::register);
                 }
 
                 protected void loadAdditional(CompoundTag tag, HolderLookup.Provider registries) {
+                    loadClientData(tag);
+                }
+
+                private void loadClientData(CompoundTag tag) {
                     flasks.add(new Flask(tag.getCompound("flask")));
                 }
 
                 protected void saveAdditional(CompoundTag tag, HolderLookup.Provider registries) {
+                    saveClientData(tag);
+                }
+
+                private void saveClientData(CompoundTag tag) {
                     for (Flask flask : flasks) {
                         tag.put("flask", flask.toNBT());
                     }
@@ -37546,6 +37554,17 @@ bus.addListener(ActualListenerRegistry::register);
                         ItemStack stack = ItemStack.EMPTY;
                         stack.save(new CompoundTag());
                         return stack;
+                    }
+                }
+
+                static class PoolEntry {
+                    static PoolEntry load(CompoundTag tag, HolderLookup.Provider registries) {
+                        return new PoolEntry(tag);
+                    }
+
+                    PoolEntry(CompoundTag tag) {
+                        ItemStack stack = ItemStack.EMPTY;
+                        stack.save(new CompoundTag());
                     }
                 }
             }
@@ -37580,22 +37599,49 @@ bus.addListener(ActualListenerRegistry::register);
                 }
             }
         """.trimIndent())
+        srcDir.resolve("BloodPoolEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public class BloodPoolEntity {
+                public static BloodPoolEntity load(CompoundTag tag, HolderLookup.Provider registries) {
+                    return new BloodPoolEntity(tag);
+                }
+
+                public BloodPoolEntity(CompoundTag tag) {
+                    ItemStack stack = ItemStack.EMPTY;
+                    stack.save(new CompoundTag());
+                }
+            }
+        """.trimIndent())
 
         val result = StructuralRefactorPass().apply(tempDir)
         val migrated = srcDir.resolve("ShelfBlockEntity.java").readText()
         val other = srcDir.resolve("OtherBlockEntity.java").readText()
+        val bloodPool = srcDir.resolve("BloodPoolEntity.java").readText()
 
         assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertTrue(migrated.contains("Flask(CompoundTag tag, net.minecraft.core.HolderLookup.Provider modporterRegistries)"), migrated)
+        assertTrue(migrated.contains("Flask(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("loadClientData(tag, registries)"), migrated)
+        assertTrue(migrated.contains("private void loadClientData(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
         assertTrue(migrated.contains("new Flask(tag.getCompound(\"flask\"), registries)"), migrated)
-        assertTrue(migrated.contains("CompoundTag toNBT(net.minecraft.core.HolderLookup.Provider modporterRegistries)"), migrated)
+        assertTrue(migrated.contains("CompoundTag toNBT(HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("saveClientData(tag, registries)"), migrated)
+        assertTrue(migrated.contains("private void saveClientData(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
         assertTrue(migrated.contains("flask.toNBT(registries)"), migrated)
-        assertTrue(migrated.contains("ItemStack toItem(net.minecraft.core.HolderLookup.Provider modporterRegistries)"), migrated)
+        assertTrue(migrated.contains("ItemStack toItem(HolderLookup.Provider registries)"), migrated)
         assertTrue(migrated.contains("return flask.toItem(this.getLevel().registryAccess());"), migrated)
+        assertTrue(migrated.contains("return new PoolEntry(tag, registries);"), migrated)
+        assertFalse(migrated.contains("new PoolEntry(tag, HolderLookup.Provider registries)"), migrated)
         assertFalse(migrated.contains("this.getLevel().registryAccess(), tag.getCompound(\"tank\")"), migrated)
         assertTrue(other.contains("new ShelfBlockEntity.Flask(tag.getCompound(\"flask\"), this.getLevel().registryAccess())"), other)
         assertTrue(other.contains("tag.put(\"flask\", flask.toNBT(this.getLevel().registryAccess()));"), other)
         assertTrue(other.contains("return flask.toItem(this.getLevel().registryAccess());"), other)
+        assertTrue(bloodPool.contains("return new BloodPoolEntity(tag, registries);"), bloodPool)
+        assertFalse(bloodPool.contains("new BloodPoolEntity(tag, HolderLookup.Provider registries)"), bloodPool)
     }
 
     @Test

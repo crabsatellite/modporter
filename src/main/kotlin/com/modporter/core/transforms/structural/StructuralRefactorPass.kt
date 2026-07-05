@@ -18766,9 +18766,9 @@ $migratedRecipes
         result = migrateItemStackTagConstructors(result)
         result = migrateLegacyClientGuiUtilityApis(result)
         result = migrateGeometryLoaderResourceLocationKeys(result)
-        result = migrateProjectItemStackNbtConstructors(result, itemStackNbtConstructors, itemStackNbtMethods, javaInheritanceIndex)
         result = migrateProjectItemStackNbtMethods(result, itemStackNbtMethods, javaInheritanceIndex, entityCapabilityTypes, javaMethodReturnTypes)
         result = migrateProjectItemStackNbtConstructors(result, itemStackNbtConstructors, itemStackNbtMethods, javaInheritanceIndex)
+        result = migrateProjectItemStackNbtMethods(result, itemStackNbtMethods, javaInheritanceIndex, entityCapabilityTypes, javaMethodReturnTypes)
         result = migrateLegacyItemStackRegistrySerialization(result, javaInheritanceIndex)
         result = migrateFluidTankNbtProviderCalls(result, javaInheritanceIndex)
         result = migrateFluidStackNbtProviderCalls(result, javaInheritanceIndex)
@@ -26731,7 +26731,7 @@ ${indent}}"""
 
     private fun currentMethodParametersBeforeOffset(source: String, offset: Int): List<String> {
         val methodPattern = Regex(
-            """(?m)(?:^|\r?\n)[ \t]*(?:(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*)(?:(?:public|protected|private|static|final|synchronized)\s+)+[A-Za-z_$][\w$<>\[\].?,\s]*\s+[A-Za-z_$][\w$]*\s*\(([^()]*)\)\s*\{"""
+            """(?m)(?:^|\r?\n)[ \t]*(?:(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*)(?:(?:public|protected|private|static|final|synchronized)\s+)*[A-Za-z_$][\w$<>\[\].?,\s]*\s+[A-Za-z_$][\w$]*\s*\(([^()]*)\)\s*\{"""
         )
         val methodParameters = methodPattern.findAll(source)
             .filter { it.range.first < offset }
@@ -28466,31 +28466,42 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             val owner: String,
             val methodName: String,
             val parameterCount: Int,
+            val header: String,
             val source: String,
             val range: IntRange,
             val directItemStack: Boolean
         )
         val candidates = mutableListOf<Candidate>()
-        val nbtMethodNames = setOf("saveToNBT", "loadFromNBT", "writeToNBT", "readFromNBT")
         for (javaFile in javaFiles) {
             val source = runCatching { javaFile.readText() }.getOrDefault("")
             if (!source.contains("CompoundTag")) continue
             val executableCode = maskJavaCommentsAndLiterals(source)
             val typeBlocks = javaTypeBlocks(source, executableCode)
             if (typeBlocks.isEmpty()) continue
+            val classDeclarationsByName = collectJavaClassDeclarations(source).associateBy { it.name }
             val itemStackNames = collectItemStackValueNames(source)
             val itemStackCollectionNames = collectItemStackCollectionNames(source)
-            for (method in javaMethodRanges(source)) {
-                if (!method.header.contains("CompoundTag") ||
-                    method.header.contains("HolderLookup.Provider") ||
+            val itemStackHandlerNames = collectItemStackHandlerValueNames(source)
+            val fluidTankNames = collectFluidTankValueNames(source)
+            for (method in javaMethodRangesIncludingDefault(source)) {
+                if (method.header.contains("HolderLookup.Provider") ||
                     method.header.contains("net.minecraft.core.HolderLookup.Provider")
                 ) continue
                 val owner = typeBlocks.lastOrNull { method.range.first in it.bodyStart..it.end } ?: continue
                 val methodText = source.substring(method.range)
-                val directItemStack = method.name in nbtMethodNames &&
-                    methodTextNeedsItemStackProvider(methodText, itemStackNames, itemStackCollectionNames) &&
+                val directItemStack = !method.header.contains("@Override") &&
+                    methodTextNeedsHolderLookupProvider(
+                        methodText,
+                        itemStackNames,
+                        itemStackCollectionNames,
+                        itemStackHandlerNames,
+                        fluidTankNames,
+                        classDeclarationsByName[owner.name]?.let {
+                            javaClassExtendsAny(it, setOf("ItemStackHandler"), javaInheritanceIndex)
+                        } == true
+                    ) &&
                     registryAccessExpressionAt(source, method.range.first, javaInheritanceIndex) == null
-                candidates += Candidate(owner.name, method.name, javaMethodParameterCount(method.header), source, method.range, directItemStack)
+                candidates += Candidate(owner.name, method.name, javaMethodParameterCount(method.header), method.header, source, method.range, directItemStack)
             }
         }
         val result = candidates
@@ -28503,7 +28514,13 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 val method = HolderLookupNbtMethod(candidate.owner, candidate.methodName, candidate.parameterCount)
                 if (method in result) continue
                 val methodText = candidate.source.substring(candidate.range)
-                if (methodTextCallsHolderLookupNbtMethod(methodText, candidate.source, candidate.owner, result)) {
+                val methodParameters = callableParameters(candidate.source, candidate.range)
+                val needsThreadedProvider = holderLookupProviderFromParameters(methodParameters) == null &&
+                    candidate.header.contains("CompoundTag") &&
+                    isPrivateOrPackagePrivateJavaMethodHeader(candidate.header)
+                if (methodTextCallsHolderLookupNbtMethod(methodText, candidate.source, candidate.owner, result) &&
+                    (needsThreadedProvider || registryAccessExpressionAt(candidate.source, candidate.range.first, javaInheritanceIndex) == null)
+                ) {
                     result += method
                     changed = true
                 }
@@ -28527,6 +28544,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             val executableCode = maskJavaCommentsAndLiterals(source)
             val typeBlocks = javaTypeBlocks(source, executableCode)
             if (typeBlocks.isEmpty()) continue
+            val classDeclarationsByName = collectJavaClassDeclarations(source).associateBy { it.name }
             val variableTypes = if (ownerAlternation.isBlank()) emptyMap() else {
                 Regex("""\b($ownerAlternation)\s+([A-Za-z_$][\w$]*)\b""")
                     .findAll(executableCode)
@@ -28534,9 +28552,11 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             }
             val itemStackNames = collectItemStackValueNames(source)
             val itemStackCollectionNames = collectItemStackCollectionNames(source)
+            val itemStackHandlerNames = collectItemStackHandlerValueNames(source)
+            val fluidTankNames = collectFluidTankValueNames(source)
             for (type in typeBlocks) {
                 val constructorPattern = Regex(
-                    """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:public|protected|private)?\s*${Regex.escape(type.name)}\s*\([^;{}]*CompoundTag[^;{}]*\)\s*(?:throws\s+[^{;]+)?\{"""
+                    """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:public|protected|private)?\s*${Regex.escape(type.name)}\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\{"""
                 )
                 constructorPattern.findAll(executableCode).forEach { match ->
                     if (match.range.first <= type.bodyStart || match.range.first >= type.end) return@forEach
@@ -28545,7 +28565,17 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                     if (openBrace < 0 || closeBrace < 0 || closeBrace > type.end) return@forEach
                     val constructorText = source.substring(match.range.first, closeBrace + 1)
                     val parameterCount = javaMethodParameterCount(match.value)
-                    if (methodTextNeedsItemStackProvider(constructorText, itemStackNames, itemStackCollectionNames)) {
+                    if (methodTextNeedsHolderLookupProvider(
+                            constructorText,
+                            itemStackNames,
+                            itemStackCollectionNames,
+                            itemStackHandlerNames,
+                            fluidTankNames,
+                            classDeclarationsByName[type.name]?.let {
+                                javaClassExtendsAny(it, setOf("ItemStackHandler"), JavaInheritanceIndex.EMPTY)
+                            } == true
+                        )
+                    ) {
                         result += HolderLookupNbtConstructor(type.name, parameterCount)
                         return@forEach
                     }
@@ -28581,9 +28611,11 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             val executableCode = maskJavaCommentsAndLiterals(source)
             val typeBlocks = javaTypeBlocks(source, executableCode)
             if (typeBlocks.isEmpty()) continue
-            javaMethodRanges(source).forEach { method ->
+            javaMethodRangesIncludingDefault(source).forEach { method ->
                 if (!method.header.contains("CompoundTag") || method.header.contains("HolderLookup.Provider")) return@forEach
                 val owner = typeBlocks.lastOrNull { method.range.first in it.bodyStart..it.end } ?: return@forEach
+                val needsThreadedProvider = holderLookupProviderFromParameters(callableParameters(source, method.range)) == null &&
+                    isPrivateOrPackagePrivateJavaMethodHeader(method.header)
                 val callsConstructorWithoutProvider = constructorOwners.any { constructorOwner ->
                     val token = "new $constructorOwner("
                     var cursor = method.range.first
@@ -28603,7 +28635,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                         }
                         val providerNames = holderLookupProviderNamesAt(source, tokenIndex)
                         if (args.none { isHolderLookupProviderExpression(it, providerNames) } &&
-                            registryAccessExpressionAt(source, tokenIndex, javaInheritanceIndex) == null
+                            (needsThreadedProvider || registryAccessExpressionAt(source, tokenIndex, javaInheritanceIndex) == null)
                         ) {
                             missingProvider = true
                             break
@@ -28628,6 +28660,18 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
 
     private fun collectItemStackCollectionNames(source: String): Set<String> =
         Regex("""\b(?:NonNullList|List|ArrayList|java\.util\.List|java\.util\.ArrayList)\s*<\s*ItemStack\s*>\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(maskJavaCommentsAndLiterals(source))
+            .map { it.groupValues[1] }
+            .toSet()
+
+    private fun collectItemStackHandlerValueNames(source: String): Set<String> =
+        Regex("""\b(?:ItemStackHandler|net\.neoforged\.neoforge\.items\.ItemStackHandler|[A-Za-z_$][\w$]*StackHandler)\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(maskJavaCommentsAndLiterals(source))
+            .map { it.groupValues[1] }
+            .toSet()
+
+    private fun collectFluidTankValueNames(source: String): Set<String> =
+        Regex("""\b(?:FluidTank|net\.neoforged\.neoforge\.fluids\.capability\.templates\.FluidTank|[A-Za-z_$][\w$]*Tank)\s+([A-Za-z_$][\w$]*)\b""")
             .findAll(maskJavaCommentsAndLiterals(source))
             .map { it.groupValues[1] }
             .toSet()
@@ -28662,7 +28706,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         methods: Set<HolderLookupNbtMethod>,
         javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
     ): String {
-        if (constructors.isEmpty() || methods.isEmpty() || !source.contains("CompoundTag")) return source
+        if (constructors.isEmpty() || !source.contains("CompoundTag")) return source
         val constructorOwners = constructors.map { it.owner }.toSet()
         val constructorsByOwner = constructors.groupBy { it.owner }
         val executableCode = maskJavaCommentsAndLiterals(source)
@@ -28682,7 +28726,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         var result = source
         var changedSignature = false
         val signaturePattern = Regex(
-            """(?m)^([ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:public|protected|private)?\s*([A-Za-z_$][\w$]*)\s*)\(([^()]*(?:net\.minecraft\.nbt\.)?CompoundTag\s+[A-Za-z_$][\w$]*[^()]*)\)"""
+            """(?m)^([ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:public|protected|private)?\s*([A-Za-z_$][\w$]*)\s*)\(([^()]*)\)"""
         )
         result = replaceExecutableRegex(result, signaturePattern) { match ->
             val owner = match.groupValues[2]
@@ -28693,7 +28737,13 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 return@replaceExecutableRegex match.value
             }
             changedSignature = true
-            "${match.groupValues[1]}(${match.groupValues[3]}, HolderLookup.Provider registries)"
+            val params = match.groupValues[3].trim()
+            val migratedParams = if (params.isBlank()) {
+                "HolderLookup.Provider registries"
+            } else {
+                "$params, HolderLookup.Provider registries"
+            }
+            "${match.groupValues[1]}($migratedParams)"
         }
 
         val targetConstructorRanges = constructorRangesForOwners(result, constructorOwners)
@@ -28726,7 +28776,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 }
                 val registryAccess = registryAccessExpressionAt(result, offset, javaInheritanceIndex)
                     ?: return@rewriteExecutableJavaNewWithOffset null
-                "new ${constructor.owner}(${args.joinToString(", ") { it.trim() }}, $registryAccess)"
+                "new ${constructor.owner}(${args.joinToString(", ") { it.trim() }}, ${holderLookupProviderArgumentExpression(registryAccess)})"
             }
         }
 
@@ -28782,6 +28832,36 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         return false
     }
 
+    private fun methodTextNeedsHolderLookupProvider(
+        methodText: String,
+        itemStackNames: Set<String>,
+        itemStackCollectionNames: Set<String>,
+        itemStackHandlerNames: Set<String>,
+        fluidTankNames: Set<String>,
+        ownerExtendsItemStackHandler: Boolean
+    ): Boolean {
+        val executableMethod = maskJavaCommentsAndLiterals(methodText)
+        if (methodTextNeedsItemStackProvider(methodText, itemStackNames, itemStackCollectionNames)) return true
+        if (ownerExtendsItemStackHandler &&
+            Regex("""(?<![\w$])(?:this\.)?stacks\.get\s*\([^)]*\)\.(?:save|serializeNBT)\s*\(""").containsMatchIn(executableMethod)
+        ) {
+            return true
+        }
+        for (name in itemStackHandlerNames) {
+            val receiver = Regex.escape(name)
+            if (Regex("""(?<![\w$])(?:this\.)?$receiver\.(?:serializeNBT|deserializeNBT)\s*\(""").containsMatchIn(executableMethod)) {
+                return true
+            }
+        }
+        for (name in fluidTankNames) {
+            val receiver = Regex.escape(name)
+            if (Regex("""(?<![\w$])(?:this\.)?$receiver\.(?:readFromNBT|writeToNBT)\s*\(""").containsMatchIn(executableMethod)) {
+                return true
+            }
+        }
+        return false
+    }
+
     private fun methodTextCallsHolderLookupNbtMethod(
         methodText: String,
         source: String,
@@ -28818,6 +28898,44 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         }
     }
 
+    private fun isJavaCallableDeclarationAt(source: String, offset: Int, methodName: String): Boolean =
+        javaMethodRangesIncludingDefault(source).any { method ->
+            method.name == methodName &&
+                offset >= method.range.first &&
+                offset < method.range.first + method.header.length
+        }
+
+    private fun holderLookupProviderArgumentExpression(expression: String): String {
+        val cleaned = expression.trim()
+        return if (isHolderLookupProviderParameter(cleaned)) {
+            parseJavaParameter(cleaned)?.second ?: cleaned.substringAfterLast(' ')
+        } else {
+            cleaned
+        }
+    }
+
+    private fun isLikelyJavaMethodDeclarationPrefix(prefix: String): Boolean {
+        val declaration = prefix
+            .lineSequence()
+            .filterNot { it.trimStart().startsWith("@") }
+            .joinToString(" ")
+            .trim()
+        if (declaration.isBlank()) return false
+        val firstToken = declaration.substringBefore(' ')
+        if (firstToken in setOf("return", "throw", "new", "if", "for", "while", "switch", "catch", "else", "do", "try")) {
+            return false
+        }
+        return !Regex("""\breturn\s+new\b|\bnew\s+[A-Za-z_$][\w$]*\s*$""").containsMatchIn(declaration)
+    }
+
+    private fun isPrivateOrPackagePrivateJavaMethodHeader(header: String): Boolean {
+        val declaration = header
+            .lineSequence()
+            .filterNot { it.trimStart().startsWith("@") }
+            .joinToString(" ")
+        return !Regex("""\b(?:public|protected)\b""").containsMatchIn(declaration)
+    }
+
     private fun migrateProjectItemStackNbtMethods(
         source: String,
         methods: Set<HolderLookupNbtMethod>,
@@ -28850,9 +28968,12 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         var result = source
         var changedSignature = false
         val signaturePattern = Regex(
-            """(?m)^([ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|static|final|synchronized)\s+)+[A-Za-z_$][\w$<>\[\].?,\s]+\s+([A-Za-z_$][\w$]*)\s*)\(([^()]*(?:net\.minecraft\.nbt\.)?CompoundTag\s+[A-Za-z_$][\w$]*[^()]*)\)"""
+            """(?m)^([ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|static|final|synchronized)\s+)*[A-Za-z_$][\w$<>\[\].?,\s]+\s+([A-Za-z_$][\w$]*)\s*)\(([^()]*)\)"""
         )
         result = replaceExecutableRegex(result, signaturePattern) { match ->
+            if (!isLikelyJavaMethodDeclarationPrefix(match.groupValues[1])) {
+                return@replaceExecutableRegex match.value
+            }
             val methodName = match.groupValues[2]
             if (!methodsByName.containsKey(methodName) || match.groupValues[3].contains("HolderLookup.Provider")) {
                 return@replaceExecutableRegex match.value
@@ -28862,7 +28983,13 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 return@replaceExecutableRegex match.value
             }
             changedSignature = true
-            "${match.groupValues[1]}(${match.groupValues[3]}, HolderLookup.Provider registries)"
+            val params = match.groupValues[3].trim()
+            val migratedParams = if (params.isBlank()) {
+                "HolderLookup.Provider registries"
+            } else {
+                "$params, HolderLookup.Provider registries"
+            }
+            "${match.groupValues[1]}($migratedParams)"
         }
 
         fun registryAccessAt(offset: Int): String? =
@@ -28904,7 +29031,21 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 val registryAccess = capabilityLambdaRegistryAccess(result, offset, receiver)
                     ?: registryAccessAt(offset)
                     ?: return@rewriteExecutableJavaCallWithOffset null
-                "$receiver.$methodName(${(args.map { it.trim() } + registryAccess).joinToString(", ")})"
+                "$receiver.$methodName(${(args.map { it.trim() } + holderLookupProviderArgumentExpression(registryAccess)).joinToString(", ")})"
+            }
+            result = rewriteExecutableJavaInvocationArgumentsWithOffset(result, methodName) { args, offset ->
+                val executable = maskJavaCommentsAndLiterals(result)
+                if (offset > 0 && executable[offset - 1] == '.') return@rewriteExecutableJavaInvocationArgumentsWithOffset null
+                if (isJavaCallableDeclarationAt(result, offset, methodName)) return@rewriteExecutableJavaInvocationArgumentsWithOffset null
+                val providerNames = holderLookupProviderNamesAt(result, offset)
+                if (args.any { isHolderLookupProviderExpression(it, providerNames) }) {
+                    return@rewriteExecutableJavaInvocationArgumentsWithOffset null
+                }
+                val owner = ownerAt(offset)
+                if (!isTarget(owner, methodName, args.size)) return@rewriteExecutableJavaInvocationArgumentsWithOffset null
+                val registryAccess = registryAccessAt(offset)
+                    ?: return@rewriteExecutableJavaInvocationArgumentsWithOffset null
+                args.map { it.trim() } + holderLookupProviderArgumentExpression(registryAccess)
             }
         }
 
@@ -29409,7 +29550,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             .findAll(result)
             .map { it.groupValues[1] }
             .toSet()
-        fun isItemStackReceiver(receiver: String): Boolean {
+        fun isItemStackReceiver(receiver: String, offset: Int): Boolean {
             val normalized = receiver.trim()
             val simpleName = normalized.substringAfterLast('.').removeSuffix("()")
             if (simpleName in itemStackNames) return true
@@ -29421,6 +29562,12 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             }
             val collectionReceiver = Regex("""^(?:this\.)?([A-Za-z_$][\w$]*)\.get\s*\(""").find(normalized)
             if (collectionReceiver != null && collectionReceiver.groupValues[1] in itemStackCollectionNames) return true
+            if (Regex("""^(?:this\.)?stacks\.get\s*\(""").containsMatchIn(normalized)) {
+                val classDecl = enclosingJavaClassDeclaration(result, offset)
+                if (javaClassExtendsAny(classDecl, setOf("ItemStackHandler"), javaInheritanceIndex)) {
+                    return true
+                }
+            }
             return false
         }
         fun isItemStackHandlerReceiver(receiver: String, offset: Int): Boolean {
@@ -29473,7 +29620,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             }
         }
         result = rewriteExecutableJavaCallWithOffset(result, "save") { receiver, args, offset ->
-            if (!isItemStackReceiver(receiver)) return@rewriteExecutableJavaCallWithOffset null
+            if (!isItemStackReceiver(receiver, offset)) return@rewriteExecutableJavaCallWithOffset null
             val registryAccess = registryAccessAt(offset) ?: return@rewriteExecutableJavaCallWithOffset null
             when (args.size) {
                 0 -> "$receiver.save($registryAccess)"
@@ -29500,9 +29647,9 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         }
         result = rewriteExecutableJavaCallWithOffset(result, "serializeNBT") { receiver, args, offset ->
             if (args.isNotEmpty()) return@rewriteExecutableJavaCallWithOffset null
-            val registryAccess = registryAccessAt(offset) ?: return@rewriteExecutableJavaCallWithOffset null
-            when {
-                isItemStackReceiver(receiver) -> "$receiver.save($registryAccess)"
+                val registryAccess = registryAccessAt(offset) ?: return@rewriteExecutableJavaCallWithOffset null
+                when {
+                isItemStackReceiver(receiver, offset) -> "$receiver.save($registryAccess)"
                 isItemStackHandlerReceiver(receiver, offset) -> "$receiver.serializeNBT($registryAccess)"
                 else -> null
             }
@@ -31817,7 +31964,7 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                     target.dataType,
                     javaInheritanceIndex
                 ) ?: return@rewriteExecutableJavaCallWithOffset null
-                "$receiver.${target.methodName}(${(args.map { it.trim() } + provider).joinToString(", ")})"
+                "$receiver.${target.methodName}(${(args.map { it.trim() } + holderLookupProviderArgumentExpression(provider)).joinToString(", ")})"
             }
         } while (result != before)
         return result
@@ -32018,7 +32165,8 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 cursor = closeParen + 1
                 continue
             }
-            val insertion = if (args.isEmpty()) provider else ", $provider"
+            val providerArgument = holderLookupProviderArgumentExpression(provider)
+            val insertion = if (args.isEmpty()) providerArgument else ", $providerArgument"
             result = result.substring(0, closeParen) + insertion + result.substring(closeParen)
             cursor = closeParen + insertion.length + 1
         }
@@ -32066,7 +32214,8 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 cursor = closeParen + 1
                 continue
             }
-            val insertion = if (args.isEmpty()) provider else ", $provider"
+            val providerArgument = holderLookupProviderArgumentExpression(provider)
+            val insertion = if (args.isEmpty()) providerArgument else ", $providerArgument"
             result = result.substring(0, closeParen) + insertion + result.substring(closeParen)
             cursor = closeParen + insertion.length + 1
         }
@@ -32133,7 +32282,8 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 cursor = closeParen + 1
                 continue
             }
-            val insertion = if (args.isEmpty()) provider else ", $provider"
+            val providerArgument = holderLookupProviderArgumentExpression(provider)
+            val insertion = if (args.isEmpty()) providerArgument else ", $providerArgument"
             result = result.substring(0, closeParen) + insertion + result.substring(closeParen)
             cursor = closeParen + insertion.length + 1
         }
@@ -32181,7 +32331,8 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 cursor = closeParen + 1
                 continue
             }
-            val insertion = if (args.isEmpty()) provider else ", $provider"
+            val providerArgument = holderLookupProviderArgumentExpression(provider)
+            val insertion = if (args.isEmpty()) providerArgument else ", $providerArgument"
             result = result.substring(0, closeParen) + insertion + result.substring(closeParen)
             cursor = closeParen + insertion.length + 1
         }
