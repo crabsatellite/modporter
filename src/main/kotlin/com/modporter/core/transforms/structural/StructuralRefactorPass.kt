@@ -1139,6 +1139,28 @@ class StructuralRefactorPass : Pass {
         var result = source
         var migrated = false
 
+        val safeCallMethodReferencePattern = Regex(
+            """DistExecutor\.(unsafeCallWhenOn|safeCallWhenOn)\(\s*Dist\.(CLIENT|DEDICATED_SERVER)\s*,\s*\(\s*\)\s*->\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)::([A-Za-z_$][\w$]*)\s*\)"""
+        )
+        val beforeSafeCallMigration = result
+        result = replaceExecutableRegex(beforeSafeCallMigration, safeCallMethodReferencePattern) { match ->
+            val methodName = match.groupValues[1]
+            val dist = match.groupValues[2]
+            val owner = match.groupValues[3]
+            val referencedMethod = match.groupValues[4]
+            val replacement = "(FMLLoader.getDist() == Dist.$dist ? $owner.$referencedMethod() : null)"
+            migrated = true
+            changes.add(distExecutorMigrationChange(
+                file = file,
+                line = lineNumberAt(beforeSafeCallMigration, match.range.first),
+                methodName = methodName,
+                dist = dist,
+                before = match.value.trim(),
+                after = replacement
+            ))
+            replacement
+        }
+
         val enqueueExpressionPattern = Regex(
             """(?m)^([ \t]*)([\w.]+\.enqueueWork\(\s*)\(\s*\)\s*->\s*DistExecutor\.(unsafeRunWhenOn|safeRunWhenOn)\(\s*Dist\.(CLIENT|DEDICATED_SERVER)\s*,\s*\(\s*\)\s*->\s*\(\s*\)\s*->\s*([^{};]+?)\s*\)\s*\)\s*;"""
         )
@@ -19113,6 +19135,7 @@ $migratedRecipes
         result = migrateCustomPacketPayloadRecordContractsSource(result, modId)
         result = migrateAbstractNestedPayloadBaseInterfaces(result)
         result = migrateSupplierValueCalls(result)
+        result = migrateNeoForgeRegistriesValueAccess(result)
         result = migrateUnboundLevelRegistryAccessCalls(result)
         result = migrateNitrogenBlockStateRecipeConstructors(result)
         result = migrateNitrogenBiomeParameterRecipeSource(result)
@@ -30125,6 +30148,12 @@ ${indent}if ($handlerVar != null) $statement"""
         listOf("ifPresent", "orElseThrow", "orElse", "map", "resolve", "isPresent").forEach { methodName ->
             result = rewriteExecutableJavaCallWithOffset(result, methodName) { receiver, args, offset ->
                 if (receiver.contains("LazyOptional.ofNullable")) return@rewriteExecutableJavaCallWithOffset null
+                val directBlockCapability = parseDirectLevelBlockEntityCapabilityReceiver(receiver)
+                if (directBlockCapability != null) {
+                    wrappedBlockCapability = true
+                    val capabilityExpression = directBlockCapability.levelBlockCapabilityExpression()
+                    return@rewriteExecutableJavaCallWithOffset "${compatPackage()}.LazyOptional.ofNullable($capabilityExpression).$methodName(${args.joinToString(", ")})"
+                }
                 val capability = parseLegacyBlockCapabilityReceiver(receiver) ?: return@rewriteExecutableJavaCallWithOffset null
                 if (!isBlockEntityCapabilityReceiver(maskJavaCommentsAndLiterals(result), offset, capability.first, javaInheritanceIndex)) {
                     return@rewriteExecutableJavaCallWithOffset null
@@ -30225,6 +30254,16 @@ ${indent}if ($handlerVar != null) $statement"""
         val valueType: String
     )
 
+    private data class DirectLevelBlockCapabilityCall(
+        val levelExpression: String,
+        val positionExpression: String,
+        val capability: String,
+        val side: String?
+    ) {
+        fun levelBlockCapabilityExpression(): String =
+            "$levelExpression.getCapability($capability, $positionExpression, ${side ?: "null"})"
+    }
+
     private fun generatedCompatPackageImportedBy(source: String): String? =
         Regex("""(?m)^\s*import\s+(com\.modporter\.generated\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.compat)\.LazyOptional\s*;""")
             .find(source)
@@ -30275,6 +30314,27 @@ ${indent}if ($handlerVar != null) $statement"""
         if (capability != "Capabilities.ItemHandler.BLOCK" && capability != "Capabilities.FluidHandler.BLOCK") return null
         if (args.size > 2) return null
         return Triple(receiver, args.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }, capability)
+    }
+
+    private fun parseDirectLevelBlockEntityCapabilityReceiver(expression: String): DirectLevelBlockCapabilityCall? {
+        val parsedCapability = parseLegacyBlockCapabilityReceiver(expression) ?: return null
+        val receiver = parsedCapability.first
+        val token = ".getBlockEntity("
+        val tokenIndex = receiver.lastIndexOf(token)
+        if (tokenIndex <= 0 || !receiver.trimEnd().endsWith(")")) return null
+        val levelExpression = receiver.substring(0, tokenIndex).trim()
+        if (levelExpression.isBlank()) return null
+        val argsStart = tokenIndex + ".getBlockEntity".length
+        val closeParen = findMatchingParen(receiver, argsStart)
+        if (closeParen != receiver.length - 1) return null
+        val args = splitTopLevelJavaArgs(receiver.substring(argsStart + 1, closeParen))
+        if (args.size != 1) return null
+        return DirectLevelBlockCapabilityCall(
+            levelExpression = levelExpression,
+            positionExpression = args.single().trim(),
+            capability = parsedCapability.third,
+            side = parsedCapability.second
+        )
     }
 
     private fun parseLegacyItemStackCapabilityReceiver(expression: String): Pair<String, String>? {
@@ -43038,6 +43098,15 @@ ${modifierLines.joinToString("\n")}
             result = Regex("""\bthis\.${Regex.escape(variable)}\.value\(\)""").replace(result, "this.$variable.get()")
         }
         return result
+    }
+
+    private fun migrateNeoForgeRegistriesValueAccess(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("NeoForgeRegistries.") || !executableCode.contains(".get().")) return source
+        return replaceExecutableRegex(
+            source,
+            Regex("""\bNeoForgeRegistries\.([A-Z][A-Z0-9_]*)\.get\(\)\.""")
+        ) { match -> "NeoForgeRegistries.${match.groupValues[1]}." }
     }
 
     private fun migrateBucketItemSupplierConstructors(

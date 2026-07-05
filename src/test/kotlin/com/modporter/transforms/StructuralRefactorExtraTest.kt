@@ -8073,9 +8073,14 @@ bus.addListener(ActualListenerRegistry::register);
                     if (blockEntity.getCapability(Capabilities.FluidHandler.BLOCK, Direction.NORTH).isPresent()) {
                         int fill = blockEntity.getCapability(Capabilities.FluidHandler.BLOCK, Direction.NORTH).resolve().get().fill(fluid, IFluidHandler.FluidAction.EXECUTE);
                     }
+                    if (player.getCommandSenderWorld().getBlockEntity(pos) != null && player.getCommandSenderWorld().getBlockEntity(pos).getCapability(Capabilities.ItemHandler.BLOCK).isPresent()) {
+                        haptic();
+                    }
                     unknown.getCapability(Capabilities.ItemHandler.BLOCK, Direction.UP).ifPresent(h -> h.toString());
                     unknown.getCapability(Capabilities.FluidHandler.BLOCK, Direction.NORTH).resolve();
                 }
+
+                private static void haptic() {}
             }
         """.trimIndent())
 
@@ -8088,6 +8093,7 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("LazyOptional<IItemHandler> lazyCap = com.modporter.generated.example.compat.LazyOptional.ofNullable(Capabilities.ItemHandler.BLOCK.getCapability(benchBE.getLevel(), benchBE.getBlockPos(), benchBE.getBlockState(), benchBE, Direction.UP));"), migrated)
         assertTrue(migrated.contains("com.modporter.generated.example.compat.LazyOptional.ofNullable(Capabilities.FluidHandler.BLOCK.getCapability(blockEntity.getLevel(), blockEntity.getBlockPos(), blockEntity.getBlockState(), blockEntity, Direction.NORTH)).isPresent()"), migrated)
         assertTrue(migrated.contains("com.modporter.generated.example.compat.LazyOptional.ofNullable(Capabilities.FluidHandler.BLOCK.getCapability(blockEntity.getLevel(), blockEntity.getBlockPos(), blockEntity.getBlockState(), blockEntity, Direction.NORTH)).resolve().get().fill(fluid, IFluidHandler.FluidAction.EXECUTE)"), migrated)
+        assertTrue(migrated.contains("LazyOptional.ofNullable(player.getCommandSenderWorld().getCapability(Capabilities.ItemHandler.BLOCK, pos, null)).isPresent()"), migrated)
         assertTrue(migrated.contains("unknown.getCapability(Capabilities.ItemHandler.BLOCK, Direction.UP).ifPresent"), migrated)
         assertTrue(migrated.contains("unknown.getCapability(Capabilities.FluidHandler.BLOCK, Direction.NORTH).resolve();"), migrated)
     }
@@ -10544,6 +10550,18 @@ bus.addListener(ActualListenerRegistry::register);
                 }
             }
         """.trimIndent())
+        srcDir.resolve("NeoForgeRegistrySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.material.Fluid;
+            import net.neoforged.neoforge.registries.NeoForgeRegistries;
+
+            public class NeoForgeRegistrySurface {
+                public String fluidPath(Fluid fluid) {
+                    return NeoForgeRegistries.FLUID_TYPES.get().getKey(fluid.getFluidType()).getPath();
+                }
+            }
+        """.trimIndent())
 
         val result = StructuralRefactorPass().apply(tempDir)
         val surface = srcDir.resolve("LegacyVanillaSurface.java").readText()
@@ -10552,6 +10570,7 @@ bus.addListener(ActualListenerRegistry::register);
         val tier = srcDir.resolve("LegacyTierClass.java").readText()
         val stepEntity = srcDir.resolve("LegacyStepEntity.java").readText()
         val lootPiece = srcDir.resolve("LootPiece.java").readText()
+        val neoForgeRegistrySurface = srcDir.resolve("NeoForgeRegistrySurface.java").readText()
 
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
         assertTrue(surface.contains("return data.getLevel();"), surface)
@@ -10593,6 +10612,8 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(stepEntity.contains("public float maxUpStep()"), stepEntity)
         assertTrue(stepEntity.contains("return 1.0F;"), stepEntity)
         assertFalse(stepEntity.contains("setMaxUpStep"), stepEntity)
+        assertTrue(neoForgeRegistrySurface.contains("return NeoForgeRegistries.FLUID_TYPES.getKey(fluid.getFluidType()).getPath();"), neoForgeRegistrySurface)
+        assertFalse(neoForgeRegistrySurface.contains("FLUID_TYPES.get().getKey"), neoForgeRegistrySurface)
         assertTrue(lootPiece.contains("be.setLootTable(ResourceKey.create(Registries.LOOT_TABLE, ResourceLocation.fromNamespaceAndPath(\"example\", \"deep_city_altar\")));"), lootPiece)
         assertTrue(lootPiece.contains("            be.setLootTableSeed(random.nextLong());"), lootPiece)
         assertTrue(lootPiece.contains("import net.minecraft.resources.ResourceKey;"), lootPiece)
@@ -11130,6 +11151,38 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(!migrated.contains("DistExecutor"))
         assertTrue(!migrated.contains("DistExecutor removed in NeoForge"))
         assertTrue(result.changes.none { it.ruleId == "struct-dist-executor" })
+    }
+
+    @Test
+    fun `migrates DistExecutor safe call method references to dist expression`() {
+        val projectDir = createFile("DistExecutorSafeCall.java", """
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.DistExecutor;
+
+            public class DistExecutorSafeCall {
+                public String label() {
+                    return DistExecutor.safeCallWhenOn(Dist.CLIENT, () -> ClientHooks::label);
+                }
+            }
+
+            class ClientHooks {
+                static String label() {
+                    return "client";
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/DistExecutorSafeCall.java")
+            .readText()
+
+        assertTrue(migrated.contains("return (FMLLoader.getDist() == Dist.CLIENT ? ClientHooks.label() : null);"), migrated)
+        assertTrue(migrated.contains("import net.neoforged.fml.loading.FMLLoader;"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.fml.DistExecutor;"), migrated)
+        assertFalse(migrated.contains("DistExecutor."), migrated)
     }
 
     @Test
