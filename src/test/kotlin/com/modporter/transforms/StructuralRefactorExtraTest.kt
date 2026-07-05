@@ -4585,6 +4585,101 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `migrates direct FluidHandlerItemStack initCapabilities to item capability registration`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val itemDir = srcDir.resolve("item")
+        val initDir = srcDir.resolve("init")
+        val libDir = srcDir.resolve("lib")
+        itemDir.createDirectories()
+        initDir.createDirectories()
+        libDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.init.Registration;
+            import com.example.lib.References;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(References.MODID)
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                    Registration.init(modEventBus);
+                }
+            }
+        """.trimIndent())
+
+        libDir.resolve("References.java").writeText("""
+            package com.example.lib;
+
+            public class References {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+
+        initDir.resolve("Registration.java").writeText("""
+            package com.example.init;
+
+            import com.example.item.SyringeItem;
+            import net.minecraft.world.item.Item;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class Registration {
+                public static final DeferredRegister<Item> ITEMS = null;
+                public static final DeferredHolder<Item, Item> SYRINGE = ITEMS.register("syringe", SyringeItem::new);
+
+                public static void init(IEventBus modEventBus) {
+                    ITEMS.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+
+        itemDir.resolve("SyringeItem.java").writeText("""
+            package com.example.item;
+
+            import com.example.lib.References;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import net.neoforged.neoforge.fluids.capability.templates.FluidHandlerItemStack;
+            import org.jetbrains.annotations.Nullable;
+
+            public class SyringeItem extends Item {
+                public SyringeItem() {
+                    super(new Properties());
+                }
+
+                @Override
+                public @Nullable ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
+                    return new FluidHandlerItemStack(stack, 100);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val item = itemDir.resolve("SyringeItem.java").readText()
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-direct-fluid-handler-item-capability" })
+        assertTrue(result.changes.any { it.ruleId == "struct-direct-fluid-handler-item-capability-listener" })
+        assertTrue(item.contains("public static final DeferredRegister.DataComponents DATA_COMPONENTS = DeferredRegister.createDataComponents(Registries.DATA_COMPONENT_TYPE, com.example.lib.References.MODID);"), item)
+        assertTrue(item.contains("public static final DeferredHolder<DataComponentType<?>, DataComponentType<SimpleFluidContent>> FLUID_CONTENT = DATA_COMPONENTS.registerComponentType(\"syringe_fluid_content\", builder -> builder.persistent(SimpleFluidContent.CODEC).networkSynchronized(SimpleFluidContent.STREAM_CODEC));"), item)
+        assertTrue(item.contains("event.registerItem(Capabilities.FluidHandler.ITEM, (stack, context) -> new FluidHandlerItemStack(FLUID_CONTENT, stack, 100), items);"), item)
+        assertFalse(item.contains("initCapabilities"), item)
+        assertFalse(item.contains("ICapabilityProvider"), item)
+        assertFalse(item.contains("CompoundTag"), item)
+        assertTrue(mod.contains("import com.example.item.SyringeItem;"), mod)
+        assertTrue(mod.contains("SyringeItem.DATA_COMPONENTS.register(modEventBus);"), mod)
+        assertTrue(mod.contains("modEventBus.addListener((RegisterCapabilitiesEvent event) -> SyringeItem.registerFluidCapabilities(event,"), mod)
+        assertTrue(mod.contains("Registration.SYRINGE.get()"), mod)
+    }
+
+    @Test
     fun `migrates bucket item supplier constructor super calls without capability migration`() {
         val srcDir = tempDir.resolve("src/main/java/com/example/items")
         srcDir.createDirectories()

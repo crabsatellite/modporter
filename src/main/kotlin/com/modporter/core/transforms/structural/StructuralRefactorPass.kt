@@ -202,6 +202,15 @@ class StructuralRefactorPass : Pass {
             errors.add("Custom fluid capability migration error: ${e.message}")
         }
 
+        // Migrate direct FluidHandlerItemStack Item#initCapabilities hooks to
+        // registered item capabilities backed by SimpleFluidContent components.
+        try {
+            val directFluidHandlerChanges = migrateDirectFluidHandlerItemStackCapabilities(projectDir, dryRun)
+            changes.addAll(directFluidHandlerChanges)
+        } catch (e: Exception) {
+            errors.add("Direct fluid handler item capability migration error: ${e.message}")
+        }
+
         // Migrate legacy Curios Item#initCapabilities providers to the
         // RegisterCapabilitiesEvent item capability registration model.
         try {
@@ -5298,6 +5307,204 @@ $itemArguments
         val itemReferences: List<RegisteredItemReference>,
         val handlerKindExpression: String?
     )
+
+    private data class DirectFluidHandlerItemStackCapabilityMigration(
+        val itemFile: Path,
+        val packageName: String,
+        val className: String,
+        val itemReferences: List<RegisteredItemReference>,
+        val modIdExpression: String,
+        val dataComponentsFieldName: String,
+        val componentFieldName: String,
+        val componentPath: String,
+        val capacityExpression: String
+    )
+
+    private fun migrateDirectFluidHandlerItemStackCapabilities(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        val mainClass = detectModMainClass(projectDir) ?: return changes
+        val mainText = mainClass.readText()
+        val migrations = javaFiles.mapNotNull { javaFile ->
+            directFluidHandlerItemStackCapabilityMigration(javaFile, javaFiles, mainClass, mainText)
+        }
+        if (migrations.isEmpty()) return changes
+
+        for (migration in migrations) {
+            var itemText = migration.itemFile.readText()
+            val originalItemText = itemText
+            itemText = replaceDirectFluidHandlerItemStackInitCapabilities(itemText, migration)
+            itemText = addImportIfMissing(itemText, "net.minecraft.core.component.DataComponentType")
+            itemText = addImportIfMissing(itemText, "net.minecraft.core.registries.Registries")
+            itemText = addImportIfMissing(itemText, "net.minecraft.world.level.ItemLike")
+            itemText = addImportIfMissing(itemText, "net.neoforged.neoforge.capabilities.Capabilities")
+            itemText = addImportIfMissing(itemText, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
+            itemText = addImportIfMissing(itemText, "net.neoforged.neoforge.fluids.SimpleFluidContent")
+            itemText = addImportIfMissing(itemText, "net.neoforged.neoforge.registries.DeferredHolder")
+            itemText = addImportIfMissing(itemText, "net.neoforged.neoforge.registries.DeferredRegister")
+            itemText = removeUnusedSimpleImports(
+                itemText,
+                listOf(
+                    "net.minecraft.nbt.CompoundTag",
+                    "net.neoforged.neoforge.capabilities.ICapabilityProvider",
+                    "org.jetbrains.annotations.Nullable",
+                    "javax.annotation.Nullable"
+                )
+            )
+            if (itemText != originalItemText) {
+                if (!dryRun) {
+                    migration.itemFile.writeText(itemText)
+                }
+                changes.add(Change(
+                    file = migration.itemFile,
+                    line = 0,
+                    description = "Migrate direct FluidHandlerItemStack initCapabilities hook to registered item capability",
+                    before = "initCapabilities(...) -> new FluidHandlerItemStack(stack, capacity)",
+                    after = "DataComponentType<SimpleFluidContent> + RegisterCapabilitiesEvent.registerItem",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-direct-fluid-handler-item-capability"
+                ))
+            }
+        }
+
+        var migratedMainText = mainText
+        val originalMainText = migratedMainText
+        val mainPackage = packageNameOf(migratedMainText)
+        val constructorBusName = requireModEventBusName(migratedMainText, "direct fluid handler item capability registration")
+        for (migration in migrations) {
+            if (migration.packageName != mainPackage) {
+                migratedMainText = addImportIfMissing(migratedMainText, "${migration.packageName}.${migration.className}")
+            }
+            migratedMainText = addImportIfMissing(migratedMainText, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
+            migration.itemReferences.map { it.qualifiedRegistryClass }
+                .distinct()
+                .filter { it.substringBeforeLast('.', "") != mainPackage }
+                .forEach { migratedMainText = addImportIfMissing(migratedMainText, it) }
+
+            if (!migratedMainText.contains("${migration.className}.${migration.dataComponentsFieldName}.register($constructorBusName)")) {
+                val itemArguments = migration.itemReferences.joinToString(",\n") { ref ->
+                    "                ${ref.registryClassName}.${ref.fieldName}.get()"
+                }
+                val registration = """
+        ${migration.className}.${migration.dataComponentsFieldName}.register($constructorBusName);
+        $constructorBusName.addListener((RegisterCapabilitiesEvent event) -> ${migration.className}.registerFluidCapabilities(event,
+$itemArguments
+        ));
+""".trimEnd()
+                migratedMainText = insertModBusListener(
+                    migratedMainText,
+                    constructorBusName,
+                    registration,
+                    migration.itemReferences.first().registryClassName
+                )
+                changes.add(Change(
+                    file = mainClass,
+                    line = 0,
+                    description = "Register direct FluidHandlerItemStack data components and item capabilities on the mod event bus",
+                    before = "(no SimpleFluidContent data component / RegisterCapabilitiesEvent listener)",
+                    after = "${migration.className}.${migration.dataComponentsFieldName}.register(...) + registerFluidCapabilities(...)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-direct-fluid-handler-item-capability-listener"
+                ))
+            }
+        }
+        if (migratedMainText != originalMainText && !dryRun) {
+            mainClass.writeText(migratedMainText)
+        }
+
+        return changes
+    }
+
+    private fun directFluidHandlerItemStackCapabilityMigration(
+        javaFile: Path,
+        javaFiles: List<Path>,
+        mainClass: Path,
+        mainText: String
+    ): DirectFluidHandlerItemStackCapabilityMigration? {
+        val source = javaFile.readText()
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("initCapabilities") || !executableCode.contains("FluidHandlerItemStack")) {
+            return null
+        }
+        val className = classNameOfJavaSource(executableCode) ?: return null
+        val method = javaMethodRangesIncludingDefault(executableCode).firstOrNull { candidate ->
+            candidate.name == "initCapabilities" && executableCode.substring(candidate.range).contains("FluidHandlerItemStack")
+        } ?: return null
+        val parametersText = method.header.substringAfter("(", "").substringBeforeLast(")", "")
+        val stackParameterName = splitTopLevelJavaArgs(parametersText)
+            .firstOrNull { parameter -> parameter.contains("ItemStack") }
+            ?.let(::javaParameterName)
+            ?: return null
+        val methodExecutable = executableCode.substring(method.range)
+        val returnMatch = Regex("""(?s)\breturn\s+new\s+(?:[A-Za-z_$][\w$]*\.)*FluidHandlerItemStack\s*\(([^;{}]+)\)\s*;""")
+            .find(methodExecutable)
+            ?: return null
+        val args = splitTopLevelJavaArgs(returnMatch.groupValues[1])
+        if (args.size != 2 || args[0].trim() != stackParameterName) return null
+
+        val itemReferences = findRegisteredItemReferences(javaFiles, className)
+            .distinctBy { "${it.qualifiedRegistryClass}.${it.fieldName}" }
+            .sortedWith(compareBy({ it.qualifiedRegistryClass }, { it.fieldName }))
+        if (itemReferences.isEmpty()) return null
+
+        val modIdExpression = inferModAccess(source)?.modIdExpression
+            ?: explicitModIdReferenceForGeneratedClass(mainClass, mainText, packageNameOf(source), metadataModId = null)
+            ?: return null
+        return DirectFluidHandlerItemStackCapabilityMigration(
+            itemFile = javaFile,
+            packageName = packageNameOf(source),
+            className = className,
+            itemReferences = itemReferences,
+            modIdExpression = modIdExpression,
+            dataComponentsFieldName = uniqueJavaFieldName(source, "DATA_COMPONENTS"),
+            componentFieldName = uniqueJavaFieldName(source, "FLUID_CONTENT"),
+            componentPath = "${itemReferences.first().fieldName.lowercase()}_fluid_content",
+            capacityExpression = args[1].trim()
+        )
+    }
+
+    private fun replaceDirectFluidHandlerItemStackInitCapabilities(
+        source: String,
+        migration: DirectFluidHandlerItemStackCapabilityMigration
+    ): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val method = javaMethodRangesIncludingDefault(executableCode).firstOrNull { candidate ->
+            candidate.name == "initCapabilities" && executableCode.substring(candidate.range).contains("FluidHandlerItemStack")
+        } ?: return source
+        var end = method.range.last + 1
+        if (end < source.length && source[end] == '\r') end++
+        if (end < source.length && source[end] == '\n') end++
+        var result = source.substring(0, method.range.first) + source.substring(end)
+        if (result.contains("registerFluidCapabilities(RegisterCapabilitiesEvent")) return result
+        val classMatch = Regex("""\bclass\s+${Regex.escape(migration.className)}\b[^{]*\{""").find(maskJavaCommentsAndLiterals(result))
+            ?: return result
+        val classOpen = result.indexOf('{', classMatch.range.last)
+        if (classOpen < 0) return result
+        val members = """
+
+    public static final DeferredRegister.DataComponents ${migration.dataComponentsFieldName} = DeferredRegister.createDataComponents(Registries.DATA_COMPONENT_TYPE, ${migration.modIdExpression});
+    public static final DeferredHolder<DataComponentType<?>, DataComponentType<SimpleFluidContent>> ${migration.componentFieldName} = ${migration.dataComponentsFieldName}.registerComponentType("${migration.componentPath}", builder -> builder.persistent(SimpleFluidContent.CODEC).networkSynchronized(SimpleFluidContent.STREAM_CODEC));
+
+    public static void registerFluidCapabilities(RegisterCapabilitiesEvent event, ItemLike... items) {
+        event.registerItem(Capabilities.FluidHandler.ITEM, (stack, context) -> new FluidHandlerItemStack(${migration.componentFieldName}, stack, ${migration.capacityExpression}), items);
+    }
+"""
+        return result.substring(0, classOpen + 1) + members + result.substring(classOpen + 1)
+    }
+
+    private fun uniqueJavaFieldName(source: String, baseName: String): String {
+        var candidate = baseName
+        var suffix = 2
+        while (Regex("""(?<![\w$])${Regex.escape(candidate)}(?![\w$])""").containsMatchIn(source)) {
+            candidate = "${baseName}_${suffix++}"
+        }
+        return candidate
+    }
 
     private fun migrateCustomFluidItemCapabilities(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
