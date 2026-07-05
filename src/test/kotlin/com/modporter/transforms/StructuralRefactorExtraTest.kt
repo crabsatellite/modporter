@@ -32057,6 +32057,55 @@ bus.addListener(ActualListenerRegistry::register);
                 }
             }
         """.trimIndent())
+        srcDir.resolve("FollyEffect.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectCategory;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public class FollyEffect extends MobEffect {
+                public FollyEffect() {
+                    super(MobEffectCategory.HARMFUL, 0x56CBFD);
+                }
+
+                @Override
+                public boolean applyEffectTick(LivingEntity living, int amplifier) {
+                    if (living.isAlive()) {
+                        living.setYRot(10);
+                    } else {
+                        living.setXRot(20);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TargetEvents.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.event.entity.living.LivingChangeTargetEvent;
+
+            public class TargetEvents {
+                public void change(LivingChangeTargetEvent event) {
+                    if (event.getNewTarget() != null) {
+                        event.setNewTarget(null);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("PacketSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.FriendlyByteBuf;
+
+            public class PacketSurface {
+                private final CompoundTag data;
+
+                public PacketSurface(FriendlyByteBuf buf) {
+                    this.data = buf.readAnySizeNbt();
+                }
+            }
+        """.trimIndent())
 
         StructuralRefactorPass().apply(tempDir)
 
@@ -32067,6 +32116,9 @@ bus.addListener(ActualListenerRegistry::register);
         val armor = srcDir.resolve("ArmorTextureItem.java").readText()
         val rarity = srcDir.resolve("RarityItem.java").readText()
         val frosted = srcDir.resolve("FrostedEffect.java").readText()
+        val folly = srcDir.resolve("FollyEffect.java").readText()
+        val targetEvents = srcDir.resolve("TargetEvents.java").readText()
+        val packetSurface = srcDir.resolve("PacketSurface.java").readText()
         assertTrue(bow.contains("public AbstractArrow customArrow(AbstractArrow arrow, ItemStack projectileStack, ItemStack weaponStack)"))
         assertTrue(bow.contains("return super.customArrow(arrow, projectileStack, weaponStack);"), bow)
         assertTrue(bow.contains("this.getUseDuration(stack, living) - timeLeft"))
@@ -32086,6 +32138,13 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(rarity.contains("public void verifyComponentsAfterLoad(ItemStack stack)"))
         assertTrue(frosted.contains("this.addAttributeModifier(Attributes.MOVEMENT_SPEED, SPEED, -0.15D, AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL);"))
         assertTrue(Regex("""(?s)public boolean applyEffectTick\([^)]*\)\s*\{.*return true;\s*\}""").containsMatchIn(frosted), frosted)
+        assertTrue(Regex("""(?s)public boolean applyEffectTick\([^)]*\)\s*\{.*return true;\s*\}""").containsMatchIn(folly), folly)
+        assertTrue(targetEvents.contains("event.getNewAboutToBeSetTarget()"), targetEvents)
+        assertTrue(targetEvents.contains("event.setNewAboutToBeSetTarget(null);"), targetEvents)
+        assertFalse(targetEvents.contains("getNewTarget"), targetEvents)
+        assertFalse(targetEvents.contains("setNewTarget"), targetEvents)
+        assertTrue(packetSurface.contains("this.data = buf.readNbt();"), packetSurface)
+        assertFalse(packetSurface.contains("readAnySizeNbt"), packetSurface)
     }
 
     @Test

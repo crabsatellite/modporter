@@ -18775,6 +18775,8 @@ $migratedRecipes
         result = migrateNestedHolderLookupProviderAccess(result, javaInheritanceIndex)
         result = migrateRegistryAccessEmptyFallbacks(result, javaInheritanceIndex)
         result = migrateLegacyGameEventListenerSource(result)
+        result = migrateLegacyLivingChangeTargetEventSource(result)
+        result = migrateFriendlyByteBufReadAnySizeNbtSource(result)
         result = migrateLegacyNetworkBufferCodecsSource(result)
         result = migrateHolderValueMethodArgumentSource(result, holderValueParameterHints)
         result = migrateSynchedEntityDataBufferSource(result)
@@ -40220,9 +40222,29 @@ ${indent}}
     private fun mobEffectBooleanMethodNeedsTrailingTrue(body: String): Boolean {
         val trimmed = body.trimEnd()
         if (trimmed.isBlank()) return true
+        if (!Regex("""\b(?:return|throw)\b""").containsMatchIn(maskJavaCommentsAndLiterals(trimmed))) return true
         if (Regex("""(?s)\b(?:return|throw)\b[^;]*;\s*$""").containsMatchIn(trimmed)) return false
         if (Regex("""(?s)\belse\s*(?:\{[^{}]*\}|\b(?:return|throw)\b[^;]*;)\s*$""").containsMatchIn(trimmed)) return false
         return true
+    }
+
+    private fun migrateLegacyLivingChangeTargetEventSource(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("LivingChangeTargetEvent") ||
+            !executableCode.contains("NewTarget(")
+        ) {
+            return source
+        }
+        var result = source
+        result = replaceExecutableRegex(result, Regex("""\.getNewTarget\s*\(""")) { ".getNewAboutToBeSetTarget(" }
+        result = replaceExecutableRegex(result, Regex("""\.setNewTarget\s*\(""")) { ".setNewAboutToBeSetTarget(" }
+        return result
+    }
+
+    private fun migrateFriendlyByteBufReadAnySizeNbtSource(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".readAnySizeNbt(")) return source
+        return replaceExecutableRegex(source, Regex("""\.readAnySizeNbt\s*\(""")) { ".readNbt(" }
     }
 
     private fun migrateLegacyNetworkBufferCodecsSource(source: String): String {
