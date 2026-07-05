@@ -11744,7 +11744,9 @@ $fields
             val visited = mutableSetOf<String>()
             while (current.isNotBlank() && visited.add(current)) {
                 if (current in baseTypes) return true
-                current = directSuperByClass[current]?.substringAfterLast('.') ?: return false
+                current = directSuperByClass[current]?.substringAfterLast('.')
+                    ?: externalDirectSuperBySimpleName[current]?.substringAfterLast('.')
+                    ?: return false
             }
             return false
         }
@@ -11761,6 +11763,79 @@ $fields
 
         companion object {
             val EMPTY = JavaInheritanceIndex(emptyMap())
+
+            private val externalDirectSuperBySimpleName: Map<String, String> = mapOf(
+                "AbstractVillager" to "AgeableMob",
+                "Villager" to "AbstractVillager",
+                "WanderingTrader" to "AbstractVillager",
+                "Raider" to "PatrollingMonster",
+                "PatrollingMonster" to "Monster",
+                "Zombie" to "Monster",
+                "ZombieVillager" to "Zombie",
+                "Husk" to "Zombie",
+                "Drowned" to "Zombie",
+                "AbstractSkeleton" to "Monster",
+                "Skeleton" to "AbstractSkeleton",
+                "WitherSkeleton" to "AbstractSkeleton",
+                "Stray" to "AbstractSkeleton",
+                "Creeper" to "Monster",
+                "Spider" to "Monster",
+                "CaveSpider" to "Spider",
+                "EnderMan" to "Monster",
+                "Silverfish" to "Monster",
+                "Endermite" to "Monster",
+                "Witch" to "Raider",
+                "Pillager" to "Raider",
+                "Vindicator" to "Raider",
+                "Evoker" to "Raider",
+                "Ravager" to "Raider",
+                "AbstractGolem" to "PathfinderMob",
+                "IronGolem" to "AbstractGolem",
+                "SnowGolem" to "AbstractGolem",
+                "WaterAnimal" to "PathfinderMob",
+                "AbstractFish" to "WaterAnimal",
+                "Cod" to "AbstractFish",
+                "Salmon" to "AbstractFish",
+                "Pufferfish" to "AbstractFish",
+                "TropicalFish" to "AbstractFish",
+                "Dolphin" to "WaterAnimal",
+                "Squid" to "WaterAnimal",
+                "GlowSquid" to "Squid",
+                "Horse" to "AbstractHorse",
+                "Donkey" to "AbstractChestedHorse",
+                "Mule" to "AbstractChestedHorse",
+                "Llama" to "AbstractChestedHorse",
+                "TraderLlama" to "Llama",
+                "Camel" to "AbstractHorse",
+                "Pig" to "Animal",
+                "Cow" to "Animal",
+                "Sheep" to "Animal",
+                "Chicken" to "Animal",
+                "Rabbit" to "Animal",
+                "Fox" to "Animal",
+                "Bee" to "Animal",
+                "Panda" to "Animal",
+                "Turtle" to "Animal",
+                "Frog" to "Animal",
+                "Sniffer" to "Animal",
+                "Wolf" to "TamableAnimal",
+                "Cat" to "TamableAnimal",
+                "Parrot" to "TamableAnimal",
+                "Ocelot" to "Animal",
+                "AbstractHurtingProjectile" to "Projectile",
+                "Fireball" to "AbstractHurtingProjectile",
+                "SmallFireball" to "Fireball",
+                "LargeFireball" to "Fireball",
+                "WitherSkull" to "Fireball",
+                "ThrowableItemProjectile" to "ThrowableProjectile",
+                "ThrownPotion" to "ThrowableItemProjectile",
+                "ThrownEnderpearl" to "ThrowableItemProjectile",
+                "ThrownExperienceBottle" to "ThrowableItemProjectile",
+                "Snowball" to "ThrowableItemProjectile",
+                "AbstractMinecartContainer" to "AbstractMinecart",
+                "Minecart" to "AbstractMinecart",
+                "ChestBoat" to "Boat"
+            )
         }
     }
 
@@ -26860,6 +26935,14 @@ ${indent}}"""
 
     private fun registryAccessFromParameters(parameters: List<String>): String? {
         holderLookupProviderFromParameters(parameters)?.let { return it }
+        return registryAccessFromParameters(parameters, JavaInheritanceIndex.EMPTY)
+    }
+
+    private fun registryAccessFromParameters(
+        parameters: List<String>,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String? {
+        holderLookupProviderFromParameters(parameters)?.let { return it }
         val parameterPattern = Regex("""(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:<[^>]+>)?)\s+([A-Za-z_$][\w$]*)$""")
         val parsed = parameters.mapNotNull { parameter ->
             val cleaned = parameter.trim()
@@ -26888,7 +26971,10 @@ ${indent}}"""
         if (inventoryRegistryAccess.size > 1) return null
 
         val entityRegistryAccess = parsed
-            .filter { it.first in setOf("ServerPlayer", "Player", "LivingEntity", "Entity", "Mob") }
+            .filter { (type, _) ->
+                type in javaEntityBaseTypes() ||
+                    javaInheritanceIndex.inherits(type, javaEntityBaseTypes())
+            }
             .map { "${it.second}.registryAccess()" }
             .distinct()
         if (entityRegistryAccess.size == 1) return entityRegistryAccess.single()
@@ -26925,7 +27011,7 @@ ${indent}}"""
         javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
     ): String? {
         val parameters = currentMethodParametersBeforeOffset(source, offset)
-        registryAccessFromParameters(parameters)?.let { return it }
+        registryAccessFromParameters(parameters, javaInheritanceIndex)?.let { return it }
         clientMinecraftRegistryAccessExpression(source)?.let { return it }
         if (isInsideStaticJavaMethod(source, offset)) return null
         val declaration = enclosingJavaClassDeclaration(source, offset)
@@ -29164,6 +29250,18 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 .findAll(maskJavaCommentsAndLiterals(result))
                 .associate { "${it.groupValues[2]}()" to it.groupValues[1] }
         }
+        val lazyOptionalValueTypes = if (ownerAlternation.isBlank()) emptyMap() else {
+            Regex("""\b(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.)?LazyOptional\s*<\s*($ownerAlternation)\s*>\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(maskJavaCommentsAndLiterals(result))
+                .associate { it.groupValues[2] to it.groupValues[1] }
+        }
+
+        fun lazyOptionalUnwrappedOwner(receiver: String): String? {
+            val match = Regex("""^(?:this\.)?([A-Za-z_$][\w$]*)\s*\.\s*resolve\s*\(\s*\)\s*\.\s*(?:get|orElseThrow)\s*\(\s*\)$""")
+                .find(receiver)
+                ?: return null
+            return lazyOptionalValueTypes[match.groupValues[1]]
+        }
 
         fun receiverOwner(receiver: String, offset: Int): String? {
             val normalized = receiver.trim()
@@ -29172,6 +29270,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             staticFactoryReceiverOwner(normalized, methodsByName.values.flatten().map { it.owner }.toSet(), javaMethodReturnTypes)?.let { return it }
             if (normalized in ownerNames) return normalized
             variableTypes[normalized]?.let { return it }
+            lazyOptionalUnwrappedOwner(normalized)?.let { return it }
             val simpleReceiver = normalized.substringAfterLast('.')
             getterTypes[normalized]?.let { return it }
             getterTypes[simpleReceiver]?.let { return it }

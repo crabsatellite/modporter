@@ -7316,6 +7316,7 @@ bus.addListener(ActualListenerRegistry::register);
 
             import com.modporter.generated.example.compat.LazyOptional;
             import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.npc.Villager;
             import net.minecraft.world.entity.player.Player;
 
             public class CapabilityUse {
@@ -7332,6 +7333,14 @@ bus.addListener(ActualListenerRegistry::register);
                         LazyOptional.ofNullable(target.getCapability(ConvalescentDataProvider.CONVALESCENT_DATA, null)).ifPresent(dst -> {
                             dst.loadFromNBT(src.saveToNBT(new CompoundTag()));
                         });
+                    });
+                }
+
+                public void copyVillager(Villager villager, CompoundTag tag) {
+                    LazyOptional<ConvalescentData> cap = LazyOptional.ofNullable(villager.getCapability(ConvalescentDataProvider.CONVALESCENT_DATA, null));
+                    tag.put("direct", cap.resolve().get().saveToNBT(new CompoundTag()));
+                    LazyOptional.ofNullable(villager.getCapability(ConvalescentDataProvider.CONVALESCENT_DATA, null)).ifPresent(c -> {
+                        tag.put("data", c.saveToNBT(new CompoundTag()));
                     });
                 }
             }
@@ -7367,6 +7376,8 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(use.contains("c.loadFromNBT(tag.getCompound(\"data\"), player.registryAccess())"), use)
         assertTrue(use.contains("ConvalescentData.of(player.getMainHandItem()).saveToNBT(new CompoundTag(), player.registryAccess())"), use)
         assertTrue(use.contains("dst.loadFromNBT(src.saveToNBT(new CompoundTag(), source.registryAccess()), target.registryAccess())"), use)
+        assertTrue(use.contains("cap.resolve().get().saveToNBT(new CompoundTag(), villager.registryAccess())"), use)
+        assertTrue(use.contains("c.saveToNBT(new CompoundTag(), villager.registryAccess())"), use)
         assertTrue(entityUse.contains("c.saveToNBT(new CompoundTag(), this.registryAccess())"), entityUse)
     }
 
