@@ -12060,7 +12060,11 @@ $fields
         val itemStackNbtConstructors = collectItemStackNbtConstructorsNeedingHolderLookup(javaFiles, itemStackNbtMethods)
         val constructorFactoryMethods = collectHolderLookupConstructorFactoryMethods(javaFiles, itemStackNbtConstructors, javaInheritanceIndex)
         val savedDataHolderLookupMethods = collectSavedDataHolderLookupMethods(javaFiles, savedDataClassNames)
-        val effectiveItemStackNbtMethods = itemStackNbtMethods + constructorFactoryMethods + savedDataHolderLookupMethods
+        val existingHolderLookupNbtMethods = collectExistingHolderLookupNbtMethods(javaFiles)
+        val effectiveItemStackNbtMethods = itemStackNbtMethods +
+            constructorFactoryMethods +
+            savedDataHolderLookupMethods +
+            existingHolderLookupNbtMethods
         val entityCapabilityTypes = collectEntityCapabilityValueTypes(javaFiles)
 
         javaFiles.forEach { javaFile ->
@@ -29255,12 +29259,24 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 .findAll(maskJavaCommentsAndLiterals(result))
                 .associate { it.groupValues[2] to it.groupValues[1] }
         }
+        val mapEntryValueTypes = if (ownerAlternation.isBlank()) emptyMap() else {
+            Regex("""\b(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.)?Map\.Entry\s*<\s*[^,<>]+(?:<[^<>]*>)?\s*,\s*($ownerAlternation)\s*>\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(maskJavaCommentsAndLiterals(result))
+                .associate { it.groupValues[2] to it.groupValues[1] }
+        }
 
         fun lazyOptionalUnwrappedOwner(receiver: String): String? {
             val match = Regex("""^(?:this\.)?([A-Za-z_$][\w$]*)\s*\.\s*resolve\s*\(\s*\)\s*\.\s*(?:get|orElseThrow)\s*\(\s*\)$""")
                 .find(receiver)
                 ?: return null
             return lazyOptionalValueTypes[match.groupValues[1]]
+        }
+
+        fun mapEntryValueOwner(receiver: String): String? {
+            val match = Regex("""^(?:this\.)?([A-Za-z_$][\w$]*)\s*\.\s*getValue\s*\(\s*\)$""")
+                .find(receiver)
+                ?: return null
+            return mapEntryValueTypes[match.groupValues[1]]
         }
 
         fun receiverOwner(receiver: String, offset: Int): String? {
@@ -29271,6 +29287,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             if (normalized in ownerNames) return normalized
             variableTypes[normalized]?.let { return it }
             lazyOptionalUnwrappedOwner(normalized)?.let { return it }
+            mapEntryValueOwner(normalized)?.let { return it }
             val simpleReceiver = normalized.substringAfterLast('.')
             getterTypes[normalized]?.let { return it }
             getterTypes[simpleReceiver]?.let { return it }
@@ -33681,11 +33698,19 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         }
 
         if (localSavedDataClasses.isNotEmpty()) {
-            result = Regex("""public\s+CompoundTag\s+save\s*\(\s*CompoundTag\s+($id)\s*\)""")
-                .replace(result) { match ->
+            val executableBeforeSaveMigration = maskJavaCommentsAndLiterals(result)
+            val typeBlocksBeforeSaveMigration = javaTypeBlocks(result, executableBeforeSaveMigration)
+            result = replaceExecutableRegex(result, Regex("""public\s+CompoundTag\s+save\s*\(\s*CompoundTag\s+($id)\s*\)""")) { match ->
+                val owner = typeBlocksBeforeSaveMigration
+                    .lastOrNull { match.range.first in it.bodyStart..it.end }
+                    ?.name
+                if (owner in localSavedDataClasses) {
                     needsHolderLookup = true
                     "public CompoundTag save(CompoundTag ${match.groupValues[1]}, HolderLookup.Provider registries)"
+                } else {
+                    match.value
                 }
+            }
         }
 
         result = rewriteJavaCall(result, "computeIfAbsent") { receiver, args ->

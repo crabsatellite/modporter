@@ -7639,6 +7639,92 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `holder lookup provider is threaded through typed map entry values inside saved data save`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PodSavedData.java").writeText("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.Map;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.saveddata.SavedData;
+
+            public class PodSavedData extends SavedData {
+                private final Map<BlockPos, PodData> pods = new HashMap<>();
+
+                @Override
+                public CompoundTag save(CompoundTag tag) {
+                    CompoundTag podTag = new CompoundTag();
+                    for (Map.Entry<BlockPos, PodData> entry : pods.entrySet()) {
+                        podTag.put(entry.getKey().toString(), entry.getValue().save(new CompoundTag()));
+                    }
+                    return tag;
+                }
+
+                public class PodData {
+                    public CompoundTag save(CompoundTag tag, HolderLookup.Provider registries) {
+                        return tag;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("PodSavedData.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("public CompoundTag save(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("entry.getValue().save(new CompoundTag(), registries)"), migrated)
+    }
+
+    @Test
+    fun `saved data signature migration does not widen nested nbt helper save methods`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LifeSavedData.java").writeText("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.Map;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.saveddata.SavedData;
+
+            public class LifeSavedData extends SavedData {
+                private final Map<BlockPos, PodData> pods = new HashMap<>();
+
+                @Override
+                public CompoundTag save(CompoundTag tag) {
+                    CompoundTag podTag = new CompoundTag();
+                    for (Map.Entry<BlockPos, PodData> entry : pods.entrySet()) {
+                        podTag.put(entry.getKey().toString(), entry.getValue().save(new CompoundTag()));
+                    }
+                    return tag;
+                }
+
+                public class PodData {
+                    public CompoundTag save(CompoundTag tag) {
+                        tag.putLong("pos", 0L);
+                        return tag;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LifeSavedData.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("public CompoundTag save(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("public CompoundTag save(CompoundTag tag)"), migrated)
+        assertTrue(migrated.contains("entry.getValue().save(new CompoundTag())"), migrated)
+        assertFalse(migrated.contains("entry.getValue().save(new CompoundTag(), registries)"), migrated)
+    }
+
+    @Test
     fun `merchant offers nbt serialization migrates to registry aware codecs`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
