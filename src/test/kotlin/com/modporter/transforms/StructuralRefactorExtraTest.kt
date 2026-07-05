@@ -1008,6 +1008,11 @@ class StructuralRefactorExtraTest {
                 public boolean reject(ItemStack stack) {
                     return !stack.getCapability(Capabilities.FluidHandler.ITEM).isPresent();
                 }
+
+                public IFluidHandlerItem direct(ItemStack stack) {
+                    IFluidHandlerItem fluid = stack.getCapability(Capabilities.FluidHandler.ITEM).resolve().get();
+                    return fluid;
+                }
             }
         """.trimIndent())
 
@@ -1019,6 +1024,8 @@ class StructuralRefactorExtraTest {
         assertTrue(source.contains("} else if (itemStack.isEmpty()) {"), source)
         assertTrue(source.contains("IFluidHandlerItem syringe = itemStack.getCapability(Capabilities.FluidHandler.ITEM);"), source)
         assertFalse(source.contains(".resolve().orElseThrow()"), source)
+        assertTrue(source.contains("IFluidHandlerItem fluid = stack.getCapability(Capabilities.FluidHandler.ITEM);"), source)
+        assertFalse(source.contains(".resolve().get()"), source)
         assertTrue(source.contains("return stack.getCapability(Capabilities.FluidHandler.ITEM) == null;"), source)
         assertFalse(source.contains("!stack.getCapability(Capabilities.FluidHandler.ITEM) != null"), source)
     }
@@ -10143,14 +10150,20 @@ bus.addListener(ActualListenerRegistry::register);
         srcDir.resolve("LegacyVanillaSurface.java").writeText("""
             package com.example;
 
+            import com.google.common.collect.HashMultimap;
+            import com.google.common.collect.Multimap;
+            import net.minecraft.core.Holder;
             import net.minecraft.core.component.DataComponents;
             import net.minecraft.nbt.NbtOps;
             import net.minecraft.core.BlockPos;
+            import net.minecraft.world.InteractionResult;
             import net.minecraft.world.InteractionHand;
             import net.minecraft.world.effect.MobEffect;
             import net.minecraft.world.effect.MobEffectCategory;
             import net.minecraft.world.effect.MobEffectInstance;
             import net.minecraft.world.effect.MobEffects;
+            import net.minecraft.world.entity.ai.attributes.Attribute;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
             import net.minecraft.world.entity.EquipmentSlot;
             import net.minecraft.world.entity.LivingEntity;
             import net.minecraft.world.entity.MobType;
@@ -10168,6 +10181,10 @@ bus.addListener(ActualListenerRegistry::register);
             import net.minecraft.world.level.block.LiquidBlockContainer;
             import net.minecraft.world.level.block.state.BlockState;
             import net.minecraft.world.level.material.Fluid;
+            import net.neoforged.neoforge.common.NeoForgeMod;
+            import net.neoforged.neoforge.common.util.TriState;
+            import net.neoforged.neoforge.event.entity.player.CanPlayerSleepEvent;
+            import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
 
             public class LegacyVanillaSurface {
                 public int level(VillagerData data) {
@@ -10202,6 +10219,28 @@ bus.addListener(ActualListenerRegistry::register);
 
                 public boolean arthropod(LivingEntity target) {
                     return target.getMobType() == MobType.ARTHROPOD && target.getMobType() != MobType.UNDEAD;
+                }
+
+                public void rightClick(PlayerInteractEvent.RightClickBlock event) {
+                    event.setResult(TriState.TRUE);
+                }
+
+                public static void staticRightClick(PlayerInteractEvent.RightClickBlock event) {
+                    event.setResult(TriState.FALSE);
+                }
+
+                public void sleep(CanPlayerSleepEvent event) {
+                    if (event.getPos().isPresent() && event.getEntity().level().getBlockState(event.getPos().getValue()).getBlock() == null) {
+                        event.setResult(TriState.TRUE);
+                    }
+                }
+
+                public void entityState(Player player) {
+                    Multimap<Holder<Attribute>, AttributeModifier> map = HashMultimap.create();
+                    map.put(NeoForgeMod.SWIM_SPEED.get(), null);
+                    if (player.isAddedToWorld()) {
+                        player.isAlive();
+                    }
                 }
 
                 public LegacyEffectType customEffect() {
@@ -10377,6 +10416,16 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(surface.contains("itemEntity.setThrower(entity);"), surface)
         assertTrue(surface.contains("target.getType().is(EntityTypeTags.ARTHROPOD)"), surface)
         assertTrue(surface.contains("!target.getType().is(EntityTypeTags.UNDEAD)"), surface)
+        assertTrue(surface.contains("event.setCancellationResult(InteractionResult.SUCCESS);"), surface)
+        assertTrue(surface.contains("event.setCancellationResult(InteractionResult.FAIL);"), surface)
+        assertTrue(surface.contains("event.setCanceled(true);"), surface)
+        assertFalse(surface.contains("event.setResult(TriState"), surface)
+        assertTrue(surface.contains("event.setProblem(null);"), surface)
+        assertTrue(surface.contains("event.getEntity().level().getBlockState(event.getPos())"), surface)
+        assertFalse(surface.contains("event.getPos().isPresent()"), surface)
+        assertFalse(surface.contains("event.getPos().getValue()"), surface)
+        assertTrue(surface.contains("map.put(NeoForgeMod.SWIM_SPEED, null);"), surface)
+        assertTrue(surface.contains("player.isAddedToLevel()"), surface)
         assertTrue(surface.contains("new LegacyEffectType(ExampleEffects.CUSTOM);"), surface)
         assertTrue(surface.contains("private final Holder<MobEffect> effect;"), surface)
         assertTrue(surface.contains("LegacyEffectType(Holder<MobEffect> effect)"), surface)

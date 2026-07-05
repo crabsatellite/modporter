@@ -4120,6 +4120,29 @@ ${registrations.distinct().joinToString("\n")}
             }
         }
 
+        val directResolveGetRegex = Regex(
+            """(?m)^([ \t]*)([A-Za-z_$][\w$]*(?:\s*<[^;\r\n=]+>)?)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\r\n]+?\.getCapability\([^;\r\n]+?\))\.resolve\(\)\.get\(\)\s*;\s*$"""
+        )
+        result = directResolveGetRegex.replace(result) { match ->
+            val getter = match.groupValues[4].trim()
+            if (itemStackNames.none { getter.startsWith("$it.") }) {
+                match.value
+            } else {
+                changed = true
+                val replacement = "${match.groupValues[1]}${match.groupValues[2].trim()} ${match.groupValues[3]} = $getter;"
+                changes.add(Change(
+                    file = file,
+                    line = lineNumber(result, match.range.first),
+                    description = "ItemStack capability resolve().get() -> direct nullable capability result",
+                    before = match.value.trim(),
+                    after = replacement.trim(),
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-itemstack-capability-resolve-get"
+                ))
+                replacement
+            }
+        }
+
         for (varName in migratedOptionalNames) {
             result = Regex("""\b${Regex.escape(varName)}\.isEmpty\(\)""").replace(result) { match ->
                 changed = true
@@ -18672,6 +18695,15 @@ $migratedRecipes
 
         result = replaceExecutableRegex(result, Regex("""\.getBlockReach\(\)""")) { ".blockInteractionRange()" }
         result = replaceExecutableRegex(result, Regex("""\.getEntityReach\(\)""")) { ".entityInteractionRange()" }
+        result = replaceExecutableRegex(result, Regex("""\.isAddedToWorld\(\)""")) { ".isAddedToLevel()" }
+        if (result.contains("NeoForgeMod.")) {
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\bNeoForgeMod\.([A-Z][A-Z0-9_]*)\.get\(\)""")
+            ) { match ->
+                "NeoForgeMod.${match.groupValues[1]}"
+            }
+        }
         result = rewriteExecutableJavaInvocationArguments(result, "EventHooks.canCreateFluidSource") { args ->
             if (args.size == 4 && args[3].trim() == "true") args.take(3) else null
         }
@@ -18892,6 +18924,7 @@ $migratedRecipes
         result = migrateLegacyFillBucketEventSource(result)
         result = migrateLegacyBucketPickupAndLiquidContainerCalls(result)
         result = migrateLegacyTriStateEventResults(result)
+        result = migrateRightClickBlockTriStateResults(result)
         result = migrateLegacyCancellableEventBaseClasses(result)
         result = migrateLegacySleepingTimeCheckEventSource(result)
         result = migrateLegacyCancellableEventHelperParameters(result)
@@ -34367,6 +34400,69 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         return result
     }
 
+    private fun migrateRightClickBlockTriStateResults(source: String): String {
+        if (!source.contains("RightClickBlock") || !source.contains(".setResult(") || !source.contains("TriState.")) {
+            return source
+        }
+        var result = source
+        var changed = false
+        var cursor = 0
+        val id = """[A-Za-z_$][\w$]*"""
+        val methodPattern = Regex(
+            """(?m)^[ \t]*(?:@\w+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:(?:public|protected|private|static|final|synchronized)\s+)*(?:<[^>{};]+>\s*)?(?:[\w<>\[\].?,]+\s+)+$id\s*\([^;{}()]*\b(?:(?:[A-Za-z_$][\w$]*\.)*PlayerInteractEvent\.)?RightClickBlock\s+($id)\b[^;{}()]*\)\s*(?:throws\s+[^{]+)?\{"""
+        )
+        while (true) {
+            val match = methodPattern.find(result, cursor) ?: break
+            val eventVar = match.groupValues[1]
+            val openBrace = result.indexOf('{', match.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            var migratedBody = body
+            migratedBody = replaceExecutableRegex(
+                migratedBody,
+                Regex("""(?m)^([ \t]*)\b${Regex.escape(eventVar)}\.setResult\(\s*TriState\.TRUE\s*\)\s*;""")
+            ) { bodyMatch ->
+                val indent = bodyMatch.groupValues[1]
+                "${indent}$eventVar.setCancellationResult(InteractionResult.SUCCESS);\n${indent}$eventVar.setCanceled(true);"
+            }
+            migratedBody = replaceExecutableRegex(
+                migratedBody,
+                Regex("""(?m)^([ \t]*)\b${Regex.escape(eventVar)}\.setResult\(\s*TriState\.FALSE\s*\)\s*;""")
+            ) { bodyMatch ->
+                val indent = bodyMatch.groupValues[1]
+                "${indent}$eventVar.setCancellationResult(InteractionResult.FAIL);\n${indent}$eventVar.setCanceled(true);"
+            }
+            migratedBody = replaceExecutableRegex(
+                migratedBody,
+                Regex("""(?m)^([ \t]*)\b${Regex.escape(eventVar)}\.setResult\(\s*TriState\.DEFAULT\s*\)\s*;""")
+            ) { bodyMatch ->
+                val indent = bodyMatch.groupValues[1]
+                "${indent}$eventVar.setCanceled(false);"
+            }
+            if (migratedBody != body) {
+                result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
+                changed = true
+                cursor = openBrace + 1 + migratedBody.length
+            } else {
+                cursor = closeBrace + 1
+            }
+        }
+        if (!changed) return source
+        result = addImportIfMissing(result, "net.minecraft.world.InteractionResult")
+        result = removeUnusedSimpleImports(
+            result,
+            listOf(
+                "net.neoforged.neoforge.common.util.TriState",
+                "net.neoforged.bus.api.Event"
+            )
+        )
+        return result
+    }
+
     private fun migrateLegacyCancellableEventBaseClasses(source: String): String {
         if (!source.contains("extends Event") || !source.contains("ICancellableEvent")) return source
         val id = """[A-Za-z_$][\w$]*"""
@@ -34393,13 +34489,18 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
     }
 
     private fun migrateLegacyFillBucketEventSource(source: String): String {
-        if (!source.contains("FillBucketEvent")) return source
+        if (!source.contains("FillBucketEvent") &&
+            !(source.contains("PlayerInteractEvent.RightClickBlock") && source.contains(".setResult("))) return source
         val originalExecutable = maskJavaCommentsAndLiterals(source)
         val fillBucketEventVars = Regex("""\bFillBucketEvent\s+([A-Za-z_$][\w$]*)\b""")
             .findAll(originalExecutable)
             .map { it.groupValues[1] }
             .toSet()
-        if (fillBucketEventVars.isEmpty()) return source
+        val rightClickBlockEventVars = Regex("""\bPlayerInteractEvent\.RightClickBlock\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(originalExecutable)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (fillBucketEventVars.isEmpty() && rightClickBlockEventVars.isEmpty()) return source
         var result = source
             .replace(
                 "import net.minecraftforge.event.entity.player.FillBucketEvent;",
@@ -34420,7 +34521,9 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         while (true) {
             val match = methodPattern.find(result, cursor) ?: break
             val eventVar = match.groupValues[1]
-            if (eventVar !in fillBucketEventVars) {
+            val isLegacyFillBucketEvent = eventVar in fillBucketEventVars
+            val isRightClickBlockEvent = eventVar in rightClickBlockEventVars || isLegacyFillBucketEvent
+            if (!isRightClickBlockEvent) {
                 cursor = match.range.last + 1
                 continue
             }
@@ -34432,14 +34535,16 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
             }
             val body = result.substring(openBrace + 1, closeBrace)
             var migratedBody = body
-            migratedBody = Regex("""\b${Regex.escape(eventVar)}\.getTarget\(\)""")
-                .replace(migratedBody, "$eventVar.getHitVec()")
-            migratedBody = Regex("""\b${Regex.escape(eventVar)}\.getEmptyBucket\(\)""")
-                .replace(migratedBody, "$eventVar.getItemStack()")
-            migratedBody = Regex("""\b${Regex.escape(eventVar)}\.setFilledBucket\(\s*([^;\r\n]+?)\s*\)\s*;""")
-                .replace(migratedBody) { setMatch ->
-                    "$eventVar.getEntity().setItemInHand($eventVar.getHand(), ${setMatch.groupValues[1].trim()});"
-                }
+            if (isLegacyFillBucketEvent) {
+                migratedBody = Regex("""\b${Regex.escape(eventVar)}\.getTarget\(\)""")
+                    .replace(migratedBody, "$eventVar.getHitVec()")
+                migratedBody = Regex("""\b${Regex.escape(eventVar)}\.getEmptyBucket\(\)""")
+                    .replace(migratedBody, "$eventVar.getItemStack()")
+                migratedBody = Regex("""\b${Regex.escape(eventVar)}\.setFilledBucket\(\s*([^;\r\n]+?)\s*\)\s*;""")
+                    .replace(migratedBody) { setMatch ->
+                        "$eventVar.getEntity().setItemInHand($eventVar.getHand(), ${setMatch.groupValues[1].trim()});"
+                    }
+            }
             migratedBody = Regex("""\b${Regex.escape(eventVar)}\.setResult\(\s*TriState\.TRUE\s*\)\s*;""")
                 .replace(
                     migratedBody,
@@ -34528,6 +34633,10 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
                     migratedBody,
                     if (eventVar in directLocationEventVars) "$eventVar.getPos()" else "java.util.Optional.of($eventVar.getPos())"
                 )
+            migratedBody = Regex("""\b${Regex.escape(eventVar)}\.getPos\(\)\.isPresent\(\)\s*&&\s*""")
+                .replace(migratedBody, "")
+            migratedBody = Regex("""\b${Regex.escape(eventVar)}\.getPos\(\)\.getValue\(\)""")
+                .replace(migratedBody, "$eventVar.getPos()")
             if (migratedBody != body) {
                 result = result.substring(0, openBrace + 1) + migratedBody + result.substring(closeBrace)
                 changed = true
