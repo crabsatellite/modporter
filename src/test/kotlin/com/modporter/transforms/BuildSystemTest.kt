@@ -3379,6 +3379,36 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `migrates client camera and renderer access transformers to 121 named members`() {
+        val projectDir = tempDir.resolve("client-renderer-at")
+        val atDir = projectDir.resolve("src/main/resources/META-INF")
+        atDir.createDirectories()
+        atDir.resolve("accesstransformer.cfg").writeText("""
+            public net.minecraft.client.Camera m_90568_(DDD)V # move
+            public net.minecraft.client.Camera m_90572_(FF)V # setRotation
+            public net.minecraft.client.Camera m_90566_(D)D # getMaxZoom
+            public net.minecraft.client.renderer.entity.EntityRenderDispatcher f_114363_ # playerRenderers
+            public net.minecraft.client.renderer.entity.player.PlayerRenderer m_117775_(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ILnet/minecraft/client/player/AbstractClientPlayer;Lnet/minecraft/client/model/geom/ModelPart;Lnet/minecraft/client/model/geom/ModelPart;)V # renderHand
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = atDir.resolve("accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.client.Camera move(FFF)V # move"), at)
+        assertTrue(at.contains("public net.minecraft.client.Camera setRotation(FF)V # setRotation"), at)
+        assertTrue(at.contains("public net.minecraft.client.Camera getMaxZoom(F)F # getMaxZoom"), at)
+        assertTrue(at.contains("public net.minecraft.client.renderer.entity.EntityRenderDispatcher playerRenderers # playerRenderers"), at)
+        assertTrue(at.contains("public net.minecraft.client.renderer.entity.player.PlayerRenderer renderHand(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ILnet/minecraft/client/player/AbstractClientPlayer;Lnet/minecraft/client/model/geom/ModelPart;Lnet/minecraft/client/model/geom/ModelPart;)V # renderHand"), at)
+        assertFalse(at.contains("m_90568_"), at)
+        assertFalse(at.contains("m_90572_"), at)
+        assertFalse(at.contains("m_90566_"), at)
+        assertFalse(at.contains("f_114363_"), at)
+        assertFalse(at.contains("m_117775_"), at)
+    }
+
+    @Test
     fun `adds fired weapon arrow access transformer when migrated projectile source needs it`() {
         val projectDir = tempDir.resolve("projectile-fired-weapon-at")
         val srcDir = projectDir.resolve("src/main/java/com/example")

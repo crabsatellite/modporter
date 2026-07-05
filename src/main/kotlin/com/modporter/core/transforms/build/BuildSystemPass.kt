@@ -3506,6 +3506,16 @@ config="$configName"
                 "public net.minecraft.world.level.chunk.ChunkGenerator tryGenerateStructure(Lnet/minecraft/world/level/levelgen/structure/StructureSet\$StructureSelectionEntry;Lnet/minecraft/world/level/StructureManager;Lnet/minecraft/core/RegistryAccess;Lnet/minecraft/world/level/levelgen/RandomState;Lnet/minecraft/world/level/levelgen/structure/templatesystem/StructureTemplateManager;JLnet/minecraft/world/level/chunk/ChunkAccess;Lnet/minecraft/world/level/ChunkPos;Lnet/minecraft/core/SectionPos;)Z"
             "public net.minecraft.world.level.storage.loot.LootTable m_230924_(Lit/unimi/dsi/fastutil/objects/ObjectArrayList;ILnet/minecraft/util/RandomSource;)V" ->
                 "public net.minecraft.world.level.storage.loot.LootTable shuffleAndSplitItems(Lit/unimi/dsi/fastutil/objects/ObjectArrayList;ILnet/minecraft/util/RandomSource;)V"
+            "public net.minecraft.client.Camera m_90568_(DDD)V" ->
+                "public net.minecraft.client.Camera move(FFF)V"
+            "public net.minecraft.client.Camera m_90572_(FF)V" ->
+                "public net.minecraft.client.Camera setRotation(FF)V"
+            "public net.minecraft.client.Camera m_90566_(D)D" ->
+                "public net.minecraft.client.Camera getMaxZoom(F)F"
+            "public net.minecraft.client.renderer.entity.EntityRenderDispatcher f_114363_" ->
+                "public net.minecraft.client.renderer.entity.EntityRenderDispatcher playerRenderers"
+            "public net.minecraft.client.renderer.entity.player.PlayerRenderer m_117775_(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ILnet/minecraft/client/player/AbstractClientPlayer;Lnet/minecraft/client/model/geom/ModelPart;Lnet/minecraft/client/model/geom/ModelPart;)V" ->
+                "public net.minecraft.client.renderer.entity.player.PlayerRenderer renderHand(Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/MultiBufferSource;ILnet/minecraft/client/player/AbstractClientPlayer;Lnet/minecraft/client/model/geom/ModelPart;Lnet/minecraft/client/model/geom/ModelPart;)V"
             else -> entry
         }
         val finalized = finalizeAccessTransformerEntry(migrated) ?: return ""
