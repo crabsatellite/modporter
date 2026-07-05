@@ -29049,6 +29049,41 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `migrates legacy WalkNodeEvaluator block path type static calls to source backed helper`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TeleportChecks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.pathfinder.PathType;
+            import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
+
+            public class TeleportChecks {
+                public boolean canStand(Level level, BlockPos pos) {
+                    // WalkNodeEvaluator.getBlockPathTypeStatic(level, pos);
+                    String literal = "WalkNodeEvaluator.getBlockPathTypeStatic(level, pos)";
+                    PathType type = WalkNodeEvaluator.getBlockPathTypeStatic(level, pos.mutable());
+                    return literal.length() > 0 && type == PathType.WALKABLE;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("TeleportChecks.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("PathType type = modporterGetLegacyBlockPathTypeStatic(level, pos.mutable());"), migrated)
+        assertTrue(migrated.contains("private static net.minecraft.world.level.pathfinder.PathType modporterGetLegacyBlockPathTypeStatic"), migrated)
+        assertTrue(migrated.contains("net.minecraft.world.level.pathfinder.NodeEvaluator.isBurningBlock(blockstate)"), migrated)
+        assertTrue(migrated.contains("blockstate.getBlockPathType(level, pos, null)"), migrated)
+        assertFalse(migrated.contains("import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;"), migrated)
+        assertTrue(migrated.contains("// WalkNodeEvaluator.getBlockPathTypeStatic(level, pos);"), migrated)
+        assertTrue(migrated.contains("\"WalkNodeEvaluator.getBlockPathTypeStatic(level, pos)\""), migrated)
+    }
+
+    @Test
     fun `migrates legacy blocked path type constants only for proven blocked consumers`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

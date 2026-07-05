@@ -18820,6 +18820,162 @@ $migratedRecipes
         return arguments
     }
 
+    private fun migrateLegacyWalkNodeEvaluatorBlockPathTypeStatic(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".getBlockPathTypeStatic(") || !executableCode.contains("WalkNodeEvaluator")) {
+            return source
+        }
+
+        var changed = false
+        var result = rewriteExecutableJavaCallWithOffset(source, "getBlockPathTypeStatic") { receiver, args, _ ->
+            val normalizedReceiver = receiver.trim()
+            if (args.size != 2 ||
+                normalizedReceiver != "WalkNodeEvaluator" &&
+                normalizedReceiver != "net.minecraft.world.level.pathfinder.WalkNodeEvaluator") {
+                return@rewriteExecutableJavaCallWithOffset null
+            }
+            changed = true
+            "modporterGetLegacyBlockPathTypeStatic(${args[0].trim()}, ${args[1].trim()})"
+        }
+        if (!changed) return source
+
+        val withoutWalkNodeEvaluatorImport = removeImport(result, "net.minecraft.world.level.pathfinder.WalkNodeEvaluator")
+        if (!hasSimpleTypeReference(maskJavaCommentsAndLiterals(withoutWalkNodeEvaluatorImport), "WalkNodeEvaluator")) {
+            result = withoutWalkNodeEvaluatorImport
+        }
+        if (!maskJavaCommentsAndLiterals(result)
+                .contains("modporterGetLegacyBlockPathTypeStatic(net.minecraft.world.level.BlockGetter level")) {
+            result = insertBeforeLastClassBrace(result, legacyWalkNodeEvaluatorBlockPathTypeStaticHelpers())
+        }
+        return result
+    }
+
+    private fun legacyWalkNodeEvaluatorBlockPathTypeStaticHelpers(): String = """
+
+    private static net.minecraft.world.level.pathfinder.PathType modporterGetLegacyBlockPathTypeStatic(net.minecraft.world.level.BlockGetter level, net.minecraft.core.BlockPos.MutableBlockPos pos) {
+        int i = pos.getX();
+        int j = pos.getY();
+        int k = pos.getZ();
+        net.minecraft.world.level.pathfinder.PathType pathType = modporterGetLegacyPathTypeFromState(level, pos);
+        if (pathType == net.minecraft.world.level.pathfinder.PathType.OPEN && j >= level.getMinBuildHeight() + 1) {
+            net.minecraft.core.BlockPos.MutableBlockPos below = new net.minecraft.core.BlockPos.MutableBlockPos(i, j - 1, k);
+            return switch (modporterGetLegacyPathTypeFromState(level, below)) {
+                case OPEN, WATER, LAVA, WALKABLE -> net.minecraft.world.level.pathfinder.PathType.OPEN;
+                case DAMAGE_FIRE -> net.minecraft.world.level.pathfinder.PathType.DAMAGE_FIRE;
+                case DAMAGE_OTHER -> net.minecraft.world.level.pathfinder.PathType.DAMAGE_OTHER;
+                case STICKY_HONEY -> net.minecraft.world.level.pathfinder.PathType.STICKY_HONEY;
+                case POWDER_SNOW -> net.minecraft.world.level.pathfinder.PathType.DANGER_POWDER_SNOW;
+                case DAMAGE_CAUTIOUS -> net.minecraft.world.level.pathfinder.PathType.DAMAGE_CAUTIOUS;
+                case TRAPDOOR -> net.minecraft.world.level.pathfinder.PathType.DANGER_TRAPDOOR;
+                default -> modporterCheckLegacyNeighbourBlocks(level, i, j, k, net.minecraft.world.level.pathfinder.PathType.WALKABLE);
+            };
+        }
+        return pathType;
+    }
+
+    private static net.minecraft.world.level.pathfinder.PathType modporterCheckLegacyNeighbourBlocks(
+        net.minecraft.world.level.BlockGetter level,
+        int x,
+        int y,
+        int z,
+        net.minecraft.world.level.pathfinder.PathType pathType
+    ) {
+        net.minecraft.core.BlockPos.MutableBlockPos cursor = new net.minecraft.core.BlockPos.MutableBlockPos();
+        for (int i = -1; i <= 1; i++) {
+            for (int j = -1; j <= 1; j++) {
+                for (int k = -1; k <= 1; k++) {
+                    if (i != 0 || k != 0) {
+                        cursor.set(x + i, y + j, z + k);
+                        net.minecraft.world.level.pathfinder.PathType neighbourType = modporterGetLegacyPathTypeFromState(level, cursor);
+                        net.minecraft.world.level.block.state.BlockState blockState = level.getBlockState(cursor);
+                        net.minecraft.world.level.pathfinder.PathType blockPathType = blockState.getAdjacentBlockPathType(level, cursor, null, neighbourType);
+                        if (blockPathType != null) {
+                            return blockPathType;
+                        }
+                        net.minecraft.world.level.material.FluidState fluidState = blockState.getFluidState();
+                        net.minecraft.world.level.pathfinder.PathType fluidPathType = fluidState.getAdjacentBlockPathType(level, cursor, null, neighbourType);
+                        if (fluidPathType != null) {
+                            return fluidPathType;
+                        }
+                        if (neighbourType == net.minecraft.world.level.pathfinder.PathType.DAMAGE_OTHER) {
+                            return net.minecraft.world.level.pathfinder.PathType.DANGER_OTHER;
+                        }
+                        if (neighbourType == net.minecraft.world.level.pathfinder.PathType.DAMAGE_FIRE || neighbourType == net.minecraft.world.level.pathfinder.PathType.LAVA) {
+                            return net.minecraft.world.level.pathfinder.PathType.DANGER_FIRE;
+                        }
+                        if (neighbourType == net.minecraft.world.level.pathfinder.PathType.WATER) {
+                            return net.minecraft.world.level.pathfinder.PathType.WATER_BORDER;
+                        }
+                        if (neighbourType == net.minecraft.world.level.pathfinder.PathType.DAMAGE_CAUTIOUS) {
+                            return net.minecraft.world.level.pathfinder.PathType.DAMAGE_CAUTIOUS;
+                        }
+                    }
+                }
+            }
+        }
+        return pathType;
+    }
+
+    private static net.minecraft.world.level.pathfinder.PathType modporterGetLegacyPathTypeFromState(net.minecraft.world.level.BlockGetter level, net.minecraft.core.BlockPos pos) {
+        net.minecraft.world.level.block.state.BlockState blockstate = level.getBlockState(pos);
+        net.minecraft.world.level.pathfinder.PathType type = blockstate.getBlockPathType(level, pos, null);
+        if (type != null) {
+            return type;
+        }
+        net.minecraft.world.level.block.Block block = blockstate.getBlock();
+        if (blockstate.isAir()) {
+            return net.minecraft.world.level.pathfinder.PathType.OPEN;
+        } else if (blockstate.is(net.minecraft.tags.BlockTags.TRAPDOORS) || blockstate.is(net.minecraft.world.level.block.Blocks.LILY_PAD) || blockstate.is(net.minecraft.world.level.block.Blocks.BIG_DRIPLEAF)) {
+            return net.minecraft.world.level.pathfinder.PathType.TRAPDOOR;
+        } else if (blockstate.is(net.minecraft.world.level.block.Blocks.POWDER_SNOW)) {
+            return net.minecraft.world.level.pathfinder.PathType.POWDER_SNOW;
+        } else if (blockstate.is(net.minecraft.world.level.block.Blocks.CACTUS) || blockstate.is(net.minecraft.world.level.block.Blocks.SWEET_BERRY_BUSH)) {
+            return net.minecraft.world.level.pathfinder.PathType.DAMAGE_OTHER;
+        } else if (blockstate.is(net.minecraft.world.level.block.Blocks.HONEY_BLOCK)) {
+            return net.minecraft.world.level.pathfinder.PathType.STICKY_HONEY;
+        } else if (blockstate.is(net.minecraft.world.level.block.Blocks.COCOA)) {
+            return net.minecraft.world.level.pathfinder.PathType.COCOA;
+        } else if (!blockstate.is(net.minecraft.world.level.block.Blocks.WITHER_ROSE) && !blockstate.is(net.minecraft.world.level.block.Blocks.POINTED_DRIPSTONE)) {
+            net.minecraft.world.level.material.FluidState fluidstate = blockstate.getFluidState();
+            net.minecraft.world.level.pathfinder.PathType nonLoggableFluidPathType = fluidstate.getBlockPathType(level, pos, null, false);
+            if (nonLoggableFluidPathType != null) {
+                return nonLoggableFluidPathType;
+            }
+            if (fluidstate.is(net.minecraft.tags.FluidTags.LAVA)) {
+                return net.minecraft.world.level.pathfinder.PathType.LAVA;
+            } else if (net.minecraft.world.level.pathfinder.NodeEvaluator.isBurningBlock(blockstate)) {
+                return net.minecraft.world.level.pathfinder.PathType.DAMAGE_FIRE;
+            } else if (block instanceof net.minecraft.world.level.block.DoorBlock doorblock) {
+                if (blockstate.getValue(net.minecraft.world.level.block.DoorBlock.OPEN)) {
+                    return net.minecraft.world.level.pathfinder.PathType.DOOR_OPEN;
+                }
+                return doorblock.type().canOpenByHand()
+                    ? net.minecraft.world.level.pathfinder.PathType.DOOR_WOOD_CLOSED
+                    : net.minecraft.world.level.pathfinder.PathType.DOOR_IRON_CLOSED;
+            } else if (block instanceof net.minecraft.world.level.block.BaseRailBlock) {
+                return net.minecraft.world.level.pathfinder.PathType.RAIL;
+            } else if (block instanceof net.minecraft.world.level.block.LeavesBlock) {
+                return net.minecraft.world.level.pathfinder.PathType.LEAVES;
+            } else if (!blockstate.is(net.minecraft.tags.BlockTags.FENCES)
+                && !blockstate.is(net.minecraft.tags.BlockTags.WALLS)
+                && (!(block instanceof net.minecraft.world.level.block.FenceGateBlock) || blockstate.getValue(net.minecraft.world.level.block.FenceGateBlock.OPEN))) {
+                if (!blockstate.isPathfindable(net.minecraft.world.level.pathfinder.PathComputationType.LAND)) {
+                    return net.minecraft.world.level.pathfinder.PathType.BLOCKED;
+                }
+                net.minecraft.world.level.pathfinder.PathType loggableFluidPathType = fluidstate.getBlockPathType(level, pos, null, true);
+                if (loggableFluidPathType != null) {
+                    return loggableFluidPathType;
+                }
+                return fluidstate.is(net.minecraft.tags.FluidTags.WATER)
+                    ? net.minecraft.world.level.pathfinder.PathType.WATER
+                    : net.minecraft.world.level.pathfinder.PathType.OPEN;
+            }
+            return net.minecraft.world.level.pathfinder.PathType.FENCE;
+        }
+        return net.minecraft.world.level.pathfinder.PathType.DAMAGE_CAUTIOUS;
+    }
+""".trimIndent()
+
     private fun migrateVanilla121ApiSource(
         source: String,
         mapCodecConstantOwners: Set<String> = emptySet(),
@@ -18938,6 +19094,7 @@ $migratedRecipes
         result = migrateProjectItemStackNbtMethods(result, itemStackNbtMethods, javaInheritanceIndex, entityCapabilityTypes, javaMethodReturnTypes)
         result = migrateProjectItemStackNbtConstructors(result, itemStackNbtConstructors, itemStackNbtMethods, javaInheritanceIndex)
         result = migrateProjectItemStackNbtMethods(result, itemStackNbtMethods, javaInheritanceIndex, entityCapabilityTypes, javaMethodReturnTypes)
+        result = migrateLegacyWalkNodeEvaluatorBlockPathTypeStatic(result)
         result = migrateLegacyItemStackRegistrySerialization(result, javaInheritanceIndex)
         result = migrateFluidTankNbtProviderCalls(result, javaInheritanceIndex)
         result = migrateFluidStackNbtProviderCalls(result, javaInheritanceIndex)
