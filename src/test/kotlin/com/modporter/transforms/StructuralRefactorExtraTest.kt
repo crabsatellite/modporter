@@ -13092,6 +13092,11 @@ bus.addListener(ActualListenerRegistry::register);
                 }
 
                 @SubscribeEvent
+                public static void onDirectLivingTick(LivingEvent.LivingTickEvent event) {
+                    use(event.getEntity());
+                }
+
+                @SubscribeEvent
                 public static void onPlayerTick(LivingEvent.LivingTickEvent event) {
                     if (!(event.getEntity() instanceof ServerPlayer player)) return;
                     String playerTickDoc = "scheduler.tick(player);";
@@ -13160,6 +13165,9 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("if (!(event.getEntity() instanceof LivingEntity entity)) return;"))
         assertTrue(migrated.contains("public static void onCancelableLivingTick(EntityTickEvent.Pre event)"))
         assertTrue(migrated.contains("if (!event.isCanceled())"))
+        assertTrue(migrated.contains("public static void onDirectLivingTick(EntityTickEvent.Post event)"))
+        assertTrue(migrated.contains("if (!(event.getEntity() instanceof LivingEntity modporterLivingEntity)) return;"))
+        assertTrue(migrated.contains("use(modporterLivingEntity);"))
         assertTrue(migrated.contains("public static void onPlayerTick(PlayerTickEvent.Post event)"))
         assertTrue(migrated.contains("public static void onSplitPlayerTick(PlayerTickEvent.Post event)"))
         assertTrue(migrated.contains("if (event.getEntity().level().isClientSide()) {"), migrated)
@@ -22990,6 +22998,7 @@ bus.addListener(ActualListenerRegistry::register);
             import net.minecraft.world.entity.LivingEntity;
             import net.minecraft.world.entity.ai.goal.MeleeAttackGoal;
             import net.minecraft.world.entity.PathfinderMob;
+            import org.jetbrains.annotations.NotNull;
 
             public class ThrowGoal extends MeleeAttackGoal {
                 public ThrowGoal(PathfinderMob mob) {
@@ -22997,7 +23006,7 @@ bus.addListener(ActualListenerRegistry::register);
                 }
 
                 @Override
-                protected void checkAndPerformAttack(LivingEntity victim, double distance) {
+                protected void checkAndPerformAttack(@NotNull LivingEntity victim, double distance) {
                     double reach = this.getAttackReachSqr(victim);
                     if (distance <= reach && this.getTicksUntilNextAttack() <= 0) {
                         this.resetAttackCooldown();
@@ -23155,6 +23164,11 @@ bus.addListener(ActualListenerRegistry::register);
                 protected float getStandingEyeHeight(Pose pose, EntityDimensions size) {
                     return size.height() * 0.9F;
                 }
+
+                @Override
+                public boolean canBreatheUnderwater() {
+                    return true;
+                }
             }
         """.trimIndent())
         srcDir.resolve("AttackGoals.java").writeText("""
@@ -23306,7 +23320,7 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(signBlock.contains("super(type, properties);"))
         assertTrue(signBlock.contains("public static final com.mojang.serialization.MapCodec<net.minecraft.world.level.block.WallSignBlock> CODEC"))
         assertTrue(signBlock.contains("public com.mojang.serialization.MapCodec<net.minecraft.world.level.block.WallSignBlock> codec()"))
-        assertTrue(throwGoal.contains("protected void checkAndPerformAttack(LivingEntity victim)"))
+        assertTrue(throwGoal.contains("protected void checkAndPerformAttack(@NotNull LivingEntity victim)"))
         assertTrue(throwGoal.contains("this.canPerformAttack(victim) && this.getTicksUntilNextAttack() <= 0"))
         assertTrue(throwGoal.contains("super.checkAndPerformAttack(victim);"))
         assertTrue(throwGoal.contains("this.mob.distanceToSqr(victim) > 4.0D"))
@@ -23323,7 +23337,13 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(livingOverrideShapes.contains("protected EntityDimensions getDefaultDimensions(Pose pose)"))
         assertTrue(livingOverrideShapes.contains("EntityDimensions dimensions = EntityDimensions.fixed(1.0F, 2.0F);"))
         assertTrue(livingOverrideShapes.contains("return dimensions.withEyeHeight(dimensions.height() * 0.9F);"))
+        assertTrue(livingOverrideShapes.contains("public boolean canDrownInFluidType(FluidType type)"))
+        assertTrue(livingOverrideShapes.contains("if (type == net.neoforged.neoforge.common.NeoForgeMod.WATER_TYPE.value())"))
+        assertTrue(livingOverrideShapes.contains("return false;"))
+        assertTrue(livingOverrideShapes.contains("return super.canDrownInFluidType(type);"))
+        assertTrue(livingOverrideShapes.contains("import net.neoforged.neoforge.fluids.FluidType;"))
         assertFalse(livingOverrideShapes.contains("getStandingEyeHeight("))
+        assertFalse(livingOverrideShapes.contains("canBreatheUnderwater("))
         assertTrue(entityOverrideShapes.contains("public Vec3 getVehicleAttachmentPoint(Entity vehicle)"))
         assertTrue(entityOverrideShapes.contains("return new Vec3(0.0D, -0.25D, 0.0D);"))
         assertTrue(entityOverrideShapes.contains("public boolean canChangeDimensions(Level from, Level to)"))

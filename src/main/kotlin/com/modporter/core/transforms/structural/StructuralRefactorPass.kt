@@ -16782,6 +16782,7 @@ ${entries.joinToString(",\n")}
         val livingTickHandlerPattern = Regex(
             """\b((?:(?:public|protected|private|static|final|synchronized)\s+)*void\s+([A-Za-z_$][\w$]*)\s*\(\s*)LivingEvent\.LivingTickEvent(\s+([A-Za-z_$][\w$]*)\s*\))"""
         )
+        val migratedEntityTickHandlers = linkedSetOf<String>()
         var cursor = 0
         while (true) {
             val match = livingTickHandlerPattern.find(result, cursor) ?: break
@@ -16810,6 +16811,9 @@ ${entries.joinToString(",\n")}
                     "EntityTickEvent.Post"
                 }
             }
+            if (replacementType.startsWith("EntityTickEvent.")) {
+                migratedEntityTickHandlers += methodName
+            }
             val replacement = "${match.groupValues[1]}$replacementType${match.groupValues[3]}"
             result = result.substring(0, match.range.first) + replacement + result.substring(match.range.last + 1)
             cursor = match.range.first + replacement.length
@@ -16825,6 +16829,8 @@ ${entries.joinToString(",\n")}
             result = removeImport(result, "net.neoforged.neoforge.event.entity.living.LivingEvent")
             result = removeImport(result, "net.minecraftforge.event.entity.living.LivingEvent")
         }
+
+        result = guardMigratedLivingTickEntityHandlers(result, migratedEntityTickHandlers)
 
         if (result.contains("EntityTickEvent.Post") || result.contains("EntityTickEvent.Pre")) {
             result = Regex(
@@ -16854,6 +16860,68 @@ ${entries.joinToString(",\n")}
         result = migratePlayerTickEventPlayerArguments(result)
 
         return result
+    }
+
+    private fun guardMigratedLivingTickEntityHandlers(source: String, methodNames: Set<String>): String {
+        if (methodNames.isEmpty()) return source
+        var result = source
+        var changed = false
+        var cursor = 0
+        while (true) {
+            val executableResult = maskJavaCommentsAndLiterals(result)
+            val method = javaMethodRanges(executableResult)
+                .firstOrNull { it.range.first >= cursor && it.name in methodNames }
+                ?: break
+            val header = executableResult.substring(method.range.first, result.indexOf('{', method.range.first).coerceAtLeast(method.range.first))
+            val eventName = Regex("""\bEntityTickEvent\.(?:Post|Pre)\s+([A-Za-z_$][\w$]*)\b""")
+                .find(header)
+                ?.groupValues
+                ?.get(1)
+            if (eventName == null) {
+                cursor = method.range.last + 1
+                continue
+            }
+            val openBrace = result.indexOf('{', method.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace <= openBrace) {
+                cursor = method.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            val executableBody = executableResult.substring(openBrace + 1, closeBrace)
+            if (Regex("""instanceof\s+LivingEntity\b""").containsMatchIn(executableBody)) {
+                cursor = closeBrace + 1
+                continue
+            }
+            val directAssignment = Regex(
+                """(?m)^([ \t]*)LivingEntity\s+([A-Za-z_$][\w$]*)\s*=\s*${Regex.escape(eventName)}\.getEntity\(\)\s*;\s*\r?\n?"""
+            ).find(executableBody)
+            val localName = directAssignment?.groupValues?.get(2)
+                ?: uniqueJavaLocalName(executableBody, "modporterLivingEntity")
+            val bodyIndent = directAssignment?.groupValues?.get(1)
+                ?: Regex("""(?m)^([ \t]*)\S""").find(body)?.groupValues?.get(1)
+                ?: ((result.substring(method.range.first, openBrace).lineSequence().lastOrNull()?.takeWhile { it == ' ' || it == '\t' } ?: "") + "    ")
+            val guardLine = "${bodyIndent}if (!($eventName.getEntity() instanceof LivingEntity $localName)) return;\n"
+            val rewrittenBody = if (directAssignment != null) {
+                val prefix = body.substring(0, directAssignment.range.first)
+                val suffix = body.substring(directAssignment.range.last + 1)
+                val rewrittenSuffix = replaceExecutableRegex(
+                    suffix,
+                    Regex("""\b${Regex.escape(eventName)}\.getEntity\s*\(\s*\)""")
+                ) { localName }
+                prefix + guardLine + rewrittenSuffix
+            } else {
+                val rewrittenOriginalBody = replaceExecutableRegex(
+                    body,
+                    Regex("""\b${Regex.escape(eventName)}\.getEntity\s*\(\s*\)""")
+                ) { localName }
+                "\n$guardLine$rewrittenOriginalBody"
+            }
+            result = result.substring(0, openBrace + 1) + rewrittenBody + result.substring(closeBrace)
+            changed = true
+            cursor = openBrace + 1 + rewrittenBody.length
+        }
+        return if (changed) addImportIfMissing(result, "net.minecraft.world.entity.LivingEntity") else source
     }
 
     private fun migratePlayerTickEventPlayerArguments(source: String): String {
@@ -28268,6 +28336,7 @@ protected Vec3 getPassengerAttachmentPoint(Entity entity, EntityDimensions dimen
 
         result = migrateLegacyEyeHeightOverrides(result, javaInheritanceIndex)
         result = removeLegacyEntityRemoveCapabilityInvalidation(result, javaInheritanceIndex)
+        result = migrateLegacyCanBreatheUnderwaterOverrides(result, javaInheritanceIndex)
 
         if (result.contains("canChangeDimensions()")) {
             result = Regex("""\b(public|protected)\s+boolean\s+canChangeDimensions\s*\(\s*\)""")
@@ -28337,6 +28406,70 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         if (needsEntity) result = addImportIfMissing(result, "net.minecraft.world.entity.Entity")
         if (needsVec3) result = addImportIfMissing(result, "net.minecraft.world.phys.Vec3")
         return result
+    }
+
+    private fun migrateLegacyCanBreatheUnderwaterOverrides(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
+        if (!source.contains("canBreatheUnderwater(")) return source
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        for (method in javaMethodRanges(source).filter { it.name == "canBreatheUnderwater" }) {
+            val executableMethodText = executableSource.substring(method.range)
+            if (!Regex("""\bboolean\s+canBreatheUnderwater\s*\(\s*\)""").containsMatchIn(executableMethodText)) {
+                continue
+            }
+            val classDeclaration = enclosingJavaClassDeclaration(source, method.range.first)
+            if (!javaClassExtendsAny(classDeclaration, javaLivingEntityBaseTypes(), javaInheritanceIndex)) {
+                continue
+            }
+            val openBrace = source.indexOf('{', method.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (openBrace < 0 || closeBrace <= openBrace) continue
+            val body = source.substring(openBrace + 1, closeBrace)
+            val executableBody = executableSource.substring(openBrace + 1, closeBrace)
+            val returnMatches = Regex("""\breturn\s+(.+?);""", RegexOption.DOT_MATCHES_ALL)
+                .findAll(executableBody)
+                .toList()
+            if (returnMatches.size != 1) continue
+            val returnRange = returnMatches.single().groups[1]?.range ?: continue
+            val legacyBreathExpression = body.substring(returnRange).trim()
+            val indent = source.lineSequence()
+                .runningFold(0) { offset, line -> offset + line.length + 1 }
+                .zip(source.lineSequence())
+                .firstOrNull { (offset, line) -> offset <= method.range.first && method.range.first <= offset + line.length && line.contains("canBreatheUnderwater") }
+                ?.second
+                ?.takeWhile { it == ' ' || it == '\t' }
+                ?: method.header.takeWhile { it == ' ' || it == '\t' }
+            val nonOverrideAnnotations = Regex("""(?m)^[ \t]*@(?!Override\b)[^\r\n]*\r?\n""")
+                .findAll(method.header.substringBefore("boolean canBreatheUnderwater"))
+                .joinToString("") { it.value }
+            val waterDrownExpression = invertBooleanExpression(legacyBreathExpression)
+            val replacement = buildString {
+                append(nonOverrideAnnotations)
+                append(indent).append("@Override\n")
+                append(indent).append("public boolean canDrownInFluidType(FluidType type) {\n")
+                append(indent).append("    if (type == net.neoforged.neoforge.common.NeoForgeMod.WATER_TYPE.value()) {\n")
+                append(indent).append("        return $waterDrownExpression;\n")
+                append(indent).append("    }\n")
+                append(indent).append("    return super.canDrownInFluidType(type);\n")
+                append(indent).append("}")
+            }
+            edits += method.range to replacement
+        }
+        if (edits.isEmpty()) return source
+        return addImportIfMissing(applyStringEdits(source, edits), "net.neoforged.neoforge.fluids.FluidType")
+    }
+
+    private fun invertBooleanExpression(expression: String): String {
+        val trimmed = expression.trim()
+        return when {
+            trimmed == "true" -> "false"
+            trimmed == "false" -> "true"
+            trimmed.startsWith("!") && trimmed.drop(1).trim().matches(Regex("""[A-Za-z_$][\w$.]*(?:\(\))?""")) -> trimmed.drop(1).trim()
+            else -> "!($trimmed)"
+        }
     }
 
     private fun removeLegacyEntityRemoveCapabilityInvalidation(
@@ -37573,7 +37706,7 @@ $methodBody
         }
         var cursor = 0
         val signaturePattern = Regex(
-            """(?m)((?:[ \t]*@\w+(?:\([^)]*\))?\s*)*[ \t]*protected\s+void\s+checkAndPerformAttack\s*\(\s*((?:net\.minecraft\.world\.entity\.)?LivingEntity)\s+([A-Za-z_$][\w$]*)\s*,\s*double\s+([A-Za-z_$][\w$]*)\s*\)\s*\{)"""
+            """(?m)((?:[ \t]*@\w+(?:\([^)]*\))?\s*)*[ \t]*protected\s+void\s+checkAndPerformAttack\s*\(\s*((?:@[A-Za-z_$][\w$.]*(?:\([^)]*\))?\s+)*(?:net\.minecraft\.world\.entity\.)?LivingEntity)\s+([A-Za-z_$][\w$]*)\s*,\s*double\s+([A-Za-z_$][\w$]*)\s*\)\s*\{)"""
         )
         while (true) {
             val match = signaturePattern.find(result, cursor) ?: break
@@ -37631,7 +37764,7 @@ $methodBody
             cursor = match.range.first + migratedSignature.length + migratedBody.length + 1
         }
         val hasOneArgCheckAndPerformAttack = Regex(
-            """\bcheckAndPerformAttack\s*\(\s*(?:net\.minecraft\.world\.entity\.)?LivingEntity\s+[A-Za-z_$][\w$]*\s*\)"""
+            """\bcheckAndPerformAttack\s*\(\s*(?:@[A-Za-z_$][\w$.]*(?:\([^)]*\))?\s+)*(?:net\.minecraft\.world\.entity\.)?LivingEntity\s+[A-Za-z_$][\w$]*\s*\)"""
         ).containsMatchIn(maskJavaCommentsAndLiterals(result))
         if (hasOneArgCheckAndPerformAttack) {
             result = rewriteExecutableJavaCall(result, "checkAndPerformAttack") { receiver, args ->
@@ -38351,7 +38484,7 @@ ${indent}}""".trimStart('\n')
         var result = source
         var cursor = 0
         val signaturePattern = Regex(
-            """(?m)((?:[ \t]*@\w+(?:\([^)]*\))?\s*)*[ \t]*protected\s+double\s+getAttackReachSqr\s*\(\s*((?:net\.minecraft\.world\.entity\.)?LivingEntity)\s+([A-Za-z_$][\w$]*)\s*\)\s*\{)"""
+            """(?m)((?:[ \t]*@\w+(?:\([^)]*\))?\s*)*[ \t]*protected\s+double\s+getAttackReachSqr\s*\(\s*((?:@[A-Za-z_$][\w$.]*(?:\([^)]*\))?\s+)*(?:net\.minecraft\.world\.entity\.)?LivingEntity)\s+([A-Za-z_$][\w$]*)\s*\)\s*\{)"""
         )
         while (true) {
             val match = signaturePattern.find(result, cursor) ?: break
