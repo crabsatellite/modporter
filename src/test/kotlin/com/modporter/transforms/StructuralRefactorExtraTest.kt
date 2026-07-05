@@ -5286,8 +5286,8 @@ bus.addListener(ActualListenerRegistry::register);
 
             public class Registration {
                 public static final DeferredRegister<Item> ITEMS = null;
-                public static final DeferredHolder<Item, BoneTiaraItem> BONE_TIARA =
-                        ITEMS.register("bone_tiara", () -> new BoneTiaraItem(new Item.Properties()));
+                public static final DeferredHolder<Item, Item> BONE_TIARA =
+                        ITEMS.register("bone_tiara", BoneTiaraItem::new);
 
                 public static void init(IEventBus bus) {
                     ITEMS.register(bus);
@@ -5328,8 +5328,8 @@ bus.addListener(ActualListenerRegistry::register);
             import java.util.Set;
 
             public class BoneTiaraItem extends Item {
-                public BoneTiaraItem(Properties properties) {
-                    super(properties);
+                public BoneTiaraItem() {
+                    super(new Properties());
                 }
 
                 @Override

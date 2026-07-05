@@ -5166,7 +5166,9 @@ $itemArguments
     ): List<RegisteredItemReference> =
         javaFiles.flatMap { javaFile ->
             val text = javaFile.readText()
-            if (!text.contains("new $itemClassName")) return@flatMap emptyList()
+            val executableCode = maskJavaCommentsAndLiterals(text)
+            val itemConstructorReference = Regex("""(?:new\s+(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(itemClassName)}\s*\()|(?:(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(itemClassName)}\s*::\s*new)""")
+            if (!itemConstructorReference.containsMatchIn(executableCode)) return@flatMap emptyList()
             val packageName = packageNameOf(text)
             val registryClassName = Regex("""\bclass\s+(\w+)\b""")
                 .find(text)
@@ -5174,9 +5176,9 @@ $itemArguments
                 ?.get(1)
                 ?: return@flatMap emptyList()
             val fieldPattern = Regex(
-                """(?s)public\s+static\s+final\s+[^=;]+?\s+(\w+)\s*=\s*\w+\.register\s*\([^;]*?new\s+${Regex.escape(itemClassName)}\s*\("""
+                """(?s)public\s+static\s+final\s+[^=;]+?\s+(\w+)\s*=\s*\w+\.register\s*\([^;]*?(?:new\s+(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(itemClassName)}\s*\(|(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(itemClassName)}\s*::\s*new)"""
             )
-            fieldPattern.findAll(text).map { match ->
+            fieldPattern.findAll(executableCode).map { match ->
                 RegisteredItemReference(
                     registryFile = javaFile,
                     packageName = packageName,
