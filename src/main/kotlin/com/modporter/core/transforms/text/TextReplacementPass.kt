@@ -100,6 +100,7 @@ class TextReplacementPass(
         var content = originalContent
         val changes = mutableListOf<Change>()
         val tierIncorrectTagResources = mutableListOf<TierIncorrectTagResource>()
+        val relativePath = projectDir.relativize(file).toString().replace('\\', '/')
 
         val networkHooksOpenScreen = migrateNetworkHooksOpenScreen(content, file)
         content = networkHooksOpenScreen.content
@@ -120,6 +121,24 @@ class TextReplacementPass(
                     ruleId = "forge-internal-name-descriptors"
                 )
             )
+        }
+
+        if (relativePath.startsWith("src/test/java/")) {
+            val beforeTestSourceAssertions = content
+            content = migrateTestSourceForgeAssertions(content)
+            if (content != beforeTestSourceAssertions) {
+                changes.add(
+                    Change(
+                        file = file,
+                        line = 1,
+                        description = "Migrate source-level test assertions from Forge symbols to NeoForge symbols",
+                        before = "test assertions mention net.minecraftforge or MinecraftForge",
+                        after = "test assertions mention NeoForge packages and NeoForge.EVENT_BUS",
+                        confidence = Confidence.HIGH,
+                        ruleId = "test-source-forge-assertions"
+                    )
+                )
+            }
         }
 
         val beforeInventoryRecipeHolder = content
@@ -177,6 +196,22 @@ class TextReplacementPass(
                 )
             }
             content = replacement.content
+        }
+
+        val beforeMobEffectInstanceSave = content
+        content = migrateMobEffectInstanceSaveCalls(content)
+        if (content != beforeMobEffectInstanceSave) {
+            changes.add(
+                Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate MobEffectInstance NBT save calls to the 1.21 no-arg save API",
+                    before = "mobEffectInstance.save(new CompoundTag())",
+                    after = "mobEffectInstance.save()",
+                    confidence = Confidence.HIGH,
+                    ruleId = "mobeffectinstance-save-noarg"
+                )
+            )
         }
 
         val beforeItemPropertiesUseDuration = content
@@ -543,6 +578,9 @@ class TextReplacementPass(
         if (result.contains("RenderGuiLayerEvent") && !result.contains("import net.neoforged.neoforge.client.event.RenderGuiLayerEvent;")) {
             missingImports.add("import net.neoforged.neoforge.client.event.RenderGuiLayerEvent;")
         }
+        if (Regex("\\bDeltaTracker\\b").containsMatchIn(result) && !result.contains("import net.minecraft.client.DeltaTracker;")) {
+            missingImports.add("import net.minecraft.client.DeltaTracker;")
+        }
         if (result.contains("FastColor.ARGB32") && !result.contains("import net.minecraft.util.FastColor;")) {
             missingImports.add("import net.minecraft.util.FastColor;")
         }
@@ -704,6 +742,24 @@ class TextReplacementPass(
         }
 
         return dedupeImports(result)
+    }
+
+    private fun migrateMobEffectInstanceSaveCalls(source: String): String {
+        if (!source.contains("MobEffectInstance") || !source.contains(".save(")) return source
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val mobEffectInstanceNames = Regex("""\b(?:net\.minecraft\.world\.effect\.)?MobEffectInstance\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(executableCode)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (mobEffectInstanceNames.isEmpty()) return source
+        var result = source
+        for (name in mobEffectInstanceNames) {
+            result = replaceExecutableRegex(
+                result,
+                Regex("""(?<![\w$])((?:this\.)?${Regex.escape(name)})\.save\s*\(\s*new\s+(?:net\.minecraft\.nbt\.)?CompoundTag\s*\(\s*\)\s*\)""")
+            ) { match -> "${match.groupValues[1]}.save()" }
+        }
+        return result
     }
 
     private fun migrateRemainingRegistryObjectWildcardHolders(source: String): String {
@@ -4539,6 +4595,17 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         ).fold(source) { current, (oldOwner, newOwner) ->
             current.replace(oldOwner, newOwner)
         }
+    }
+
+    private fun migrateTestSourceForgeAssertions(source: String): String {
+        return source
+            .replace("net.minecraftforge.fml.", "net.neoforged.fml.")
+            .replace("net.minecraftforge.eventbus.", "net.neoforged.bus.")
+            .replace("net.minecraftforge.forgespi.", "net.neoforged.neoforgespi.")
+            .replace("net.minecraftforge.fluids.", "net.neoforged.neoforge.fluids.")
+            .replace("net.minecraftforge.common.", "net.neoforged.neoforge.common.")
+            .replace("net.minecraftforge.", "net.neoforged.neoforge.")
+            .replace("MinecraftForge", "NeoForge")
     }
 
     private fun findJavaFiles(projectDir: Path): List<Path> {

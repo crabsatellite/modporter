@@ -50,6 +50,35 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `source level test assertions migrate forge names inside strings`() {
+        val testDir = tempDir.resolve("src/test/java/com/example")
+        testDir.createDirectories()
+        testDir.resolve("SourceContractTest.java").writeText("""
+            package com.example;
+
+            class SourceContractTest {
+                void contract(String source) {
+                    assert source.contains("import net.minecraftforge.fluids.FluidStack;");
+                    assert source.contains("MinecraftForge.EVENT_BUS.register(ServerEvent.class)");
+                    assert source.matches(".*MinecraftForge\\s*\\.\\s*EVENT_BUS.*");
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(tempDir)
+        val transformed = testDir.resolve("SourceContractTest.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(transformed.contains("import net.neoforged.neoforge.fluids.FluidStack;"), transformed)
+        assertTrue(transformed.contains("NeoForge.EVENT_BUS.register(ServerEvent.class)"), transformed)
+        assertTrue(transformed.contains("NeoForge\\\\s*\\\\.\\\\s*EVENT_BUS"), transformed)
+        assertFalse(transformed.contains("net.minecraftforge"), transformed)
+        assertFalse(transformed.contains("MinecraftForge"), transformed)
+    }
+
+    @Test
     fun `forge internal names in mixin descriptors use neoforge owners`() {
         val projectDir = createTestFile("""
             package com.example;
@@ -537,6 +566,32 @@ class TextReplacementTest {
         assertTrue(!transformed.contains("IGuiOverlay"))
         assertTrue(!transformed.contains("ExtendedGui"))
         assertTrue(!transformed.contains("VanillaGuiOverlay"))
+    }
+
+    @Test
+    fun `layered draw overlay signatures add delta tracker import`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.LayeredDraw;
+
+            class CooldownHudOverlay implements LayeredDraw.Layer {
+                @Override
+                public void render(GuiGraphics guiGraphics, DeltaTracker deltaTracker) {
+                    guiGraphics.pose();
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.client.DeltaTracker;"), transformed)
+        assertTrue(transformed.contains("public void render(GuiGraphics guiGraphics, DeltaTracker deltaTracker)"), transformed)
     }
 
     @Test

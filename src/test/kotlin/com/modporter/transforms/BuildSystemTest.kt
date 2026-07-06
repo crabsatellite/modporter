@@ -3324,6 +3324,7 @@ class BuildSystemTest {
             public net.minecraft.world.level.block.FlowerPotBlock m_153267_()Z # isEmpty
             public net.minecraft.server.level.ChunkMap m_183719_()Lnet/minecraft/world/level/chunk/ChunkGenerator; # generator
             public net.minecraft.world.level.biome.Biome f_47435_ # TEMPERATURE_NOISE
+            public-f net.minecraft.world.level.biome.BiomeSource f_47891_ # possibleBiomes
             public net.minecraft.world.entity.decoration.Painting m_218891_(Lnet/minecraft/core/Holder;)V # setVariant
             public net.minecraft.world.level.block.DispenserBlock f_52661_ # DISPENSER_REGISTRY
             public net.minecraft.client.gui.Gui m_93024_(Lnet/minecraft/world/phys/HitResult;)Z # canRenderCrosshairForSpectator
@@ -3365,6 +3366,7 @@ class BuildSystemTest {
         assertTrue(at.contains("public net.minecraft.world.level.block.FlowerPotBlock isEmpty()Z # isEmpty"))
         assertTrue(at.contains("public net.minecraft.server.level.ChunkMap generator()Lnet/minecraft/world/level/chunk/ChunkGenerator; # generator"))
         assertTrue(at.contains("public net.minecraft.world.level.biome.Biome TEMPERATURE_NOISE # TEMPERATURE_NOISE"))
+        assertTrue(at.contains("public-f net.minecraft.world.level.biome.BiomeSource possibleBiomes # possibleBiomes"))
         assertTrue(at.contains("public net.minecraft.world.entity.decoration.Painting setVariant(Lnet/minecraft/core/Holder;)V # setVariant"))
         assertTrue(at.contains("public net.minecraft.world.level.block.DispenserBlock DISPENSER_REGISTRY # DISPENSER_REGISTRY"))
         assertTrue(at.contains("public net.minecraft.client.gui.Gui canRenderCrosshairForSpectator(Lnet/minecraft/world/phys/HitResult;)Z # canRenderCrosshairForSpectator"))
@@ -3379,6 +3381,7 @@ class BuildSystemTest {
         assertFalse(at.contains("UNREFERENCED_TEXTURES"))
         assertFalse(at.contains("getPlacementsForStructure"))
         assertFalse(at.contains("f_119234_"))
+        assertFalse(at.contains("f_47891_"))
         assertFalse(at.contains("m_223138_"))
         assertFalse(at.contains("f_60442_"))
         assertFalse(at.contains("BlockBehaviour material"))
@@ -5010,6 +5013,41 @@ class BuildSystemTest {
 
         assertFalse(result.changes.any { it.ruleId == "build-exclude-integrations" })
         assertFalse(content.contains("exclude 'com/example/test/util/SakuraTestBase.java'"))
+    }
+
+    @Test
+    fun `removes existing build excludes that hide main source and resource content`() {
+        val projectDir = tempDir.resolve("p17-existing-excludes")
+        val gameTestDir = projectDir.resolve("src/main/java/com/example/gametest")
+        val structureDir = projectDir.resolve("src/main/resources/gameteststructures")
+        gameTestDir.createDirectories()
+        structureDir.createDirectories()
+        gameTestDir.resolve("ExampleGameTests.java").writeText("""
+            package com.example.gametest;
+
+            public class ExampleGameTests {
+            }
+        """.trimIndent())
+        structureDir.resolve("empty.snbt").writeText("{}")
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            tasks.named('jar', Jar).configure {
+                exclude 'com/example/gametest/**'
+                exclude 'gameteststructures/**'
+                exclude 'META-INF/private-notes.txt'
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-remove-main-source-exclude" }, result.changes.joinToString("\n"))
+        assertFalse(content.contains("exclude 'com/example/gametest/**'"), content)
+        assertFalse(content.contains("exclude 'gameteststructures/**'"), content)
+        assertTrue(content.contains("exclude 'META-INF/private-notes.txt'"), content)
     }
 
     @Test

@@ -2,6 +2,7 @@ package com.modporter.core.transforms.build
 
 import com.modporter.core.pipeline.*
 import mu.KotlinLogging
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.*
 import kotlin.streams.toList
@@ -298,6 +299,12 @@ class BuildSystemPass(
         }
 
         try {
+            changes.addAll(removeMainSourceBuildExcludes(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to remove main source/resource excludes: ${e.message}")
+        }
+
+        try {
             errors.addAll(detectForbiddenReflection(projectDir))
             if (!dryRun) {
                 errors.addAll(detectLegacyCoremodApiReferences(projectDir))
@@ -319,6 +326,67 @@ class BuildSystemPass(
         }
 
         return PassResult(name, changes, errors)
+    }
+
+    private fun removeMainSourceBuildExcludes(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        for (buildFileName in listOf("build.gradle", "build.gradle.kts")) {
+            val buildFile = projectDir.resolve(buildFileName)
+            if (!buildFile.exists()) continue
+            val original = buildFile.readText()
+            val excludePattern = Regex("""(?m)^[ \t]*exclude[ \t]*(?:\([ \t]*)?['"]([^'"]+)['"][ \t]*\)?[ \t]*(?:\r?\n)?""")
+            val removals = excludePattern.findAll(original)
+                .filter { mainSourceOrResourcePathExists(projectDir, it.groupValues[1]) }
+                .toList()
+            if (removals.isEmpty()) continue
+            for (match in removals) {
+                changes.add(Change(
+                    file = buildFile,
+                    line = original.lineNumberAt(match.range.first),
+                    description = "Remove build exclude that hides existing main source or resource content",
+                    before = match.value.trim(),
+                    after = "(removed)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-remove-main-source-exclude"
+                ))
+            }
+            if (!dryRun) {
+                var content = original
+                for (match in removals.asReversed()) {
+                    content = content.removeRange(match.range)
+                }
+                buildFile.writeText(content)
+            }
+        }
+        return changes
+    }
+
+    private fun mainSourceOrResourcePathExists(projectDir: Path, rawPattern: String): Boolean {
+        val normalized = rawPattern.replace('\\', '/').trimStart('/')
+        if (normalized.isBlank()) return false
+        val prefix = normalized.substringBefore('*').trimEnd('/')
+        if (prefix.isBlank()) return false
+        return listOf(
+            projectDir.resolve("src/main/java").resolve(prefix),
+            projectDir.resolve("src/main/resources").resolve(prefix)
+        ).any { path ->
+            path.exists() || runCatching {
+                val parent = path.parent
+                if (parent == null || !parent.exists()) {
+                    false
+                } else {
+                    val stream = Files.walk(parent)
+                    try {
+                        val normalizedPath = path.normalize().toString().replace('\\', '/')
+                        stream.anyMatch { candidate ->
+                            candidate.normalize().toString().replace('\\', '/').startsWith(normalizedPath)
+                        }
+                    } finally {
+                        stream.close()
+                    }
+                }
+            }.getOrDefault(false)
+        }
     }
 
     private fun transformBuildGradle(
@@ -3428,6 +3496,8 @@ config="$configName"
                 "public net.minecraft.server.level.ChunkMap generator()Lnet/minecraft/world/level/chunk/ChunkGenerator;"
             "public net.minecraft.world.level.biome.Biome f_47435_" ->
                 "public net.minecraft.world.level.biome.Biome TEMPERATURE_NOISE"
+            "public-f net.minecraft.world.level.biome.BiomeSource f_47891_" ->
+                "public-f net.minecraft.world.level.biome.BiomeSource possibleBiomes"
             "public net.minecraft.world.entity.decoration.Painting m_218891_(Lnet/minecraft/core/Holder;)V" ->
                 "public net.minecraft.world.entity.decoration.Painting setVariant(Lnet/minecraft/core/Holder;)V"
             "public net.minecraft.world.level.block.DispenserBlock f_52661_" ->

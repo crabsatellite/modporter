@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.awt.image.BufferedImage
 import java.nio.file.Path
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import javax.imageio.ImageIO
 import kotlin.io.path.*
 import kotlin.test.assertEquals
@@ -94,6 +96,15 @@ class ResourceMigrationTest {
                 }
             }
         """.trimIndent())
+    }
+
+    private fun writeJarWithEntry(jar: Path, entryName: String, content: String) {
+        jar.parent.createDirectories()
+        ZipOutputStream(jar.outputStream()).use { zip ->
+            zip.putNextEntry(ZipEntry(entryName))
+            zip.write(content.toByteArray(Charsets.UTF_8))
+            zip.closeEntry()
+        }
     }
 
     @Test
@@ -851,11 +862,75 @@ class ResourceMigrationTest {
         val recipe = projectDir.resolve("src/main/resources/data/resmod/recipe/unproven_result_array.json").readText()
         assertFalse(
             result.changes.any { it.ruleId == "res-recipe-result-entry-id" },
-            "Result entry stack migration must require source-declared serializer codec evidence"
+            "Result entry stack migration must require source-declared serializer codec or target dependency data evidence"
         )
         assertTrue(recipe.contains(""""item": "resmod:sliced_cabbage""""))
         assertTrue(recipe.contains(""""count": 2"""))
         assertFalse(recipe.contains(""""item": {"""))
+    }
+
+    @Test
+    fun `dependency recipe data shape migrates external result entry item stack fields`() {
+        val projectDir = setupResourceProject()
+        val dependencyJar = projectDir.resolve("libs/depmod-1.0.0.jar")
+        writeJarWithEntry(
+            dependencyJar,
+            "data/depmod/recipe/cutting/example.json",
+            """
+                {
+                  "type": "depmod:cutting",
+                  "ingredients": [
+                    {
+                      "item": "depmod:cabbage"
+                    }
+                  ],
+                  "result": [
+                    {
+                      "item": {
+                        "count": 2,
+                        "id": "depmod:sliced_cabbage"
+                      }
+                    }
+                  ]
+                }
+            """.trimIndent()
+        )
+        projectDir.resolve("build.gradle").writeText("""
+            repositories { flatDir { dirs 'libs' } }
+            dependencies {
+                implementation files('libs/depmod-1.0.0.jar')
+            }
+        """.trimIndent())
+        val recipeDir = projectDir.resolve("src/main/resources/data/resmod/recipes")
+        recipeDir.resolve("external_cutting.json").writeText("""
+            {
+              "type": "depmod:cutting",
+              "ingredients": [
+                {
+                  "item": "resmod:cabbage"
+                }
+              ],
+              "result": [
+                {
+                  "item": "resmod:sliced_cabbage",
+                  "count": 2
+                }
+              ]
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/main/resources/data/resmod/recipe/external_cutting.json").readText()
+        assertTrue(
+            result.changes.any { it.ruleId == "res-recipe-result-entry-id" },
+            "Target dependency data should prove external result entry item stack fields"
+        )
+        assertTrue(recipe.contains(""""item": {"""))
+        assertTrue(recipe.contains(""""id": "resmod:sliced_cabbage""""))
+        assertTrue(recipe.contains(""""count": 2"""))
+        assertTrue(recipe.contains(""""item": "resmod:cabbage""""))
+        assertFalse(recipe.contains(""""item": "resmod:sliced_cabbage""""))
     }
 
     @Test

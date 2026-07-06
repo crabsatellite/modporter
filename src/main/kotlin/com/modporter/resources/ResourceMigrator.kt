@@ -9,7 +9,9 @@ import java.awt.RenderingHints
 import java.awt.image.BufferedImage
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.Paths
 import java.nio.file.StandardCopyOption
+import java.util.zip.ZipFile
 import javax.imageio.ImageIO
 import kotlin.io.path.*
 
@@ -1488,6 +1490,12 @@ class ResourceMigrationPass(
     }
 
     private fun collectRecipeDataCodecHints(projectDir: Path): RecipeDataCodecHints {
+        val sourceHints = collectProjectRecipeDataCodecHints(projectDir)
+        val dependencyHints = collectDependencyRecipeDataShapeHints(projectDir)
+        return sourceHints + dependencyHints
+    }
+
+    private fun collectProjectRecipeDataCodecHints(projectDir: Path): RecipeDataCodecHints {
         val javaSources = collectJavaSourceInfos(projectDir)
         if (javaSources.isEmpty()) return RecipeDataCodecHints.EMPTY
 
@@ -1541,6 +1549,153 @@ class ResourceMigrationPass(
             },
             compoundTagFieldsByType = compoundTagFields.mapValues { it.value.toSet() }
         )
+    }
+
+    private fun collectDependencyRecipeDataShapeHints(projectDir: Path): RecipeDataCodecHints {
+        val itemStackFields = linkedMapOf<String, MutableSet<String>>()
+        val itemStackListEntryFields = linkedMapOf<String, MutableMap<String, MutableSet<String>>>()
+
+        for (jar in collectGradleDependencyJars(projectDir).distinct()) {
+            try {
+                ZipFile(jar.toFile()).use { zip ->
+                    val entries = zip.entries()
+                    while (entries.hasMoreElements()) {
+                        val entry = entries.nextElement()
+                        val name = entry.name.replace('\\', '/')
+                        if (entry.isDirectory || !name.endsWith(".json")) continue
+                        if (!name.startsWith("data/") && !name.contains("/data/")) continue
+                        if (!name.contains("/recipe/") && !name.contains("/recipes/")) continue
+                        val content = zip.getInputStream(entry).bufferedReader().use { it.readText() }
+                        val root = parseResourceJson(content) as? JsonObject ?: continue
+                        collectRecipeShapeHints(root, itemStackFields, itemStackListEntryFields)
+                    }
+                }
+            } catch (_: Exception) {
+                continue
+            }
+        }
+
+        if (itemStackFields.isEmpty() && itemStackListEntryFields.isEmpty()) return RecipeDataCodecHints.EMPTY
+        return RecipeDataCodecHints(
+            itemStackFieldsByType = itemStackFields.mapValues { it.value.toSet() },
+            itemStackListEntryFieldsByType = itemStackListEntryFields.mapValues { (_, fieldsByList) ->
+                fieldsByList.mapValues { it.value.toSet() }
+            }
+        )
+    }
+
+    private fun collectRecipeShapeHints(
+        element: JsonElement,
+        itemStackFields: MutableMap<String, MutableSet<String>>,
+        itemStackListEntryFields: MutableMap<String, MutableMap<String, MutableSet<String>>>
+    ) {
+        when (element) {
+            is JsonArray -> element.forEach { collectRecipeShapeHints(it, itemStackFields, itemStackListEntryFields) }
+            is JsonObject -> {
+                val recipeType = (element["type"] as? JsonPrimitive)
+                    ?.takeIf { it.isString }
+                    ?.content
+                if (recipeType != null) {
+                    for ((key, value) in element) {
+                        when (value) {
+                            is JsonObject -> {
+                                if (isTargetItemStackObject(value)) {
+                                    itemStackFields.getOrPut(recipeType) { linkedSetOf() }.add(key)
+                                }
+                            }
+                            is JsonArray -> {
+                                val entryFields = targetItemStackEntryFields(value)
+                                if (entryFields.isNotEmpty()) {
+                                    itemStackListEntryFields
+                                        .getOrPut(recipeType) { linkedMapOf() }
+                                        .getOrPut(key) { linkedSetOf() }
+                                        .addAll(entryFields)
+                                }
+                            }
+                            else -> Unit
+                        }
+                    }
+                }
+                element.values.forEach { collectRecipeShapeHints(it, itemStackFields, itemStackListEntryFields) }
+            }
+            else -> Unit
+        }
+    }
+
+    private fun targetItemStackEntryFields(entries: JsonArray): Set<String> {
+        val fields = linkedSetOf<String>()
+        for (entry in entries) {
+            val entryObject = entry as? JsonObject ?: continue
+            for ((key, value) in entryObject) {
+                if (value is JsonObject && isTargetItemStackObject(value)) {
+                    fields += key
+                }
+            }
+        }
+        return fields
+    }
+
+    private fun isTargetItemStackObject(element: JsonObject): Boolean {
+        val id = element["id"] as? JsonPrimitive ?: return false
+        return id.isString
+    }
+
+    private fun collectGradleDependencyJars(projectDir: Path): List<Path> {
+        val buildFiles = listOf("build.gradle", "build.gradle.kts")
+            .map { projectDir.resolve(it) }
+            .filter { it.exists() }
+        if (buildFiles.isEmpty()) return emptyList()
+
+        val jars = linkedSetOf<Path>()
+        for (file in buildFiles) {
+            val content = file.readText()
+            collectGradleFileDependencies(projectDir, content).forEach { jars.add(it) }
+            collectGradleCoordinateDependencies(content).forEach { coordinate ->
+                jars.addAll(gradleCacheJarsForCoordinate(coordinate))
+            }
+        }
+        return jars.toList()
+    }
+
+    private fun collectGradleFileDependencies(projectDir: Path, content: String): List<Path> {
+        val jars = mutableListOf<Path>()
+        val pattern = Regex("""files\s*\(\s*['"]([^'"]+\.jar)['"]\s*\)""")
+        for (match in pattern.findAll(content)) {
+            val pathText = match.groupValues[1]
+            val path = Paths.get(pathText)
+            val resolved = if (path.isAbsolute) path else projectDir.resolve(pathText)
+            if (resolved.exists() && Files.isRegularFile(resolved)) {
+                jars.add(resolved)
+            }
+        }
+        return jars
+    }
+
+    private fun collectGradleCoordinateDependencies(content: String): List<String> {
+        val coordinates = linkedSetOf<String>()
+        val quotePattern = Regex("""['"]([A-Za-z0-9_.-]+(?:\.[A-Za-z0-9_.-]+)*:[A-Za-z0-9_.-]+:[^'"\s)]+)['"]""")
+        for (match in quotePattern.findAll(content)) {
+            coordinates += match.groupValues[1].substringBeforeLast('@')
+        }
+        return coordinates.toList()
+    }
+
+    private fun gradleCacheJarsForCoordinate(coordinate: String): List<Path> {
+        val parts = coordinate.split(':')
+        if (parts.size < 3) return emptyList()
+        val group = parts[0]
+        val artifact = parts[1]
+        val version = parts[2].substringBefore(':')
+        val gradleHome = System.getenv("GRADLE_USER_HOME")?.takeIf { it.isNotBlank() }?.let { Paths.get(it) }
+            ?: Paths.get(System.getProperty("user.home"), ".gradle")
+        val moduleDir = gradleHome.resolve("caches/modules-2/files-2.1/$group/$artifact/$version")
+        if (!moduleDir.exists()) return emptyList()
+        val expectedName = "$artifact-$version.jar"
+        return Files.walk(moduleDir).use { files ->
+            files
+                .filter { Files.isRegularFile(it) && it.fileName.toString() == expectedName }
+                .toList()
+        }
     }
 
     private fun collectRecipeSerializerRegistryNamespaces(
@@ -3006,6 +3161,26 @@ class ResourceMigrationPass(
 
         fun compoundTagFields(type: String?): Set<String> =
             if (type == null) emptySet() else compoundTagFieldsByType[type].orEmpty()
+
+        operator fun plus(other: RecipeDataCodecHints): RecipeDataCodecHints =
+            RecipeDataCodecHints(
+                itemStackFieldsByType =
+                    (itemStackFieldsByType.keys + other.itemStackFieldsByType.keys).associateWith { key ->
+                        itemStackFieldsByType[key].orEmpty() + other.itemStackFieldsByType[key].orEmpty()
+                    },
+                itemStackListEntryFieldsByType =
+                    (itemStackListEntryFieldsByType.keys + other.itemStackListEntryFieldsByType.keys).associateWith { type ->
+                        val left = itemStackListEntryFieldsByType[type].orEmpty()
+                        val right = other.itemStackListEntryFieldsByType[type].orEmpty()
+                        (left.keys + right.keys).associateWith { field ->
+                            left[field].orEmpty() + right[field].orEmpty()
+                        }
+                    },
+                compoundTagFieldsByType =
+                    (compoundTagFieldsByType.keys + other.compoundTagFieldsByType.keys).associateWith { key ->
+                        compoundTagFieldsByType[key].orEmpty() + other.compoundTagFieldsByType[key].orEmpty()
+                    }
+            )
 
         companion object {
             val EMPTY = RecipeDataCodecHints()

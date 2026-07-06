@@ -741,6 +741,87 @@ class RealModBenchmarkTest {
     }
 
     @Test
+    fun `runtime log audit allowlists source inherited missing item model`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeMissingModelEvidence(projectDir, includeModelFile = false)
+        writeMissingModelEvidence(sourceDir, includeModelFile = false)
+        val logFile = tempDir.resolve("missing-model-inherited.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-1/WARN] [minecraft/ModelBakery]: Unable to load model: 'example:item/descriptive_item' referenced from: example:item/descriptive_item: java.io.FileNotFoundException: example:models/item/descriptive_item.json
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected source-inherited missing model to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("both omit model 'assets/example/models/item/descriptive_item.json'") },
+            "Expected missing-model evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps missing item model warning when input has model`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeMissingModelEvidence(projectDir, includeModelFile = false)
+        writeMissingModelEvidence(sourceDir, includeModelFile = true)
+        val logFile = tempDir.resolve("missing-model-regression.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-1/WARN] [minecraft/ModelBakery]: Unable to load model: 'example:item/descriptive_item' referenced from: example:item/descriptive_item: java.io.FileNotFoundException: example:models/item/descriptive_item.json
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Unable to load model: 'example:item/descriptive_item'") },
+            "Porter-lost model files must remain fatal"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows external dependency missing model with active dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "maven.modrinth:depmod:1.0.0"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("external-missing-model.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-1/WARN] [minecraft/ModelBakery]: Unable to load model: 'depmod:item/missing_widget' referenced from: depmod:item/missing_widget: java.io.FileNotFoundException: depmod:models/item/missing_widget.json
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected external dependency missing model to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("external dependency missing model warning") && it.contains("depmod") },
+            "Expected external dependency evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps external missing model without dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        val logFile = tempDir.resolve("external-missing-model-without-evidence.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-1/WARN] [minecraft/ModelBakery]: Unable to load model: 'depmod:item/missing_widget' referenced from: depmod:item/missing_widget: java.io.FileNotFoundException: depmod:models/item/missing_widget.json
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Unable to load model: 'depmod:item/missing_widget'") },
+            "External missing model warnings require active dependency evidence"
+        )
+    }
+
+    @Test
     fun `runtime log audit allowlists source inherited texture mip size`(@TempDir tempDir: Path) {
         val projectDir = tempDir.resolve("work/example")
         val sourceDir = tempDir.resolve("sources/example")
@@ -2142,6 +2223,28 @@ class RealModBenchmarkTest {
         }
     }
 
+    private fun writeMissingModelEvidence(projectDir: Path, includeModelFile: Boolean) {
+        val javaDir = projectDir.resolve("src/main/java/example")
+        val modelDir = projectDir.resolve("src/main/resources/assets/example/models/item")
+        javaDir.createDirectories()
+        modelDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        javaDir.resolve("ExampleItems.java").writeText("""
+            package example;
+
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ExampleItems {
+                public static final DeferredRegister<Item> ITEMS = DeferredRegister.create(null, "example");
+                public static final Object DESCRIPTIVE_ITEM = ITEMS.register("descriptive_item", () -> new Item(new Item.Properties()));
+            }
+        """.trimIndent() + "\n")
+        if (includeModelFile) {
+            modelDir.resolve("descriptive_item.json").writeText("""{"parent":"minecraft:item/generated","textures":{"layer0":"example:item/descriptive_item"}}""" + "\n")
+        }
+    }
+
     private fun writeTextureMipEvidence(projectDir: Path, width: Int, height: Int) {
         val textureDir = projectDir.resolve("src/main/resources/assets/example/textures/block/fluids")
         textureDir.createDirectories()
@@ -2945,6 +3048,9 @@ class RealModBenchmarkTest {
         externalDependencyCreativeTabDuplicateEvidence(lines, index, evidenceCache)?.let {
             return "external dependency creative-tab duplicate item warning ($it)"
         }
+        externalDependencyMissingModelEvidence(lines, index, evidenceCache)?.let {
+            return "external dependency missing model warning ($it)"
+        }
         sourceInheritedCreativeTabDuplicateEvidence(lines, index, evidenceCache)?.let {
             return "source-inherited creative-tab duplicate item warning ($it)"
         }
@@ -2953,6 +3059,9 @@ class RealModBenchmarkTest {
         }
         sourceInheritedMissingSoundFileEvidence(lines[index], evidenceCache)?.let {
             return "source-inherited missing sound file warning ($it)"
+        }
+        sourceInheritedMissingModelEvidence(lines[index], evidenceCache)?.let {
+            return "source-inherited missing model warning ($it)"
         }
         sourceInheritedTextureMipEvidence(lines[index], evidenceCache)?.let {
             return "source-inherited texture mip warning ($it)"
@@ -3158,6 +3267,63 @@ class RealModBenchmarkTest {
         if (resourceHasSoundFile(sourceDir, fileNamespace, soundFilePath)) return null
         return "input and converted resources declare sound file '$soundReference' for event '$eventNamespace:$eventPath' but both omit sounds/$soundFilePath.ogg"
     }
+
+    private fun externalDependencyMissingModelEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val warning = missingModelWarning(lines[index]) ?: return null
+        val project = evidenceCache.projectDir ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (warning.namespace == targetMod) return null
+        if (resourceHasModelFile(project, warning.namespace, warning.modelFolder, warning.modelPath)) return null
+        val activeDependency = evidenceCache.buildFileContainsDependencyId(warning.namespace)
+        val loadedMod = warning.namespace in loadedRuntimeModIds(lines)
+        if (!activeDependency && !loadedMod) return null
+        val evidence = buildList {
+            if (activeDependency) add("active build dependency")
+            if (loadedMod) add("loaded runtime mod")
+        }.joinToString(" and ")
+        return "model '${warning.namespace}:${warning.modelFolder}/${warning.modelPath}' belongs to external dependency namespace '${warning.namespace}' with $evidence evidence"
+    }
+
+    private fun sourceInheritedMissingModelEvidence(
+        line: String,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val warning = missingModelWarning(line) ?: return null
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (warning.namespace != targetMod) return null
+        if (resourceHasModelFile(project, warning.namespace, warning.modelFolder, warning.modelPath)) return null
+        if (resourceHasModelFile(sourceDir, warning.namespace, warning.modelFolder, warning.modelPath)) return null
+        if (!sourceDeclaresRegistryModelId(project, warning.namespace, warning.modelFolder, warning.modelPath)) return null
+        if (!sourceDeclaresRegistryModelId(sourceDir, warning.namespace, warning.modelFolder, warning.modelPath)) return null
+        val relative = "assets/${warning.namespace}/models/${warning.modelFolder}/${warning.modelPath}.json"
+        return "input and converted sources declare ${warning.modelFolder} id '${warning.namespace}:${warning.modelPath}' and both omit model '$relative'"
+    }
+
+    private fun missingModelWarning(line: String): MissingModelWarning? {
+        val match = Regex("""Unable to load model: '([a-z0-9_.-]+):([a-z0-9_./-]+)' referenced from: [a-z0-9_.-]+:[a-z0-9_./-]+: java\.io\.FileNotFoundException: ([a-z0-9_.-]+):models/(item|block)/([a-z0-9_./-]+)\.json""")
+            .find(line)
+            ?: return null
+        val modelNamespace = match.groupValues[1]
+        val modelIdPath = match.groupValues[2]
+        val fileNamespace = match.groupValues[3]
+        val modelFolder = match.groupValues[4]
+        val modelPath = match.groupValues[5]
+        if (modelNamespace != fileNamespace) return null
+        if (modelIdPath != "$modelFolder/$modelPath") return null
+        return MissingModelWarning(modelNamespace, modelFolder, modelPath)
+    }
+
+    private data class MissingModelWarning(
+        val namespace: String,
+        val modelFolder: String,
+        val modelPath: String
+    )
 
     private fun sourceInheritedTextureMipEvidence(
         line: String,
@@ -3472,6 +3638,33 @@ class RealModBenchmarkTest {
         resourceRoots(projectDir).any { root ->
             root.resolve("assets/$namespace/sounds/$soundFilePath.ogg").exists()
         }
+
+    private fun resourceHasModelFile(projectDir: Path, namespace: String, modelFolder: String, modelPath: String): Boolean =
+        resourceRoots(projectDir).any { root ->
+            root.resolve("assets/$namespace/models/$modelFolder/$modelPath.json").exists()
+        }
+
+    private fun sourceDeclaresRegistryModelId(
+        projectDir: Path,
+        namespace: String,
+        modelFolder: String,
+        modelPath: String
+    ): Boolean {
+        if (!projectDir.exists()) return false
+        val idPath = modelPath
+        val idPatterns = itemReferencePatterns("$namespace:$idPath")
+        val registrationLiteral = Regex("""\bregister\s*\(\s*["']${Regex.escape(idPath)}["']""")
+        val registryMarkers = when (modelFolder) {
+            "item" -> listOf("DeferredRegister<Item", "RegistryObject<Item", "DeferredHolder<Item", "ForgeRegistries.ITEMS", "Registries.ITEM", "new Item(")
+            "block" -> listOf("DeferredRegister<Block", "RegistryObject<Block", "DeferredHolder<Block", "ForgeRegistries.BLOCKS", "Registries.BLOCK", "new Block(")
+            else -> return false
+        }
+        return javaAndKotlinSourceFiles(projectDir).any { file ->
+            val active = activeCode(file.readText())
+            val declaresId = registrationLiteral.containsMatchIn(active) || idPatterns.any { it.containsMatchIn(active) }
+            declaresId && registryMarkers.any { active.contains(it) }
+        }
+    }
 
     private data class ImageSize(val width: Int, val height: Int)
 
