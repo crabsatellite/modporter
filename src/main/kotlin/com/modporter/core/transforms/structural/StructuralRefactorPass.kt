@@ -428,6 +428,13 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            val levelReaderDeprecationChanges = migrateDeprecatedLevelReaderHasChunksAtCalls(projectDir, dryRun)
+            changes.addAll(levelReaderDeprecationChanges)
+        } catch (e: Exception) {
+            errors.add("LevelReader hasChunksAt migration error: ${e.message}")
+        }
+
+        try {
             val livingDamageHelperChanges = migrateLivingDamageEventHelperBoundaries(projectDir, dryRun)
             changes.addAll(livingDamageHelperChanges)
         } catch (e: Exception) {
@@ -33753,6 +33760,10 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         result = migrateDeprecatedMobEffectHolderComparisons(result, mobEffectDeferredHolderFields)
         result = migrateWeightedEntryWrapperArraysToLists(result)
         result = migrateLegacyBlockCloneItemStackOverrides(result, javaInheritanceIndex)
+        result = migrateDeprecatedStructureProcessorProcessBlockOverrides(result)
+        result = migrateDeprecatedBlockRenderDispatcherSingleBlockCalls(result)
+        result = migrateDeprecatedBakedModelGetQuadsCallSites(result)
+        result = migrateDeprecatedItemTransformsConstructors(result)
         return result
     }
 
@@ -33950,6 +33961,270 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         result = addExecutableImportIfMissing(result, "net.minecraft.world.phys.HitResult")
         return result
     }
+
+    private fun migrateDeprecatedStructureProcessorProcessBlockOverrides(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("processBlock(") ||
+            !executableCode.contains("StructureTemplate.StructureBlockInfo") ||
+            !executableCode.contains("StructurePlaceSettings")) {
+            return source
+        }
+        var result = source
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        for (method in javaMethodRangesIncludingDefault(executableCode)) {
+            if (method.name != "processBlock") continue
+            val methodText = result.substring(method.range)
+            val methodExecutable = executableCode.substring(method.range)
+            if (!Regex("""\bLevelReader\s+[A-Za-z_$][\w$]*""").containsMatchIn(methodExecutable) ||
+                !Regex("""\bStructurePlaceSettings\s+[A-Za-z_$][\w$]*""").containsMatchIn(methodExecutable) ||
+                !Regex("""\bStructureTemplate\.StructureBlockInfo\s+[A-Za-z_$][\w$]*""").containsMatchIn(methodExecutable)) {
+                continue
+            }
+            val tokenIndex = methodExecutable.indexOf("processBlock")
+            if (tokenIndex < 0) continue
+            val openParen = methodExecutable.indexOf('(', tokenIndex)
+            val closeParen = if (openParen >= 0) findMatchingParen(methodExecutable, openParen) else -1
+            if (openParen < 0 || closeParen < 0) continue
+            val params = splitTopLevelJavaArgs(methodText.substring(openParen + 1, closeParen))
+            if (params.size != 6) continue
+            val templateName = uniqueJavaIdentifier("structureTemplate", javaIdentifierTokens(methodText))
+            val signatureMigrated = methodText.substring(0, tokenIndex) +
+                "process" +
+                methodText.substring(tokenIndex + "processBlock".length, closeParen) +
+                ", @Nullable StructureTemplate $templateName" +
+                methodText.substring(closeParen)
+            val migratedMethod = rewriteExecutableJavaCall(signatureMigrated, "processBlock") { receiver, args ->
+                if (receiver.trim() == "super" && args.size == 6) {
+                    "super.process(${args.joinToString(", ") { it.trim() }}, $templateName)"
+                } else {
+                    null
+                }
+            }
+            if (migratedMethod != methodText) {
+                edits += method.range to migratedMethod
+            }
+        }
+        if (edits.isEmpty()) return source
+        result = applyStringEdits(source, edits)
+        val executableResult = maskJavaCommentsAndLiterals(result)
+        if (Regex("""(?<![\w$])@Nullable(?![\w$])""").containsMatchIn(executableResult) &&
+            !executableResult.contains("import org.jetbrains.annotations.Nullable;") &&
+            !executableResult.contains("import javax.annotation.Nullable;")) {
+            result = addExecutableImportIfMissing(result, "javax.annotation.Nullable")
+        }
+        return result
+    }
+
+    private fun migrateDeprecatedBlockRenderDispatcherSingleBlockCalls(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".renderSingleBlock(")) return source
+        val dispatcherVariables = javaVariablesOfType(executableCode, "BlockRenderDispatcher")
+        var changed = false
+        var result = rewriteExecutableJavaCall(source, "renderSingleBlock") { receiver, args ->
+            if (args.size != 5 || !isBlockRenderDispatcherExpression(receiver, dispatcherVariables)) {
+                return@rewriteExecutableJavaCall null
+            }
+            changed = true
+            "${receiver.trim()}.renderSingleBlock(${args.joinToString(", ") { it.trim() }}, ModelData.EMPTY, null)"
+        }
+        if (changed) {
+            result = addExecutableImportIfMissing(result, "net.neoforged.neoforge.client.model.data.ModelData")
+        }
+        return result
+    }
+
+    private fun isBlockRenderDispatcherExpression(receiver: String, dispatcherVariables: Set<String>): Boolean {
+        val normalized = receiver.trim()
+        if (normalized in dispatcherVariables) return true
+        return normalized.endsWith(".getBlockRenderer()") ||
+            normalized == "Minecraft.getInstance().getBlockRenderer()" ||
+            normalized.endsWith(".blockRenderer") && normalized.substringAfterLast('.') in dispatcherVariables
+    }
+
+    private fun migrateDeprecatedBakedModelGetQuadsCallSites(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".getQuads(")) return source
+        val bakedModelVariables = javaVariablesOfType(executableCode, "BakedModel")
+        var changed = false
+        var result = rewriteExecutableJavaCall(source, "getQuads") { receiver, args ->
+            if (args.size != 3 || !isBakedModelExpression(receiver, bakedModelVariables)) {
+                return@rewriteExecutableJavaCall null
+            }
+            changed = true
+            "${receiver.trim()}.getQuads(${args.joinToString(", ") { it.trim() }}, ModelData.EMPTY, null)"
+        }
+        if (changed) {
+            result = addExecutableImportIfMissing(result, "net.neoforged.neoforge.client.model.data.ModelData")
+        }
+        return result
+    }
+
+    private fun isBakedModelExpression(receiver: String, bakedModelVariables: Set<String>): Boolean {
+        val normalized = receiver.trim()
+        if (normalized in bakedModelVariables) return true
+        return normalized.contains(".getBlockModel(") ||
+            normalized.contains(".getModel(")
+    }
+
+    private fun migrateDeprecatedItemTransformsConstructors(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("new ItemTransforms(") &&
+            !executableCode.contains("new net.minecraft.client.renderer.block.model.ItemTransforms(")) {
+            return source
+        }
+        var result = source
+        var cursor = 0
+        while (cursor < result.length) {
+            val executable = maskJavaCommentsAndLiterals(result)
+            val match = Regex("""new\s+(?:net\.minecraft\.client\.renderer\.block\.model\.)?ItemTransforms\s*\(""")
+                .find(executable, cursor)
+                ?: break
+            val openParen = executable.indexOf('(', match.range.last)
+            val closeParen = if (openParen >= 0) findMatchingParen(executable, openParen) else -1
+            if (openParen < 0 || closeParen < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            if (args.size != 8) {
+                cursor = closeParen + 1
+                continue
+            }
+            val replacement = args.joinToString(", ") { it.trim() } + ", com.google.common.collect.ImmutableMap.of()"
+            result = result.substring(0, openParen + 1) + replacement + result.substring(closeParen)
+            cursor = openParen + 1 + replacement.length
+        }
+        return result
+    }
+
+    private fun javaVariablesOfType(source: String, simpleType: String): Set<String> {
+        val id = """[A-Za-z_$][\w$]*"""
+        val type = """(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(simpleType)}"""
+        return Regex("""(?<![\w$])(?:final\s+)?$type\s+($id)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+    }
+
+    private fun migrateDeprecatedLevelReaderHasChunksAtCalls(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        var compatPackageCache: String? = null
+        fun compatPackage(): String {
+            val existing = compatPackageCache
+            if (existing != null) return existing
+            val detected = detectRequiredGeneratedCompatPackage(projectDir, "LevelReader hasChunksAt compatibility helper")
+            compatPackageCache = detected
+            return detected
+        }
+
+        val changes = mutableListOf<Change>()
+        var helperNeeded = false
+        javaFiles.forEach { javaFile ->
+            val original = javaFile.readText()
+            val executableCode = maskJavaCommentsAndLiterals(original)
+            if (!executableCode.contains(".hasChunksAt(")) return@forEach
+            val levelReaderVariables = javaVariablesOfLevelReaderType(executableCode)
+            var changed = false
+            var migrated = rewriteExecutableJavaCall(original, "hasChunksAt") { receiver, args ->
+                if (args.size != 2 || !isLevelReaderExpression(receiver, levelReaderVariables)) {
+                    return@rewriteExecutableJavaCall null
+                }
+                changed = true
+                helperNeeded = true
+                "LevelReaderCompat.hasChunksAt(${receiver.trim()}, ${args[0].trim()}, ${args[1].trim()})"
+            }
+            if (!changed) return@forEach
+            migrated = addExecutableImportIfMissing(migrated, "${compatPackage()}.LevelReaderCompat")
+            if (!dryRun) javaFile.writeText(migrated)
+            changes.add(Change(
+                file = javaFile,
+                line = 0,
+                description = "Replace deprecated LevelReader.hasChunksAt(BlockPos, BlockPos) with non-deprecated chunk-range helper",
+                before = "level.hasChunksAt(from, to)",
+                after = "LevelReaderCompat.hasChunksAt(level, from, to)",
+                confidence = Confidence.HIGH,
+                ruleId = "struct-levelreader-haschunksat-helper"
+            ))
+        }
+
+        if (helperNeeded) {
+            val packageName = compatPackage()
+            val helperFile = srcDir.resolve(packageName.replace('.', '/')).resolve("LevelReaderCompat.java")
+            val helperSource = generatedLevelReaderCompatSource(packageName)
+            val previous = if (helperFile.exists()) helperFile.readText() else null
+            if (previous != helperSource) {
+                if (!dryRun) {
+                    helperFile.parent.createDirectories()
+                    helperFile.writeText(helperSource)
+                }
+                changes.add(Change(
+                    file = helperFile,
+                    line = 0,
+                    description = "Generate LevelReader chunk-range helper using non-deprecated hasChunk calls",
+                    before = "deprecated LevelReader.hasChunksAt overloads",
+                    after = "LevelReaderCompat.hasChunksAt(LevelReader, BlockPos, BlockPos)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-levelreader-haschunksat-helper"
+                ))
+            }
+        }
+        return changes
+    }
+
+    private fun javaVariablesOfLevelReaderType(source: String): Set<String> {
+        val id = """[A-Za-z_$][\w$]*"""
+        val type = """(?:[A-Za-z_$][\w$]*\.)*(?:LevelReader|LevelAccessor|ServerLevelAccessor|Level|ServerLevel|ClientLevel)"""
+        return Regex("""(?<![\w$])(?:final\s+)?$type\s+($id)\b""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+    }
+
+    private fun isLevelReaderExpression(receiver: String, levelReaderVariables: Set<String>): Boolean {
+        val normalized = receiver.trim()
+        if (normalized in levelReaderVariables) return true
+        return normalized == "level()" ||
+            normalized == "this.level()" ||
+            normalized.endsWith(".level()") ||
+            normalized.endsWith(".getCommandSenderWorld()")
+    }
+
+    private fun generatedLevelReaderCompatSource(packageName: String): String =
+        """
+package $packageName;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.SectionPos;
+import net.minecraft.world.level.LevelReader;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
+
+public final class LevelReaderCompat {
+    private LevelReaderCompat() {
+    }
+
+    public static boolean hasChunksAt(LevelReader level, BlockPos from, BlockPos to) {
+        if (to.getY() < level.getMinBuildHeight() || from.getY() >= level.getMaxBuildHeight()) {
+            return false;
+        }
+        int fromChunkX = SectionPos.blockToSectionCoord(from.getX());
+        int toChunkX = SectionPos.blockToSectionCoord(to.getX());
+        int fromChunkZ = SectionPos.blockToSectionCoord(from.getZ());
+        int toChunkZ = SectionPos.blockToSectionCoord(to.getZ());
+        for (int chunkX = fromChunkX; chunkX <= toChunkX; chunkX++) {
+            for (int chunkZ = fromChunkZ; chunkZ <= toChunkZ; chunkZ++) {
+                if (level.getChunk(chunkX, chunkZ, ChunkStatus.FULL, false) == null) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+}
+""".trimStart()
 
     private data class ClientColorAliasDeclaration(val alias: String, val range: IntRange)
     private data class ClientColorRegistrationStatement(val range: IntRange, val replacement: String)

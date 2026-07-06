@@ -38981,6 +38981,100 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `migrates deprecated structure rendering model and level reader xlint surfaces`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val clientDir = srcDir.resolve("client")
+        val worldDir = srcDir.resolve("world")
+        srcDir.createDirectories()
+        clientDir.createDirectories()
+        worldDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        worldDir.resolve("ExampleProcessor.java").writeText("""
+            package com.example.world;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.LevelReader;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.StructurePlaceSettings;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessor;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorType;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate;
+
+            public class ExampleProcessor extends StructureProcessor {
+                @Override
+                public StructureTemplate.StructureBlockInfo processBlock(LevelReader level, BlockPos offset, BlockPos pos, StructureTemplate.StructureBlockInfo blockInfo, StructureTemplate.StructureBlockInfo relativeBlockInfo, StructurePlaceSettings settings) {
+                    return super.processBlock(level, offset, pos, blockInfo, relativeBlockInfo, settings);
+                }
+
+                @Override
+                protected StructureProcessorType<?> getType() {
+                    return null;
+                }
+            }
+        """.trimIndent())
+        clientDir.resolve("ExampleRenderer.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.renderer.MultiBufferSource;
+            import net.minecraft.client.renderer.block.model.ItemTransform;
+            import net.minecraft.client.renderer.block.model.ItemTransforms;
+            import net.minecraft.client.resources.model.BakedModel;
+            import net.minecraft.core.Direction;
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.level.block.state.BlockState;
+            import com.mojang.blaze3d.vertex.PoseStack;
+
+            public class ExampleRenderer {
+                public void render(BlockState state, PoseStack poseStack, MultiBufferSource bufferSource, int light, int overlay, BakedModel model, RandomSource random) {
+                    Minecraft.getInstance().getBlockRenderer().renderSingleBlock(state, poseStack, bufferSource, light, overlay);
+                    model.getQuads(state, Direction.UP, random);
+                    ItemTransforms transforms = new ItemTransforms(ItemTransform.NO_TRANSFORM, ItemTransform.NO_TRANSFORM, ItemTransform.NO_TRANSFORM, ItemTransform.NO_TRANSFORM, ItemTransform.NO_TRANSFORM, ItemTransform.NO_TRANSFORM, ItemTransform.NO_TRANSFORM, ItemTransform.NO_TRANSFORM);
+                }
+            }
+        """.trimIndent())
+        worldDir.resolve("ExampleChunks.java").writeText("""
+            package com.example.world;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.Level;
+
+            public class ExampleChunks {
+                public boolean loaded(Level level, BlockPos from, BlockPos to) {
+                    return level.hasChunksAt(from, to);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val processor = worldDir.resolve("ExampleProcessor.java").readText()
+        val renderer = clientDir.resolve("ExampleRenderer.java").readText()
+        val chunks = worldDir.resolve("ExampleChunks.java").readText()
+        val helper = tempDir.resolve("src/main/java/com/modporter/generated/example/compat/LevelReaderCompat.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "struct-levelreader-haschunksat-helper" })
+        assertTrue(processor.contains("public StructureTemplate.StructureBlockInfo process(LevelReader level, BlockPos offset, BlockPos pos, StructureTemplate.StructureBlockInfo blockInfo, StructureTemplate.StructureBlockInfo relativeBlockInfo, StructurePlaceSettings settings, @Nullable StructureTemplate structureTemplate)"), processor)
+        assertTrue(processor.contains("super.process(level, offset, pos, blockInfo, relativeBlockInfo, settings, structureTemplate);"), processor)
+        assertFalse(processor.contains("processBlock("), processor)
+        assertTrue(renderer.contains("import net.neoforged.neoforge.client.model.data.ModelData;"), renderer)
+        assertTrue(renderer.contains("renderSingleBlock(state, poseStack, bufferSource, light, overlay, ModelData.EMPTY, null);"), renderer)
+        assertTrue(renderer.contains("model.getQuads(state, Direction.UP, random, ModelData.EMPTY, null);"), renderer)
+        assertTrue(renderer.contains("new ItemTransforms(ItemTransform.NO_TRANSFORM, ItemTransform.NO_TRANSFORM, ItemTransform.NO_TRANSFORM, ItemTransform.NO_TRANSFORM, ItemTransform.NO_TRANSFORM, ItemTransform.NO_TRANSFORM, ItemTransform.NO_TRANSFORM, ItemTransform.NO_TRANSFORM, com.google.common.collect.ImmutableMap.of())"), renderer)
+        assertTrue(chunks.contains("import com.modporter.generated.example.compat.LevelReaderCompat;"), chunks)
+        assertTrue(chunks.contains("return LevelReaderCompat.hasChunksAt(level, from, to);"), chunks)
+        assertTrue(helper.contains("public static boolean hasChunksAt(LevelReader level, BlockPos from, BlockPos to)"), helper)
+        assertTrue(helper.contains("if (level.getChunk(chunkX, chunkZ, ChunkStatus.FULL, false) == null)"), helper)
+    }
+
+    @Test
     fun `migrates xlint-clean deprecated 121 api surfaces without suppressing logic`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
