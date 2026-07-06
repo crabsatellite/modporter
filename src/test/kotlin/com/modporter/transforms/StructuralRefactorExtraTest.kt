@@ -14873,6 +14873,94 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `aligns living damage helper call sites across split NeoForge damage phases`() {
+        val eventDir = tempDir.resolve("src/main/java/com/example/event")
+        val bindingDir = tempDir.resolve("src/main/java/com/example/binding")
+        eventDir.createDirectories()
+        bindingDir.createDirectories()
+
+        eventDir.resolve("AttackEvents.java").writeText("""
+            package com.example.event;
+
+            import com.example.binding.BindingEvents;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;
+            import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;
+
+            public class AttackEvents {
+                @SubscribeEvent
+                public static void livingHurtEvent(LivingDamageEvent.Post event) {
+                    if (event.getEntity() instanceof ServerPlayer sp) {
+                        BindingEvents.playerHurtEvent(event, sp);
+                    }
+                }
+
+                @SubscribeEvent
+                public static void livingDamageEvent(LivingDamageEvent.Pre event) {
+                    LivingEntity entity = event.getEntity();
+                    if (entity instanceof ServerPlayer player) {
+                        playerDamageEvent(event, player);
+                    }
+                    BindingEvents.minionDamageEvent(event);
+                    BindingEvents.playerDamageEvent(event);
+                }
+
+                private static void playerDamageEvent(LivingIncomingDamageEvent event, ServerPlayer player) {
+                    if (event.getAmount() > 20.0F) {
+                        event.setCanceled(true);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        bindingDir.resolve("BindingEvents.java").writeText("""
+            package com.example.binding;
+
+            import net.minecraft.server.level.ServerPlayer;
+            import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;
+            import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;
+
+            public class BindingEvents {
+                public static void minionDamageEvent(LivingDamageEvent.Pre event) {
+                    event.setNewDamage(event.getNewDamage() * 1.5F);
+                }
+
+                public static void playerDamageEvent(LivingDamageEvent.Post event) {
+                    event.getEntity().setAirSupply((int) event.getNewDamage());
+                }
+
+                public static void playerHurtEvent(LivingIncomingDamageEvent event, ServerPlayer sp) {
+                    if (event.getAmount() > 0) {
+                        event.setCanceled(true);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val attack = eventDir.resolve("AttackEvents.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-living-damage-helper-boundary" }, attack)
+        assertTrue(attack.contains("public static void livingHurtEvent(LivingIncomingDamageEvent event)"), attack)
+        assertTrue(attack.contains("public static void livingDamageEvent(LivingDamageEvent.Pre event)"), attack)
+        assertTrue(attack.contains("BindingEvents.minionDamageEvent(event);"), attack)
+        val preMethod = Regex("""(?s)public static void livingDamageEvent\(LivingDamageEvent\.Pre event\).*?\n    }""")
+            .find(attack)
+            ?.value
+            ?: error(attack)
+        assertFalse(preMethod.contains("playerDamageEvent(event, player);"), attack)
+        assertFalse(preMethod.contains("BindingEvents.playerDamageEvent(event);"), attack)
+        assertTrue(attack.contains("public static void modporterLivingDamageEventIncoming(LivingIncomingDamageEvent event)"), attack)
+        assertTrue(attack.contains("if (event.getEntity() instanceof ServerPlayer player)"), attack)
+        assertTrue(attack.contains("playerDamageEvent(event, player);"), attack)
+        assertTrue(attack.contains("public static void modporterLivingDamageEventPost(LivingDamageEvent.Post event)"), attack)
+        assertTrue(attack.contains("BindingEvents.playerDamageEvent(event);"), attack)
+    }
+
+    @Test
     fun `holder value accessor migration ignores comments and strings`() {
         val projectDir = createFile("HolderAccessDocs.java", """
             package com.example;

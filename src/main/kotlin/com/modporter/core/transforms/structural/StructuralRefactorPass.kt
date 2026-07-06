@@ -407,6 +407,13 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            val livingDamageHelperChanges = migrateLivingDamageEventHelperBoundaries(projectDir, dryRun)
+            changes.addAll(livingDamageHelperChanges)
+        } catch (e: Exception) {
+            errors.add("Living damage helper boundary migration error: ${e.message}")
+        }
+
+        try {
             val entityLevelChanges = migrateEntityLevelAccessorCalls(projectDir, dryRun)
             changes.addAll(entityLevelChanges)
         } catch (e: Exception) {
@@ -27955,6 +27962,345 @@ ${indent}}"""
         )
         return result
     }
+
+    private enum class LivingDamageBoundary {
+        INCOMING,
+        PRE,
+        POST
+    }
+
+    private data class LivingDamageEventMethodSignature(
+        val packageName: String,
+        val className: String,
+        val methodName: String,
+        val boundary: LivingDamageBoundary
+    ) {
+        val fqn: String
+            get() = if (packageName.isBlank()) className else "$packageName.$className"
+    }
+
+    private data class LivingDamageHelperCall(
+        val targetBoundary: LivingDamageBoundary,
+        val blockRange: IntRange,
+        val blockText: String
+    )
+
+    private fun migrateLivingDamageEventHelperBoundaries(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        val signatures = collectLivingDamageEventMethodSignatures(javaFiles)
+        if (signatures.isEmpty()) return emptyList()
+        val changes = mutableListOf<Change>()
+
+        javaFiles.forEach { javaFile ->
+            val original = javaFile.readText()
+            if (!original.contains("LivingDamageEvent") && !original.contains("LivingIncomingDamageEvent")) return@forEach
+            val migrated = migrateLivingDamageEventHelperBoundariesInSource(original, signatures)
+            if (migrated != original) {
+                if (!dryRun) javaFile.writeText(migrated)
+                changes.add(Change(
+                    file = javaFile,
+                    line = 0,
+                    description = "Align living damage helper call sites with NeoForge damage event phases",
+                    before = "helper call passes LivingDamageEvent.Pre/Post to incompatible helper boundary",
+                    after = "caller signature retargeted or helper call split into matching phase subscriber",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-living-damage-helper-boundary"
+                ))
+            }
+        }
+        return changes
+    }
+
+    private fun collectLivingDamageEventMethodSignatures(
+        javaFiles: List<Path>
+    ): List<LivingDamageEventMethodSignature> =
+        javaFiles.flatMap { javaFile ->
+            val source = runCatching { javaFile.readText() }.getOrDefault("")
+            if (!source.contains("LivingDamageEvent") && !source.contains("LivingIncomingDamageEvent")) {
+                return@flatMap emptyList()
+            }
+            val packageName = packageNameOf(source)
+            val className = javaTopLevelTypeName(source) ?: return@flatMap emptyList()
+            javaMethodRangesIncludingDefault(source).mapNotNull { method ->
+                val eventParameter = livingDamageEventParameter(method.header, source) ?: return@mapNotNull null
+                LivingDamageEventMethodSignature(packageName, className, method.name, eventParameter.first)
+            }
+        }
+
+    private fun livingDamageEventParameter(
+        methodHeader: String,
+        source: String
+    ): Pair<LivingDamageBoundary, String>? {
+        val parametersText = methodHeader.substringAfter("(", "").substringBeforeLast(")", "")
+        splitTopLevelJavaArgs(parametersText).forEach { parameter ->
+            val name = javaParameterName(parameter) ?: return@forEach
+            canonicalLivingDamageBoundary(parameter, source)?.let { return it to name }
+        }
+        return null
+    }
+
+    private fun canonicalLivingDamageBoundary(typeText: String, source: String): LivingDamageBoundary? {
+        val normalized = typeText.replace(Regex("""\s+"""), "")
+        return when {
+            normalized.contains("LivingIncomingDamageEvent") -> LivingDamageBoundary.INCOMING
+            normalized.contains("LivingDamageEvent.Pre") -> LivingDamageBoundary.PRE
+            normalized.contains("LivingDamageEvent.Post") -> LivingDamageBoundary.POST
+            Regex("""(?<![\w$])Pre(?![\w$])""").containsMatchIn(typeText) &&
+                source.contains("LivingDamageEvent.Pre") -> LivingDamageBoundary.PRE
+            Regex("""(?<![\w$])Post(?![\w$])""").containsMatchIn(typeText) &&
+                source.contains("LivingDamageEvent.Post") -> LivingDamageBoundary.POST
+            else -> null
+        }
+    }
+
+    private fun migrateLivingDamageEventHelperBoundariesInSource(
+        source: String,
+        signatures: List<LivingDamageEventMethodSignature>
+    ): String {
+        val ownerClass = javaTopLevelTypeName(source) ?: return source
+        val ownerPackage = packageNameOf(source)
+        val imports = javaSingleTypeImports(source)
+        val signaturesBySimpleClassAndMethod = signatures.groupBy { it.className to it.methodName }
+        val signaturesByFqnAndMethod = signatures.groupBy { it.fqn to it.methodName }
+
+        var result = source
+        for (method in javaMethodRangesIncludingDefault(result).asReversed()) {
+            val eventParameter = livingDamageEventParameter(method.header, result) ?: continue
+            val currentBoundary = eventParameter.first
+            val eventVar = eventParameter.second
+            val methodText = result.substring(method.range)
+            val helperCalls = livingDamageHelperCalls(
+                methodText = methodText,
+                eventVar = eventVar,
+                currentClass = ownerClass,
+                currentPackage = ownerPackage,
+                imports = imports,
+                signaturesBySimpleClassAndMethod = signaturesBySimpleClassAndMethod,
+                signaturesByFqnAndMethod = signaturesByFqnAndMethod
+            )
+            val incompatibleCalls = helperCalls.filter { it.targetBoundary != currentBoundary }
+            if (incompatibleCalls.isEmpty()) continue
+
+            val migratedMethod = if (canRetypeLivingDamageHandler(methodText, eventVar, helperCalls, incompatibleCalls)) {
+                retypeLivingDamageHandler(methodText, currentBoundary, incompatibleCalls.single().targetBoundary)
+            } else {
+                splitLivingDamageHelperCalls(methodText, method.name, eventVar, incompatibleCalls)
+            }
+            if (migratedMethod != methodText) {
+                result = result.substring(0, method.range.first) + migratedMethod + result.substring(method.range.last + 1)
+            }
+        }
+
+        if (result.contains("LivingIncomingDamageEvent")) {
+            result = addImportIfMissing(result, "net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent")
+        }
+        if (result.contains("LivingDamageEvent.Pre") || result.contains("LivingDamageEvent.Post")) {
+            result = addImportIfMissing(result, "net.neoforged.neoforge.event.entity.living.LivingDamageEvent")
+        }
+        return result
+    }
+
+    private fun javaSingleTypeImports(source: String): Map<String, String> =
+        Regex("""(?m)^[ \t]*import\s+(?!static\b)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+            .findAll(source)
+            .associate { match -> match.groupValues[1].substringAfterLast('.') to match.groupValues[1] }
+
+    private fun livingDamageHelperCalls(
+        methodText: String,
+        eventVar: String,
+        currentClass: String,
+        currentPackage: String,
+        imports: Map<String, String>,
+        signaturesBySimpleClassAndMethod: Map<Pair<String, String>, List<LivingDamageEventMethodSignature>>,
+        signaturesByFqnAndMethod: Map<Pair<String, String>, List<LivingDamageEventMethodSignature>>
+    ): List<LivingDamageHelperCall> {
+        val result = mutableListOf<LivingDamageHelperCall>()
+        val executableMethod = maskJavaCommentsAndLiterals(methodText)
+        val callPattern = Regex("""(?m)(?:(\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\.\s*)?([A-Za-z_$][\w$]*)\s*\(([^;{}]*)\)\s*;""")
+        callPattern.findAll(executableMethod).forEach { match ->
+            val argsRange = match.groups[3]?.range ?: return@forEach
+            val args = splitTopLevelJavaArgs(methodText.substring(argsRange.first, argsRange.last + 1))
+            if (args.firstOrNull()?.trim() != eventVar) return@forEach
+            val methodName = match.groupValues[2]
+            val receiver = match.groupValues[1].takeIf { it.isNotBlank() }
+            if (receiver == eventVar) return@forEach
+            val target = resolveLivingDamageHelperSignature(
+                receiver = receiver,
+                methodName = methodName,
+                currentClass = currentClass,
+                currentPackage = currentPackage,
+                imports = imports,
+                signaturesBySimpleClassAndMethod = signaturesBySimpleClassAndMethod,
+                signaturesByFqnAndMethod = signaturesByFqnAndMethod
+            ) ?: return@forEach
+            val block = extractLivingDamageHelperBlock(methodText, match.range)
+            result += LivingDamageHelperCall(target.boundary, block.first, block.second)
+        }
+        return result
+    }
+
+    private fun resolveLivingDamageHelperSignature(
+        receiver: String?,
+        methodName: String,
+        currentClass: String,
+        currentPackage: String,
+        imports: Map<String, String>,
+        signaturesBySimpleClassAndMethod: Map<Pair<String, String>, List<LivingDamageEventMethodSignature>>,
+        signaturesByFqnAndMethod: Map<Pair<String, String>, List<LivingDamageEventMethodSignature>>
+    ): LivingDamageEventMethodSignature? {
+        if (receiver == null) {
+            return signaturesBySimpleClassAndMethod[currentClass to methodName]
+                ?.singleOrNull { it.className == currentClass }
+        }
+        val simpleReceiver = receiver.substringAfterLast('.')
+        if (simpleReceiver.firstOrNull()?.isUpperCase() != true) return null
+        val importedFqn = imports[simpleReceiver]
+        val samePackageFqn = if (currentPackage.isBlank()) simpleReceiver else "$currentPackage.$simpleReceiver"
+        val receiverFqn = when {
+            receiver.contains('.') && receiver.substringBefore('.').firstOrNull()?.isLowerCase() == true -> receiver
+            importedFqn != null -> importedFqn
+            else -> samePackageFqn
+        }
+        signaturesByFqnAndMethod[receiverFqn to methodName]?.singleOrNull()?.let { return it }
+        return signaturesBySimpleClassAndMethod[simpleReceiver to methodName]?.singleOrNull()
+    }
+
+    private fun extractLivingDamageHelperBlock(methodText: String, callRange: IntRange): Pair<IntRange, String> {
+        enclosingIfBlockWithOnlyCall(methodText, callRange)?.let { return it }
+        val lineStart = methodText.lastIndexOf('\n', callRange.first).let { if (it < 0) 0 else it + 1 }
+        var lineEnd = methodText.indexOf('\n', callRange.last + 1).let { if (it < 0) methodText.length else it + 1 }
+        if (lineEnd > methodText.length) lineEnd = methodText.length
+        return lineStart until lineEnd to methodText.substring(lineStart, lineEnd)
+    }
+
+    private fun enclosingIfBlockWithOnlyCall(methodText: String, callRange: IntRange): Pair<IntRange, String>? {
+        var openBrace = methodText.lastIndexOf('{', callRange.first)
+        while (openBrace >= 0) {
+            val closeBrace = findMatchingBrace(methodText, openBrace)
+            if (closeBrace >= callRange.last) {
+                val prefixStart = methodText.lastIndexOf('\n', openBrace).let { if (it < 0) 0 else it + 1 }
+                val prefix = methodText.substring(prefixStart, openBrace)
+                if (Regex("""\bif\s*\([^;\r\n{}]*\)\s*$""").containsMatchIn(prefix)) {
+                    val body = methodText.substring(openBrace + 1, closeBrace).trim()
+                    val callText = methodText.substring(callRange).trim()
+                    if (body == callText) {
+                        var end = closeBrace + 1
+                        if (end < methodText.length && methodText[end] == '\r') end++
+                        if (end < methodText.length && methodText[end] == '\n') end++
+                        return prefixStart until end to methodText.substring(prefixStart, end)
+                    }
+                }
+            }
+            openBrace = methodText.lastIndexOf('{', openBrace - 1)
+        }
+        return null
+    }
+
+    private fun canRetypeLivingDamageHandler(
+        methodText: String,
+        eventVar: String,
+        helperCalls: List<LivingDamageHelperCall>,
+        incompatibleCalls: List<LivingDamageHelperCall>
+    ): Boolean {
+        if (helperCalls.isEmpty() || helperCalls.size != incompatibleCalls.size) return false
+        if (incompatibleCalls.map { it.targetBoundary }.distinct().size != 1) return false
+        val executable = maskJavaCommentsAndLiterals(methodText)
+        return listOf("setAmount", "setNewDamage", "getAmount", "getNewDamage", "setCanceled", "isCanceled").none { op ->
+            Regex("""\b${Regex.escape(eventVar)}\.${Regex.escape(op)}\s*\(""").containsMatchIn(executable)
+        }
+    }
+
+    private fun retypeLivingDamageHandler(
+        methodText: String,
+        currentBoundary: LivingDamageBoundary,
+        targetBoundary: LivingDamageBoundary
+    ): String =
+        methodText.replaceFirst(Regex("""\b${Regex.escape(livingDamageBoundaryType(currentBoundary))}\b"""), livingDamageBoundaryType(targetBoundary))
+
+    private fun splitLivingDamageHelperCalls(
+        methodText: String,
+        methodName: String,
+        eventVar: String,
+        incompatibleCalls: List<LivingDamageHelperCall>
+    ): String {
+        val aliases = livingDamageEventAliases(methodText, eventVar)
+        val retainedMethod = applyStringEdits(
+            methodText,
+            incompatibleCalls.distinctBy { it.blockRange }.map { it.blockRange to "" }
+        ).trimEnd()
+        val existingGeneratedNames = Regex("""\bmodporter[A-Za-z0-9_$]*\s*\(""")
+            .findAll(methodText)
+            .map { it.value.substringBefore("(") }
+            .toSet()
+        val generatedMethods = incompatibleCalls
+            .groupBy { it.targetBoundary }
+            .mapNotNull { (boundary, calls) ->
+                val methodBlocks = calls.distinctBy { it.blockRange }
+                    .joinToString("") { rewriteLivingDamageHelperBlock(it.blockText, aliases).trimEnd() + "\n" }
+                    .trimEnd()
+                if (methodBlocks.isBlank()) return@mapNotNull null
+                val generatedName = uniqueLivingDamageHelperMethodName(methodName, boundary, existingGeneratedNames)
+                val eventType = livingDamageBoundaryType(boundary)
+                val body = indentJavaBlock(methodBlocks, "        ")
+                """
+
+    @SubscribeEvent
+    public static void $generatedName($eventType $eventVar) {
+$body
+    }
+""".trimEnd()
+            }
+        return if (generatedMethods.isEmpty()) methodText else retainedMethod + generatedMethods.joinToString("")
+    }
+
+    private fun livingDamageEventAliases(methodText: String, eventVar: String): Map<String, String> {
+        val aliases = linkedMapOf<String, String>()
+        val executable = maskJavaCommentsAndLiterals(methodText)
+        Regex(
+            """(?m)^[ \t]*(?:final\s+)?(?:LivingEntity|Entity|net\.minecraft\.world\.entity\.LivingEntity|net\.minecraft\.world\.entity\.Entity)\s+([A-Za-z_$][\w$]*)\s*=\s*(${Regex.escape(eventVar)}\.(?:getEntity|getSource)\(\)(?:\.getEntity\(\))?)\s*;"""
+        ).findAll(executable).forEach { match ->
+            aliases[match.groupValues[1]] = match.groupValues[2]
+        }
+        return aliases
+    }
+
+    private fun rewriteLivingDamageHelperBlock(blockText: String, aliases: Map<String, String>): String {
+        var result = blockText
+        aliases.forEach { (alias, expression) ->
+            result = Regex("""(?<![\w$])${Regex.escape(alias)}(?![\w$])""").replace(result, expression)
+        }
+        return result
+    }
+
+    private fun uniqueLivingDamageHelperMethodName(
+        originalMethodName: String,
+        boundary: LivingDamageBoundary,
+        existingNames: Set<String>
+    ): String {
+        val suffix = when (boundary) {
+            LivingDamageBoundary.INCOMING -> "Incoming"
+            LivingDamageBoundary.PRE -> "Pre"
+            LivingDamageBoundary.POST -> "Post"
+        }
+        val base = "modporter" + originalMethodName.replaceFirstChar { it.uppercase() } + suffix
+        var candidate = base
+        var index = 2
+        while (candidate in existingNames) {
+            candidate = "$base${index++}"
+        }
+        return candidate
+    }
+
+    private fun livingDamageBoundaryType(boundary: LivingDamageBoundary): String =
+        when (boundary) {
+            LivingDamageBoundary.INCOMING -> "LivingIncomingDamageEvent"
+            LivingDamageBoundary.PRE -> "LivingDamageEvent.Pre"
+            LivingDamageBoundary.POST -> "LivingDamageEvent.Post"
+        }
 
     private fun unwrapSimpleNotCanceledGuards(source: String, eventVar: String): String {
         var result = source
