@@ -15198,6 +15198,11 @@ $methods
 
         if (finders.isEmpty()) return emptyList()
 
+        val mainFile = detectModMainClass(projectDir)
+            ?: error("Cannot register custom recipe book category finders: expected exactly one @Mod main class")
+        val mainOriginal = mainFile.readText()
+        val modBusVar = detectModBusVariable(mainOriginal)
+            ?: error("Cannot derive mod event bus variable for custom recipe book category finders")
         val compatPackage = detectRequiredGeneratedCompatPackage(projectDir, "custom recipe book category finders")
         val className = "ModRecipeBookCategories"
         val compatFile = srcDir.resolve(compatPackage.replace('.', '/')).resolve("$className.java")
@@ -15219,9 +15224,6 @@ $methods
             }
         }
 
-        val mainFile = detectModMainClass(projectDir) ?: return changes
-        val mainOriginal = mainFile.readText()
-        val modBusVar = detectModBusVariable(mainOriginal) ?: return changes
         val registrationCall = "$compatPackage.$className.register($modBusVar);"
         if (!mainOriginal.contains(registrationCall)) {
             val indent = mainConstructorIndent(mainOriginal, modBusVar)

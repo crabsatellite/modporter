@@ -946,18 +946,18 @@ class StructuralRefactorExtraTest {
             license="All Rights Reserved"
 
             [[mods]]
-            modId="beyondtheveil" # mandatory
+            modId="examplemod" # mandatory
             version="1.0.0"
-            displayName="Beyond The Veil"
+            displayName="Example Mod"
 
-            [[dependencies.beyondtheveil]]
+            [[dependencies.examplemod]]
                 modId="neoforge"
                 mandatory=true
                 versionRange="[21,)"
                 ordering="NONE"
                 side="BOTH"
 
-            [[dependencies.beyondtheveil]]
+            [[dependencies.examplemod]]
                 modId="minecraft"
                 mandatory=true
                 versionRange="[1.21.1]"
@@ -967,8 +967,14 @@ class StructuralRefactorExtraTest {
         srcDir.resolve("UsesLazyOptional.java").writeText("""
             package com.example;
 
+            import net.minecraftforge.common.util.LazyOptional;
+
             public class UsesLazyOptional {
-                private LazyOptional<String> value;
+                private final LazyOptional<String> value = LazyOptional.empty();
+
+                public LazyOptional<String> value() {
+                    return this.value;
+                }
             }
         """.trimIndent())
 
@@ -976,7 +982,7 @@ class StructuralRefactorExtraTest {
         val source = srcDir.resolve("UsesLazyOptional.java").readText()
 
         assertTrue(result.errors.none { it.contains("Cannot derive generated compat package") }, result.errors.joinToString("\n"))
-        assertTrue(source.contains("import com.modporter.generated.beyondtheveil.compat.LazyOptional;"), source)
+        assertTrue(source.contains("import com.modporter.generated.examplemod.compat.LazyOptional;"), source)
         assertFalse(source.contains("com.modporter.generated.neoforge"))
         assertFalse(source.contains("com.modporter.generated.minecraft"))
     }
@@ -9959,6 +9965,65 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(generated.contains("throw new IllegalStateException(\"Recipe type com.example.ExampleRegistration.MAGIC_RECIPE_TYPE.get() produced \" + recipe.value().getClass().getName() + \" instead of com.example.recipes.MagicRecipe\");"), generated)
         assertTrue(generated.contains("case BUILDING -> RecipeBookCategories.CRAFTING_BUILDING_BLOCKS;"), generated)
         assertFalse(generated.contains("RecipeBookCategories.UNKNOWN"), generated)
+    }
+
+    @Test
+    fun `custom crafting book recipe finder requires proven mod bus registration point`() {
+        val rootSrc = tempDir.resolve("src/main/java/com/example")
+        val recipeSrc = rootSrc.resolve("recipes")
+        rootSrc.createDirectories()
+        recipeSrc.createDirectories()
+        tempDir.resolve("gradle.properties").writeText("mod_id=examplemod\n")
+        rootSrc.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+            }
+        """.trimIndent())
+        rootSrc.resolve("ExampleRegistration.java").writeText("""
+            package com.example;
+
+            import com.example.recipes.MagicRecipe;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ExampleRegistration {
+                public static final DeferredRegister<RecipeType<?>> RECIPE_TYPES = DeferredRegister.create(Registries.RECIPE_TYPE, "examplemod");
+                public static final DeferredHolder<RecipeType<?>, RecipeType<MagicRecipe>> MAGIC_RECIPE_TYPE =
+                    RECIPE_TYPES.register("magic_recipe_type", () -> new RecipeType<>() {});
+            }
+        """.trimIndent())
+        recipeSrc.resolve("MagicRecipe.java").writeText("""
+            package com.example.recipes;
+
+            import net.minecraft.world.item.crafting.CraftingBookCategory;
+            import net.minecraft.world.item.crafting.Recipe;
+
+            public class MagicRecipe implements Recipe<MagicInput> {
+                public CraftingBookCategory category() {
+                    return CraftingBookCategory.MISC;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Custom recipe book category finder migration error") &&
+                    it.contains("Cannot derive mod event bus variable")
+            },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(
+            tempDir.resolve("src/main/java/com/modporter/generated/examplemod/compat/ModRecipeBookCategories.java").exists(),
+            "Must not generate an unregistered recipe book helper"
+        )
     }
 
     @Test

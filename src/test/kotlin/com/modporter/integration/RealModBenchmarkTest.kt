@@ -748,7 +748,7 @@ class RealModBenchmarkTest {
         writeTextureMipEvidence(sourceDir, width = 17, height = 17)
         val logFile = tempDir.resolve("texture-mip-inherited.log")
         logFile.writeText("""
-            [06:14:12] [Worker-Main-1/WARN] [minecraft/SpriteLoader]: Texture example:block/fluids/liquid_gold_overlay with size 17x17 limits mip level from 4 to 0
+            [06:14:12] [Worker-Main-1/WARN] [minecraft/SpriteLoader]: Texture example:block/fluids/odd_mip_overlay with size 17x17 limits mip level from 4 to 0
         """.trimIndent() + "\n")
 
         val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
@@ -768,13 +768,13 @@ class RealModBenchmarkTest {
         writeTextureMipEvidence(sourceDir, width = 16, height = 16)
         val logFile = tempDir.resolve("texture-mip-regression.log")
         logFile.writeText("""
-            [06:14:12] [Worker-Main-1/WARN] [minecraft/SpriteLoader]: Texture example:block/fluids/liquid_gold_overlay with size 17x17 limits mip level from 4 to 0
+            [06:14:12] [Worker-Main-1/WARN] [minecraft/SpriteLoader]: Texture example:block/fluids/odd_mip_overlay with size 17x17 limits mip level from 4 to 0
         """.trimIndent() + "\n")
 
         val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
 
         assertTrue(
-            audit.findings.any { it.contains("Texture example:block/fluids/liquid_gold_overlay") },
+            audit.findings.any { it.contains("Texture example:block/fluids/odd_mip_overlay") },
             "Porter-changed texture dimensions must remain fatal"
         )
     }
@@ -2147,7 +2147,7 @@ class RealModBenchmarkTest {
         textureDir.createDirectories()
         projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
         val image = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
-        ImageIO.write(image, "png", textureDir.resolve("liquid_gold_overlay.png").toFile())
+        ImageIO.write(image, "png", textureDir.resolve("odd_mip_overlay.png").toFile())
     }
 
     private fun terminateProcessTree(process: Process, forcibly: Boolean) {
