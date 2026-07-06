@@ -202,6 +202,15 @@ class StructuralRefactorPass : Pass {
             errors.add("Custom fluid capability migration error: ${e.message}")
         }
 
+        // Migrate item-stack-backed Item#initCapabilities inventory providers
+        // to registered item capabilities backed by vanilla container data components.
+        try {
+            val itemStackHandlerItemCapabilityChanges = migrateItemStackHandlerItemCapabilities(projectDir, dryRun)
+            changes.addAll(itemStackHandlerItemCapabilityChanges)
+        } catch (e: Exception) {
+            errors.add("ItemStackHandler item capability migration error: ${e.message}")
+        }
+
         // Migrate direct FluidHandlerItemStack Item#initCapabilities hooks to
         // registered item capabilities backed by SimpleFluidContent components.
         try {
@@ -5320,6 +5329,407 @@ $itemArguments
         val capacityExpression: String
     )
 
+    private data class LegacyFluidHandlerItemStackTemplate(
+        val capacityExpression: String,
+        val anonymousBody: String
+    )
+
+    private data class ItemStackHandlerItemCapabilityMigration(
+        val itemFile: Path,
+        val packageName: String,
+        val className: String,
+        val itemReferences: List<RegisteredItemReference>,
+        val handlerClassName: String,
+        val handlerSizeExpression: String,
+        val modIdExpression: String?,
+        val dataComponentsFieldName: String?,
+        val componentFieldName: String?,
+        val componentPath: String?,
+        val fluidTemplate: LegacyFluidHandlerItemStackTemplate?
+    )
+
+    private fun migrateItemStackHandlerItemCapabilities(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return changes
+
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        val mainClass = detectModMainClass(projectDir) ?: return changes
+        val mainText = mainClass.readText()
+        val migrations = javaFiles.mapNotNull { javaFile ->
+            itemStackHandlerItemCapabilityMigration(javaFile, javaFiles, mainClass, mainText)
+        }
+        if (migrations.isEmpty()) return changes
+
+        for (migration in migrations) {
+            var itemText = migration.itemFile.readText()
+            val originalItemText = itemText
+            itemText = removeMethodByNameContaining(
+                itemText,
+                "initCapabilities",
+                listOf(migration.handlerClassName, "ItemStackHandler")
+            )
+            itemText = migrateItemStackHandlerProviderClass(itemText, migration)
+            itemText = insertItemStackHandlerCapabilityRegistrationMethods(itemText, migration)
+            itemText = addImportIfMissing(itemText, "net.minecraft.core.component.DataComponents")
+            itemText = addImportIfMissing(itemText, "net.minecraft.world.item.component.ItemContainerContents")
+            itemText = addImportIfMissing(itemText, "net.minecraft.world.level.ItemLike")
+            itemText = addImportIfMissing(itemText, "net.neoforged.neoforge.capabilities.Capabilities")
+            itemText = addImportIfMissing(itemText, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
+            if (migration.fluidTemplate != null) {
+                itemText = addImportIfMissing(itemText, "net.minecraft.core.component.DataComponentType")
+                itemText = addImportIfMissing(itemText, "net.minecraft.core.registries.Registries")
+                itemText = addImportIfMissing(itemText, "net.neoforged.neoforge.fluids.SimpleFluidContent")
+                itemText = addImportIfMissing(itemText, "net.neoforged.neoforge.fluids.capability.templates.FluidHandlerItemStack")
+                itemText = addImportIfMissing(itemText, "net.neoforged.neoforge.registries.DeferredHolder")
+                itemText = addImportIfMissing(itemText, "net.neoforged.neoforge.registries.DeferredRegister")
+            }
+            itemText = removeUnusedSimpleImports(
+                itemText,
+                listOf(
+                    "net.minecraft.core.Direction",
+                    "net.minecraft.core.HolderLookup",
+                    "net.minecraft.nbt.CompoundTag",
+                    "net.neoforged.neoforge.capabilities.ICapabilityProvider",
+                    "net.neoforged.neoforge.items.IItemHandler",
+                    "org.apache.commons.lang3.StringUtils",
+                    "org.jetbrains.annotations.Nullable",
+                    "javax.annotation.Nullable"
+                )
+            )
+            itemText = removeUnusedImportsBySimpleNamePattern(itemText, Regex("""Capability|LazyOptional"""))
+            itemText = cleanupRedundantBlankLines(itemText)
+            if (itemText != originalItemText) {
+                if (!dryRun) {
+                    migration.itemFile.writeText(itemText)
+                }
+                changes.add(Change(
+                    file = migration.itemFile,
+                    line = 0,
+                    description = "Migrate ItemStackHandler-backed item initCapabilities hook to registered item capability",
+                    before = "initCapabilities(...) -> ICapabilityProvider wrapping ItemStackHandler",
+                    after = "DataComponents.CONTAINER-backed ItemStackHandler + RegisterCapabilitiesEvent.registerItem",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-itemstackhandler-item-capability"
+                ))
+            }
+        }
+
+        var migratedMainText = mainText
+        val originalMainText = migratedMainText
+        val mainPackage = packageNameOf(migratedMainText)
+        val constructorBusName = requireModEventBusName(migratedMainText, "ItemStackHandler item capability registration")
+        for (migration in migrations) {
+            if (migration.packageName != mainPackage) {
+                migratedMainText = addImportIfMissing(migratedMainText, "${migration.packageName}.${migration.className}")
+            }
+            migratedMainText = addImportIfMissing(migratedMainText, "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent")
+            migration.itemReferences.map { it.qualifiedRegistryClass }
+                .distinct()
+                .filter { it.substringBeforeLast('.', "") != mainPackage }
+                .forEach { migratedMainText = addImportIfMissing(migratedMainText, it) }
+
+            val itemArguments = migration.itemReferences.joinToString(",\n") { ref ->
+                "                ${ref.registryClassName}.${ref.fieldName}.get()"
+            }
+            val registrations = buildList {
+                if (migration.fluidTemplate != null &&
+                    migration.dataComponentsFieldName != null &&
+                    !migratedMainText.contains("${migration.className}.${migration.dataComponentsFieldName}.register($constructorBusName)")
+                ) {
+                    add("        ${migration.className}.${migration.dataComponentsFieldName}.register($constructorBusName);")
+                }
+                if (migration.fluidTemplate != null &&
+                    !migratedMainText.contains("${migration.className}.registerFluidCapabilities(event,")
+                ) {
+                    add("""
+        $constructorBusName.addListener((RegisterCapabilitiesEvent event) -> ${migration.className}.registerFluidCapabilities(event,
+$itemArguments
+        ));
+""".trimEnd())
+                }
+                if (!migratedMainText.contains("${migration.className}.registerItemCapabilities(event,")) {
+                    add("""
+        $constructorBusName.addListener((RegisterCapabilitiesEvent event) -> ${migration.className}.registerItemCapabilities(event,
+$itemArguments
+        ));
+""".trimEnd())
+                }
+            }
+            if (registrations.isNotEmpty()) {
+                migratedMainText = insertModBusListener(
+                    migratedMainText,
+                    constructorBusName,
+                    registrations.joinToString("\n"),
+                    migration.itemReferences.first().registryClassName
+                )
+                changes.add(Change(
+                    file = mainClass,
+                    line = 0,
+                    description = "Register ItemStackHandler-backed item capabilities on the mod event bus",
+                    before = "(no RegisterCapabilitiesEvent item capability listener)",
+                    after = "${migration.className}.registerItemCapabilities(event, ...)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-itemstackhandler-item-capability-listener"
+                ))
+            }
+        }
+        if (migratedMainText != originalMainText && !dryRun) {
+            mainClass.writeText(migratedMainText)
+        }
+
+        return changes
+    }
+
+    private fun itemStackHandlerItemCapabilityMigration(
+        javaFile: Path,
+        javaFiles: List<Path>,
+        mainClass: Path,
+        mainText: String
+    ): ItemStackHandlerItemCapabilityMigration? {
+        val source = javaFile.readText()
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("initCapabilities") || !executableCode.contains("ItemStackHandler")) {
+            return null
+        }
+        val className = classNameOfJavaSource(executableCode) ?: return null
+        val handlerClassNames = itemStackHandlerProviderClassNames(source)
+        if (handlerClassNames.isEmpty()) return null
+        val method = javaMethodRangesIncludingDefault(executableCode).firstOrNull { candidate ->
+            candidate.name == "initCapabilities" &&
+                handlerClassNames.any { executableCode.substring(candidate.range).contains("new $it(") }
+        } ?: return null
+        val parametersText = method.header.substringAfter("(", "").substringBeforeLast(")", "")
+        val stackParameterName = splitTopLevelJavaArgs(parametersText)
+            .firstOrNull { parameter -> parameter.contains("ItemStack") }
+            ?.let(::javaParameterName)
+            ?: return null
+        val methodText = source.substring(method.range)
+        val methodExecutable = executableCode.substring(method.range)
+        val itemHandler = legacyItemStackHandlerConstruction(
+            methodText,
+            methodExecutable,
+            stackParameterName,
+            handlerClassNames
+        ) ?: return null
+        val itemReferences = findRegisteredItemReferences(javaFiles, className)
+            .distinctBy { "${it.qualifiedRegistryClass}.${it.fieldName}" }
+            .sortedWith(compareBy({ it.qualifiedRegistryClass }, { it.fieldName }))
+        if (itemReferences.isEmpty()) return null
+
+        val fluidTemplate = legacyFluidHandlerItemStackTemplate(methodText, stackParameterName)
+        val modIdExpression = if (fluidTemplate != null) {
+            inferModAccess(source)?.modIdExpression
+                ?: explicitModIdReferenceForGeneratedClass(mainClass, mainText, packageNameOf(source), metadataModId = null)
+                ?: return null
+        } else {
+            null
+        }
+
+        return ItemStackHandlerItemCapabilityMigration(
+            itemFile = javaFile,
+            packageName = packageNameOf(source),
+            className = className,
+            itemReferences = itemReferences,
+            handlerClassName = itemHandler.first,
+            handlerSizeExpression = itemHandler.second,
+            modIdExpression = modIdExpression,
+            dataComponentsFieldName = fluidTemplate?.let { uniqueJavaFieldName(source, "DATA_COMPONENTS") },
+            componentFieldName = fluidTemplate?.let { uniqueJavaFieldName(source, "FLUID_CONTENT") },
+            componentPath = fluidTemplate?.let { "${itemReferences.first().fieldName.lowercase()}_fluid_content" },
+            fluidTemplate = fluidTemplate
+        )
+    }
+
+    private fun itemStackHandlerProviderClassNames(source: String): Set<String> {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        return javaTypeBlocks(source, executableCode)
+            .filter { type ->
+                val declaration = executableCode.substring(type.declarationStart, type.bodyStart)
+                declaration.contains("extends ItemStackHandler") ||
+                    declaration.contains("extends net.neoforged.neoforge.items.ItemStackHandler")
+            }
+            .filter { type ->
+                val body = executableCode.substring(type.bodyStart, type.end)
+                body.contains("onContentsChanged") &&
+                    (body.contains("CustomData") || body.contains("ItemStack.parseOptional") || body.contains("contents"))
+            }
+            .mapTo(linkedSetOf()) { it.name }
+    }
+
+    private fun legacyItemStackHandlerConstruction(
+        methodText: String,
+        executableMethodText: String,
+        stackParameterName: String,
+        handlerClassNames: Set<String>
+    ): Pair<String, String>? {
+        val handlerAlternation = handlerClassNames.joinToString("|") { Regex.escape(it) }
+        val constructor = Regex("""new\s+($handlerAlternation)\s*\(""")
+            .find(executableMethodText)
+            ?: return null
+        val openParen = constructor.range.last
+        val closeParen = findMatchingParen(executableMethodText, openParen)
+        if (closeParen < 0) return null
+        val args = splitTopLevelJavaArgs(methodText.substring(openParen + 1, closeParen))
+        if (args.size < 2 || args[0].trim() != stackParameterName) return null
+        return constructor.groupValues[1] to args[1].trim()
+    }
+
+    private fun legacyFluidHandlerItemStackTemplate(
+        methodText: String,
+        stackParameterName: String
+    ): LegacyFluidHandlerItemStackTemplate? {
+        val executableMethodText = maskJavaCommentsAndLiterals(methodText)
+        val constructor = Regex("""new\s+(?:[A-Za-z_$][\w$]*\.)*FluidHandlerItemStack\s*\(""")
+            .find(executableMethodText)
+            ?: return null
+        val openParen = constructor.range.last
+        val closeParen = findMatchingParen(executableMethodText, openParen)
+        if (closeParen < 0) return null
+        val args = splitTopLevelJavaArgs(methodText.substring(openParen + 1, closeParen))
+        if (args.size != 2 || args[0].trim() != stackParameterName) return null
+        var suffixStart = closeParen + 1
+        while (suffixStart < executableMethodText.length && executableMethodText[suffixStart].isWhitespace()) {
+            suffixStart++
+        }
+        val anonymousBody = if (suffixStart < executableMethodText.length && executableMethodText[suffixStart] == '{') {
+            val anonymousClose = findMatchingBrace(executableMethodText, suffixStart)
+            if (anonymousClose < 0) return null
+            methodText.substring(suffixStart, anonymousClose + 1)
+        } else {
+            ""
+        }
+        return LegacyFluidHandlerItemStackTemplate(args[1].trim(), anonymousBody)
+    }
+
+    private fun migrateItemStackHandlerProviderClass(
+        source: String,
+        migration: ItemStackHandlerItemCapabilityMigration
+    ): String {
+        var result = source
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(class\s+${Regex.escape(migration.handlerClassName)}\b[^{;\r\n]*?\bextends\s+(?:net\.neoforged\.neoforge\.items\.)?ItemStackHandler)\s+implements\s+ICapabilityProvider""")
+        ) { match -> match.groupValues[1] }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(?m)^[ \t]*private\s+final\s+LazyOptional\s*<\s*IItemHandler\s*>\s+[A-Za-z_$][\w$]*\s*=\s*LazyOptional\.of\s*\(\s*\(\s*\)\s*->\s*this\s*\)\s*;\s*\r?\n""")
+        ) { "" }
+        result = removeJavaMethodDeclarationsByNameContaining(result, "getCapability", listOf("Capabilities.ItemHandler"))
+
+        val containerField = itemStackHandlerContainerFieldName(result, migration.handlerClassName) ?: return result
+        result = migrateItemStackHandlerConstructorsToDataComponent(result, migration.handlerClassName, containerField)
+        result = replaceItemStackHandlerOnContentsChanged(result, migration.handlerClassName, containerField)
+        result = removeJavaMethodDeclarationsByNameContaining(result, "initStacks", listOf("ItemStack.parseOptional", "CustomData", "contents"))
+        return result
+    }
+
+    private fun itemStackHandlerContainerFieldName(source: String, handlerClassName: String): String? {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val type = javaTypeBlocks(source, executableCode).firstOrNull { it.name == handlerClassName } ?: return null
+        val typeText = source.substring(type.bodyStart + 1, type.end)
+        Regex("""(?m)\b(?:private|protected|public)?\s*(?:final\s+)?(?:net\.minecraft\.world\.item\.)?ItemStack\s+([A-Za-z_$][\w$]*)\s*;""")
+            .find(typeText)
+            ?.let { return it.groupValues[1] }
+        javaConstructorRanges(typeText, handlerClassName).forEach { constructor ->
+            val constructorText = typeText.substring(constructor.range)
+            Regex("""this\.([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*;""")
+                .find(constructorText)
+                ?.let { return it.groupValues[1] }
+        }
+        return null
+    }
+
+    private fun migrateItemStackHandlerConstructorsToDataComponent(
+        source: String,
+        handlerClassName: String,
+        containerFieldName: String
+    ): String {
+        var result = source
+        for (constructor in javaConstructorRanges(result, handlerClassName).asReversed()) {
+            val constructorText = result.substring(constructor.range)
+            val migratedConstructor = replaceExecutableRegex(
+                constructorText,
+                Regex("""(?m)^([ \t]*)(?:this\.)?initStacks\s*\([^;]*\)\s*;\s*$""")
+            ) { match ->
+                "${match.groupValues[1]}$containerFieldName.getOrDefault(DataComponents.CONTAINER, ItemContainerContents.EMPTY).copyInto(stacks);"
+            }
+            if (migratedConstructor != constructorText) {
+                result = result.substring(0, constructor.range.first) +
+                    migratedConstructor +
+                    result.substring(constructor.range.last + 1)
+            }
+        }
+        return result
+    }
+
+    private fun replaceItemStackHandlerOnContentsChanged(
+        source: String,
+        handlerClassName: String,
+        containerFieldName: String
+    ): String {
+        var result = source
+        val executableCode = maskJavaCommentsAndLiterals(result)
+        val type = javaTypeBlocks(result, executableCode).firstOrNull { it.name == handlerClassName } ?: return result
+        val methods = javaMethodRangesIncludingDefault(executableCode)
+            .filter { it.name == "onContentsChanged" && it.range.first in type.bodyStart..type.end }
+        for (method in methods.asReversed()) {
+            val openBrace = result.indexOf('{', method.range.first)
+            if (openBrace < 0 || openBrace > method.range.last) continue
+            val header = result.substring(method.range.first, openBrace).trimEnd()
+            val indent = Regex("""(?m)^([ \t]*)""").find(header)?.groupValues?.get(1).orEmpty()
+            val replacement = """$header {
+$indent    $containerFieldName.set(DataComponents.CONTAINER, ItemContainerContents.fromItems(stacks));
+$indent}"""
+            result = result.substring(0, method.range.first) + replacement + result.substring(method.range.last + 1)
+        }
+        return result
+    }
+
+    private fun insertItemStackHandlerCapabilityRegistrationMethods(
+        source: String,
+        migration: ItemStackHandlerItemCapabilityMigration
+    ): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val classMatch = Regex("""\bclass\s+${Regex.escape(migration.className)}\b[^{]*\{""").find(executableCode)
+            ?: return source
+        val classOpen = source.indexOf('{', classMatch.range.last)
+        if (classOpen < 0) return source
+        val members = buildString {
+            if (migration.fluidTemplate != null &&
+                migration.dataComponentsFieldName != null &&
+                migration.componentFieldName != null &&
+                migration.componentPath != null &&
+                migration.modIdExpression != null &&
+                !source.contains("${migration.dataComponentsFieldName} = DeferredRegister.createDataComponents")
+            ) {
+                appendLine()
+                appendLine("    public static final DeferredRegister.DataComponents ${migration.dataComponentsFieldName} = DeferredRegister.createDataComponents(Registries.DATA_COMPONENT_TYPE, ${migration.modIdExpression});")
+                appendLine("    public static final DeferredHolder<DataComponentType<?>, DataComponentType<SimpleFluidContent>> ${migration.componentFieldName} = ${migration.dataComponentsFieldName}.registerComponentType(\"${migration.componentPath}\", builder -> builder.persistent(SimpleFluidContent.CODEC).networkSynchronized(SimpleFluidContent.STREAM_CODEC));")
+            }
+            if (migration.fluidTemplate != null &&
+                migration.componentFieldName != null &&
+                !source.contains("registerFluidCapabilities(RegisterCapabilitiesEvent")
+            ) {
+                val anonymousBody = migration.fluidTemplate.anonymousBody
+                appendLine()
+                appendLine("    public static void registerFluidCapabilities(RegisterCapabilitiesEvent event, ItemLike... items) {")
+                appendLine("        event.registerItem(Capabilities.FluidHandler.ITEM, (stack, context) -> new FluidHandlerItemStack(${migration.componentFieldName}, stack, ${migration.fluidTemplate.capacityExpression})$anonymousBody, items);")
+                appendLine("    }")
+            }
+            if (!source.contains("registerItemCapabilities(RegisterCapabilitiesEvent")) {
+                appendLine()
+                appendLine("    public static void registerItemCapabilities(RegisterCapabilitiesEvent event, ItemLike... items) {")
+                appendLine("        event.registerItem(Capabilities.ItemHandler.ITEM, (stack, context) -> new ${migration.handlerClassName}(stack, ${migration.handlerSizeExpression}), items);")
+                appendLine("    }")
+            }
+        }
+        if (members.isBlank()) return source
+        return source.substring(0, classOpen + 1) + members + source.substring(classOpen + 1)
+    }
+
     private fun migrateDirectFluidHandlerItemStackCapabilities(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
         val srcDir = projectDir.resolve("src/main/java")
@@ -6323,6 +6733,34 @@ $itemArguments
             if (end < result.length && result[end] == '\n') end++
             result = result.removeRange(annotationStart, end)
             searchStart = annotationStart
+        }
+        return result
+    }
+
+    private fun removeJavaMethodDeclarationsByNameContaining(
+        source: String,
+        methodName: String,
+        requiredNeedles: List<String>
+    ): String {
+        var result = source
+        val methods = javaMethodRangesIncludingDefault(source)
+            .filter { it.name == methodName }
+            .filter { method ->
+                val methodText = source.substring(method.range)
+                requiredNeedles.any { methodText.contains(it) }
+            }
+        for (method in methods.asReversed()) {
+            val signatureStart = result.lastIndexOf('\n', method.range.first).let { if (it < 0) 0 else it + 1 }
+            val annotationStart = Regex("""(?m)(?:^[ \t]*@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*\r?\n)+[ \t]*$""")
+                .findAll(result.substring(0, signatureStart))
+                .lastOrNull()
+                ?.range
+                ?.first
+                ?: signatureStart
+            var end = method.range.last + 1
+            if (end < result.length && result[end] == '\r') end++
+            if (end < result.length && result[end] == '\n') end++
+            result = result.removeRange(annotationStart, end)
         }
         return result
     }

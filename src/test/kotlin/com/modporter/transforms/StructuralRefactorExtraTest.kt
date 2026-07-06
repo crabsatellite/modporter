@@ -4585,6 +4585,286 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `migrates ItemStackHandler item initCapabilities to registered item data component capabilities`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val itemDir = srcDir.resolve("item")
+        val initDir = srcDir.resolve("init")
+        val libDir = srcDir.resolve("lib")
+        itemDir.createDirectories()
+        initDir.createDirectories()
+        libDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.init.Registration;
+            import com.example.lib.References;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(References.MODID)
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                    Registration.init(modEventBus);
+                }
+            }
+        """.trimIndent())
+
+        libDir.resolve("References.java").writeText("""
+            package com.example.lib;
+
+            public class References {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+
+        initDir.resolve("Registration.java").writeText("""
+            package com.example.init;
+
+            import com.example.item.BloodGemItem;
+            import com.example.item.DreamBottleItem;
+            import net.minecraft.world.item.Item;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class Registration {
+                public static final DeferredRegister<Item> ITEMS = null;
+                public static final DeferredHolder<Item, Item> BLOOD_GEM = ITEMS.register("blood_gem", BloodGemItem::new);
+                public static final DeferredHolder<Item, Item> DREAM_BOTTLE = ITEMS.register("dream_bottle", DreamBottleItem::new);
+                public static final DeferredHolder<Item, Item> MEMORY_PHIAL = ITEMS.register("memory_phial", Item::new);
+
+                public static void init(IEventBus modEventBus) {
+                    ITEMS.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+
+        itemDir.resolve("BloodGemItem.java").writeText("""
+            package com.example.item;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.Direction;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.component.DataComponents;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.DyeItem;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.component.CustomData;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import net.neoforged.neoforge.items.ItemStackHandler;
+            import org.apache.commons.lang3.StringUtils;
+            import org.jetbrains.annotations.NotNull;
+            import org.jetbrains.annotations.Nullable;
+
+            public class BloodGemItem extends Item {
+                public BloodGemItem() {
+                    super(new Properties());
+                }
+
+                public int visibleSlots(ItemStack stack) {
+                    return stack.getCapability(Capabilities.ItemHandler.ITEM).getSlots();
+                }
+
+                @Override
+                @Nullable
+                public ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
+                    BloodGemStackHandler itemStackHandler = new BloodGemStackHandler(stack, 15);
+                    return new ICapabilityProvider() {
+                        @Override
+                        @NotNull
+                        public <T> LazyOptional<T> getCapability(@NotNull Capability<T> cap, @Nullable Direction side) {
+                            return cap == Capabilities.ItemHandler.BLOCK ? itemStackHandler.getCapability(Capabilities.ItemHandler.BLOCK).cast() : LazyOptional.empty();
+                        }
+                    };
+                }
+
+                private static class BloodGemStackHandler extends ItemStackHandler implements ICapabilityProvider {
+                    private final ItemStack container;
+
+                    public BloodGemStackHandler(ItemStack container, int size) {
+                        super(size);
+                        this.container = container;
+                        initStacks();
+                    }
+
+                    private final LazyOptional<IItemHandler> holder = LazyOptional.of(() -> this);
+
+                    @Override
+                    @NotNull
+                    public <T> LazyOptional<T> getCapability(@NotNull Capability<T> cap, @Nullable Direction side) {
+                        return Capabilities.ItemHandler.BLOCK.orEmpty(cap, holder);
+                    }
+
+                    @Override
+                    public boolean isItemValid(int slot, @NotNull ItemStack stack) {
+                        return stack.getItem() instanceof DyeItem;
+                    }
+
+                    @Override
+                    protected void onContentsChanged(int slot) {
+                        CompoundTag tag = container.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY).copyTag();
+                        if (!tag.contains("contents")) {
+                            tag.put("contents", new CompoundTag());
+                        }
+                        tag.getCompound("contents").put(String.valueOf(slot), stacks.get(slot).save(new CompoundTag()));
+                    }
+
+                    private void initStacks(HolderLookup.Provider registries) {
+                        CompoundTag tag = container.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY).copyTag();
+                        if (!tag.contains("contents")) {
+                            tag.put("contents", new CompoundTag());
+                        }
+                        CompoundTag contents1 = tag.getCompound("contents");
+                        for (String contents : contents1.getAllKeys()) {
+                            if (StringUtils.isNumeric(contents)) {
+                                int index = Integer.parseInt(contents);
+                                if (index >= 0 && index < stacks.size()) {
+                                    stacks.set(index, ItemStack.parseOptional(registries, contents1.getCompound(contents)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        itemDir.resolve("DreamBottleItem.java").writeText("""
+            package com.example.item;
+
+            import com.example.init.Registration;
+            import com.example.lib.References;
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.Direction;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.component.DataComponents;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.component.CustomData;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
+            import net.neoforged.neoforge.fluids.FluidStack;
+            import net.neoforged.neoforge.fluids.capability.templates.FluidHandlerItemStack;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import net.neoforged.neoforge.items.ItemStackHandler;
+            import org.apache.commons.lang3.StringUtils;
+            import org.jetbrains.annotations.NotNull;
+            import org.jetbrains.annotations.Nullable;
+
+            public class DreamBottleItem extends Item {
+                public DreamBottleItem() {
+                    super(new Properties());
+                }
+
+                @Override
+                @Nullable
+                public ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
+                    FluidHandlerItemStack fluidHandlerItemStack = new FluidHandlerItemStack(stack, 4000) {
+                        @Override
+                        public boolean isFluidValid(int tank, @NotNull FluidStack stack) {
+                            return stack.getFluid().isSame(Registration.MEMORY_PHIAL.get());
+                        }
+                    };
+                    DreamBottleStackHandler itemStackHandler = new DreamBottleStackHandler(stack, 4);
+                    return new ICapabilityProvider() {
+                        @Override
+                        @NotNull
+                        public <T> LazyOptional<T> getCapability(@NotNull Capability<T> cap, @Nullable Direction side) {
+                            return cap == Capabilities.FluidHandler.ITEM ? fluidHandlerItemStack.getCapability(Capabilities.FluidHandler.ITEM).cast() : (cap == Capabilities.ItemHandler.BLOCK ? itemStackHandler.getCapability(Capabilities.ItemHandler.BLOCK).cast() : LazyOptional.empty());
+                        }
+                    };
+                }
+
+                private static class DreamBottleStackHandler extends ItemStackHandler implements ICapabilityProvider {
+                    private final ItemStack container;
+
+                    public DreamBottleStackHandler(ItemStack container, int size) {
+                        super(size);
+                        this.container = container;
+                        initStacks();
+                    }
+
+                    private final LazyOptional<IItemHandler> holder = LazyOptional.of(() -> this);
+
+                    @Override
+                    @NotNull
+                    public <T> LazyOptional<T> getCapability(@NotNull Capability<T> cap, @Nullable Direction side) {
+                        return Capabilities.ItemHandler.BLOCK.orEmpty(cap, holder);
+                    }
+
+                    @Override
+                    public boolean isItemValid(int slot, @NotNull ItemStack stack) {
+                        return stack.getItem() == Registration.MEMORY_PHIAL.get();
+                    }
+
+                    @Override
+                    protected void onContentsChanged(int slot) {
+                        CompoundTag tag = container.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY).copyTag();
+                        if (!tag.contains("contents")) {
+                            tag.put("contents", new CompoundTag());
+                        }
+                        tag.getCompound("contents").put(String.valueOf(slot), stacks.get(slot).save(new CompoundTag()));
+                    }
+
+                    private void initStacks(HolderLookup.Provider registries) {
+                        CompoundTag tag = container.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY).copyTag();
+                        if (!tag.contains("contents")) {
+                            tag.put("contents", new CompoundTag());
+                        }
+                        CompoundTag contents1 = tag.getCompound("contents");
+                        for (String contents : contents1.getAllKeys()) {
+                            if (StringUtils.isNumeric(contents)) {
+                                int index = Integer.parseInt(contents);
+                                if (index >= 0 && index < stacks.size()) {
+                                    stacks.set(index, ItemStack.parseOptional(registries, contents1.getCompound(contents)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val bloodGem = itemDir.resolve("BloodGemItem.java").readText()
+        val dreamBottle = itemDir.resolve("DreamBottleItem.java").readText()
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-itemstackhandler-item-capability" })
+        assertTrue(result.changes.any { it.ruleId == "struct-itemstackhandler-item-capability-listener" })
+        assertTrue(bloodGem.contains("event.registerItem(Capabilities.ItemHandler.ITEM, (stack, context) -> new BloodGemStackHandler(stack, 15), items);"), bloodGem)
+        assertTrue(bloodGem.contains("container.getOrDefault(DataComponents.CONTAINER, ItemContainerContents.EMPTY).copyInto(stacks);"), bloodGem)
+        assertTrue(bloodGem.contains("container.set(DataComponents.CONTAINER, ItemContainerContents.fromItems(stacks));"), bloodGem)
+        assertTrue(bloodGem.contains("return stack.getCapability(Capabilities.ItemHandler.ITEM).getSlots();"), bloodGem)
+        assertFalse(bloodGem.contains("initCapabilities"), bloodGem)
+        assertFalse(bloodGem.contains("ICapabilityProvider"), bloodGem)
+        assertFalse(bloodGem.contains("LazyOptional"), bloodGem)
+        assertFalse(bloodGem.contains("HolderLookup.Provider"), bloodGem)
+        assertFalse(bloodGem.contains("CUSTOM_DATA"), bloodGem)
+        assertTrue(dreamBottle.contains("public static final DeferredRegister.DataComponents DATA_COMPONENTS = DeferredRegister.createDataComponents(Registries.DATA_COMPONENT_TYPE, com.example.lib.References.MODID);"), dreamBottle)
+        assertTrue(dreamBottle.contains("public static final DeferredHolder<DataComponentType<?>, DataComponentType<SimpleFluidContent>> FLUID_CONTENT = DATA_COMPONENTS.registerComponentType(\"dream_bottle_fluid_content\", builder -> builder.persistent(SimpleFluidContent.CODEC).networkSynchronized(SimpleFluidContent.STREAM_CODEC));"), dreamBottle)
+        assertTrue(dreamBottle.contains("event.registerItem(Capabilities.FluidHandler.ITEM, (stack, context) -> new FluidHandlerItemStack(FLUID_CONTENT, stack, 4000)"), dreamBottle)
+        assertTrue(dreamBottle.contains("public boolean isFluidValid(int tank, @NotNull FluidStack stack)"), dreamBottle)
+        assertTrue(dreamBottle.contains("event.registerItem(Capabilities.ItemHandler.ITEM, (stack, context) -> new DreamBottleStackHandler(stack, 4), items);"), dreamBottle)
+        assertFalse(dreamBottle.contains("initCapabilities"), dreamBottle)
+        assertFalse(dreamBottle.contains("ICapabilityProvider"), dreamBottle)
+        assertFalse(dreamBottle.contains("HolderLookup.Provider"), dreamBottle)
+        assertTrue(mod.contains("BloodGemItem.registerItemCapabilities(event,"), mod)
+        assertTrue(mod.contains("DreamBottleItem.DATA_COMPONENTS.register(modEventBus);"), mod)
+        assertTrue(mod.contains("DreamBottleItem.registerFluidCapabilities(event,"), mod)
+        assertTrue(mod.contains("DreamBottleItem.registerItemCapabilities(event,"), mod)
+        assertTrue(mod.contains("Registration.BLOOD_GEM.get()"), mod)
+        assertTrue(mod.contains("Registration.DREAM_BOTTLE.get()"), mod)
+    }
+
+    @Test
     fun `migrates direct FluidHandlerItemStack initCapabilities to item capability registration`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val itemDir = srcDir.resolve("item")
