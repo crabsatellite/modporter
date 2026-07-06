@@ -39150,6 +39150,67 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `marks required deprecated override contracts without suppressing them`() {
+        val clientDir = tempDir.resolve("src/main/java/com/example/client")
+        val entityDir = tempDir.resolve("src/main/java/com/example/entity")
+        clientDir.createDirectories()
+        entityDir.createDirectories()
+        clientDir.resolve("ExampleBakedModel.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.client.renderer.block.model.ItemOverrides;
+            import net.minecraft.client.renderer.block.model.ItemTransforms;
+            import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+            import net.minecraft.client.resources.model.BakedModel;
+
+            public class ExampleBakedModel implements BakedModel {
+                @Override
+                public TextureAtlasSprite getParticleIcon() {
+                    return null;
+                }
+
+                @Override
+                public ItemTransforms getTransforms() {
+                    return ItemTransforms.NO_TRANSFORMS;
+                }
+
+                @Override
+                public ItemOverrides getOverrides() {
+                    return ItemOverrides.EMPTY;
+                }
+            }
+        """.trimIndent())
+        entityDir.resolve("ExampleMob.java").writeText("""
+            package com.example.entity;
+
+            import javax.annotation.Nullable;
+            import net.minecraft.world.DifficultyInstance;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.entity.MobSpawnType;
+            import net.minecraft.world.entity.SpawnGroupData;
+            import net.minecraft.world.level.ServerLevelAccessor;
+
+            public abstract class ExampleMob extends Mob {
+                @Nullable
+                public SpawnGroupData finalizeSpawn(ServerLevelAccessor level, DifficultyInstance difficulty, MobSpawnType reason, @Nullable SpawnGroupData spawnData) {
+                    return super.finalizeSpawn(level, difficulty, reason, spawnData);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val baked = clientDir.resolve("ExampleBakedModel.java").readText()
+        val mob = entityDir.resolve("ExampleMob.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(baked.contains("@Deprecated\n    @Override\n    public TextureAtlasSprite getParticleIcon()"), baked)
+        assertTrue(baked.contains("@Deprecated\n    @Override\n    public ItemTransforms getTransforms()"), baked)
+        assertTrue(mob.contains("@Deprecated\n    public SpawnGroupData finalizeSpawn"), mob)
+        assertFalse(baked.contains("@SuppressWarnings"), baked)
+        assertFalse(mob.contains("@SuppressWarnings"), mob)
+    }
+
+    @Test
     fun `migrates xlint-clean deprecated 121 api surfaces without suppressing logic`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

@@ -33766,6 +33766,7 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         result = migrateDeprecatedItemTransformsConstructors(result)
         result = migrateDeprecatedStructureGenerationHelpers(result)
         result = migrateDeprecatedRenderSystemRunAsFancy(result)
+        result = markRequiredDeprecatedOverrides(result)
         return result
     }
 
@@ -34353,6 +34354,65 @@ public final class LevelReaderCompat {
         }
     }
 """.trimEnd()
+
+    private fun markRequiredDeprecatedOverrides(source: String): String {
+        var result = markFinalizeSpawnRequiredDeprecatedOverride(source)
+        val executableCode = maskJavaCommentsAndLiterals(result)
+        if (!executableCode.contains("@Override") ||
+            !executableCode.contains("getParticleIcon(") &&
+            !executableCode.contains("getTransforms(") &&
+            !executableCode.contains("finalizeSpawn(")) {
+            return result
+        }
+        val insertions = mutableListOf<Pair<Int, String>>()
+        for (method in javaMethodRangesIncludingDefault(executableCode)) {
+            if (Regex("""(?m)^[ \t]*@(?:java\.lang\.)?Deprecated\b""").containsMatchIn(method.header)) {
+                continue
+            }
+            val requiredDeprecatedOverride = when (method.name) {
+                "getParticleIcon" -> method.header.contains("@Override") && method.header.contains("TextureAtlasSprite") && method.header.contains("()")
+                "getTransforms" -> method.header.contains("@Override") && method.header.contains("ItemTransforms") && method.header.contains("()")
+                "finalizeSpawn" -> method.header.contains("SpawnGroupData") &&
+                    method.header.contains("ServerLevelAccessor") &&
+                    method.header.contains("DifficultyInstance") &&
+                    method.header.contains("MobSpawnType")
+                else -> false
+            }
+            if (!requiredDeprecatedOverride) continue
+            val methodText = result.substring(method.range)
+            val insertionMatch = Regex("""(?m)^([ \t]*)@Override\b""").find(methodText)
+                ?: Regex("""(?m)^([ \t]*)(?:public|protected|private)\s+""").find(methodText)
+                ?: continue
+            val indent = insertionMatch.groupValues[1]
+            insertions += method.range.first + insertionMatch.range.first to "${indent}@Deprecated\n"
+        }
+        if (insertions.isEmpty()) return result
+        insertions.sortedByDescending { it.first }.forEach { (offset, text) ->
+            result = result.substring(0, offset) + text + result.substring(offset)
+        }
+        return result
+    }
+
+    private fun markFinalizeSpawnRequiredDeprecatedOverride(source: String): String {
+        if (!source.contains("finalizeSpawn(") ||
+            !source.contains("ServerLevelAccessor") ||
+            !source.contains("DifficultyInstance") ||
+            !source.contains("MobSpawnType") ||
+            !source.contains("SpawnGroupData")) {
+            return source
+        }
+        val pattern = Regex(
+            """(?m)^([ \t]*)((?:@[A-Za-z_$][\w$.]*(?:\([^)]*\))?\s*\r?\n\1)*)(public\s+SpawnGroupData\s+finalizeSpawn\s*\([^{};]*ServerLevelAccessor[^{};]*DifficultyInstance[^{};]*MobSpawnType[^{};]*SpawnGroupData[^{};]*\)\s*\{)"""
+        )
+        return pattern.replace(source) { match ->
+            val annotations = match.groupValues[2]
+            if (Regex("""(?m)^[ \t]*@(?:java\.lang\.)?Deprecated\b""").containsMatchIn(annotations)) {
+                match.value
+            } else {
+                "${match.groupValues[1]}${annotations}${match.groupValues[1]}@Deprecated\n${match.groupValues[1]}${match.groupValues[3]}"
+            }
+        }
+    }
 
     private data class ClientColorAliasDeclaration(val alias: String, val range: IntRange)
     private data class ClientColorRegistrationStatement(val range: IntRange, val replacement: String)
