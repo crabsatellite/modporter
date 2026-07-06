@@ -3604,6 +3604,9 @@ config="$configName"
                 if (containsEntityRenderDispatcherRenderersAccess(source)) {
                     entries.add("public net.minecraft.client.renderer.entity.EntityRenderDispatcher renderers")
                 }
+                if (containsDefaultAttributesSuppliersAccess(source)) {
+                    entries.add("public net.minecraft.world.entity.ai.attributes.DefaultAttributes SUPPLIERS")
+                }
             }
         return entries
     }
@@ -3681,6 +3684,13 @@ config="$configName"
         ) ||
             Regex("""\bgetEntityRenderDispatcher\s*\(\s*\)\s*\.\s*renderers\b""").containsMatchIn(code)
     }
+
+    private fun containsDefaultAttributesSuppliersAccess(source: String): Boolean =
+        containsJavaStaticFieldAccess(
+            source,
+            """(?:net\.minecraft\.world\.entity\.ai\.attributes\.)?DefaultAttributes""",
+            "SUPPLIERS"
+        )
 
     private fun containsTypedJavaFieldAccess(source: String, typePattern: String, fieldName: String): Boolean {
         val code = maskJavaCommentsAndLiterals(source)

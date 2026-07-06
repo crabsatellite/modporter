@@ -352,6 +352,13 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            val customRecipeBookFinderChanges = migrateCustomRecipeBookCategoryFinders(projectDir, dryRun)
+            changes.addAll(customRecipeBookFinderChanges)
+        } catch (e: Exception) {
+            errors.add("Custom recipe book category finder migration error: ${e.message}")
+        }
+
+        try {
             val mobCategoryEnumExtensionChanges = migrateLegacyMobCategoryEnumExtensions(projectDir, dryRun)
             changes.addAll(mobCategoryEnumExtensionChanges)
         } catch (e: Exception) {
@@ -432,6 +439,13 @@ class StructuralRefactorPass : Pass {
             changes.addAll(levelReaderDeprecationChanges)
         } catch (e: Exception) {
             errors.add("LevelReader hasChunksAt migration error: ${e.message}")
+        }
+
+        try {
+            val xlintBridgeChanges = migrateXlintCleanApiBridges(projectDir, dryRun)
+            changes.addAll(xlintBridgeChanges)
+        } catch (e: Exception) {
+            errors.add("Xlint-clean API bridge migration error: ${e.message}")
         }
 
         try {
@@ -4396,6 +4410,9 @@ ${registrations.distinct().joinToString("\n")}
         "BuildCreativeModeTabContentsEvent",
         "EntityRenderersEvent",
         "RegisterEvent",
+        "RegisterCapabilitiesEvent",
+        "RegisterSpawnPlacementsEvent",
+        "SpawnPlacementRegisterEvent",
         "FMLCommonSetupEvent",
         "FMLClientSetupEvent",
         "FMLDedicatedServerSetupEvent",
@@ -4420,6 +4437,10 @@ ${registrations.distinct().joinToString("\n")}
         "net.minecraftforge.client.event.EntityRenderersEvent",
         "net.neoforged.neoforge.registries.RegisterEvent",
         "net.minecraftforge.registries.RegisterEvent",
+        "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent",
+        "net.minecraftforge.common.capabilities.RegisterCapabilitiesEvent",
+        "net.neoforged.neoforge.event.entity.RegisterSpawnPlacementsEvent",
+        "net.minecraftforge.event.entity.SpawnPlacementRegisterEvent",
         "net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent",
         "net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent",
         "net.neoforged.fml.event.lifecycle.FMLClientSetupEvent",
@@ -7372,6 +7393,17 @@ $itemArguments
             val busName = requireModEventBusName(mainText, "provider-backed attachment registration")
             for (caps in attachOwners.values) {
                 val first = caps.first()
+                if (!mainText.contains("${first.attachClass}::registerCapabilities")) {
+                    if (first.attachPackage != mainPackage) {
+                        mainText = addImportIfMissing(mainText, "${first.attachPackage}.${first.attachClass}")
+                    }
+                    mainText = insertModBusListener(
+                        mainText,
+                        busName,
+                        "        $busName.addListener(${first.attachClass}::registerCapabilities);",
+                        "${first.attachClass}.capabilities"
+                    )
+                }
                 if (mainText.contains("${first.attachClass}.registerAttachments(")) continue
                 if (first.attachPackage != mainPackage) {
                     mainText = addImportIfMissing(mainText, "${first.attachPackage}.${first.attachClass}")
@@ -7390,7 +7422,7 @@ $itemArguments
                     line = 1,
                     description = "Register provider-backed capability attachments on the mod event bus",
                     before = "(no provider-backed attachment registration)",
-                    after = "$busName registers AttachmentType DeferredRegister",
+                    after = "$busName registers capabilities and AttachmentType DeferredRegister",
                     confidence = Confidence.HIGH,
                     ruleId = "struct-provider-backed-entity-capability-main-register"
                 ))
@@ -7579,6 +7611,9 @@ $itemArguments
             }
             "            event.registerEntity($provider.${capability.fieldName}, (EntityType) entityType, (entity, side) -> ($guard) ? entity.getData($provider.${capability.attachmentFieldName}.get()).${capability.dataGetterName}() : null);"
         }
+        val attachmentInitializers = capabilities.joinToString(System.lineSeparator()) { capability ->
+            "        java.util.Objects.requireNonNull(${capability.providerReferenceFromAttach}.${capability.attachmentFieldName});"
+        }
         return """
 
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -7589,6 +7624,7 @@ $registrations
     }
 
     public static void registerAttachments(IEventBus modEventBus) {
+$attachmentInitializers
         ATTACHMENT_TYPES.register(modEventBus);
     }
 """.trimEnd()
@@ -14638,6 +14674,24 @@ $fields
         val enumName: String
     )
 
+    private data class CustomRecipeBookCategoryRecipe(
+        val simpleName: String,
+        val qualifiedName: String
+    )
+
+    private data class CustomRecipeBookTypeField(
+        val ownerQualifiedName: String,
+        val fieldName: String,
+        val recipeClassQualifiedName: String
+    ) {
+        val expression: String = "$ownerQualifiedName.$fieldName.get()"
+    }
+
+    private data class CustomRecipeBookCategoryFinder(
+        val recipeTypeExpression: String,
+        val recipeClassQualifiedName: String
+    )
+
     private data class LegacyMobCategoryExtension(
         val sourceFile: Path,
         val packageName: String,
@@ -15115,6 +15169,194 @@ $methods
             ensureEnumExtensionsTomlEntry(metaInf)
         }
         return changes
+    }
+
+    private fun migrateCustomRecipeBookCategoryFinders(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .toList()
+        if (javaFiles.isEmpty()) return emptyList()
+
+        val recipeClasses = collectCustomCraftingBookCategoryRecipes(javaFiles)
+        if (recipeClasses.isEmpty()) return emptyList()
+        val recipeClassNames = recipeClasses.associateBy { it.qualifiedName }
+        val existingSources = javaFiles.associateWith { it.readText() }
+        val existingExecutable = existingSources.values.joinToString("\n") { maskJavaCommentsAndLiterals(it) }
+        val finders = collectCustomRecipeTypeFields(javaFiles)
+            .filter { it.recipeClassQualifiedName in recipeClassNames }
+            .filterNot { field -> customRecipeBookFinderAlreadyRegistered(existingExecutable, field) }
+            .map { field ->
+                CustomRecipeBookCategoryFinder(
+                    recipeTypeExpression = field.expression,
+                    recipeClassQualifiedName = field.recipeClassQualifiedName
+                )
+            }
+            .distinctBy { it.recipeTypeExpression }
+            .sortedBy { it.recipeTypeExpression }
+
+        if (finders.isEmpty()) return emptyList()
+
+        val compatPackage = detectRequiredGeneratedCompatPackage(projectDir, "custom recipe book category finders")
+        val className = "ModRecipeBookCategories"
+        val compatFile = srcDir.resolve(compatPackage.replace('.', '/')).resolve("$className.java")
+        val generatedSource = customRecipeBookCategoryFinderSource(compatPackage, className, finders)
+        val changes = mutableListOf<Change>()
+        if (!compatFile.exists() || compatFile.readText() != generatedSource) {
+            changes.add(Change(
+                file = compatFile,
+                line = 0,
+                description = "Generate NeoForge recipe book category finders for custom CraftingBookCategory recipes",
+                before = "(missing RegisterRecipeBookCategoriesEvent finder)",
+                after = "$className.register(IEventBus)",
+                confidence = Confidence.HIGH,
+                ruleId = "struct-custom-recipebook-category-finder"
+            ))
+            if (!dryRun) {
+                compatFile.parent.createDirectories()
+                compatFile.writeText(generatedSource)
+            }
+        }
+
+        val mainFile = detectModMainClass(projectDir) ?: return changes
+        val mainOriginal = mainFile.readText()
+        val modBusVar = detectModBusVariable(mainOriginal) ?: return changes
+        val registrationCall = "$compatPackage.$className.register($modBusVar);"
+        if (!mainOriginal.contains(registrationCall)) {
+            val indent = mainConstructorIndent(mainOriginal, modBusVar)
+            val registration = "${indent}if (net.neoforged.fml.loading.FMLLoader.getDist() == net.neoforged.api.distmarker.Dist.CLIENT) {\n" +
+                "$indent    $registrationCall\n" +
+                "$indent}"
+            val mainMigrated = insertModBusListener(mainOriginal, modBusVar, registration, className)
+            if (mainMigrated != mainOriginal) {
+                changes.add(Change(
+                    file = mainFile,
+                    line = 0,
+                    description = "Register generated custom recipe book category finder on the client mod bus",
+                    before = "(missing client RegisterRecipeBookCategoriesEvent listener)",
+                    after = registrationCall,
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-custom-recipebook-category-finder-registration"
+                ))
+                if (!dryRun) mainFile.writeText(mainMigrated)
+            }
+        }
+
+        return changes
+    }
+
+    private fun collectCustomCraftingBookCategoryRecipes(javaFiles: List<Path>): List<CustomRecipeBookCategoryRecipe> =
+        javaFiles.mapNotNull { javaFile ->
+            val source = javaFile.readText()
+            val executableCode = maskJavaCommentsAndLiterals(source)
+            if (!executableCode.contains("CraftingBookCategory") || !executableCode.contains("Recipe<")) return@mapNotNull null
+            val className = javaTopLevelTypeName(source) ?: return@mapNotNull null
+            val typeStart = findTypeDeclarationStart(executableCode, className) ?: return@mapNotNull null
+            val typeOpen = executableCode.indexOf('{', typeStart)
+            if (typeOpen < 0) return@mapNotNull null
+            val header = executableCode.substring(typeStart, typeOpen)
+            if (!Regex("""\bimplements\b[^{;]*\bRecipe\s*<""").containsMatchIn(header)) return@mapNotNull null
+            if (Regex("""\bimplements\b[^{;]*\bCraftingRecipe\b""").containsMatchIn(header)) return@mapNotNull null
+            val categoryMethod = Regex(
+                """(?m)\bpublic\s+(?:net\.minecraft\.world\.item\.crafting\.)?CraftingBookCategory\s+category\s*\(\s*\)"""
+            ).containsMatchIn(executableCode)
+            if (!categoryMethod) return@mapNotNull null
+            val packageName = packageNameOf(source)
+            val qualifiedName = if (packageName.isBlank()) className else "$packageName.$className"
+            CustomRecipeBookCategoryRecipe(className, qualifiedName)
+        }
+
+    private fun collectCustomRecipeTypeFields(javaFiles: List<Path>): List<CustomRecipeBookTypeField> =
+        javaFiles.flatMap { javaFile ->
+            val source = javaFile.readText()
+            val executableCode = maskJavaCommentsAndLiterals(source)
+            if (!executableCode.contains("RecipeType<")) return@flatMap emptyList()
+            val packageName = packageNameOf(source)
+            val imports = javaNonStaticImports(source)
+            val owner = javaTopLevelTypeName(source) ?: return@flatMap emptyList()
+            val ownerQualifiedName = if (packageName.isBlank()) owner else "$packageName.$owner"
+            val fields = mutableListOf<CustomRecipeBookTypeField>()
+            Regex(
+                """\bDeferredHolder\s*<\s*RecipeType\s*<\s*\?\s*>\s*,\s*RecipeType\s*<\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>\s*>\s+([A-Z][A-Z0-9_]*)\b"""
+            ).findAll(executableCode).forEach { match ->
+                fields += CustomRecipeBookTypeField(
+                    ownerQualifiedName = ownerQualifiedName,
+                    fieldName = match.groupValues[2],
+                    recipeClassQualifiedName = resolveJavaTypeName(match.groupValues[1], packageName, imports)
+                )
+            }
+            Regex(
+                """\b(?:RegistryObject|Supplier)\s*<\s*RecipeType\s*<\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>\s*>\s+([A-Z][A-Z0-9_]*)\b"""
+            ).findAll(executableCode).forEach { match ->
+                fields += CustomRecipeBookTypeField(
+                    ownerQualifiedName = ownerQualifiedName,
+                    fieldName = match.groupValues[2],
+                    recipeClassQualifiedName = resolveJavaTypeName(match.groupValues[1], packageName, imports)
+                )
+            }
+            fields
+        }
+
+    private fun customRecipeBookFinderAlreadyRegistered(
+        executableCode: String,
+        field: CustomRecipeBookTypeField
+    ): Boolean {
+        if (!executableCode.contains("registerRecipeCategoryFinder(")) return false
+        val normalized = normalizeRecipeTypeExpression(executableCode)
+        val ownerSimpleName = field.ownerQualifiedName.substringAfterLast('.')
+        val candidates = listOf(
+            field.expression,
+            "$ownerSimpleName.${field.fieldName}.get()",
+            "${field.fieldName}.get()"
+        ).map(::normalizeRecipeTypeExpression)
+        return candidates.any { normalized.contains("registerRecipeCategoryFinder($it,") }
+    }
+
+    private fun customRecipeBookCategoryFinderSource(
+        packageName: String,
+        className: String,
+        finders: List<CustomRecipeBookCategoryFinder>
+    ): String {
+        val registrations = finders.joinToString("\n") { finder ->
+            """
+        event.registerRecipeCategoryFinder(${finder.recipeTypeExpression}, recipe -> {
+            if (recipe.value() instanceof ${finder.recipeClassQualifiedName} value) {
+                return fromCraftingCategory(value.category());
+            }
+            throw new IllegalStateException("Recipe type ${finder.recipeTypeExpression} produced " + recipe.value().getClass().getName() + " instead of ${finder.recipeClassQualifiedName}");
+        });
+            """.trimEnd()
+        }
+        return """package $packageName;
+
+import net.minecraft.client.RecipeBookCategories;
+import net.minecraft.world.item.crafting.CraftingBookCategory;
+import net.neoforged.bus.api.IEventBus;
+import net.neoforged.neoforge.client.event.RegisterRecipeBookCategoriesEvent;
+
+public final class $className {
+    private $className() {
+    }
+
+    public static void register(IEventBus modEventBus) {
+        modEventBus.addListener($className::registerRecipeCategories);
+    }
+
+    public static void registerRecipeCategories(RegisterRecipeBookCategoriesEvent event) {
+$registrations
+    }
+
+    private static RecipeBookCategories fromCraftingCategory(CraftingBookCategory category) {
+        return switch (category) {
+            case BUILDING -> RecipeBookCategories.CRAFTING_BUILDING_BLOCKS;
+            case EQUIPMENT -> RecipeBookCategories.CRAFTING_EQUIPMENT;
+            case REDSTONE -> RecipeBookCategories.CRAFTING_REDSTONE;
+            case MISC -> RecipeBookCategories.CRAFTING_MISC;
+        };
+    }
+}
+"""
     }
 
     private fun recipeBookTypeEnumExtensionJsonEntry(extension: LegacyRecipeBookTypeExtension): String {
@@ -31311,11 +31553,13 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             if (!isItemStackReceiver(receiver, offset)) return@rewriteExecutableJavaCallWithOffset null
             val registryAccess = registryAccessAt(offset) ?: return@rewriteExecutableJavaCallWithOffset null
             when (args.size) {
-                0 -> "$receiver.save($registryAccess)"
+                0 -> "$receiver.saveOptional($registryAccess)"
                 1 -> {
                     val tagArg = args[0].trim()
                     if (tagArg == registryAccess || tagArg.endsWith(".registryAccess()")) {
                         null
+                    } else if (tagArg == "new CompoundTag()" || tagArg == "new net.minecraft.nbt.CompoundTag()") {
+                        "$receiver.saveOptional($registryAccess)"
                     } else {
                         "$receiver.save($registryAccess, $tagArg)"
                     }
@@ -31335,9 +31579,9 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         }
         result = rewriteExecutableJavaCallWithOffset(result, "serializeNBT") { receiver, args, offset ->
             if (args.isNotEmpty()) return@rewriteExecutableJavaCallWithOffset null
-                val registryAccess = registryAccessAt(offset) ?: return@rewriteExecutableJavaCallWithOffset null
+            val registryAccess = registryAccessAt(offset) ?: return@rewriteExecutableJavaCallWithOffset null
                 when {
-                isItemStackReceiver(receiver, offset) -> "$receiver.save($registryAccess)"
+                isItemStackReceiver(receiver, offset) -> "$receiver.saveOptional($registryAccess)"
                 isItemStackHandlerReceiver(receiver, offset) -> "$receiver.serializeNBT($registryAccess)"
                 else -> null
             }
@@ -34228,6 +34472,631 @@ public final class LevelReaderCompat {
     }
 }
 """.trimStart()
+
+    private data class EntityRendererRegistration(
+        val entityTypeKey: String,
+        val rendererSimpleName: String,
+        val rendererFqn: String
+    )
+
+    private data class EntityRendererMigrationResult(
+        val source: String,
+        val changed: Boolean,
+        val requiredImports: Set<String>
+    )
+
+    private fun migrateXlintCleanApiBridges(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .filter { file ->
+                !srcDir.relativize(file).toString().replace('\\', '/')
+                    .startsWith("com/modporter/generated/")
+            }
+            .toList()
+        if (javaFiles.isEmpty()) return emptyList()
+
+        var compatPackageCache: String? = null
+        fun compatPackage(): String {
+            val existing = compatPackageCache
+            if (existing != null) return existing
+            val detected = detectRequiredGeneratedCompatPackage(projectDir, "Xlint-clean API bridge helpers")
+            compatPackageCache = detected
+            return detected
+        }
+
+        val types = collectJavaSourceTypes(javaFiles)
+        val rendererRegistrations = collectEntityRendererRegistrations(types)
+        val rendererTargets = collectConcreteEntityRendererTargets(types)
+        val changes = mutableListOf<Change>()
+        var needsDatagenCompat = false
+        var needsDefaultAttributesCompat = false
+
+        javaFiles.forEach { javaFile ->
+            val original = javaFile.readText()
+            var migrated = original
+
+            val rendererMigrated = migrateRendererMapCastsToConcreteRenderersSource(
+                migrated,
+                rendererRegistrations,
+                rendererTargets
+            )
+            if (rendererMigrated.changed) {
+                migrated = rendererMigrated.source
+                rendererMigrated.requiredImports.forEach { importName ->
+                    migrated = addExecutableImportIfMissing(migrated, importName)
+                }
+                migrated = removeUnusedSimpleImport(
+                    migrated,
+                    "net.minecraft.client.renderer.entity.EntityRenderer",
+                    "EntityRenderer"
+                )
+                changes.add(Change(
+                    file = javaFile,
+                    line = 0,
+                    description = "Replace unchecked EntityRenderDispatcher renderer-map cast with source-registered concrete renderer type",
+                    before = "(EntityRenderer<T>) dispatcher.renderers.get(entityType)",
+                    after = "(ConcreteRenderer) dispatcher.renderers.get(entityType)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-xlint-concrete-entity-renderer-cast"
+                ))
+            }
+
+            val datagenMigrated = migrateDeprecatedDatagenCodecConstructorsSource(migrated) { compatPackage() }
+            if (datagenMigrated.first != migrated) {
+                migrated = datagenMigrated.first
+                needsDatagenCompat = needsDatagenCompat || datagenMigrated.second
+                changes.add(Change(
+                    file = javaFile,
+                    line = 0,
+                    description = "Construct deprecated datagen-only placement and loot functions through their official codecs",
+                    before = "deprecated 1.21 datagen builder calls",
+                    after = "DatagenCompat codec-backed builders",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-xlint-datagen-codec-bridges"
+                ))
+            }
+
+            val defaultAttributesMigrated = migrateDefaultAttributesSupplierCastsSource(migrated) { compatPackage() }
+            if (defaultAttributesMigrated.first != migrated) {
+                migrated = defaultAttributesMigrated.first
+                needsDefaultAttributesCompat = needsDefaultAttributesCompat || defaultAttributesMigrated.second
+                changes.add(Change(
+                    file = javaFile,
+                    line = 0,
+                    description = "Replace unchecked DefaultAttributes.getSupplier EntityType cast with AT-backed helper",
+                    before = "DefaultAttributes.getSupplier((EntityType<? extends LivingEntity>) type)",
+                    after = "DefaultAttributesCompat.getSupplier(type)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-xlint-defaultattributes-helper"
+                ))
+            }
+
+            if (migrated != original && !dryRun) {
+                javaFile.writeText(migrated)
+            }
+        }
+
+        if (needsDatagenCompat) {
+            changes.addAll(ensureGeneratedCompatJavaSource(
+                srcDir = srcDir,
+                packageName = compatPackage(),
+                className = "DatagenCompat",
+                source = generatedDatagenCompatSource(compatPackage()),
+                dryRun = dryRun,
+                description = "Generate codec-backed datagen helper for deprecated 1.21 builders",
+                before = "deprecated datagen builder APIs",
+                after = "DatagenCompat",
+                ruleId = "struct-xlint-datagen-codec-bridges"
+            ))
+        }
+        if (needsDefaultAttributesCompat) {
+            changes.addAll(ensureGeneratedCompatJavaSource(
+                srcDir = srcDir,
+                packageName = compatPackage(),
+                className = "DefaultAttributesCompat",
+                source = generatedDefaultAttributesCompatSource(compatPackage()),
+                dryRun = dryRun,
+                description = "Generate AT-backed DefaultAttributes supplier helper",
+                before = "unchecked EntityType<? extends LivingEntity> cast",
+                after = "DefaultAttributesCompat.getSupplier(EntityType<?>)",
+                ruleId = "struct-xlint-defaultattributes-helper"
+            ))
+        }
+
+        return changes
+    }
+
+    private fun ensureGeneratedCompatJavaSource(
+        srcDir: Path,
+        packageName: String,
+        className: String,
+        source: String,
+        dryRun: Boolean,
+        description: String,
+        before: String,
+        after: String,
+        ruleId: String
+    ): List<Change> {
+        val helperFile = srcDir.resolve(packageName.replace('.', '/')).resolve("$className.java")
+        val previous = if (helperFile.exists()) helperFile.readText() else null
+        if (previous == source) return emptyList()
+        if (!dryRun) {
+            helperFile.parent.createDirectories()
+            helperFile.writeText(source)
+        }
+        return listOf(Change(
+            file = helperFile,
+            line = 0,
+            description = description,
+            before = before,
+            after = after,
+            confidence = Confidence.HIGH,
+            ruleId = ruleId
+        ))
+    }
+
+    private fun collectEntityRendererRegistrations(types: List<JavaSourceType>): Map<String, EntityRendererRegistration> {
+        val byEntityType = linkedMapOf<String, EntityRendererRegistration>()
+        val typesBySimpleName = types.groupBy { it.className }
+        types.forEach { type ->
+            val imports = javaImportMap(type.source)
+            val executableCode = maskJavaCommentsAndLiterals(type.source)
+            var cursor = 0
+            while (true) {
+                val tokenIndex = executableCode.indexOf(".registerEntityRenderer(", cursor)
+                if (tokenIndex < 0) break
+                val openParen = tokenIndex + ".registerEntityRenderer".length
+                val closeParen = findMatchingParen(executableCode, openParen)
+                if (closeParen < 0) {
+                    cursor = tokenIndex + ".registerEntityRenderer(".length
+                    continue
+                }
+                val args = splitTopLevelJavaArgs(type.source.substring(openParen + 1, closeParen))
+                if (args.size >= 2) {
+                    val rendererRef = Regex("""^\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*::\s*new\s*$""")
+                        .find(args[1])
+                        ?.groupValues
+                        ?.get(1)
+                    val rendererFqn = rendererRef?.let {
+                        resolveProjectJavaTypeReference(it, type.packageName, imports, typesBySimpleName)
+                    }
+                    if (rendererRef != null && rendererFqn != null) {
+                        val registration = EntityRendererRegistration(
+                            entityTypeKey = normalizedJavaExpressionKey(args[0]),
+                            rendererSimpleName = rendererRef.substringAfterLast('.'),
+                            rendererFqn = rendererFqn
+                        )
+                        byEntityType.putIfAbsent(registration.entityTypeKey, registration)
+                    }
+                }
+                cursor = closeParen + 1
+            }
+        }
+        return byEntityType
+    }
+
+    private fun collectConcreteEntityRendererTargets(types: List<JavaSourceType>): Map<String, String> {
+        val targets = linkedMapOf<String, String>()
+        val knownRendererBases = setOf(
+            "EntityRenderer",
+            "LivingEntityRenderer",
+            "MobRenderer",
+            "AgeableMobRenderer",
+            "HumanoidMobRenderer"
+        )
+        types.forEach { type ->
+            val executableCode = maskJavaCommentsAndLiterals(type.source)
+            val classMatch = Regex(
+                """(?m)\bclass\s+${Regex.escape(type.className)}(?:\s*<[^>{}]+>)?\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*<\s*([^,>]+)"""
+            ).find(executableCode) ?: return@forEach
+            val superSimpleName = classMatch.groupValues[1].substringAfterLast('.')
+            if (superSimpleName !in knownRendererBases) return@forEach
+            targets[type.fqn] = normalizedJavaTypeKey(classMatch.groupValues[2])
+        }
+        return targets
+    }
+
+    private fun migrateRendererMapCastsToConcreteRenderersSource(
+        source: String,
+        registrations: Map<String, EntityRendererRegistration>,
+        rendererTargets: Map<String, String>
+    ): EntityRendererMigrationResult {
+        if (registrations.isEmpty() || !source.contains("renderers.get(") || !source.contains("EntityRenderer<")) {
+            return EntityRendererMigrationResult(source, changed = false, requiredImports = emptySet())
+        }
+        val packageName = packageNameOf(source)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val id = """[A-Za-z_$][\w$]*"""
+        val declarationPattern = Regex(
+            """(?m)^([ \t]*)(final\s+)?(?:net\.minecraft\.client\.renderer\.entity\.)?EntityRenderer\s*<\s*([^>\r\n;]+?)\s*>\s+($id)\s*=\s*\(\s*(?:net\.minecraft\.client\.renderer\.entity\.)?EntityRenderer\s*<\s*([^>\r\n;]+?)\s*>\s*\)\s*"""
+        )
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        val imports = linkedSetOf<String>()
+        for (match in declarationPattern.findAll(executableCode)) {
+            val expressionStart = match.range.last + 1
+            val semicolon = findJavaStatementSemicolon(executableCode, expressionStart)
+            if (semicolon < 0) continue
+            val renderersGetIndex = executableCode.indexOf(".renderers.get(", expressionStart)
+                .takeIf { it >= 0 && it < semicolon }
+                ?: continue
+            val openParen = renderersGetIndex + ".renderers.get".length
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0 || closeParen > semicolon) continue
+            val entityTypeKey = normalizedJavaExpressionKey(source.substring(openParen + 1, closeParen))
+            val registration = registrations[entityTypeKey] ?: continue
+            val expectedTarget = normalizedJavaTypeKey(match.groupValues[3])
+            val castTarget = normalizedJavaTypeKey(match.groupValues[5])
+            if (expectedTarget != castTarget) continue
+            val rendererTarget = rendererTargets[registration.rendererFqn] ?: continue
+            if (rendererTarget != expectedTarget) continue
+
+            val rendererPackage = registration.rendererFqn.substringBeforeLast('.', "")
+            val rendererReference = registration.rendererSimpleName
+            if (rendererPackage.isNotBlank() && rendererPackage != packageName) {
+                imports += registration.rendererFqn
+            }
+            val expression = source.substring(expressionStart, semicolon).trim()
+            val replacement = buildString {
+                append(match.groupValues[1])
+                append(match.groupValues[2])
+                append(rendererReference)
+                append(' ')
+                append(match.groupValues[4])
+                append(" = (")
+                append(rendererReference)
+                append(") ")
+                append(expression)
+                append(';')
+            }
+            edits += match.range.first..semicolon to replacement
+        }
+        if (edits.isEmpty()) return EntityRendererMigrationResult(source, changed = false, requiredImports = emptySet())
+        var result = source
+        for ((range, replacement) in edits.asReversed()) {
+            result = result.substring(0, range.first) + replacement + result.substring(range.last + 1)
+        }
+        return EntityRendererMigrationResult(result, changed = true, requiredImports = imports)
+    }
+
+    private fun migrateDeprecatedDatagenCodecConstructorsSource(
+        source: String,
+        generatedCompatPackage: () -> String
+    ): Pair<String, Boolean> {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("CopyCustomDataFunction.copyData(") &&
+            !executableCode.contains("SetCustomDataFunction.setCustomData(") &&
+            !executableCode.contains("CountOnEveryLayerPlacement.of(")) {
+            return source to false
+        }
+
+        var result = source
+        var helperNeeded = false
+        val copyDataMigrated = migrateCopyCustomDataBuilderChains(result)
+        result = copyDataMigrated.first
+        helperNeeded = helperNeeded || copyDataMigrated.second
+        val countOnEveryLayerMigrated = migrateCountOnEveryLayerPlacementCalls(result)
+        result = countOnEveryLayerMigrated.first
+        helperNeeded = helperNeeded || countOnEveryLayerMigrated.second
+        result = rewriteExecutableJavaCall(result, "copy") { receiver, args ->
+            if (args.size != 3 || !isBlockEntityCopyCustomDataBuilder(receiver)) return@rewriteExecutableJavaCall null
+            val strategy = copyCustomDataMergeStrategyName(args[2]) ?: return@rewriteExecutableJavaCall null
+            helperNeeded = true
+            "DatagenCompat.copyBlockEntityCustomData(${args[0].trim()}, ${args[1].trim()}, \"$strategy\")"
+        }
+        result = rewriteExecutableJavaCall(result, "setCustomData") { receiver, args ->
+            if (args.size != 1 || !receiver.trim().endsWith("SetCustomDataFunction")) return@rewriteExecutableJavaCall null
+            helperNeeded = true
+            "DatagenCompat.setCustomData(${args[0].trim()})"
+        }
+        result = rewriteExecutableJavaCall(result, "of") { receiver, args ->
+            if (args.size != 1 || !receiver.trim().endsWith("CountOnEveryLayerPlacement")) return@rewriteExecutableJavaCall null
+            helperNeeded = true
+            "DatagenCompat.countOnEveryLayer(${args[0].trim()})"
+        }
+
+        if (!helperNeeded) return source to false
+        result = addExecutableImportIfMissing(result, "${generatedCompatPackage()}.DatagenCompat")
+        result = removeUnusedSimpleImport(
+            result,
+            "net.minecraft.world.level.storage.loot.providers.nbt.ContextNbtProvider",
+            "ContextNbtProvider"
+        )
+        result = removeUnusedSimpleImport(
+            result,
+            "net.minecraft.world.level.storage.loot.functions.CopyCustomDataFunction",
+            "CopyCustomDataFunction"
+        )
+        result = removeUnusedSimpleImport(
+            result,
+            "net.minecraft.world.level.storage.loot.functions.SetCustomDataFunction",
+            "SetCustomDataFunction"
+        )
+        result = removeUnusedSimpleImport(
+            result,
+            "net.minecraft.world.level.levelgen.placement.CountOnEveryLayerPlacement",
+            "CountOnEveryLayerPlacement"
+        )
+        return result to true
+    }
+
+    private fun migrateCopyCustomDataBuilderChains(source: String): Pair<String, Boolean> {
+        var result = source
+        var changed = false
+        var cursor = 0
+        val tokens = listOf(
+            "CopyCustomDataFunction.copyData(",
+            "net.minecraft.world.level.storage.loot.functions.CopyCustomDataFunction.copyData("
+        )
+        while (cursor < result.length) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenMatch = tokens.mapNotNull { token ->
+                val index = executableCode.indexOf(token, cursor)
+                if (index >= 0) index to token else null
+            }.minByOrNull { it.first } ?: break
+            val tokenIndex = tokenMatch.first
+            val token = tokenMatch.second
+            val copyDataOpen = tokenIndex + token.removeSuffix("(").length
+            val copyDataClose = findMatchingParen(executableCode, copyDataOpen)
+            if (copyDataClose < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val providerArgs = splitTopLevelJavaArgs(result.substring(copyDataOpen + 1, copyDataClose))
+            if (providerArgs.size != 1 ||
+                providerArgs[0].trim() !in setOf(
+                    "ContextNbtProvider.BLOCK_ENTITY",
+                    "net.minecraft.world.level.storage.loot.providers.nbt.ContextNbtProvider.BLOCK_ENTITY"
+                )) {
+                cursor = copyDataClose + 1
+                continue
+            }
+            var copyTokenIndex = copyDataClose + 1
+            while (copyTokenIndex < executableCode.length && executableCode[copyTokenIndex].isWhitespace()) copyTokenIndex++
+            if (!executableCode.startsWith(".copy(", copyTokenIndex)) {
+                cursor = copyDataClose + 1
+                continue
+            }
+            val copyOpen = copyTokenIndex + ".copy".length
+            val copyClose = findMatchingParen(executableCode, copyOpen)
+            if (copyClose < 0) {
+                cursor = copyTokenIndex + ".copy(".length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(copyOpen + 1, copyClose))
+            if (args.size != 3) {
+                cursor = copyClose + 1
+                continue
+            }
+            val strategy = copyCustomDataMergeStrategyName(args[2])
+            if (strategy == null) {
+                cursor = copyClose + 1
+                continue
+            }
+            val replacement = "DatagenCompat.copyBlockEntityCustomData(${args[0].trim()}, ${args[1].trim()}, \"$strategy\")"
+            result = result.substring(0, tokenIndex) + replacement + result.substring(copyClose + 1)
+            cursor = tokenIndex + replacement.length
+            changed = true
+        }
+        return result to changed
+    }
+
+    private fun migrateCountOnEveryLayerPlacementCalls(source: String): Pair<String, Boolean> {
+        var result = source
+        var changed = false
+        var cursor = 0
+        val tokens = listOf(
+            "CountOnEveryLayerPlacement.of(",
+            "net.minecraft.world.level.levelgen.placement.CountOnEveryLayerPlacement.of("
+        )
+        while (cursor < result.length) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenMatch = tokens.mapNotNull { token ->
+                val index = executableCode.indexOf(token, cursor)
+                if (index >= 0) index to token else null
+            }.minByOrNull { it.first } ?: break
+            val tokenIndex = tokenMatch.first
+            val token = tokenMatch.second
+            val openParen = tokenIndex + token.removeSuffix("(").length
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            if (args.size != 1) {
+                cursor = closeParen + 1
+                continue
+            }
+            val replacement = "DatagenCompat.countOnEveryLayer(${args[0].trim()})"
+            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
+            cursor = tokenIndex + replacement.length
+            changed = true
+        }
+        return result to changed
+    }
+
+    private fun isBlockEntityCopyCustomDataBuilder(receiver: String): Boolean {
+        val trimmed = receiver.trim()
+        if (!trimmed.startsWith("CopyCustomDataFunction.copyData(") &&
+            !trimmed.startsWith("net.minecraft.world.level.storage.loot.functions.CopyCustomDataFunction.copyData(")) {
+            return false
+        }
+        val openParen = trimmed.indexOf("copyData(").takeIf { it >= 0 }?.let { it + "copyData".length } ?: return false
+        val closeParen = findMatchingParen(trimmed, openParen)
+        if (closeParen < 0 || trimmed.substring(closeParen + 1).isNotBlank()) return false
+        val args = splitTopLevelJavaArgs(trimmed.substring(openParen + 1, closeParen))
+        if (args.size != 1) return false
+        val sourceProvider = args[0].trim()
+        return sourceProvider == "ContextNbtProvider.BLOCK_ENTITY" ||
+            sourceProvider == "net.minecraft.world.level.storage.loot.providers.nbt.ContextNbtProvider.BLOCK_ENTITY"
+    }
+
+    private fun copyCustomDataMergeStrategyName(argument: String): String? {
+        val trimmed = argument.trim()
+        val match = Regex("""^(?:net\.minecraft\.world\.level\.storage\.loot\.functions\.)?CopyCustomDataFunction\.MergeStrategy\.([A-Z_]+)$""")
+            .find(trimmed)
+            ?: return null
+        return match.groupValues[1].lowercase()
+    }
+
+    private fun migrateDefaultAttributesSupplierCastsSource(
+        source: String,
+        generatedCompatPackage: () -> String
+    ): Pair<String, Boolean> {
+        if (!source.contains("DefaultAttributes.getSupplier(")) return source to false
+        var helperNeeded = false
+        var result = rewriteExecutableJavaCall(source, "getSupplier") { receiver, args ->
+            if (args.size != 1 || !receiver.trim().endsWith("DefaultAttributes")) return@rewriteExecutableJavaCall null
+            val entityTypeExpression = entityTypeExtendsLivingEntityCastArgument(args[0])
+                ?: return@rewriteExecutableJavaCall null
+            helperNeeded = true
+            "DefaultAttributesCompat.getSupplier($entityTypeExpression)"
+        }
+        if (!helperNeeded) return source to false
+        result = addExecutableImportIfMissing(result, "${generatedCompatPackage()}.DefaultAttributesCompat")
+        result = removeUnusedSimpleImport(
+            result,
+            "net.minecraft.world.entity.ai.attributes.DefaultAttributes",
+            "DefaultAttributes"
+        )
+        return result to true
+    }
+
+    private fun entityTypeExtendsLivingEntityCastArgument(argument: String): String? =
+        Regex(
+            """^\s*\(\s*(?:net\.minecraft\.world\.entity\.)?EntityType\s*<\s*\?\s+extends\s+(?:net\.minecraft\.world\.entity\.)?LivingEntity\s*>\s*\)\s*(.+?)\s*$""",
+            RegexOption.DOT_MATCHES_ALL
+        ).find(argument)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
+
+    private fun generatedDatagenCompatSource(packageName: String): String =
+        """
+package $packageName;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.mojang.serialization.JsonOps;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.world.level.levelgen.placement.PlacementModifier;
+import net.minecraft.world.level.storage.loot.functions.LootItemFunction;
+import net.minecraft.world.level.storage.loot.functions.LootItemFunctions;
+
+public final class DatagenCompat {
+    private DatagenCompat() {
+    }
+
+    public static PlacementModifier countOnEveryLayer(int count) {
+        JsonObject json = new JsonObject();
+        json.addProperty("type", "minecraft:count_on_every_layer");
+        json.addProperty("count", count);
+        return PlacementModifier.CODEC.parse(JsonOps.INSTANCE, json).getOrThrow();
+    }
+
+    public static LootItemFunction.Builder copyBlockEntityCustomData(String sourcePath, String targetPath, String mergeStrategy) {
+        return () -> {
+            JsonObject operation = new JsonObject();
+            operation.addProperty("source", sourcePath);
+            operation.addProperty("target", targetPath);
+            operation.addProperty("op", mergeStrategy);
+            JsonArray operations = new JsonArray();
+            operations.add(operation);
+            JsonObject json = new JsonObject();
+            json.addProperty("function", "minecraft:copy_custom_data");
+            json.addProperty("source", "block_entity");
+            json.add("ops", operations);
+            return LootItemFunctions.TYPED_CODEC.parse(JsonOps.INSTANCE, json).getOrThrow();
+        };
+    }
+
+    public static LootItemFunction.Builder setCustomData(CompoundTag tag) {
+        return () -> {
+            JsonObject json = new JsonObject();
+            json.addProperty("function", "minecraft:set_custom_data");
+            json.addProperty("tag", tag.toString());
+            return LootItemFunctions.TYPED_CODEC.parse(JsonOps.INSTANCE, json).getOrThrow();
+        };
+    }
+}
+""".trimStart()
+
+    private fun generatedDefaultAttributesCompatSource(packageName: String): String =
+        """
+package $packageName;
+
+import java.util.Map;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
+import net.minecraft.world.entity.ai.attributes.DefaultAttributes;
+import net.neoforged.neoforge.common.CommonHooks;
+
+public final class DefaultAttributesCompat {
+    private DefaultAttributesCompat() {
+    }
+
+    public static AttributeSupplier getSupplier(EntityType<?> entityType) {
+        AttributeSupplier supplier = forgeAttributes().get(entityType);
+        return supplier != null ? supplier : DefaultAttributes.SUPPLIERS.get(entityType);
+    }
+
+    @Deprecated
+    private static Map<EntityType<? extends LivingEntity>, AttributeSupplier> forgeAttributes() {
+        return CommonHooks.getAttributesView();
+    }
+}
+""".trimStart()
+
+    private fun javaImportMap(source: String): Map<String, String> {
+        val imports = linkedMapOf<String, String>()
+        Regex("""(?m)^[ \t]*import\s+(?!static\b)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+            .findAll(maskJavaCommentsAndLiterals(source))
+            .forEach { match ->
+                val fqn = match.groupValues[1]
+                imports[fqn.substringAfterLast('.')] = fqn
+            }
+        return imports
+    }
+
+    private fun resolveProjectJavaTypeReference(
+        reference: String,
+        packageName: String,
+        imports: Map<String, String>,
+        typesBySimpleName: Map<String, List<JavaSourceType>>
+    ): String? {
+        val trimmed = reference.trim()
+        if (trimmed.isBlank()) return null
+        if (trimmed.contains('.')) {
+            val firstSegment = trimmed.substringBefore('.')
+            imports[firstSegment]?.let { imported ->
+                return imported + "." + trimmed.substringAfter('.')
+            }
+            if (firstSegment.firstOrNull()?.isLowerCase() == true) return trimmed
+            val samePackage = if (packageName.isBlank()) trimmed else "$packageName.$trimmed"
+            if (typesBySimpleName[trimmed.substringAfterLast('.')]?.any { it.fqn == samePackage } == true) {
+                return samePackage
+            }
+            return null
+        }
+        imports[trimmed]?.let { return it }
+        val samePackage = if (packageName.isBlank()) trimmed else "$packageName.$trimmed"
+        if (typesBySimpleName[trimmed]?.any { it.fqn == samePackage } == true) return samePackage
+        return typesBySimpleName[trimmed]?.singleOrNull()?.fqn
+    }
+
+    private fun normalizedJavaExpressionKey(expression: String): String =
+        expression.replace(Regex("""\s+"""), "")
+
+    private fun normalizedJavaTypeKey(type: String): String =
+        type.trim()
+            .removePrefix("? extends ")
+            .removePrefix("? super ")
+            .substringBefore('<')
+            .substringAfterLast('.')
+            .replace(Regex("""\s+"""), "")
 
     private fun migrateDeprecatedStructureGenerationHelpers(source: String): String {
         val executableCode = maskJavaCommentsAndLiterals(source)

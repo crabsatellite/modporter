@@ -6,10 +6,17 @@ import com.modporter.core.pipeline.Confidence
 import com.modporter.mapping.MappingDatabase
 import com.modporter.registry.PipelineOptions
 import com.modporter.registry.PipelineRegistry
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.awt.image.BufferedImage
+import javax.imageio.ImageIO
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -691,6 +698,84 @@ class RealModBenchmarkTest {
         assertTrue(
             audit.findings.any { it.contains("Missing sound for event: example:entity.sentry.ambient") },
             "Porter-lost sound definitions must remain fatal"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allowlists source inherited missing sound file`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeMissingSoundFileEvidence(projectDir, includeSoundFile = false)
+        writeMissingSoundFileEvidence(sourceDir, includeSoundFile = false)
+        val logFile = tempDir.resolve("missing-sound-file-inherited.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-3/WARN] [minecraft/SoundManager]: File example:sounds/entity/sentry/ambient.ogg does not exist, cannot add it to event example:entity.sentry.ambient
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected source-inherited missing sound file to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("declare sound file 'example:entity/sentry/ambient'") },
+            "Expected sound-file evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps missing sound file warning when input has file`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeMissingSoundFileEvidence(projectDir, includeSoundFile = false)
+        writeMissingSoundFileEvidence(sourceDir, includeSoundFile = true)
+        val logFile = tempDir.resolve("missing-sound-file-regression.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-3/WARN] [minecraft/SoundManager]: File example:sounds/entity/sentry/ambient.ogg does not exist, cannot add it to event example:entity.sentry.ambient
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("example:sounds/entity/sentry/ambient.ogg") },
+            "Porter-lost sound files must remain fatal"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allowlists source inherited texture mip size`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeTextureMipEvidence(projectDir, width = 17, height = 17)
+        writeTextureMipEvidence(sourceDir, width = 17, height = 17)
+        val logFile = tempDir.resolve("texture-mip-inherited.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-1/WARN] [minecraft/SpriteLoader]: Texture example:block/fluids/liquid_gold_overlay with size 17x17 limits mip level from 4 to 0
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected source-inherited texture mip warning to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("inherited size 17x17") },
+            "Expected texture-size evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps texture mip warning when input dimensions differ`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeTextureMipEvidence(projectDir, width = 17, height = 17)
+        writeTextureMipEvidence(sourceDir, width = 16, height = 16)
+        val logFile = tempDir.resolve("texture-mip-regression.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-1/WARN] [minecraft/SpriteLoader]: Texture example:block/fluids/liquid_gold_overlay with size 17x17 limits mip level from 4 to 0
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Texture example:block/fluids/liquid_gold_overlay") },
+            "Porter-changed texture dimensions must remain fatal"
         )
     }
 
@@ -2037,6 +2122,34 @@ class RealModBenchmarkTest {
         resourceDir.resolve("sounds.json").writeText(soundsJson + "\n")
     }
 
+    private fun writeMissingSoundFileEvidence(projectDir: Path, includeSoundFile: Boolean) {
+        val resourceDir = projectDir.resolve("src/main/resources/assets/example")
+        val soundDir = resourceDir.resolve("sounds/entity/sentry")
+        resourceDir.createDirectories()
+        soundDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        resourceDir.resolve("sounds.json").writeText("""
+            {
+              "entity.sentry.ambient": {
+                "sounds": [
+                  "example:entity/sentry/ambient"
+                ]
+              }
+            }
+        """.trimIndent() + "\n")
+        if (includeSoundFile) {
+            soundDir.resolve("ambient.ogg").writeText("not a real ogg; only existence matters to the audit evidence\n")
+        }
+    }
+
+    private fun writeTextureMipEvidence(projectDir: Path, width: Int, height: Int) {
+        val textureDir = projectDir.resolve("src/main/resources/assets/example/textures/block/fluids")
+        textureDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        val image = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+        ImageIO.write(image, "png", textureDir.resolve("liquid_gold_overlay.png").toFile())
+    }
+
     private fun terminateProcessTree(process: Process, forcibly: Boolean) {
         val descendants = process.toHandle().descendants().iterator().asSequence().toList().asReversed()
         for (handle in descendants) {
@@ -2838,6 +2951,12 @@ class RealModBenchmarkTest {
         sourceInheritedMissingSoundEvidence(lines[index], evidenceCache)?.let {
             return "source-inherited missing sound definition warning ($it)"
         }
+        sourceInheritedMissingSoundFileEvidence(lines[index], evidenceCache)?.let {
+            return "source-inherited missing sound file warning ($it)"
+        }
+        sourceInheritedTextureMipEvidence(lines[index], evidenceCache)?.let {
+            return "source-inherited texture mip warning ($it)"
+        }
         return null
     }
 
@@ -3015,6 +3134,49 @@ class RealModBenchmarkTest {
         if (resourceDefinesSoundEvent(project, namespace, soundPath)) return null
         if (resourceDefinesSoundEvent(sourceDir, namespace, soundPath)) return null
         return "input and converted sources declare sound event '$namespace:$soundPath' but their sounds.json resources omit it"
+    }
+
+    private fun sourceInheritedMissingSoundFileEvidence(
+        line: String,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val match = Regex("""File ([a-z0-9_.-]+):sounds/([a-z0-9_./-]+)\.ogg does not exist, cannot add it to event ([a-z0-9_.-]+):([a-z0-9_./-]+)""")
+            .find(line)
+            ?: return null
+        val fileNamespace = match.groupValues[1]
+        val soundFilePath = match.groupValues[2]
+        val eventNamespace = match.groupValues[3]
+        val eventPath = match.groupValues[4]
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (fileNamespace != targetMod || eventNamespace != targetMod || fileNamespace != eventNamespace) return null
+        val soundReference = "$fileNamespace:$soundFilePath"
+        if (!resourceDefinesSoundFileReference(project, eventNamespace, eventPath, soundReference)) return null
+        if (!resourceDefinesSoundFileReference(sourceDir, eventNamespace, eventPath, soundReference)) return null
+        if (resourceHasSoundFile(project, fileNamespace, soundFilePath)) return null
+        if (resourceHasSoundFile(sourceDir, fileNamespace, soundFilePath)) return null
+        return "input and converted resources declare sound file '$soundReference' for event '$eventNamespace:$eventPath' but both omit sounds/$soundFilePath.ogg"
+    }
+
+    private fun sourceInheritedTextureMipEvidence(
+        line: String,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val match = Regex("""Texture ([a-z0-9_.-]+):([a-z0-9_./-]+) with size (\d+)x(\d+) limits mip level from \d+ to \d+""")
+            .find(line)
+            ?: return null
+        val namespace = match.groupValues[1]
+        val texturePath = match.groupValues[2]
+        val expectedSize = ImageSize(match.groupValues[3].toInt(), match.groupValues[4].toInt())
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (namespace != targetMod) return null
+        val projectSize = resourceTextureSize(project, namespace, texturePath) ?: return null
+        val sourceSize = resourceTextureSize(sourceDir, namespace, texturePath) ?: return null
+        if (projectSize != expectedSize || sourceSize != expectedSize) return null
+        return "input and converted resources contain texture '$namespace:$texturePath' with inherited size ${expectedSize.width}x${expectedSize.height}"
     }
 
     private fun externalDependencyCreativeTabDuplicateEvidence(
@@ -3280,11 +3442,62 @@ class RealModBenchmarkTest {
             .any { file -> runCatching { keyPattern.containsMatchIn(file.readText()) }.getOrDefault(false) }
     }
 
-    private fun soundDefinitionFiles(projectDir: Path, namespace: String): List<Path> =
+    private fun resourceDefinesSoundFileReference(
+        projectDir: Path,
+        namespace: String,
+        eventPath: String,
+        soundReference: String
+    ): Boolean =
+        soundDefinitionFiles(projectDir, namespace)
+            .filter { it.exists() }
+            .any { file ->
+                runCatching {
+                    val root = Json.parseToJsonElement(file.readText()).jsonObject
+                    val event = root[eventPath]?.jsonObject ?: return@runCatching false
+                    val sounds = event["sounds"]?.jsonArray ?: return@runCatching false
+                    sounds.any { entry ->
+                        val rawName = when {
+                            entry is kotlinx.serialization.json.JsonPrimitive -> entry.contentOrNull
+                            else -> entry.jsonObject["name"]?.jsonPrimitive?.contentOrNull
+                        } ?: return@any false
+                        normalizeSoundReference(namespace, rawName) == soundReference
+                    }
+                }.getOrDefault(false)
+            }
+
+    private fun normalizeSoundReference(namespace: String, soundName: String): String =
+        if (soundName.contains(":")) soundName else "$namespace:$soundName"
+
+    private fun resourceHasSoundFile(projectDir: Path, namespace: String, soundFilePath: String): Boolean =
+        resourceRoots(projectDir).any { root ->
+            root.resolve("assets/$namespace/sounds/$soundFilePath.ogg").exists()
+        }
+
+    private data class ImageSize(val width: Int, val height: Int)
+
+    private fun resourceTextureSize(projectDir: Path, namespace: String, texturePath: String): ImageSize? =
+        resourceRoots(projectDir)
+            .asSequence()
+            .map { it.resolve("assets/$namespace/textures/$texturePath.png") }
+            .firstNotNullOfOrNull { file ->
+                if (!file.exists()) {
+                    null
+                } else {
+                    runCatching {
+                        val image = ImageIO.read(file.toFile()) ?: return@runCatching null
+                        ImageSize(image.width, image.height)
+                    }.getOrNull()
+                }
+            }
+
+    private fun resourceRoots(projectDir: Path): List<Path> =
         listOf(
-            projectDir.resolve("src/main/resources/assets/$namespace/sounds.json"),
-            projectDir.resolve("src/generated/resources/assets/$namespace/sounds.json")
-        )
+            projectDir.resolve("src/main/resources"),
+            projectDir.resolve("src/generated/resources")
+        ).filter { it.exists() }
+
+    private fun soundDefinitionFiles(projectDir: Path, namespace: String): List<Path> =
+        resourceRoots(projectDir).map { it.resolve("assets/$namespace/sounds.json") }
 
     private fun benchmarkInputSourceDir(projectDir: Path): Path? {
         val caseId = projectDir.fileName?.toString() ?: return null

@@ -3502,6 +3502,40 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `adds default attributes suppliers access transformer when generated helper uses supplier map`() {
+        val projectDir = tempDir.resolve("default-attributes-suppliers-at")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.neoforged.moddev' version '2.0.107'
+            }
+        """.trimIndent())
+        val srcDir = projectDir.resolve("src/main/java/com/modporter/generated/example/compat")
+        srcDir.createDirectories()
+        srcDir.resolve("DefaultAttributesCompat.java").writeText("""
+            package com.modporter.generated.example.compat;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.ai.attributes.DefaultAttributes;
+
+            public final class DefaultAttributesCompat {
+                public static Object get(EntityType<?> type) {
+                    return DefaultAttributes.SUPPLIERS.get(type);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        val build = projectDir.resolve("build.gradle").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.world.entity.ai.attributes.DefaultAttributes SUPPLIERS"), at)
+        assertTrue(build.contains("accessTransformers"), build)
+    }
+
+    @Test
     fun `adds fired weapon arrow access transformer when migrated projectile source needs it`() {
         val projectDir = tempDir.resolve("projectile-fired-weapon-at")
         val srcDir = projectDir.resolve("src/main/java/com/example")

@@ -135,6 +135,7 @@ For the full success gate, prefer:
 | Sakura Mod | `local` | Larger local baseline with broad API coverage |
 | Twilight Forest | `git` | Public large-mod target from official `TeamTwilight/twilightforest` branch `1.20.1`; compare failures against their official `1.21.1` branch |
 | The Aether | `git` | Public large-mod target from official `The-Aether-Team/The-Aether` branch `1.20.1-develop` |
+| Beyond the Veil | `git` | Public large-mod target from `valeriotor/Beyond-The-Veil` branch `1.20` |
 | Radios, LeaningTower, VillagerTourism, ping_system | `missing` | Known future targets; skipped unless strict mode is enabled |
 
 The intended iteration loop is:

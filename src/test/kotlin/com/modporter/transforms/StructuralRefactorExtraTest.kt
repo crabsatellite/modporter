@@ -2202,11 +2202,16 @@ class StructuralRefactorExtraTest {
             import net.neoforged.bus.api.SubscribeEvent;
             import net.neoforged.fml.common.EventBusSubscriber;
             import net.neoforged.neoforge.event.entity.EntityAttributeCreationEvent;
+            import net.neoforged.neoforge.event.entity.RegisterSpawnPlacementsEvent;
 
             @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
             public class EntityRegistry {
                 @SubscribeEvent
                 public static void registerEntityAttributes(EntityAttributeCreationEvent event) {
+                }
+
+                @SubscribeEvent
+                public static void registerSpawnPlacements(RegisterSpawnPlacementsEvent event) {
                 }
             }
         """.trimIndent())
@@ -2226,12 +2231,16 @@ class StructuralRefactorExtraTest {
         StructuralRefactorPass().apply(tempDir)
 
         val main = srcDir.resolve("ExampleMod.java").readText()
-        val listener = "modEventBus.addListener(com.example.entity.EntityRegistry::registerEntityAttributes);"
-        val listenerIndex = main.indexOf(listener)
+        val attributeListener = "modEventBus.addListener(com.example.entity.EntityRegistry::registerEntityAttributes);"
+        val spawnListener = "modEventBus.addListener(com.example.entity.EntityRegistry::registerSpawnPlacements);"
+        val listenerIndex = main.indexOf(attributeListener)
+        val spawnListenerIndex = main.indexOf(spawnListener)
         val guardIndex = main.indexOf("if (FMLLoader.getDist() == Dist.CLIENT)")
         assertTrue(listenerIndex > 0, main)
+        assertTrue(spawnListenerIndex > 0, main)
         assertTrue(listenerIndex < guardIndex, main)
-        assertTrue(main.contains("IEventBus modEventBus = modContainer.getEventBus();\n        $listener\n        if (FMLLoader.getDist() == Dist.CLIENT)"), main)
+        assertTrue(spawnListenerIndex < guardIndex, main)
+        assertTrue(main.contains("IEventBus modEventBus = modContainer.getEventBus();\n        $spawnListener\n        $attributeListener\n        if (FMLLoader.getDist() == Dist.CLIENT)"), main)
     }
 
     @Test
@@ -7520,8 +7529,8 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("Optional.of(tag).map(tag -> ItemStack.parseOptional(registries, tag));"), migrated)
         assertTrue(migrated.contains("ContainerHelper.saveAllItems(tag, this.items, registries);"), migrated)
         assertTrue(migrated.contains("ContainerHelper.loadAllItems(tag, this.items, registries);"), migrated)
-        assertTrue(migrated.contains("tag.put(\"Stack\", stack.save(registries, new CompoundTag()));"), migrated)
-        assertTrue(migrated.contains("tag.put(\"Held\", this.heldStack.save(registries));"), migrated)
+        assertTrue(migrated.contains("tag.put(\"Stack\", stack.saveOptional(registries));"), migrated)
+        assertTrue(migrated.contains("tag.put(\"Held\", this.heldStack.saveOptional(registries));"), migrated)
         assertTrue(migrated.contains("tag.put(\"Handler\", handler.serializeNBT(registries));"), migrated)
         assertTrue(migrated.contains("handler.deserializeNBT(registries, tag.getCompound(\"Handler\"));"), migrated)
         assertFalse(migrated.contains("RegistryAccess.EMPTY"), migrated)
@@ -7635,7 +7644,7 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(data.contains("import net.minecraft.core.HolderLookup;"), data)
         assertTrue(data.contains("public CompoundTag saveToNBT(CompoundTag tag, HolderLookup.Provider registries)"), data)
         assertTrue(data.contains("public void loadFromNBT(CompoundTag tag, HolderLookup.Provider registries)"), data)
-        assertTrue(data.contains("heldStack.save(registries, new CompoundTag())"), data)
+        assertTrue(data.contains("heldStack.saveOptional(registries)"), data)
         assertTrue(data.contains("ItemStack.parseOptional(registries, tag.getCompound(\"held\"))"), data)
         assertTrue(provider.contains("public CompoundTag serializeNBT(net.minecraft.core.HolderLookup.Provider provider)"), provider)
         assertTrue(provider.contains("getData().saveToNBT(tag, provider);"), provider)
@@ -8896,11 +8905,14 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(events.contains("DeferredRegister<AttachmentType<?>> ATTACHMENT_TYPES"), events)
         assertTrue(events.contains("event.registerEntity(PlayerDataProvider.PLAYER_DATA"), events)
         assertTrue(events.contains("entity.getData(PlayerDataProvider.PLAYER_DATA_ATTACHMENT.get()).getPlayerData()"), events)
+        assertTrue(events.contains("java.util.Objects.requireNonNull(PlayerDataProvider.PLAYER_DATA_ATTACHMENT);"), events)
+        assertTrue(events.indexOf("java.util.Objects.requireNonNull(PlayerDataProvider.PLAYER_DATA_ATTACHMENT);") < events.indexOf("ATTACHMENT_TYPES.register(modEventBus);"), events)
         assertFalse(events.contains("AttachCapabilitiesEvent"), events)
         assertFalse(events.contains("event.register(PlayerData.class)"), events)
         assertFalse(Regex("""@SubscribeEvent\s*\r?\n\s*@SubscribeEvent""").containsMatchIn(events), events)
         assertTrue(use.contains("LazyOptional.ofNullable(player.getCapability(PLAYER_DATA, null)).ifPresent(PlayerData::mark);"), use)
         assertTrue(use.contains("LazyOptional.ofNullable(player.getCapability(PLAYER_DATA, null)).orElse(new PlayerData()).mark();"), use)
+        assertTrue(mod.contains("modEventBus.addListener(CapabilityEvents::registerCapabilities);"), mod)
         assertTrue(mod.contains("CapabilityEvents.registerAttachments(modEventBus);"), mod)
     }
 
@@ -9822,6 +9834,131 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(enumExtensions.contains("\"constructor\": \"()V\""), enumExtensions)
         assertTrue(enumExtensions.contains("\"parameters\": [ ]"), enumExtensions)
         assertTrue(toml.contains("enumExtensions=\"META-INF/enumextensions.json\""), toml)
+    }
+
+    @Test
+    fun `custom crafting book recipes generate client recipe book category finders`() {
+        val rootSrc = tempDir.resolve("src/main/java/com/example")
+        val recipeSrc = rootSrc.resolve("recipes")
+        rootSrc.createDirectories()
+        recipeSrc.createDirectories()
+        tempDir.resolve("gradle.properties").writeText("mod_id=examplemod\n")
+        rootSrc.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("examplemod")
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                    ExampleRegistration.RECIPE_TYPES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        rootSrc.resolve("ExampleRegistration.java").writeText("""
+            package com.example;
+
+            import com.example.recipes.MagicRecipe;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ExampleRegistration {
+                public static final DeferredRegister<RecipeType<?>> RECIPE_TYPES = DeferredRegister.create(Registries.RECIPE_TYPE, "examplemod");
+                public static final DeferredHolder<RecipeType<?>, RecipeType<MagicRecipe>> MAGIC_RECIPE_TYPE =
+                    RECIPE_TYPES.register("magic_recipe_type", () -> new RecipeType<>() {});
+            }
+        """.trimIndent())
+        recipeSrc.resolve("MagicRecipe.java").writeText("""
+            package com.example.recipes;
+
+            import com.example.ExampleRegistration;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.CraftingBookCategory;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+
+            public class MagicRecipe implements Recipe<MagicInput> {
+                private final CraftingBookCategory category;
+
+                public MagicRecipe(CraftingBookCategory category) {
+                    this.category = category;
+                }
+
+                @Override
+                public RecipeType<?> getType() {
+                    return ExampleRegistration.MAGIC_RECIPE_TYPE.get();
+                }
+
+                @Override
+                public RecipeSerializer<?> getSerializer() {
+                    return null;
+                }
+
+                @Override
+                public boolean matches(MagicInput input, Level level) {
+                    return true;
+                }
+
+                @Override
+                public ItemStack assemble(MagicInput input, HolderLookup.Provider provider) {
+                    return ItemStack.EMPTY;
+                }
+
+                @Override
+                public boolean canCraftInDimensions(int width, int height) {
+                    return true;
+                }
+
+                @Override
+                public ItemStack getResultItem(HolderLookup.Provider provider) {
+                    return ItemStack.EMPTY;
+                }
+
+                public CraftingBookCategory category() {
+                    return this.category;
+                }
+            }
+        """.trimIndent())
+        recipeSrc.resolve("MagicInput.java").writeText("""
+            package com.example.recipes;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.RecipeInput;
+
+            public class MagicInput implements RecipeInput {
+                @Override
+                public ItemStack getItem(int index) {
+                    return ItemStack.EMPTY;
+                }
+
+                @Override
+                public int size() {
+                    return 1;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        val main = rootSrc.resolve("ExampleMod.java").readText()
+        val generated = tempDir.resolve("src/main/java/com/modporter/generated/examplemod/compat/ModRecipeBookCategories.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-custom-recipebook-category-finder" })
+        assertTrue(result.changes.any { it.ruleId == "struct-custom-recipebook-category-finder-registration" })
+        assertTrue(main.contains("if (net.neoforged.fml.loading.FMLLoader.getDist() == net.neoforged.api.distmarker.Dist.CLIENT)"), main)
+        assertTrue(main.contains("com.modporter.generated.examplemod.compat.ModRecipeBookCategories.register(modEventBus);"), main)
+        assertTrue(generated.contains("event.registerRecipeCategoryFinder(com.example.ExampleRegistration.MAGIC_RECIPE_TYPE.get(), recipe -> {"), generated)
+        assertTrue(generated.contains("if (recipe.value() instanceof com.example.recipes.MagicRecipe value)"), generated)
+        assertTrue(generated.contains("return fromCraftingCategory(value.category());"), generated)
+        assertTrue(generated.contains("throw new IllegalStateException(\"Recipe type com.example.ExampleRegistration.MAGIC_RECIPE_TYPE.get() produced \" + recipe.value().getClass().getName() + \" instead of com.example.recipes.MagicRecipe\");"), generated)
+        assertTrue(generated.contains("case BUILDING -> RecipeBookCategories.CRAFTING_BUILDING_BLOCKS;"), generated)
+        assertFalse(generated.contains("RecipeBookCategories.UNKNOWN"), generated)
     }
 
     @Test
@@ -19736,7 +19873,7 @@ bus.addListener(ActualListenerRegistry::register);
         val step = srcDir.resolve("ItemFluidStep.java").readText()
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertTrue(step.contains("stack.save(worker.registryAccess(), new CompoundTag())"), step)
+        assertTrue(step.contains("stack.saveOptional(worker.registryAccess())"), step)
         assertTrue(step.contains("tank.writeToNBT(worker.registryAccess(), new CompoundTag())"), step)
         assertTrue(step.contains("ItemStack.parseOptional(worker.registryAccess(), tag.getCompound(\"stack\"))"), step)
         assertTrue(step.contains("tank.readFromNBT(worker.registryAccess(), tag.getCompound(\"tank\"))"), step)
@@ -27185,7 +27322,7 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(itemStackSerializationSurface.contains("protected void readAdditionalSaveData(CompoundTag tag)"))
         assertTrue(itemStackSerializationSurface.contains("protected void addAdditionalSaveData(CompoundTag tag)"))
         assertTrue(itemStackSerializationSurface.contains("ItemStack.parseOptional(this.registryAccess(), tag.getCompound(\"Stack\"))"))
-        assertTrue(itemStackSerializationSurface.contains("this.stack.save(this.registryAccess())"))
+        assertTrue(itemStackSerializationSurface.contains("this.stack.saveOptional(this.registryAccess())"))
         assertTrue(meleeAttackGoalSurface.contains("protected void checkAndPerformAttack(LivingEntity target)"))
         assertTrue(meleeAttackGoalSurface.contains("super.checkAndPerformAttack(target);"))
         assertTrue(apiBridgeSurface.contains("ResourceLocation.CODEC.listOf()"))
@@ -27617,7 +27754,7 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(boss.contains("this.addBossSaveData(tag, this.registryAccess());"), boss)
         assertTrue(boss.contains("super.readAdditionalSaveData(tag);"), boss)
         assertTrue(boss.contains("this.readBossSaveData(tag, this.registryAccess());"), boss)
-        assertTrue(boss.contains("tag.put(\"Stack\", this.stack.save(this.registryAccess()));"), boss)
+        assertTrue(boss.contains("tag.put(\"Stack\", this.stack.saveOptional(this.registryAccess()));"), boss)
         assertTrue(boss.contains("this.stack = ItemStack.parseOptional(this.registryAccess(), tag.getCompound(\"Stack\"));"), boss)
         assertTrue(boss.contains("this.addBossSaveData(spawnTag, this.registryAccess());"), boss)
         assertTrue(boss.contains("this.readBossSaveData(spawnTag, this.registryAccess());"), boss)
@@ -38683,7 +38820,7 @@ bus.addListener(ActualListenerRegistry::register);
 
         assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
         assertTrue(migrated.contains("net.minecraft.world.item.ItemStack.isSameItemSameComponents(handler.getStackInSlot(0), stack)"), migrated)
-        assertTrue(migrated.contains("tag.put(\"Extracted\", handler.extractItem(0, 1, false).save(registries));"), migrated)
+        assertTrue(migrated.contains("tag.put(\"Extracted\", handler.extractItem(0, 1, false).saveOptional(registries));"), migrated)
         assertFalse(migrated.contains("ItemHandlerHelper.canItemStacksStack"), migrated)
         assertFalse(migrated.contains("import net.neoforged.neoforge.items.ItemHandlerHelper;"), migrated)
     }
@@ -39213,7 +39350,24 @@ bus.addListener(ActualListenerRegistry::register);
     @Test
     fun `migrates xlint-clean deprecated 121 api surfaces without suppressing logic`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
+        val clientDir = srcDir.resolve("client")
+        val clientRenderDir = clientDir.resolve("render/entity")
+        val datagenDir = srcDir.resolve("datagen")
+        val worldDir = srcDir.resolve("world")
         srcDir.createDirectories()
+        clientDir.createDirectories()
+        clientRenderDir.createDirectories()
+        datagenDir.createDirectories()
+        worldDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+            }
+        """.trimIndent())
         srcDir.resolve("ExampleEffects.java").writeText("""
             package com.example;
 
@@ -39303,10 +39457,120 @@ bus.addListener(ActualListenerRegistry::register);
                 }
             }
         """.trimIndent())
+        srcDir.resolve("ExampleEntities.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleEntities {
+                public static final DeferredHolder<EntityType<?>, EntityType<LivingEntity>> DEEP_ONE = null;
+            }
+        """.trimIndent())
+        clientDir.resolve("ClientSetup.java").writeText("""
+            package com.example.client;
+
+            import com.example.ExampleEntities;
+            import com.example.client.render.entity.DeepOneRenderer;
+
+            public class ClientSetup {
+                public void register(RegisterRenderersEvent event) {
+                    event.registerEntityRenderer(ExampleEntities.DEEP_ONE.get(), DeepOneRenderer::new);
+                }
+
+                interface RegisterRenderersEvent {
+                    <T> void registerEntityRenderer(T type, Object factory);
+                }
+            }
+        """.trimIndent())
+        clientRenderDir.resolve("DeepOneRenderer.java").writeText("""
+            package com.example.client.render.entity;
+
+            import net.minecraft.client.renderer.entity.EntityRendererProvider;
+            import net.minecraft.client.renderer.entity.LivingEntityRenderer;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public class DeepOneRenderer extends LivingEntityRenderer<LivingEntity, DeepOneModel> {
+                public DeepOneRenderer(EntityRendererProvider.Context context) {
+                    super(context, null, 0.5F);
+                }
+            }
+
+            class DeepOneModel {
+            }
+        """.trimIndent())
+        clientDir.resolve("RenderEvents.java").writeText("""
+            package com.example.client;
+
+            import com.example.ExampleEntities;
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.renderer.entity.EntityRenderer;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public class RenderEvents {
+                public void render() {
+                    EntityRenderer<LivingEntity> deepOneRenderer = (EntityRenderer<LivingEntity>) Minecraft.getInstance().getEntityRenderDispatcher().renderers.get(ExampleEntities.DEEP_ONE.get());
+                    deepOneRenderer.toString();
+                }
+            }
+        """.trimIndent())
+        worldDir.resolve("LifeEconomyData.java").writeText("""
+            package com.example.world;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.entity.ai.attributes.DefaultAttributes;
+
+            public class LifeEconomyData {
+                public double health(EntityType<?> boundEntity) {
+                    return DefaultAttributes.getSupplier((EntityType<? extends LivingEntity>) boundEntity).getValue(Attributes.MAX_HEALTH);
+                }
+            }
+        """.trimIndent())
+        datagenDir.resolve("ExampleLoot.java").writeText("""
+            package com.example.datagen;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.storage.loot.functions.CopyCustomDataFunction;
+            import net.minecraft.world.level.storage.loot.functions.SetCustomDataFunction;
+            import net.minecraft.world.level.storage.loot.providers.nbt.ContextNbtProvider;
+
+            public class ExampleLoot {
+                public Object copy(String tag) {
+                    return CopyCustomDataFunction.copyData(ContextNbtProvider.BLOCK_ENTITY)
+                        .copy(tag, "BlockEntityTag." + tag, CopyCustomDataFunction.MergeStrategy.REPLACE);
+                }
+
+                public Object set(CompoundTag blockEntityTag) {
+                    return SetCustomDataFunction.setCustomData(blockEntityTag);
+                }
+            }
+        """.trimIndent())
+        worldDir.resolve("ExamplePlacements.java").writeText("""
+            package com.example.world;
+
+            import java.util.List;
+            import net.minecraft.world.level.levelgen.placement.CountOnEveryLayerPlacement;
+            import net.minecraft.world.level.levelgen.placement.CountPlacement;
+
+            public class ExamplePlacements {
+                public Object blackKelp() {
+                    return List.of(CountPlacement.of(4), CountOnEveryLayerPlacement.of(1));
+                }
+            }
+        """.trimIndent())
 
         val result = StructuralRefactorPass().apply(tempDir)
         val effects = srcDir.resolve("ExampleEffects.java").readText()
         val block = srcDir.resolve("ExampleBlock.java").readText()
+        val renderEvents = clientDir.resolve("RenderEvents.java").readText()
+        val lifeEconomy = worldDir.resolve("LifeEconomyData.java").readText()
+        val loot = datagenDir.resolve("ExampleLoot.java").readText()
+        val placements = worldDir.resolve("ExamplePlacements.java").readText()
+        val datagenCompat = tempDir.resolve("src/main/java/com/modporter/generated/example/compat/DatagenCompat.java").readText()
+        val defaultAttributesCompat = tempDir.resolve("src/main/java/com/modporter/generated/example/compat/DefaultAttributesCompat.java").readText()
 
         assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
         assertTrue(effects.contains(".effect(() -> new MobEffectInstance(MobEffects.CONFUSION, 20), 1.0F)"), effects)
@@ -39322,6 +39586,33 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(block.contains("BlockEntity blockEntity = level.getBlockEntity(pos);"), block)
         assertFalse(block.contains("if(true) return"), block)
         assertFalse(block.contains("super.getCloneItemStack(level, pos, state)"), block)
+        assertTrue(renderEvents.contains("import com.example.client.render.entity.DeepOneRenderer;"), renderEvents)
+        assertTrue(renderEvents.contains("DeepOneRenderer deepOneRenderer = (DeepOneRenderer) Minecraft.getInstance().getEntityRenderDispatcher().renderers.get(ExampleEntities.DEEP_ONE.get());"), renderEvents)
+        assertFalse(renderEvents.contains("EntityRenderer<LivingEntity>"), renderEvents)
+        assertFalse(renderEvents.contains("@SuppressWarnings"), renderEvents)
+        assertTrue(lifeEconomy.contains("import com.modporter.generated.example.compat.DefaultAttributesCompat;"), lifeEconomy)
+        assertTrue(lifeEconomy.contains("DefaultAttributesCompat.getSupplier(boundEntity).getValue(Attributes.MAX_HEALTH)"), lifeEconomy)
+        assertFalse(lifeEconomy.contains("(EntityType<? extends LivingEntity>)"), lifeEconomy)
+        assertFalse(lifeEconomy.contains("@SuppressWarnings"), lifeEconomy)
+        assertTrue(loot.contains("import com.modporter.generated.example.compat.DatagenCompat;"), loot)
+        assertTrue(loot.contains("DatagenCompat.copyBlockEntityCustomData(tag, \"BlockEntityTag.\" + tag, \"replace\")"), loot)
+        assertTrue(loot.contains("DatagenCompat.setCustomData(blockEntityTag)"), loot)
+        assertFalse(loot.contains("CopyCustomDataFunction.copyData"), loot)
+        assertFalse(loot.contains("SetCustomDataFunction.setCustomData"), loot)
+        assertFalse(loot.contains("@SuppressWarnings"), loot)
+        assertTrue(placements.contains("DatagenCompat.countOnEveryLayer(1)"), placements)
+        assertFalse(placements.contains("CountOnEveryLayerPlacement.of"), placements)
+        assertFalse(placements.contains("@SuppressWarnings"), placements)
+        assertTrue(datagenCompat.contains("PlacementModifier.CODEC.parse(JsonOps.INSTANCE, json).getOrThrow()"), datagenCompat)
+        assertTrue(datagenCompat.contains("LootItemFunctions.TYPED_CODEC.parse(JsonOps.INSTANCE, json).getOrThrow()"), datagenCompat)
+        assertFalse(datagenCompat.contains("CountOnEveryLayerPlacement"), datagenCompat)
+        assertFalse(datagenCompat.contains("CopyCustomDataFunction.copyData"), datagenCompat)
+        assertFalse(datagenCompat.contains("SetCustomDataFunction.setCustomData"), datagenCompat)
+        assertFalse(datagenCompat.contains("@SuppressWarnings"), datagenCompat)
+        assertTrue(defaultAttributesCompat.contains("DefaultAttributes.SUPPLIERS.get(entityType)"), defaultAttributesCompat)
+        assertTrue(defaultAttributesCompat.contains("CommonHooks.getAttributesView()"), defaultAttributesCompat)
+        assertTrue(defaultAttributesCompat.contains("@Deprecated"), defaultAttributesCompat)
+        assertFalse(defaultAttributesCompat.contains("@SuppressWarnings"), defaultAttributesCompat)
     }
 
     @Test
