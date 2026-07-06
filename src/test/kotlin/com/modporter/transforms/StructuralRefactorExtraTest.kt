@@ -39075,6 +39075,81 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `migrates deprecated structure generation and runAsFancy helpers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val clientDir = srcDir.resolve("client")
+        val worldDir = srcDir.resolve("world")
+        clientDir.createDirectories()
+        worldDir.createDirectories()
+        worldDir.resolve("ExampleStructure.java").writeText("""
+            package com.example.world;
+
+            import java.util.Optional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.block.Rotation;
+            import net.minecraft.world.level.levelgen.structure.Structure;
+            import net.minecraft.world.level.levelgen.structure.StructurePiece;
+            import net.minecraft.world.level.levelgen.structure.StructureType;
+            import net.minecraft.world.level.levelgen.structure.pieces.StructurePiecesBuilder;
+
+            public class ExampleStructure extends Structure {
+                protected ExampleStructure(StructureSettings settings) {
+                    super(settings);
+                }
+
+                @Override
+                protected Optional<GenerationStub> findGenerationPoint(GenerationContext context) {
+                    Rotation rotation = Rotation.getRandom(context.random());
+                    BlockPos start = this.getLowestYIn5by5BoxOffset7Blocks(context, rotation);
+                    return Optional.of(new GenerationStub(start, builder -> generatePieces(builder, context)));
+                }
+
+                private void generatePieces(StructurePiecesBuilder builder, Structure.GenerationContext context) {
+                    builder.addPiece((StructurePiece) null);
+                    builder.moveInsideHeights(context.random(), 20, 50);
+                }
+
+                @Override
+                public StructureType<?> type() {
+                    return null;
+                }
+            }
+        """.trimIndent())
+        clientDir.resolve("FancyRenderer.java").writeText("""
+            package com.example.client;
+
+            import com.mojang.blaze3d.systems.RenderSystem;
+            import net.minecraft.client.Minecraft;
+
+            public class FancyRenderer {
+                public static void render() {
+                    RenderSystem.runAsFancy(() -> {
+                        Minecraft.getInstance().getEntityRenderDispatcher().setRenderShadow(false);
+                    });
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val structure = worldDir.resolve("ExampleStructure.java").readText()
+        val fancy = clientDir.resolve("FancyRenderer.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(structure.contains("BlockPos start = modporter${'$'}getLowestYIn5by5BoxOffset7Blocks(context, rotation);"), structure)
+        assertTrue(structure.contains("modporter${'$'}moveInsideHeights(builder, context.random(), 20, 50);"), structure)
+        assertTrue(structure.contains("private static BlockPos modporter${'$'}getLowestYIn5by5BoxOffset7Blocks(Structure.GenerationContext context, Rotation rotation)"), structure)
+        assertTrue(structure.contains("return new BlockPos(x, getLowestY(context, x, z, xOffset, zOffset), z);"), structure)
+        assertTrue(structure.contains("private static void modporter${'$'}moveInsideHeights(StructurePiecesBuilder builder, RandomSource random, int minY, int maxY)"), structure)
+        assertTrue(structure.contains("for (StructurePiece piece : builder.build().pieces())"), structure)
+        assertFalse(structure.contains(".getLowestYIn5by5BoxOffset7Blocks("), structure)
+        assertFalse(structure.contains(".moveInsideHeights("), structure)
+        assertTrue(fancy.contains("modporter${'$'}runAsFancy(() ->"), fancy)
+        assertTrue(fancy.contains("private static void modporter${'$'}runAsFancy(Runnable fancyRunnable)"), fancy)
+        assertTrue(fancy.contains("OptionInstance<GraphicsStatus> graphicsMode = Minecraft.getInstance().options.graphicsMode();"), fancy)
+        assertFalse(fancy.contains("RenderSystem.runAsFancy"), fancy)
+    }
+
+    @Test
     fun `migrates xlint-clean deprecated 121 api surfaces without suppressing logic`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

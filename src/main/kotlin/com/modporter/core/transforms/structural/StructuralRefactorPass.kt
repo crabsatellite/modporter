@@ -33764,6 +33764,8 @@ public $className(Properties $propertiesName, WoodType $typeName) {
         result = migrateDeprecatedBlockRenderDispatcherSingleBlockCalls(result)
         result = migrateDeprecatedBakedModelGetQuadsCallSites(result)
         result = migrateDeprecatedItemTransformsConstructors(result)
+        result = migrateDeprecatedStructureGenerationHelpers(result)
+        result = migrateDeprecatedRenderSystemRunAsFancy(result)
         return result
     }
 
@@ -34225,6 +34227,132 @@ public final class LevelReaderCompat {
     }
 }
 """.trimStart()
+
+    private fun migrateDeprecatedStructureGenerationHelpers(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("getLowestYIn5by5BoxOffset7Blocks(") &&
+            !executableCode.contains(".moveInsideHeights(")) {
+            return source
+        }
+        var result = source
+        var needsLowestHelper = false
+        var needsMoveInsideHelper = false
+        if (maskJavaCommentsAndLiterals(result).contains("getLowestYIn5by5BoxOffset7Blocks(")) {
+            result = rewriteExecutableJavaCall(result, "getLowestYIn5by5BoxOffset7Blocks") { receiver, args ->
+                if (args.size != 2 || receiver.trim() !in setOf("this", "super")) {
+                    return@rewriteExecutableJavaCall null
+                }
+                needsLowestHelper = true
+                "modporter${'$'}getLowestYIn5by5BoxOffset7Blocks(${args[0].trim()}, ${args[1].trim()})"
+            }
+        }
+        if (maskJavaCommentsAndLiterals(result).contains(".moveInsideHeights(")) {
+            val builderVariables = javaVariablesOfType(maskJavaCommentsAndLiterals(result), "StructurePiecesBuilder")
+            result = rewriteExecutableJavaCall(result, "moveInsideHeights") { receiver, args ->
+                if (args.size != 3 || receiver.trim() !in builderVariables) {
+                    return@rewriteExecutableJavaCall null
+                }
+                needsMoveInsideHelper = true
+                "modporter${'$'}moveInsideHeights(${receiver.trim()}, ${args[0].trim()}, ${args[1].trim()}, ${args[2].trim()})"
+            }
+        }
+        if (needsLowestHelper && !maskJavaCommentsAndLiterals(result).contains("modporter${'$'}getLowestYIn5by5BoxOffset7Blocks(Structure.GenerationContext")) {
+            result = insertBeforeLastClassBrace(result, generatedLowestYIn5By5Helper())
+            result = addExecutableImportIfMissing(result, "net.minecraft.world.level.ChunkPos")
+        }
+        if (needsMoveInsideHelper && !maskJavaCommentsAndLiterals(result).contains("modporter${'$'}moveInsideHeights(StructurePiecesBuilder")) {
+            result = insertBeforeLastClassBrace(result, generatedMoveInsideHeightsHelper())
+            result = addExecutableImportIfMissing(result, "net.minecraft.util.RandomSource")
+            result = addExecutableImportIfMissing(result, "net.minecraft.world.level.levelgen.structure.BoundingBox")
+            result = addExecutableImportIfMissing(result, "net.minecraft.world.level.levelgen.structure.StructurePiece")
+            result = addExecutableImportIfMissing(result, "net.minecraft.world.level.levelgen.structure.pieces.StructurePiecesBuilder")
+        }
+        return result
+    }
+
+    private fun generatedLowestYIn5By5Helper(): String =
+        """
+
+    private static BlockPos modporter${'$'}getLowestYIn5by5BoxOffset7Blocks(Structure.GenerationContext context, Rotation rotation) {
+        int xOffset = 5;
+        int zOffset = 5;
+        if (rotation == Rotation.CLOCKWISE_90) {
+            xOffset = -5;
+        } else if (rotation == Rotation.CLOCKWISE_180) {
+            xOffset = -5;
+            zOffset = -5;
+        } else if (rotation == Rotation.COUNTERCLOCKWISE_90) {
+            zOffset = -5;
+        }
+
+        ChunkPos chunkPos = context.chunkPos();
+        int x = chunkPos.getBlockX(7);
+        int z = chunkPos.getBlockZ(7);
+        return new BlockPos(x, getLowestY(context, x, z, xOffset, zOffset), z);
+    }
+""".trimEnd()
+
+    private fun generatedMoveInsideHeightsHelper(): String =
+        """
+
+    private static void modporter${'$'}moveInsideHeights(StructurePiecesBuilder builder, RandomSource random, int minY, int maxY) {
+        BoundingBox boundingBox = builder.getBoundingBox();
+        int availableHeight = maxY - minY + 1 - boundingBox.getYSpan();
+        int targetY;
+        if (availableHeight > 1) {
+            targetY = minY + random.nextInt(availableHeight);
+        } else {
+            targetY = minY;
+        }
+
+        int offset = targetY - boundingBox.minY();
+        for (StructurePiece piece : builder.build().pieces()) {
+            piece.move(0, offset, 0);
+        }
+    }
+""".trimEnd()
+
+    private fun migrateDeprecatedRenderSystemRunAsFancy(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".runAsFancy(")) return source
+        var needsHelper = false
+        var result = rewriteExecutableJavaCall(source, "runAsFancy") { receiver, args ->
+            val target = receiver.trim()
+            if (args.size != 1 ||
+                target != "RenderSystem" &&
+                target != "com.mojang.blaze3d.systems.RenderSystem") {
+                return@rewriteExecutableJavaCall null
+            }
+            needsHelper = true
+            "modporter${'$'}runAsFancy(${args[0].trim()})"
+        }
+        if (!needsHelper) return source
+        if (!maskJavaCommentsAndLiterals(result).contains("modporter${'$'}runAsFancy(Runnable")) {
+            result = insertBeforeLastClassBrace(result, generatedRunAsFancyHelper())
+        }
+        result = addExecutableImportIfMissing(result, "net.minecraft.client.GraphicsStatus")
+        result = addExecutableImportIfMissing(result, "net.minecraft.client.Minecraft")
+        result = addExecutableImportIfMissing(result, "net.minecraft.client.OptionInstance")
+        result = removeSimpleImportIfUnused(result, "com.mojang.blaze3d.systems.RenderSystem", "RenderSystem")
+        return result
+    }
+
+    private fun generatedRunAsFancyHelper(): String =
+        """
+
+    private static void modporter${'$'}runAsFancy(Runnable fancyRunnable) {
+        boolean shaderTransparency = Minecraft.useShaderTransparency();
+        if (!shaderTransparency) {
+            fancyRunnable.run();
+        } else {
+            OptionInstance<GraphicsStatus> graphicsMode = Minecraft.getInstance().options.graphicsMode();
+            GraphicsStatus previousGraphicsStatus = graphicsMode.get();
+            graphicsMode.set(GraphicsStatus.FANCY);
+            fancyRunnable.run();
+            graphicsMode.set(previousGraphicsStatus);
+        }
+    }
+""".trimEnd()
 
     private data class ClientColorAliasDeclaration(val alias: String, val range: IntRange)
     private data class ClientColorRegistrationStatement(val range: IntRange, val replacement: String)
