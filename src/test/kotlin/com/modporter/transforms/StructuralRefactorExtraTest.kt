@@ -28382,6 +28382,289 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `migrates legacy item onBlockStartBreak overrides to mineBlock`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("VeinTool.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.PickaxeItem;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.neoforge.common.Tags;
+
+            public class VeinTool extends PickaxeItem {
+                @Override
+                public boolean onBlockStartBreak(ItemStack stack, BlockPos pos, Player player) {
+                    if (!player.level().isClientSide) {
+                        if (player.level().getBlockState(pos).is(Tags.Blocks.ORES)) {
+                            Block block = player.level().getBlockState(pos).getBlock();
+                            recurse(player.level(), pos, block);
+                            player.level().destroyBlock(pos.above(), true, player);
+                        }
+                    }
+                    return super.onBlockStartBreak(stack, pos, player);
+                }
+
+                private static void recurse(Level level, BlockPos pos, Block block) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val tool = srcDir.resolve("VeinTool.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(tool.contains("import net.minecraft.world.entity.LivingEntity;"), tool)
+        assertTrue(tool.contains("import net.minecraft.world.level.block.state.BlockState;"), tool)
+        assertTrue(tool.contains("public boolean mineBlock(ItemStack stack, Level level, BlockState state, BlockPos pos, LivingEntity entity)"), tool)
+        assertTrue(tool.contains("if (entity instanceof Player player)"), tool)
+        assertTrue(tool.contains("if (!level.isClientSide)"), tool)
+        assertTrue(tool.contains("if (state.is(Tags.Blocks.ORES))"), tool)
+        assertTrue(tool.contains("Block block = state.getBlock();"), tool)
+        assertTrue(tool.contains("recurse(level, pos, block);"), tool)
+        assertTrue(tool.contains("level.destroyBlock(pos.above(), true, player);"), tool)
+        assertTrue(tool.contains("return super.mineBlock(stack, level, state, pos, entity);"), tool)
+        assertFalse(tool.contains("onBlockStartBreak"), tool)
+    }
+
+    @Test
+    fun `migrates placeEntity only legacy ITeleporter implementations to dimension transitions`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TeleportUtil.java").writeText("""
+            package com.example;
+
+            import java.util.function.Function;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.phys.Vec3;
+            import net.neoforged.neoforge.common.util.ITeleporter;
+
+            public class TeleportUtil {
+                public static void send(ServerPlayer player, ServerLevel archeLevel, BlockPos toTeleport) {
+                    player.changeDimension(archeLevel, new ITeleporter() {
+                        @Override
+                        public Entity placeEntity(Entity entity, ServerLevel currentWorld, ServerLevel destWorld, float yaw, Function<Boolean, Entity> repositionEntity) {
+                            Entity entity1 = repositionEntity.apply(false);
+                            entity.teleportTo(toTeleport.getX() + 6, 111, toTeleport.getZ() + 4);
+                            return entity;
+                        }
+                    });
+                }
+
+                public static class Teleporter implements ITeleporter {
+                    private final Vec3 pos;
+
+                    public Teleporter(Vec3 pos) {
+                        this.pos = pos;
+                    }
+
+                    @Override
+                    public Entity placeEntity(Entity entity, ServerLevel currentWorld, ServerLevel destWorld, float yaw, Function<Boolean, Entity> repositionEntity) {
+                        Entity entity1 = repositionEntity.apply(false);
+                        entity.teleportTo(pos.x, pos.y, pos.z);
+                        return entity;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val teleports = srcDir.resolve("TeleportUtil.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(teleports.contains("import net.minecraft.world.level.portal.DimensionTransition;"), teleports)
+        assertFalse(teleports.contains("ITeleporter"), teleports)
+        assertFalse(teleports.contains("placeEntity"), teleports)
+        assertFalse(teleports.contains("Function"), teleports)
+        assertTrue(teleports.contains("player.changeDimension(new DimensionTransition(archeLevel, new Vec3(toTeleport.getX() + 6, 111, toTeleport.getZ() + 4), Vec3.ZERO, player.getYRot(), player.getXRot(), DimensionTransition.PLACE_PORTAL_TICKET));"), teleports)
+        assertTrue(teleports.contains("public DimensionTransition getPortalInfo(Entity entity, ServerLevel destWorld)"), teleports)
+        assertTrue(teleports.contains("return new DimensionTransition(destWorld, pos, Vec3.ZERO, entity.getYRot(), entity.getXRot(), DimensionTransition.PLACE_PORTAL_TICKET);"), teleports)
+    }
+
+    @Test
+    fun `migrates legacy respawn position optional flow to ServerPlayer dimension transition`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RespawnItem.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.server.MinecraftServer;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.phys.Vec3;
+
+            public class RespawnItem {
+                public void release(ItemStack stack, ServerPlayer player, ServerLevel sl) {
+                    MinecraftServer server = sl.getServer();
+                    BlockPos blockpos = player.getRespawnPosition();
+                    float f = player.getRespawnAngle();
+                    boolean flag = player.isRespawnForced();
+                    ServerLevel serverlevel = server.getLevel(player.getRespawnDimension());
+                    Optional<Vec3> vec3 = Player.findRespawnPositionAndUseSpawnBlock(serverlevel, blockpos, f, flag, true);
+                    vec3.ifPresent(v -> {
+                        player.changeDimension(serverlevel, new Teleporter(v));
+                        stack.shrink(1);
+                    });
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val respawn = srcDir.resolve("RespawnItem.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(respawn.contains("import net.minecraft.world.level.portal.DimensionTransition;"), respawn)
+        assertFalse(respawn.contains("import java.util.Optional;"), respawn)
+        assertFalse(respawn.contains("import net.minecraft.world.phys.Vec3;"), respawn)
+        assertFalse(respawn.contains("Player.findRespawnPositionAndUseSpawnBlock"), respawn)
+        assertFalse(respawn.contains("vec3.ifPresent"), respawn)
+        assertTrue(respawn.contains("DimensionTransition dimensionTransition = player.findRespawnPositionAndUseSpawnBlock(true, DimensionTransition.DO_NOTHING);"), respawn)
+        assertTrue(respawn.contains("if (!dimensionTransition.missingRespawnBlock())"), respawn)
+        assertTrue(respawn.contains("player.changeDimension(dimensionTransition);"), respawn)
+        assertTrue(respawn.contains("stack.shrink(1);"), respawn)
+    }
+
+    @Test
+    fun `migrates legacy FluidStack display and equality deprecations`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("FluidStackWarnings.java").writeText("""
+            package com.example;
+
+            import java.util.Comparator;
+            import java.util.List;
+            import net.neoforged.neoforge.fluids.FluidStack;
+
+            public class FluidStackWarnings {
+                private static final String DOC = "fluid.getDisplayName() fluid.getTranslationKey()";
+
+                public void render(FluidStack fluid, Holder holder, FluidStack resource) {
+                    draw(fluid.getDisplayName());
+                    drawKey(fluid.getTranslationKey());
+                    List<Object> fluids = List.of();
+                    fluids.sort(Comparator.comparing(f -> new FluidStack(f, 1000).getDisplayName().getString()));
+                    boolean same = holder.tank.getFluid().isFluidEqual(resource);
+                }
+            }
+
+            class Holder {
+                Tank tank;
+            }
+
+            class Tank {
+                FluidStack getFluid() {
+                    return FluidStack.EMPTY;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val fluid = srcDir.resolve("FluidStackWarnings.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(fluid.contains("draw(fluid.getHoverName());"), fluid)
+        assertTrue(fluid.contains("drawKey(fluid.getDescriptionId());"), fluid)
+        assertTrue(fluid.contains("new FluidStack(f, 1000).getHoverName().getString()"), fluid)
+        assertTrue(fluid.contains("boolean same = FluidStack.isSameFluidSameComponents(holder.tank.getFluid(), resource);"), fluid)
+        assertTrue(fluid.contains("""private static final String DOC = "fluid.getDisplayName() fluid.getTranslationKey()";"""), fluid)
+        assertFalse(fluid.contains("draw(fluid.getDisplayName());"), fluid)
+        assertFalse(fluid.contains("drawKey(fluid.getTranslationKey());"), fluid)
+        assertFalse(fluid.contains(".isFluidEqual("), fluid)
+    }
+
+    @Test
+    fun `migrates FluidType initializeClient overrides to client extension event registration`() {
+        val fluidDir = tempDir.resolve("src/main/java/com/example/fluid")
+        val libDir = tempDir.resolve("src/main/java/com/example/lib")
+        fluidDir.createDirectories()
+        libDir.createDirectories()
+        fluidDir.resolve("SerumFluidType.java").writeText("""
+            package com.example.fluid;
+
+            import java.util.function.Consumer;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.neoforge.client.extensions.common.IClientFluidTypeExtensions;
+            import net.neoforged.neoforge.fluids.FluidType;
+
+            public class SerumFluidType extends FluidType {
+                private final ResourceLocation stillTexture;
+
+                public SerumFluidType(Properties properties, ResourceLocation stillTexture) {
+                    super(properties);
+                    this.stillTexture = stillTexture;
+                }
+
+                @Override
+                public void initializeClient(Consumer<IClientFluidTypeExtensions> consumer) {
+                    consumer.accept(new IClientFluidTypeExtensions() {
+                        @Override
+                        public ResourceLocation getStillTexture() {
+                            return stillTexture;
+                        }
+                    });
+                }
+            }
+        """.trimIndent())
+        libDir.resolve("ModConstants.java").writeText("""
+            package com.example.lib;
+
+            public final class ModConstants {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        libDir.resolve("FluidRegistry.java").writeText("""
+            package com.example.lib;
+
+            import com.example.fluid.SerumFluidType;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.neoforge.fluids.FluidType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+            import net.neoforged.neoforge.registries.NeoForgeRegistries;
+
+            public class FluidRegistry {
+                private static final DeferredRegister<FluidType> FLUID_TYPES = DeferredRegister.create(NeoForgeRegistries.Keys.FLUID_TYPES, ModConstants.MODID);
+
+                public static void init(IEventBus bus) {
+                    FLUID_TYPES.register(bus);
+                }
+
+                public static final DeferredHolder<FluidType, FluidType> SERUM_TYPE = FLUID_TYPES.register("serum", () -> new SerumFluidType(FluidType.Properties.create(), ResourceLocation.fromNamespaceAndPath(ModConstants.MODID, "block/serum")));
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val fluidType = fluidDir.resolve("SerumFluidType.java").readText()
+        val registry = libDir.resolve("FluidRegistry.java").readText()
+        val generated = libDir.resolve("FluidRegistryClientFluidExtensions.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-fluidtype-client-extension-factory" })
+        assertTrue(result.changes.any { it.ruleId == "struct-fluidtype-client-extension-registration" })
+        assertFalse(fluidType.contains("initializeClient"), fluidType)
+        assertFalse(fluidType.contains("Consumer<"), fluidType)
+        assertTrue(fluidType.contains("public IClientFluidTypeExtensions createClientExtensions()"), fluidType)
+        assertTrue(fluidType.contains("return new IClientFluidTypeExtensions()"), fluidType)
+        assertTrue(result.changes.any { it.ruleId == "struct-fluidtype-client-extension-listener" })
+        assertTrue(registry.contains("bus.addListener(FluidRegistryClientFluidExtensions::registerClientExtensions);"), registry)
+        assertFalse(generated.contains("@EventBusSubscriber"), generated)
+        assertTrue(generated.contains("public static void registerClientExtensions(RegisterClientExtensionsEvent event)"), generated)
+        assertTrue(generated.contains("event.registerFluidType(((com.example.fluid.SerumFluidType) FluidRegistry.SERUM_TYPE.value()).createClientExtensions(), FluidRegistry.SERUM_TYPE.value());"), generated)
+    }
+
+    @Test
     fun `migrates NeoForge custom model API surfaces`() {
         val projectDir = createFile("CustomModelSurface.java", """
             package com.example;
@@ -38476,6 +38759,339 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("private final LazyOptional<IFluidHandler> holder = LazyOptional.of(() -> tank);"), migrated)
         assertTrue(migrated.contains("return holder.map(handler -> true).orElse(false);"), migrated)
         assertFalse(migrated.contains("stackHolder"), migrated)
+    }
+
+    @Test
+    fun `migrates deprecated client color registrations to mod bus color events`() {
+        val mainDir = tempDir.resolve("src/main/java/com/example")
+        val clientDir = tempDir.resolve("src/main/java/com/example/client")
+        mainDir.createDirectories()
+        clientDir.createDirectories()
+        mainDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.client.ClientSetup;
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.loading.FMLLoader;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(IEventBus modBus, ModContainer container) {
+                    Registry.BLOCKS.register(modBus);
+                    if (FMLLoader.getDist() == Dist.CLIENT) {
+                        modBus.addListener(ClientSetup::init);
+                    }
+                }
+            }
+        """.trimIndent())
+        mainDir.resolve("Registry.java").writeText("""
+            package com.example;
+
+            public class Registry {
+                public static final Register BLOCKS = new Register();
+                public static final Holder TINTED_BLOCK = new Holder();
+                public static final Holder TINTED_ITEM = new Holder();
+
+                public static class Register {
+                    public void register(Object bus) {
+                    }
+                }
+
+                public static class Holder {
+                    public Object get() {
+                        return this;
+                    }
+                }
+            }
+        """.trimIndent())
+        clientDir.resolve("ClientSetup.java").writeText("""
+            package com.example.client;
+
+            import com.example.Registry;
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.color.block.BlockColors;
+            import net.minecraft.client.color.item.ItemColors;
+            import net.neoforged.neoforge.client.event.RegisterMenuScreensEvent;
+
+            public class ClientSetup {
+                public static void init(RegisterMenuScreensEvent event) {
+                    BlockColors blockColors = Minecraft.getInstance().getBlockColors();
+                    blockColors.register((state, level, pos, tint) -> 0x123456, Registry.TINTED_BLOCK.get());
+                    ItemColors itemColors = Minecraft.getInstance().getItemColors();
+                    itemColors.register((stack, tint) -> 0x654321, Registry.TINTED_ITEM.get());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val main = mainDir.resolve("ExampleMod.java").readText()
+        val client = clientDir.resolve("ClientSetup.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "struct-client-color-handler-events" })
+        assertTrue(main.contains("modBus.addListener(com.example.client.ClientSetup::registerBlockColors);"), main)
+        assertTrue(main.contains("modBus.addListener(com.example.client.ClientSetup::registerItemColors);"), main)
+        assertTrue(main.contains("net.neoforged.fml.loading.FMLLoader.getDist() == net.neoforged.api.distmarker.Dist.CLIENT"), main)
+        assertTrue(client.contains("import net.neoforged.neoforge.client.event.RegisterColorHandlersEvent;"), client)
+        assertTrue(client.contains("public static void registerBlockColors(RegisterColorHandlersEvent.Block event)"), client)
+        assertTrue(client.contains("event.register((state, level, pos, tint) -> 0x123456, Registry.TINTED_BLOCK.get());"), client)
+        assertTrue(client.contains("public static void registerItemColors(RegisterColorHandlersEvent.Item event)"), client)
+        assertTrue(client.contains("event.register((stack, tint) -> 0x654321, Registry.TINTED_ITEM.get());"), client)
+        assertFalse(client.contains("Minecraft.getInstance().getBlockColors()"), client)
+        assertFalse(client.contains("Minecraft.getInstance().getItemColors()"), client)
+        assertFalse(client.contains("BlockColors blockColors"), client)
+        assertFalse(client.contains("ItemColors itemColors"), client)
+        assertFalse(client.contains("blockColors.register"), client)
+        assertFalse(client.contains("itemColors.register"), client)
+        assertFalse(client.contains("net.minecraft.client.color.block.BlockColors"), client)
+        assertFalse(client.contains("net.minecraft.client.color.item.ItemColors"), client)
+    }
+
+    @Test
+    fun `migrates direct render layer registrations to model render types`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val clientDir = srcDir.resolve("client")
+        val blockstateDir = tempDir.resolve("src/generated/resources/assets/example/blockstates")
+        val modelDir = tempDir.resolve("src/generated/resources/assets/example/models/block")
+        clientDir.createDirectories()
+        blockstateDir.createDirectories()
+        modelDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+                public ExampleMod(IEventBus modBus) {
+                    Registry.BLOCKS.register(modBus);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Registry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class Registry {
+                public static final DeferredRegister BLOCKS = new DeferredRegister();
+                public static final DeferredHolder<Block, Block> TINTED_WINDOW = BLOCKS.register("tinted_window", () -> null);
+                public static final DeferredHolder<Block, Block> LAYERED_WINDOW = BLOCKS.register("layered_window", () -> null);
+
+                public static class DeferredRegister {
+                    public <T> DeferredHolder<Block, T> register(String name, java.util.function.Supplier<T> supplier) {
+                        return null;
+                    }
+
+                    public void register(Object bus) {
+                    }
+                }
+            }
+        """.trimIndent())
+        clientDir.resolve("ClientSetup.java").writeText("""
+            package com.example.client;
+
+            import com.example.Registry;
+            import net.minecraft.client.renderer.ItemBlockRenderTypes;
+            import net.minecraft.client.renderer.RenderType;
+
+            public class ClientSetup {
+                public static void init() {
+                    ItemBlockRenderTypes.setRenderLayer(Registry.TINTED_WINDOW.get(), RenderType.cutout());
+                    ItemBlockRenderTypes.setRenderLayer(Registry.LAYERED_WINDOW.get(), type -> type != null && (type.equals(RenderType.solid()) || type.equals(RenderType.translucent())));
+                }
+            }
+        """.trimIndent())
+        blockstateDir.resolve("tinted_window.json").writeText("""
+            {
+              "variants": {
+                "facing=north": {
+                  "model": "example:block/tinted_window"
+                },
+                "facing=south": {
+                  "model": "example:block/tinted_window_side"
+                }
+              }
+            }
+        """.trimIndent())
+        blockstateDir.resolve("layered_window.json").writeText("""
+            {
+              "variants": {
+                "": {
+                  "model": "example:block/layered_window"
+                }
+              }
+            }
+        """.trimIndent())
+        modelDir.resolve("tinted_window.json").writeText("""
+            {
+              "parent": "minecraft:block/cube_all",
+              "textures": {
+                "all": "example:block/tinted_window"
+              }
+            }
+        """.trimIndent())
+        modelDir.resolve("tinted_window_side.json").writeText("""
+            {
+              "parent": "minecraft:block/cube_all",
+              "textures": {
+                "all": "example:block/tinted_window_side"
+              }
+            }
+        """.trimIndent())
+        modelDir.resolve("layered_window.json").writeText("""
+            {
+              "parent": "minecraft:block/cube",
+              "children": {
+                "solid": {
+                  "parent": "example:block/layered_window_solid",
+                  "render_type": "minecraft:solid"
+                },
+                "glass": {
+                  "parent": "example:block/layered_window_glass",
+                  "render_type": "minecraft:translucent"
+                }
+              },
+              "loader": "neoforge:composite"
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val client = clientDir.resolve("ClientSetup.java").readText()
+        val model = modelDir.resolve("tinted_window.json").readText()
+        val sideModel = modelDir.resolve("tinted_window_side.json").readText()
+        val layeredModel = modelDir.resolve("layered_window.json").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "struct-render-layer-model-render-type" })
+        assertFalse(client.contains("ItemBlockRenderTypes.setRenderLayer"), client)
+        assertFalse(client.contains("net.minecraft.client.renderer.ItemBlockRenderTypes"), client)
+        assertFalse(client.contains("net.minecraft.client.renderer.RenderType"), client)
+        assertTrue(model.contains("\"render_type\": \"minecraft:cutout\""), model)
+        assertTrue(sideModel.contains("\"render_type\": \"minecraft:cutout\""), sideModel)
+        assertTrue(layeredModel.contains("\"render_type\": \"minecraft:solid\""), layeredModel)
+        assertTrue(layeredModel.contains("\"render_type\": \"minecraft:translucent\""), layeredModel)
+    }
+
+    @Test
+    fun `migrates xlint-clean deprecated 121 api surfaces without suppressing logic`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleEffects.java").writeText("""
+            package com.example;
+
+            import java.util.Arrays;
+            import java.util.Optional;
+            import net.minecraft.core.Holder;
+            import net.minecraft.util.random.WeightedEntry;
+            import net.minecraft.util.random.WeightedRandomList;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.effect.MobEffects;
+            import net.minecraft.world.food.FoodProperties;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.client.renderer.texture.TextureAtlas;
+
+            public class ExampleEffects {
+                public static final FoodProperties FOOD = new FoodProperties.Builder()
+                    .nutrition(1)
+                    .effect(new MobEffectInstance(MobEffects.CONFUSION, 20), 1.0F)
+                    .build();
+
+                public boolean blocked(BlockState state, Holder<MobEffect> effect) {
+                    return !state.liquid() && effect.is(MobEffects.CONFUSION);
+                }
+
+                public Object atlas(net.minecraft.client.Minecraft minecraft) {
+                    return minecraft.getTextureAtlas(TextureAtlas.LOCATION_BLOCKS);
+                }
+
+                public Optional<WeightedEntry.Wrapper<ExampleValue>> pick(int minimum) {
+                    WeightedEntry.Wrapper<ExampleValue>[] values = Arrays.stream(ExampleValue.values())
+                        .filter(value -> value.minimum > minimum)
+                        .map(value -> WeightedEntry.wrap(value, value.weight))
+                        .toArray(WeightedEntry.Wrapper[]::new);
+                    return WeightedRandomList.create(values).getRandom(net.minecraft.util.RandomSource.create());
+                }
+
+                enum ExampleValue {
+                    ONE(1, 1);
+                    final int minimum;
+                    final int weight;
+                    ExampleValue(int minimum, int weight) {
+                        this.minimum = minimum;
+                        this.weight = weight;
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleEffectsRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.effect.MobEffect;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ExampleEffectsRegistry {
+                private static final DeferredRegister<MobEffect> EFFECTS = DeferredRegister.create(Registries.MOB_EFFECT, "example");
+                public static final DeferredHolder<MobEffect, MobEffect> CUSTOM = EFFECTS.register("custom", () -> null);
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.LevelReader;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class ExampleBlock extends Block {
+                public ExampleBlock(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public ItemStack getCloneItemStack(LevelReader level, BlockPos pos, BlockState state) {
+                    if(true) return super.getCloneItemStack(level, pos, state);
+                    ItemStack stack = super.getCloneItemStack(level, pos, state);
+                    BlockEntity blockEntity = level.getBlockEntity(pos);
+                    if (blockEntity != null) {
+                        stack.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.of(new CompoundTag()));
+                    }
+                    return stack;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val effects = srcDir.resolve("ExampleEffects.java").readText()
+        val block = srcDir.resolve("ExampleBlock.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(effects.contains(".effect(() -> new MobEffectInstance(MobEffects.CONFUSION, 20), 1.0F)"), effects)
+        assertTrue(effects.contains("state.getFluidState().isEmpty() && effect.is(MobEffects.CONFUSION.unwrapKey().orElseThrow())"), effects)
+        assertTrue(effects.contains("minecraft.getTextureAtlas(InventoryMenu.BLOCK_ATLAS)"), effects)
+        assertTrue(effects.contains("import net.minecraft.world.inventory.InventoryMenu;"), effects)
+        assertFalse(effects.contains("import net.minecraft.client.renderer.texture.TextureAtlas;"), effects)
+        assertTrue(effects.contains("List<WeightedEntry.Wrapper<ExampleValue>> values = Arrays.stream(ExampleValue.values())"), effects)
+        assertTrue(effects.contains(".toList();"), effects)
+        assertFalse(effects.contains("WeightedEntry.Wrapper[]::new"), effects)
+        assertTrue(block.contains("public ItemStack getCloneItemStack(BlockState state, HitResult target, LevelReader level, BlockPos pos, Player player)"), block)
+        assertTrue(block.contains("ItemStack stack = new ItemStack(this);"), block)
+        assertTrue(block.contains("BlockEntity blockEntity = level.getBlockEntity(pos);"), block)
+        assertFalse(block.contains("if(true) return"), block)
+        assertFalse(block.contains("super.getCloneItemStack(level, pos, state)"), block)
     }
 
     @Test

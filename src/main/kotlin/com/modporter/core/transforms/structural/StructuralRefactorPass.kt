@@ -407,6 +407,27 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            val clientColorChanges = migrateDeprecatedClientColorRegistrations(projectDir, dryRun)
+            changes.addAll(clientColorChanges)
+        } catch (e: Exception) {
+            errors.add("Client color registration migration error: ${e.message}")
+        }
+
+        try {
+            val renderLayerChanges = migrateDeprecatedRenderLayerRegistrations(projectDir, dryRun)
+            changes.addAll(renderLayerChanges)
+        } catch (e: Exception) {
+            errors.add("Render layer resource migration error: ${e.message}")
+        }
+
+        try {
+            val fluidClientExtensionChanges = migrateFluidTypeClientExtensionRegistrations(projectDir, dryRun)
+            changes.addAll(fluidClientExtensionChanges)
+        } catch (e: Exception) {
+            errors.add("FluidType client extension migration error: ${e.message}")
+        }
+
+        try {
             val livingDamageHelperChanges = migrateLivingDamageEventHelperBoundaries(projectDir, dryRun)
             changes.addAll(livingDamageHelperChanges)
         } catch (e: Exception) {
@@ -13217,6 +13238,7 @@ $fields
                     ),
                     itemStackNbtMethods = effectiveItemStackNbtMethods,
                     itemStackNbtConstructors = itemStackNbtConstructors,
+                    mobEffectDeferredHolderFields = mobEffectDeferredHolderFields,
                     entityCapabilityTypes = entityCapabilityTypes
                 )
                 if (vanilla121Migrated != text) {
@@ -19666,6 +19688,7 @@ $migratedRecipes
         attributeModifierNamespaceExpression: String? = null,
         itemStackNbtMethods: Set<HolderLookupNbtMethod> = emptySet(),
         itemStackNbtConstructors: Set<HolderLookupNbtConstructor> = emptySet(),
+        mobEffectDeferredHolderFields: Set<String> = emptySet(),
         entityCapabilityTypes: Map<String, String> = emptyMap()
     ): String {
         var result = source
@@ -19752,6 +19775,8 @@ $migratedRecipes
         result = migrateLegacyItemStackRegistrySerialization(result, javaInheritanceIndex)
         result = migrateFluidTankNbtProviderCalls(result, javaInheritanceIndex)
         result = migrateFluidStackNbtProviderCalls(result, javaInheritanceIndex)
+        result = migrateLegacyFluidStackDeprecations(result)
+        result = migrateXlintCleanApiDeprecations(result, mobEffectDeferredHolderFields, javaInheritanceIndex)
         result = migrateNestedHolderLookupProviderAccess(result, javaInheritanceIndex)
         result = migrateRegistryAccessEmptyFallbacks(result, javaInheritanceIndex)
         result = migrateLegacyGameEventListenerSource(result)
@@ -19797,6 +19822,7 @@ $migratedRecipes
         result = migrateLegacyForgeBusBindingCalls(result)
         result = migrateLegacyFollowOwnerGoalConstructors(result)
         result = migrateLegacyItemStackHurtSource(result)
+        result = migrateLegacyItemOnBlockStartBreakOverrides(result)
         result = migrateLivingEntityGetSlotForHandEquipmentSlotSource(result)
         result = migrateLegacyItemHandlerHelperStackComparisons(result)
         result = migrateLegacyTooltipPartHiding(result)
@@ -19882,6 +19908,7 @@ $migratedRecipes
         result = migrateLegacyBlockValidSpawnOverrides(result)
         result = migrateLegacyBlockAndEntityCapabilityAccessors(result, javaInheritanceIndex, generatedCompatPackage, entityCapabilityTypes)
         result = migrateLegacyEntityCapabilityOptionalChains(result)
+        result = migrateLegacyRespawnPositionTransitions(result)
         result = migrateLegacyITeleporterDimensionTransitions(result)
         result = migrateLegacyCanChangeDimensionsCallSites(result)
         result = migrateLegacyPortalWaitTimeCalls(result)
@@ -27963,6 +27990,236 @@ ${indent}}"""
         return result
     }
 
+    private data class FluidTypeClientExtensionCandidate(
+        val file: Path,
+        val packageName: String,
+        val className: String,
+        val fqn: String
+    )
+
+    private data class FluidTypeClientExtensionRegistration(
+        val file: Path,
+        val packageName: String,
+        val ownerClassName: String,
+        val fieldName: String,
+        val fluidTypeFqn: String,
+        val modIdExpression: String,
+        val modIdImport: String?
+    )
+
+    private fun migrateFluidTypeClientExtensionRegistrations(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        val candidates = javaFiles.mapNotNull { file ->
+            val source = runCatching { file.readText() }.getOrDefault("")
+            if (!source.contains("extends FluidType") ||
+                !source.contains("initializeClient") ||
+                !source.contains("IClientFluidTypeExtensions")
+            ) {
+                return@mapNotNull null
+            }
+            val className = javaTopLevelTypeName(source) ?: return@mapNotNull null
+            val packageName = packageNameOf(source)
+            FluidTypeClientExtensionCandidate(
+                file = file,
+                packageName = packageName,
+                className = className,
+                fqn = if (packageName.isBlank()) className else "$packageName.$className"
+            )
+        }
+        if (candidates.isEmpty()) return emptyList()
+        val candidateBySimpleName = candidates.groupBy { it.className }
+        val registrations = javaFiles.flatMap { file ->
+            val source = runCatching { file.readText() }.getOrDefault("")
+            collectFluidTypeClientExtensionRegistrations(file, source, candidateBySimpleName)
+        }
+        if (registrations.isEmpty()) return emptyList()
+        val registeredTypes = registrations.map { it.fluidTypeFqn }.toSet()
+        val changes = mutableListOf<Change>()
+
+        candidates.filter { it.fqn in registeredTypes }.forEach { candidate ->
+            val original = candidate.file.readText()
+            val migrated = migrateFluidTypeInitializeClientToFactory(original)
+            if (migrated != original) {
+                if (!dryRun) candidate.file.writeText(migrated)
+                changes.add(Change(
+                    file = candidate.file,
+                    line = 0,
+                    description = "Move FluidType client extensions from deprecated initializeClient override to explicit client extension factory",
+                    before = "FluidType.initializeClient(Consumer<IClientFluidTypeExtensions>) override",
+                    after = "createClientExtensions() factory registered from RegisterClientExtensionsEvent",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-fluidtype-client-extension-factory"
+                ))
+            }
+        }
+
+        registrations.groupBy { it.file }.forEach { (registrationFile, groupedRegistrations) ->
+            val ownerClassName = groupedRegistrations.first().ownerClassName
+            val listenerClassName = "${ownerClassName}ClientFluidExtensions"
+            val originalRegistration = registrationFile.readText()
+            val registrationWithListener = addFluidClientExtensionModBusListener(originalRegistration, listenerClassName)
+            if (registrationWithListener != originalRegistration) {
+                if (!dryRun) registrationFile.writeText(registrationWithListener)
+                changes.add(Change(
+                    file = registrationFile,
+                    line = 0,
+                    description = "Register FluidType client extension subscriber on the mod event bus",
+                    before = "DeferredRegister FluidType registration without RegisterClientExtensionsEvent listener",
+                    after = "IEventBus.addListener wires generated RegisterClientExtensionsEvent handler",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-fluidtype-client-extension-listener"
+                ))
+            }
+            val generated = generatedFluidClientExtensionSubscriberSource(groupedRegistrations)
+                ?: return@forEach
+            val packageDir = groupedRegistrations.first().packageName.replace('.', '/')
+            val generatedFile = srcDir.resolve(packageDir).resolve("$listenerClassName.java")
+            val previous = if (generatedFile.exists()) generatedFile.readText() else null
+            if (previous != generated) {
+                if (!dryRun) {
+                    generatedFile.parent.createDirectories()
+                    generatedFile.writeText(generated)
+                }
+                changes.add(Change(
+                    file = generatedFile,
+                    line = 0,
+                    description = "Register migrated FluidType client extensions on the client mod event bus",
+                    before = "FluidType.initializeClient override discovered on registered FluidType subtype",
+                    after = "RegisterClientExtensionsEvent subscriber registers each DeferredHolder FluidType",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-fluidtype-client-extension-registration"
+                ))
+            }
+        }
+        return changes
+    }
+
+    private fun addFluidClientExtensionModBusListener(source: String, listenerClassName: String): String {
+        if (source.contains("$listenerClassName::registerClientExtensions")) return source
+        val executable = maskJavaCommentsAndLiterals(source)
+        val method = javaMethodRangesIncludingDefault(executable).firstOrNull { method ->
+            val methodText = executable.substring(method.range)
+            methodText.contains("IEventBus") && methodText.contains(".register(")
+        } ?: return source
+        val methodText = source.substring(method.range)
+        val busParam = javaMethodParameters(methodText)
+            .firstOrNull { it.type.endsWithJavaType("IEventBus") }
+            ?.name
+            ?: return source
+        val openBrace = source.indexOf('{', method.range.first)
+        if (openBrace < 0 || openBrace > method.range.last) return source
+        val insertAfter = source.indexOf('\n', openBrace).let { if (it < 0 || it > method.range.last) openBrace + 1 else it + 1 }
+        val indent = Regex("""^[ \t]*""").find(source.substring(insertAfter).lineSequence().firstOrNull().orEmpty())?.value ?: "        "
+        return source.substring(0, insertAfter) +
+            "${indent}$busParam.addListener($listenerClassName::registerClientExtensions);\n" +
+            source.substring(insertAfter)
+    }
+
+    private fun collectFluidTypeClientExtensionRegistrations(
+        file: Path,
+        source: String,
+        candidateBySimpleName: Map<String, List<FluidTypeClientExtensionCandidate>>
+    ): List<FluidTypeClientExtensionRegistration> {
+        if (!source.contains("DeferredHolder") || !source.contains("FluidType") || !source.contains("new ")) {
+            return emptyList()
+        }
+        val packageName = packageNameOf(source)
+        val ownerClassName = javaTopLevelTypeName(source) ?: return emptyList()
+        val imports = javaSingleTypeImports(source)
+        val modId = Regex(
+            """DeferredRegister\s*<\s*FluidType\s*>\s+[A-Za-z_$][\w$]*\s*=\s*DeferredRegister\.create\([^;]+,\s*([^);\r\n]+)\s*\)\s*;"""
+        ).find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.trim()
+            ?: return emptyList()
+        val modIdOwner = Regex("""^([A-Za-z_$][\w$]*)\.""").find(modId)?.groupValues?.get(1)
+        val modIdImport = modIdOwner?.let { imports[it] }
+        val fieldPattern = Regex(
+            """(?m)public\s+static\s+final\s+DeferredHolder\s*<\s*FluidType\s*,\s*[^>]+>\s+([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\.register\([^;\r\n]*new\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\("""
+        )
+        return fieldPattern.findAll(source).mapNotNull { match ->
+            val fieldName = match.groupValues[1]
+            val rawType = match.groupValues[2]
+            val simpleType = rawType.substringAfterLast('.')
+            val candidate = candidateBySimpleName[simpleType]?.singleOrNull() ?: return@mapNotNull null
+            val resolvedType = when {
+                rawType.contains('.') && rawType.substringBefore('.').firstOrNull()?.isLowerCase() == true -> rawType
+                imports[simpleType] != null -> imports.getValue(simpleType)
+                else -> candidate.fqn
+            }
+            if (resolvedType != candidate.fqn) return@mapNotNull null
+            FluidTypeClientExtensionRegistration(
+                file = file,
+                packageName = packageName,
+                ownerClassName = ownerClassName,
+                fieldName = fieldName,
+                fluidTypeFqn = candidate.fqn,
+                modIdExpression = modId,
+                modIdImport = modIdImport
+            )
+        }.toList()
+    }
+
+    private fun migrateFluidTypeInitializeClientToFactory(source: String): String {
+        var result = source
+        for (method in javaMethodRangesIncludingDefault(result).asReversed()) {
+            if (method.name != "initializeClient") continue
+            val methodText = result.substring(method.range)
+            val parameters = javaMethodParameters(methodText)
+            if (parameters.singleOrNull()?.type?.contains("IClientFluidTypeExtensions") != true) continue
+            val consumerName = parameters.single().name
+            val executableMethod = maskJavaCommentsAndLiterals(methodText)
+            val acceptCall = Regex("""\b${Regex.escape(consumerName)}\.accept\s*\(""").find(executableMethod) ?: continue
+            val openParen = executableMethod.indexOf('(', acceptCall.range.last)
+            if (openParen < 0) continue
+            val closeParen = findMatchingParen(executableMethod, openParen)
+            if (closeParen < 0) continue
+            val extensionExpression = methodText.substring(openParen + 1, closeParen).trim()
+            if (!extensionExpression.startsWith("new IClientFluidTypeExtensions()")) continue
+            val methodIndent = Regex("""^[ \t]*""").find(methodText)?.value ?: ""
+            val replacement = """
+${methodIndent}public IClientFluidTypeExtensions createClientExtensions() {
+${methodIndent}    return $extensionExpression;
+${methodIndent}}
+""".trimEnd()
+            result = result.substring(0, method.range.first) + replacement + result.substring(method.range.last + 1)
+        }
+        if (result == source) return source
+        result = removeUnusedSimpleImport(result, "java.util.function.Consumer", "Consumer")
+        return result
+    }
+
+    private fun generatedFluidClientExtensionSubscriberSource(
+        registrations: List<FluidTypeClientExtensionRegistration>
+    ): String? {
+        val first = registrations.firstOrNull() ?: return null
+        val packageLine = if (first.packageName.isBlank()) "" else "package ${first.packageName};\n\n"
+        val imports = linkedSetOf(
+            "net.neoforged.neoforge.client.extensions.common.RegisterClientExtensionsEvent"
+        )
+        val className = "${first.ownerClassName}ClientFluidExtensions"
+        val body = registrations.distinctBy { it.fieldName }.joinToString("\n") { registration ->
+            "        event.registerFluidType(((${registration.fluidTypeFqn}) ${registration.ownerClassName}.${registration.fieldName}.value()).createClientExtensions(), ${registration.ownerClassName}.${registration.fieldName}.value());"
+        }
+        val importBlock = imports.sorted().joinToString("\n") { "import $it;" }
+        return """${packageLine}${importBlock}
+
+public final class $className {
+    private $className() {
+    }
+
+    public static void registerClientExtensions(RegisterClientExtensionsEvent event) {
+$body
+    }
+}
+"""
+    }
+
     private enum class LivingDamageBoundary {
         INCOMING,
         PRE,
@@ -32048,12 +32305,195 @@ $signatureIndent}"""
         return source.substring(openParen + 1, closeParen).trim()
     }
 
+    private fun migrateLegacyItemOnBlockStartBreakOverrides(source: String): String {
+        if (!source.contains("onBlockStartBreak")) return source
+        var result = source
+        for (method in javaMethodRangesIncludingDefault(result).asReversed()) {
+            if (method.name != "onBlockStartBreak") continue
+            val methodText = result.substring(method.range)
+            val parameters = javaMethodParameters(methodText)
+            if (parameters.size != 3) continue
+            val stack = parameters[0].takeIf { it.type.endsWithJavaType("ItemStack") }?.name ?: continue
+            val pos = parameters[1].takeIf { it.type.endsWithJavaType("BlockPos") }?.name ?: continue
+            val player = parameters[2].takeIf { it.type.endsWithJavaType("Player") }?.name ?: continue
+            val methodBody = javaMethodBodyText(methodText) ?: continue
+            if (Regex("""\breturn\s+true\s*;""").containsMatchIn(maskJavaCommentsAndLiterals(methodBody))) continue
+
+            val finalReturn = Regex(
+                """(?m)^[ \t]*return\s+(?:super\.onBlockStartBreak\(\s*${Regex.escape(stack)}\s*,\s*${Regex.escape(pos)}\s*,\s*${Regex.escape(player)}\s*\)|false)\s*;\s*$"""
+            ).findAll(methodBody).toList().singleOrNull() ?: continue
+            val executableBeforeReturn = maskJavaCommentsAndLiterals(methodBody.substring(0, finalReturn.range.first))
+            if (Regex("""\breturn\b""").containsMatchIn(executableBeforeReturn)) continue
+
+            val usedNames = javaDeclaredLocalNames(methodBody) + parameters.map { it.name }.toSet()
+            val level = uniqueJavaIdentifier("level", usedNames)
+            val state = uniqueJavaIdentifier("state", usedNames + level)
+            val entity = uniqueJavaIdentifier("entity", usedNames + level + state)
+            val openBrace = methodText.indexOf('{')
+            if (openBrace < 0) continue
+            val declaration = methodText.substring(0, openBrace).trimEnd()
+            val newDeclaration = declaration.replace(
+                Regex("""boolean\s+onBlockStartBreak\s*\([^;{}]*\)\s*$"""),
+                "boolean mineBlock(ItemStack $stack, Level $level, BlockState $state, BlockPos $pos, LivingEntity $entity)"
+            )
+            if (newDeclaration == declaration) continue
+
+            var migratedStatements = methodBody.removeRange(finalReturn.range)
+            migratedStatements = Regex("""\b${Regex.escape(player)}\.level\(\)""").replace(migratedStatements, level)
+            migratedStatements = Regex("""\b${Regex.escape(level)}\.getBlockState\(\s*${Regex.escape(pos)}\s*\)""")
+                .replace(migratedStatements, state)
+            val normalizedStatements = migratedStatements.trim().trimIndent()
+            val bodyPrefix = if (normalizedStatements.isBlank()) {
+                ""
+            } else {
+                val indented = indentJavaBlock(normalizedStatements, "        ")
+                "    if ($entity instanceof Player $player) {\n$indented\n    }\n"
+            }
+            val migratedMethod = """
+$newDeclaration {
+$bodyPrefix    return super.mineBlock($stack, $level, $state, $pos, $entity);
+}
+""".trim()
+            result = result.substring(0, method.range.first) + migratedMethod + result.substring(method.range.last + 1)
+        }
+        if (result == source) return source
+        result = addImportIfMissing(result, "net.minecraft.world.entity.LivingEntity")
+        result = addImportIfMissing(result, "net.minecraft.world.level.Level")
+        result = addImportIfMissing(result, "net.minecraft.world.level.block.state.BlockState")
+        return result
+    }
+
+    private fun String.endsWithJavaType(simpleName: String): Boolean {
+        val normalized = replace(Regex("""\s+"""), "")
+            .removeSuffix("[]")
+            .substringBefore("<")
+        return normalized == simpleName || normalized.endsWith(".$simpleName")
+    }
+
+    private fun javaIdentifierTokens(source: String): Set<String> =
+        Regex("""\b[A-Za-z_$][\w$]*\b""")
+            .findAll(maskJavaCommentsAndLiterals(source))
+            .map { it.value }
+            .toSet()
+
+    private fun javaDeclaredLocalNames(source: String): Set<String> {
+        val executable = maskJavaCommentsAndLiterals(source)
+        return Regex(
+            """(?m)(?:^|[;{}\r\n])\s*(?:final\s+)?(?:[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*(?:\s*<[^;=(){}]+>)?(?:\s*\[\s*])*)\s+([A-Za-z_$][\w$]*)\s*(?==|;|,)"""
+        ).findAll(executable)
+            .map { it.groupValues[1] }
+            .toSet()
+    }
+
+    private fun uniqueJavaIdentifier(base: String, usedNames: Set<String>): String {
+        if (base !in usedNames) return base
+        var index = 2
+        while ("$base$index" in usedNames) index++
+        return "$base$index"
+    }
+
+    private fun migrateLegacyRespawnPositionTransitions(source: String): String {
+        if (!source.contains("findRespawnPositionAndUseSpawnBlock")) return source
+        var result = source
+        for (method in javaMethodRangesIncludingDefault(result).asReversed()) {
+            val methodText = result.substring(method.range)
+            if (!methodText.contains("findRespawnPositionAndUseSpawnBlock")) continue
+            val migrated = migrateLegacyRespawnPositionTransitionsInMethod(methodText)
+            if (migrated != methodText) {
+                result = result.substring(0, method.range.first) + migrated + result.substring(method.range.last + 1)
+            }
+        }
+        if (result == source) return source
+        result = addImportIfMissing(result, "net.minecraft.world.level.portal.DimensionTransition")
+        result = removeUnusedSimpleImport(result, "java.util.Optional", "Optional")
+        result = removeUnusedSimpleImport(result, "net.minecraft.world.phys.Vec3", "Vec3")
+        return result
+    }
+
+    private fun migrateLegacyRespawnPositionTransitionsInMethod(methodText: String): String {
+        val assignment = Regex(
+            """(?m)^([ \t]*)(?:java\.util\.)?Optional\s*<\s*(?:net\.minecraft\.world\.phys\.)?Vec3\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*Player\.findRespawnPositionAndUseSpawnBlock\(\s*([^;]+?)\s*\)\s*;"""
+        ).find(methodText) ?: return methodText
+        val args = splitTopLevelJavaArgs(assignment.groupValues[3])
+        if (args.size != 5) return methodText
+        val levelVar = args[0].trim()
+        val blockVar = args[1].trim()
+        val angleVar = args[2].trim()
+        val forcedVar = args[3].trim()
+        val consumeSpawnBlock = args[4].trim()
+        val prefix = methodText.substring(0, assignment.range.first)
+        val player = respawnOwnerPlayer(prefix, levelVar, blockVar, angleVar, forcedVar) ?: return methodText
+        val optionalVar = assignment.groupValues[2]
+        val dimensionTransition = uniqueJavaIdentifier("dimensionTransition", javaIdentifierTokens(methodText) - "dimensionTransition")
+        val assignmentIndent = assignment.groupValues[1]
+        var result = methodText.replaceRange(
+            assignment.range,
+            "${assignmentIndent}DimensionTransition $dimensionTransition = $player.findRespawnPositionAndUseSpawnBlock($consumeSpawnBlock, DimensionTransition.DO_NOTHING);"
+        )
+        val searchStart = assignment.range.first
+        val executable = maskJavaCommentsAndLiterals(result)
+        val ifPresentToken = "$optionalVar.ifPresent("
+        val ifPresentIndex = executable.indexOf(ifPresentToken, searchStart)
+        if (ifPresentIndex < 0) return result
+        val openParen = ifPresentIndex + "$optionalVar.ifPresent".length
+        val closeParen = findMatchingParen(executable, openParen)
+        if (closeParen < 0) return result
+        var statementEnd = closeParen + 1
+        while (statementEnd < result.length && result[statementEnd].isWhitespace()) statementEnd++
+        if (statementEnd >= result.length || result[statementEnd] != ';') return result
+        statementEnd++
+        val lambda = result.substring(openParen + 1, closeParen).trim()
+        val lambdaMatch = Regex("""^([A-Za-z_$][\w$]*)\s*->\s*\{(?s:(.*))\}$""").find(lambda) ?: return result
+        val lambdaVar = lambdaMatch.groupValues[1]
+        var lambdaBody = lambdaMatch.groupValues[2].trim().trimIndent()
+        val changeDimension = Regex(
+            """(?m)^[ \t]*${Regex.escape(player)}\.changeDimension\([^;\r\n]*\b${Regex.escape(lambdaVar)}\b[^;\r\n]*\);\s*"""
+        ).find(lambdaBody) ?: return result
+        lambdaBody = lambdaBody.removeRange(changeDimension.range).trim().trimIndent()
+        val trailingBody = if (lambdaBody.isBlank()) "" else "\n" + indentJavaBlock(lambdaBody, "$assignmentIndent    ")
+        val replacement = """
+${assignmentIndent}if (!$dimensionTransition.missingRespawnBlock()) {
+${assignmentIndent}    $player.changeDimension($dimensionTransition);$trailingBody
+${assignmentIndent}}
+""".trimEnd()
+        return result.substring(0, ifPresentIndex) + replacement + result.substring(statementEnd)
+    }
+
+    private fun respawnOwnerPlayer(
+        prefix: String,
+        levelVar: String,
+        blockVar: String,
+        angleVar: String,
+        forcedVar: String
+    ): String? {
+        val id = """[A-Za-z_$][\w$]*"""
+        val levelOwner = Regex("""\b${Regex.escape(levelVar)}\s*=\s*[^;\r\n]*\.getLevel\(\s*($id)\.getRespawnDimension\(\)\s*\)\s*;""")
+            .find(prefix)
+            ?.groupValues
+            ?.get(1)
+        val blockOwner = Regex("""\b${Regex.escape(blockVar)}\s*=\s*($id)\.getRespawnPosition\(\)\s*;""")
+            .find(prefix)
+            ?.groupValues
+            ?.get(1)
+        val angleOwner = Regex("""\b${Regex.escape(angleVar)}\s*=\s*($id)\.getRespawnAngle\(\)\s*;""")
+            .find(prefix)
+            ?.groupValues
+            ?.get(1)
+        val forcedOwner = Regex("""\b${Regex.escape(forcedVar)}\s*=\s*($id)\.isRespawnForced\(\)\s*;""")
+            .find(prefix)
+            ?.groupValues
+            ?.get(1)
+        val owners = listOf(levelOwner, blockOwner, angleOwner, forcedOwner)
+        return owners.filterNotNull().distinct().singleOrNull()
+    }
+
     private fun migrateLegacyITeleporterDimensionTransitions(source: String): String {
         if (!source.contains("ITeleporter") && !source.contains("PortalInfo") && !source.contains(".changeDimension(")) {
             return source
         }
 
         var result = source
+        result = migrateLegacyPlaceEntityOnlyITeleporter(result)
         val getPortalInfoMethod = javaMethodText(source, "getPortalInfo")
         val defaultSuperCall = getPortalInfoMethod?.let {
             Regex("""ITeleporter\.super\.getPortalInfo\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\)""")
@@ -32083,7 +32523,7 @@ $signatureIndent}"""
             result = removeImport(result, "net.minecraftforge.common.util.ITeleporter")
             result = addImportIfMissing(result, "net.minecraft.world.level.portal.DimensionTransition")
         }
-        if (result.contains("PortalInfo")) {
+        if (Regex("""(?<![\w$])PortalInfo(?![\w$])""").containsMatchIn(result)) {
             result = result.replace("import net.minecraft.world.level.portal.PortalInfo;", "import net.minecraft.world.level.portal.DimensionTransition;")
             if (!result.contains("import net.minecraft.world.level.portal.DimensionTransition;")) {
                 result = addImportIfMissing(result, "net.minecraft.world.level.portal.DimensionTransition")
@@ -32143,6 +32583,9 @@ $signatureIndent}"""
             val entity = legacyChangeDimensionEntityExpression(dimensionSource, receiver, callOffset)
                 ?: return@rewriteJavaCallWithOffset null
             val dest = args[0].trim()
+            legacyAnonymousITeleporterDimensionTransition(args[1].trim(), entity, dest)?.let { transition ->
+                return@rewriteJavaCallWithOffset "$entity.changeDimension($transition)"
+            }
             val teleporter = legacyTeleporterConstructorParts(args[1].trim())
                 ?: return@rewriteJavaCallWithOffset null
             "$entity.changeDimension(new ${teleporter.first}(${teleporter.second}).getPortalInfo($entity, $dest))"
@@ -32161,7 +32604,109 @@ $signatureIndent}"""
         }
         result = removeUnusedSimpleImport(result, "net.neoforged.neoforge.common.util.ITeleporter", "ITeleporter")
         result = removeUnusedSimpleImport(result, "net.minecraftforge.common.util.ITeleporter", "ITeleporter")
+        result = removeUnusedSimpleImport(result, "java.util.function.Function", "Function")
+        if (result.contains("DimensionTransition")) {
+            result = addImportIfMissing(result, "net.minecraft.world.level.portal.DimensionTransition")
+        }
+        if (result.contains("new Vec3(") || result.contains("Vec3.ZERO")) {
+            result = addImportIfMissing(result, "net.minecraft.world.phys.Vec3")
+        }
         return result
+    }
+
+    private data class LegacyPlaceEntityTransition(
+        val positionExpression: String,
+        val needsVec3Constructor: Boolean
+    )
+
+    private fun migrateLegacyPlaceEntityOnlyITeleporter(source: String): String {
+        if (!source.contains("placeEntity") || !source.contains("ITeleporter") || source.contains("PortalInfo")) {
+            return source
+        }
+        var result = source
+        for (method in javaMethodRangesIncludingDefault(result).asReversed()) {
+            if (method.name != "placeEntity") continue
+            if (!isMethodInsideLegacyITeleporterClass(result, method.range.first)) continue
+            val methodText = result.substring(method.range)
+            val parameters = javaMethodParameters(methodText)
+            if (parameters.size != 5) continue
+            val entityParam = parameters[0].takeIf { it.type.endsWithJavaType("Entity") }?.name ?: continue
+            val destinationParam = parameters[2].takeIf { it.type.endsWithJavaType("ServerLevel") }?.name ?: continue
+            val transition = legacyPlaceEntityTransition(methodText, entityParam) ?: continue
+            val methodIndent = Regex("""^[ \t]*""").find(methodText)?.value ?: ""
+            val replacement = """
+${methodIndent}public DimensionTransition getPortalInfo(Entity $entityParam, ServerLevel $destinationParam) {
+${methodIndent}    return new DimensionTransition($destinationParam, ${transition.positionExpression}, Vec3.ZERO, $entityParam.getYRot(), $entityParam.getXRot(), DimensionTransition.PLACE_PORTAL_TICKET);
+${methodIndent}}
+""".trimEnd()
+            result = result.substring(0, method.range.first) + replacement + result.substring(method.range.last + 1)
+        }
+        if (result == source) return source
+        result = result.replace(" implements ITeleporter", "")
+        result = removeImport(result, "net.neoforged.neoforge.common.util.ITeleporter")
+        result = removeImport(result, "net.minecraftforge.common.util.ITeleporter")
+        result = removeUnusedSimpleImport(result, "java.util.function.Function", "Function")
+        result = addImportIfMissing(result, "net.minecraft.world.level.portal.DimensionTransition")
+        result = addImportIfMissing(result, "net.minecraft.world.phys.Vec3")
+        return result
+    }
+
+    private fun isMethodInsideLegacyITeleporterClass(source: String, methodStart: Int): Boolean {
+        val prefix = source.substring(0, methodStart)
+        val classMatch = Regex("""(?m)\b(?:class|record)\s+[A-Za-z_$][\w$]*[^{;]*\bimplements\b[^{;]*\bITeleporter\b[^{;]*\{""")
+            .findAll(prefix)
+            .lastOrNull()
+            ?: return false
+        val anonymousStart = prefix.lastIndexOf("new ITeleporter()")
+        if (anonymousStart > classMatch.range.first) return false
+        val openBrace = source.indexOf('{', classMatch.range.last - 1)
+        if (openBrace < 0) return false
+        val closeBrace = findMatchingBrace(source, openBrace)
+        return closeBrace >= methodStart
+    }
+
+    private fun legacyAnonymousITeleporterDimensionTransition(
+        expression: String,
+        entityExpression: String,
+        destinationExpression: String
+    ): String? {
+        val trimmed = expression.trim()
+        if (!trimmed.startsWith("new ITeleporter()")) return null
+        val openBrace = trimmed.indexOf('{')
+        if (openBrace < 0) return null
+        val closeBrace = findMatchingBrace(trimmed, openBrace)
+        if (closeBrace != trimmed.lastIndex) return null
+        val method = javaMethodRangesIncludingDefault(trimmed)
+            .singleOrNull { it.name == "placeEntity" }
+            ?: return null
+        val methodText = trimmed.substring(method.range)
+        val parameters = javaMethodParameters(methodText)
+        if (parameters.size != 5) return null
+        val entityParam = parameters[0].takeIf { it.type.endsWithJavaType("Entity") }?.name ?: return null
+        val transition = legacyPlaceEntityTransition(methodText, entityParam) ?: return null
+        return "new DimensionTransition($destinationExpression, ${transition.positionExpression}, Vec3.ZERO, $entityExpression.getYRot(), $entityExpression.getXRot(), DimensionTransition.PLACE_PORTAL_TICKET)"
+    }
+
+    private fun legacyPlaceEntityTransition(methodText: String, entityParam: String): LegacyPlaceEntityTransition? {
+        val executable = maskJavaCommentsAndLiterals(methodText)
+        if (!Regex("""\breturn\s+${Regex.escape(entityParam)}\s*;""").containsMatchIn(executable)) return null
+        val call = Regex("""\b${Regex.escape(entityParam)}\.teleportTo\s*\(""").find(executable) ?: return null
+        val openParen = executable.indexOf('(', call.range.last)
+        if (openParen < 0) return null
+        val closeParen = findMatchingParen(executable, openParen)
+        if (closeParen < 0) return null
+        val args = splitTopLevelJavaArgs(methodText.substring(openParen + 1, closeParen)).map { it.trim() }
+        if (args.size < 3) return null
+        val position = legacyVec3PositionExpression(args[0], args[1], args[2])
+            ?: "new Vec3(${args[0]}, ${args[1]}, ${args[2]})"
+        return LegacyPlaceEntityTransition(position, position.startsWith("new Vec3("))
+    }
+
+    private fun legacyVec3PositionExpression(x: String, y: String, z: String): String? {
+        val vectorName = Regex("""^([A-Za-z_$][\w$]*)\.x$""").find(x.trim())?.groupValues?.get(1) ?: return null
+        if (y.trim() != "$vectorName.y") return null
+        if (z.trim() != "$vectorName.z") return null
+        return vectorName
     }
 
     private fun legacyChangeDimensionEntityExpression(source: String, receiver: String, callOffset: Int): String? {
@@ -33116,6 +33661,814 @@ public $className(Properties $propertiesName, WoodType $typeName) {
             "FluidStack.parseOptional($provider, ${args[0].trim()})"
         }
         return result
+    }
+
+    private fun migrateLegacyFluidStackDeprecations(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("FluidStack") &&
+            !executableCode.contains(".getDisplayName()") &&
+            !executableCode.contains(".getTranslationKey()") &&
+            !executableCode.contains(".isFluidEqual(")
+        ) {
+            return source
+        }
+        val fluidStackVariables = Regex("""\b(?:net\.neoforged\.neoforge\.fluids\.)?FluidStack\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(executableCode)
+            .map { it.groupValues[1] }
+            .toSet()
+        var result = source
+        fluidStackVariables.forEach { variable ->
+            result = replaceExecutableJavaRegex(result, Regex("""\b${Regex.escape(variable)}\.getDisplayName\(\)""")) {
+                "$variable.getHoverName()"
+            }
+            result = replaceExecutableJavaRegex(result, Regex("""\b${Regex.escape(variable)}\.getTranslationKey\(\)""")) {
+                "$variable.getDescriptionId()"
+            }
+        }
+        result = rewriteExecutableJavaCallWithOffset(result, "getDisplayName") { receiver, args, _ ->
+            if (args.isNotEmpty()) return@rewriteExecutableJavaCallWithOffset null
+            val trimmed = receiver.trim()
+            if (trimmed.startsWith("new FluidStack(") || trimmed.startsWith("new net.neoforged.neoforge.fluids.FluidStack(")) {
+                "$trimmed.getHoverName()"
+            } else {
+                null
+            }
+        }
+        result = rewriteExecutableJavaCallWithOffset(result, "getTranslationKey") { receiver, args, _ ->
+            if (args.isNotEmpty()) return@rewriteExecutableJavaCallWithOffset null
+            val trimmed = receiver.trim()
+            if (trimmed.startsWith("new FluidStack(") || trimmed.startsWith("new net.neoforged.neoforge.fluids.FluidStack(")) {
+                "$trimmed.getDescriptionId()"
+            } else {
+                null
+            }
+        }
+        result = replaceFluidStackConstructorNoArgCall(result, "getDisplayName", "getHoverName")
+        result = replaceFluidStackConstructorNoArgCall(result, "getTranslationKey", "getDescriptionId")
+        result = rewriteExecutableJavaCallWithOffset(result, "isFluidEqual") { receiver, args, _ ->
+            if (args.size != 1) return@rewriteExecutableJavaCallWithOffset null
+            val trimmed = receiver.trim()
+            val supportedReceiver = trimmed in fluidStackVariables ||
+                trimmed.endsWith(".getFluid()") ||
+                trimmed.startsWith("new FluidStack(") ||
+                trimmed.startsWith("new net.neoforged.neoforge.fluids.FluidStack(")
+            if (!supportedReceiver) return@rewriteExecutableJavaCallWithOffset null
+            "FluidStack.isSameFluidSameComponents($trimmed, ${args[0].trim()})"
+        }
+        return result
+    }
+
+    private fun replaceFluidStackConstructorNoArgCall(source: String, oldMethod: String, newMethod: String): String {
+        var result = source
+        var cursor = 0
+        while (cursor < result.length) {
+            val executable = maskJavaCommentsAndLiterals(result)
+            val match = Regex("""new\s+(?:net\.neoforged\.neoforge\.fluids\.)?FluidStack\s*\(""").find(executable, cursor) ?: break
+            val openParen = executable.indexOf('(', match.range.last)
+            if (openParen < 0) break
+            val closeParen = findMatchingParen(executable, openParen)
+            if (closeParen < 0) break
+            val after = Regex("""^\s*\.\s*${Regex.escape(oldMethod)}\s*\(\s*\)""")
+                .find(executable.substring(closeParen + 1))
+            if (after == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            val methodNameStart = closeParen + 1 + after.value.indexOf(oldMethod)
+            result = result.substring(0, methodNameStart) + newMethod + result.substring(methodNameStart + oldMethod.length)
+            cursor = methodNameStart + newMethod.length
+        }
+        return result
+    }
+
+    private fun migrateXlintCleanApiDeprecations(
+        source: String,
+        mobEffectDeferredHolderFields: Set<String>,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
+        var result = source
+        result = migrateLegacyFoodEffectSuppliers(result)
+        result = migrateDeprecatedTextureAtlasLocationConstants(result)
+        result = migrateDeprecatedBlockStateLiquidChecks(result)
+        result = migrateDeprecatedMobEffectHolderComparisons(result, mobEffectDeferredHolderFields)
+        result = migrateWeightedEntryWrapperArraysToLists(result)
+        result = migrateLegacyBlockCloneItemStackOverrides(result, javaInheritanceIndex)
+        return result
+    }
+
+    private fun migrateLegacyFoodEffectSuppliers(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".effect(") || !executableCode.contains("MobEffectInstance")) return source
+        var result = source
+        var cursor = 0
+        while (true) {
+            val executable = maskJavaCommentsAndLiterals(result)
+            val tokenIndex = executable.indexOf(".effect(", cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + ".effect".length
+            val closeParen = findMatchingParen(executable, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + ".effect(".length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            if (args.size != 2) {
+                cursor = closeParen + 1
+                continue
+            }
+            val effect = args[0].trim()
+            if (!effect.startsWith("new MobEffectInstance(") &&
+                !effect.startsWith("new net.minecraft.world.effect.MobEffectInstance(")) {
+                cursor = closeParen + 1
+                continue
+            }
+            val replacementArgs = "() -> $effect, ${args[1].trim()}"
+            result = result.substring(0, openParen + 1) + replacementArgs + result.substring(closeParen)
+            cursor = openParen + 1 + replacementArgs.length
+        }
+        return result
+    }
+
+    private fun migrateDeprecatedTextureAtlasLocationConstants(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("LOCATION_BLOCKS")) return source
+        var result = replaceExecutableJavaRegex(
+            source,
+            Regex("""\bnet\.minecraft\.client\.renderer\.texture\.TextureAtlas\.LOCATION_BLOCKS\b""")
+        ) {
+            "net.minecraft.world.inventory.InventoryMenu.BLOCK_ATLAS"
+        }
+        result = replaceExecutableJavaRegex(result, Regex("""\bTextureAtlas\.LOCATION_BLOCKS\b""")) {
+            "InventoryMenu.BLOCK_ATLAS"
+        }
+        if (result == source) return source
+        if (maskJavaCommentsAndLiterals(result).contains("InventoryMenu.BLOCK_ATLAS")) {
+            result = addExecutableImportIfMissing(result, "net.minecraft.world.inventory.InventoryMenu")
+        }
+        val withoutTextureAtlas = removeExecutableImport(result, "net.minecraft.client.renderer.texture.TextureAtlas")
+        result = if (!Regex("""(?<![\w$.])TextureAtlas(?![\w$])""").containsMatchIn(maskJavaCommentsAndLiterals(withoutTextureAtlas))) {
+            withoutTextureAtlas
+        } else {
+            result
+        }
+        return result
+    }
+
+    private fun migrateDeprecatedBlockStateLiquidChecks(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".liquid()")) return source
+        var result = replaceExecutableJavaRegex(
+            source,
+            Regex("""!\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*(?:\(\))?)*)\.liquid\s*\(\s*\)""")
+        ) { match ->
+            "${match.groupValues[1]}.getFluidState().isEmpty()"
+        }
+        result = rewriteExecutableJavaCall(result, "liquid") { receiver, args ->
+            if (args.isNotEmpty()) return@rewriteExecutableJavaCall null
+            "!${receiver.trim()}.getFluidState().isEmpty()"
+        }
+        return result
+    }
+
+    private fun migrateDeprecatedMobEffectHolderComparisons(
+        source: String,
+        mobEffectDeferredHolderFields: Set<String>
+    ): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".is(") ||
+            !executableCode.contains("MobEffects.") &&
+            mobEffectDeferredHolderFields.none { executableCode.contains(it.substringAfterLast('.', missingDelimiterValue = it)) }) {
+            return source
+        }
+
+        val deferredHolderExpressions = mobEffectDeferredHolderFields
+            .flatMap { field ->
+                val parts = field.split('.')
+                when {
+                    parts.size >= 2 -> listOf(field, parts.takeLast(2).joinToString("."))
+                    else -> listOf(field)
+                }
+            }
+            .distinct()
+            .sortedByDescending { it.length }
+
+        fun holderKeyExpression(argument: String): String? {
+            val trimmed = argument.trim()
+            if (Regex("""MobEffects\.[A-Z0-9_]+""").matches(trimmed)) {
+                return "$trimmed.unwrapKey().orElseThrow()"
+            }
+            if (trimmed in deferredHolderExpressions) {
+                return "$trimmed.getKey()"
+            }
+            return null
+        }
+
+        return rewriteExecutableJavaCall(source, "is") { receiver, args ->
+            if (args.size != 1) return@rewriteExecutableJavaCall null
+            val key = holderKeyExpression(args[0]) ?: return@rewriteExecutableJavaCall null
+            "${receiver.trim()}.is($key)"
+        }
+    }
+
+    private fun migrateWeightedEntryWrapperArraysToLists(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("WeightedEntry.Wrapper") ||
+            !executableCode.contains(".toArray(WeightedEntry.Wrapper[]::new)")) {
+            return source
+        }
+        var changed = false
+        var result = replaceExecutableJavaRegex(
+            source,
+            Regex("""(?ms)^([ \t]*)WeightedEntry\.Wrapper\s*<\s*([^>\r\n]+)\s*>\s*\[\]\s+([A-Za-z_$][\w$]*)\s*=\s*(.*?)\.toArray\s*\(\s*WeightedEntry\.Wrapper\[\]::new\s*\)\s*;""")
+        ) { match ->
+            changed = true
+            val indent = match.groupValues[1]
+            val type = match.groupValues[2].trim()
+            val name = match.groupValues[3]
+            val streamExpression = match.groupValues[4].trim()
+            "${indent}List<WeightedEntry.Wrapper<$type>> $name = $streamExpression.toList();"
+        }
+        if (!changed) return source
+        result = addExecutableImportIfMissing(result, "java.util.List")
+        return result
+    }
+
+    private fun migrateLegacyBlockCloneItemStackOverrides(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("getCloneItemStack(") ||
+            !executableCode.contains("LevelReader") ||
+            !executableCode.contains("BlockPos") ||
+            !executableCode.contains("BlockState")) {
+            return source
+        }
+
+        val signaturePattern = Regex(
+            """(?s)(public\s+(?:@[A-Za-z_$][\w$.]*(?:\([^)]*\))?\s+)*ItemStack\s+)getCloneItemStack\s*\(\s*LevelReader\s+([A-Za-z_$][\w$]*)\s*,\s*BlockPos\s+([A-Za-z_$][\w$]*)\s*,\s*BlockState\s+([A-Za-z_$][\w$]*)\s*\)"""
+        )
+        var result = source
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        signaturePattern.findAll(executableCode).forEach { signature ->
+                val openBrace = executableCode.indexOf('{', signature.range.last)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
+                if (openBrace < 0 || closeBrace < 0) return@forEach
+                val methodRange = signature.range.first..closeBrace
+                val methodText = result.substring(methodRange)
+                val levelName = signature.groupValues[2]
+                val posName = signature.groupValues[3]
+                val stateName = signature.groupValues[4]
+                val classDeclaration = enclosingJavaClassDeclaration(executableCode, methodRange.first)
+                val directlyExtendsBlock = classDeclaration?.directSuper?.substringAfterLast('.') == "Block"
+                if (methodText.contains("super.getCloneItemStack(") && !directlyExtendsBlock) {
+                    return@forEach
+                }
+
+                var migratedMethod = signaturePattern.replaceFirst(
+                    methodText,
+                    "${signature.groupValues[1]}getCloneItemStack(BlockState $stateName, HitResult target, LevelReader $levelName, BlockPos $posName, Player player)"
+                )
+                if (directlyExtendsBlock) {
+                    migratedMethod = replaceExecutableJavaRegex(
+                        migratedMethod,
+                        Regex("""if\s*\(\s*true\s*\)\s*return\s+super\.getCloneItemStack\s*\(\s*${Regex.escape(levelName)}\s*,\s*${Regex.escape(posName)}\s*,\s*${Regex.escape(stateName)}\s*\)\s*;\s*""")
+                    ) { "" }
+                    migratedMethod = replaceExecutableJavaRegex(
+                        migratedMethod,
+                        Regex("""super\.getCloneItemStack\s*\(\s*${Regex.escape(levelName)}\s*,\s*${Regex.escape(posName)}\s*,\s*${Regex.escape(stateName)}\s*\)""")
+                    ) { "new ItemStack(this)" }
+                }
+                if (migratedMethod != methodText) {
+                    edits += methodRange to migratedMethod
+                }
+            }
+        if (edits.isEmpty()) return source
+
+        result = applyStringEdits(source, edits)
+        result = addExecutableImportIfMissing(result, "net.minecraft.world.entity.player.Player")
+        result = addExecutableImportIfMissing(result, "net.minecraft.world.phys.HitResult")
+        return result
+    }
+
+    private data class ClientColorAliasDeclaration(val alias: String, val range: IntRange)
+    private data class ClientColorRegistrationStatement(val range: IntRange, val replacement: String)
+    private data class ClientColorMigration(
+        val source: String,
+        val blockRegistrations: List<String>,
+        val itemRegistrations: List<String>,
+        val firstEditOffset: Int
+    )
+
+    private fun migrateDeprecatedClientColorRegistrations(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val mainFile = detectModMainClass(projectDir) ?: return emptyList()
+        var mainText = mainFile.readText()
+        val modBusVar = detectModBusVariable(mainText) ?: return emptyList()
+        val mainPackage = packageNameOf(mainText)
+        val changes = mutableListOf<Change>()
+
+        fun methodFor(methodName: String, eventType: String, registrations: List<String>): String =
+            """
+
+    public static void $methodName($eventType event) {
+${registrations.joinToString("\n") { "        $it" }}
+    }
+""".trimEnd()
+
+        Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .filter { it != mainFile }
+            .toList()
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                val executableCode = maskJavaCommentsAndLiterals(original)
+                if (!executableCode.contains(".register(") ||
+                    !executableCode.contains("getBlockColors()") &&
+                    !executableCode.contains("getItemColors()")) {
+                    return@forEach
+                }
+                if (executableCode.contains("RegisterColorHandlersEvent.Block") ||
+                    executableCode.contains("RegisterColorHandlersEvent.Item")) {
+                    return@forEach
+                }
+
+                val ownerName = classNameOfJavaSource(executableCode) ?: return@forEach
+                val owner = javaTypeBlocks(original, executableCode).firstOrNull { it.name == ownerName } ?: return@forEach
+                val sourcePackage = packageNameOf(original)
+                val listenerClassName = javaListenerTypeReferenceExpression(sourcePackage, mainPackage, owner) ?: return@forEach
+                val migration = migrateDeprecatedClientColorRegistrationSource(original) ?: return@forEach
+
+                var migrated = migration.source
+                if (migration.blockRegistrations.isNotEmpty()) {
+                    migrated = insertBeforeLastClassBrace(
+                        migrated,
+                        methodFor(
+                            "registerBlockColors",
+                            "RegisterColorHandlersEvent.Block",
+                            migration.blockRegistrations
+                        )
+                    )
+                }
+                if (migration.itemRegistrations.isNotEmpty()) {
+                    migrated = insertBeforeLastClassBrace(
+                        migrated,
+                        methodFor(
+                            "registerItemColors",
+                            "RegisterColorHandlersEvent.Item",
+                            migration.itemRegistrations
+                        )
+                    )
+                }
+                migrated = addExecutableImportIfMissing(migrated, "net.neoforged.neoforge.client.event.RegisterColorHandlersEvent")
+                migrated = removeSimpleImportIfUnused(migrated, "net.minecraft.client.color.block.BlockColors", "BlockColors")
+                migrated = removeSimpleImportIfUnused(migrated, "net.minecraft.client.color.item.ItemColors", "ItemColors")
+                migrated = removeSimpleImportIfUnused(migrated, "net.minecraft.client.Minecraft", "Minecraft")
+
+                var mainChanged = false
+                listOf(
+                    "registerBlockColors" to migration.blockRegistrations,
+                    "registerItemColors" to migration.itemRegistrations
+                ).forEach { (methodName, registrations) ->
+                    if (registrations.isEmpty()) return@forEach
+                    val listener = "$modBusVar.addListener($listenerClassName::$methodName);"
+                    if (!mainText.contains(listener)) {
+                        val indent = mainConstructorIndent(mainText, modBusVar)
+                        val registration = "${indent}if (net.neoforged.fml.loading.FMLLoader.getDist() == net.neoforged.api.distmarker.Dist.CLIENT) {\n" +
+                            "$indent    $listener\n" +
+                            "$indent}"
+                        mainText = insertModBusListener(mainText, modBusVar, registration, owner.name)
+                        mainChanged = true
+                    }
+                }
+
+                changes.add(Change(
+                    file = javaFile,
+                    line = lineNumberAt(original, migration.firstEditOffset),
+                    description = "Migrate deprecated client color registrations to RegisterColorHandlersEvent",
+                    before = "Minecraft.getInstance().getBlockColors()/getItemColors().register(...)",
+                    after = "RegisterColorHandlersEvent.Block/Item event.register(...)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-client-color-handler-events"
+                ))
+                if (mainChanged) {
+                    changes.add(Change(
+                        file = mainFile,
+                        line = 1,
+                        description = "Register migrated client color handlers on the mod event bus",
+                        before = "direct color registration during another client setup event",
+                        after = "mod event bus listeners for RegisterColorHandlersEvent",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-client-color-handler-events"
+                    ))
+                }
+                if (!dryRun) {
+                    javaFile.writeText(migrated)
+                }
+            }
+
+        if (!dryRun && mainText != mainFile.readText()) {
+            mainFile.writeText(mainText)
+        }
+
+        return changes
+    }
+
+    private fun migrateDeprecatedClientColorRegistrationSource(source: String): ClientColorMigration? {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val id = """[A-Za-z_$][\w$]*"""
+        fun aliases(typeName: String, methodName: String): List<ClientColorAliasDeclaration> =
+            Regex(
+                """(?m)^[ \t]*(?:final[ \t]+)?(?:${Regex.escape(typeName)}|${Regex.escape(typeName.substringAfterLast('.'))})[ \t]+($id)[ \t]*=[ \t]*(?:net\.minecraft\.client\.)?Minecraft\.getInstance[ \t]*\([ \t]*\)[ \t]*\.[ \t]*${Regex.escape(methodName)}[ \t]*\([ \t]*\)[ \t]*;[ \t]*(?:\r?\n)?"""
+            ).findAll(executableCode)
+                .map { ClientColorAliasDeclaration(it.groupValues[1], it.range) }
+                .toList()
+
+        fun statementEnd(openParen: Int): Int {
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) return -1
+            var cursor = closeParen + 1
+            while (cursor < executableCode.length && executableCode[cursor].isWhitespace()) cursor++
+            return if (cursor < executableCode.length && executableCode[cursor] == ';') cursor else -1
+        }
+
+        fun statementRange(callStart: Int, semicolon: Int): IntRange {
+            val start = source.lastIndexOf('\n', callStart).let { if (it < 0) 0 else it + 1 }
+            var end = semicolon
+            if (end + 1 < source.length && source[end + 1] == '\r') end++
+            if (end + 1 < source.length && source[end + 1] == '\n') end++
+            return start..end
+        }
+
+        fun collect(aliasDeclarations: List<ClientColorAliasDeclaration>): List<ClientColorRegistrationStatement> {
+            val statements = mutableListOf<ClientColorRegistrationStatement>()
+            aliasDeclarations.forEach { declaration ->
+                var cursor = 0
+                while (cursor < executableCode.length) {
+                    val token = "${declaration.alias}.register"
+                    val callStart = executableCode.indexOf(token, cursor)
+                    if (callStart < 0) break
+                    val openParen = executableCode.indexOf('(', callStart + token.length)
+                    if (openParen < 0) break
+                    val semicolon = statementEnd(openParen)
+                    if (semicolon < 0) {
+                        cursor = openParen + 1
+                        continue
+                    }
+                    val closeParen = findMatchingParen(executableCode, openParen)
+                    val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+                    if (args.size >= 2) {
+                        statements += ClientColorRegistrationStatement(
+                            statementRange(callStart, semicolon),
+                            "event.register(${args.joinToString(", ") { it.trim() }});"
+                        )
+                    }
+                    cursor = semicolon + 1
+                }
+            }
+            return statements
+        }
+
+        val blockAliases = aliases("net.minecraft.client.color.block.BlockColors", "getBlockColors")
+        val itemAliases = aliases("net.minecraft.client.color.item.ItemColors", "getItemColors")
+        val blockStatements = collect(blockAliases)
+        val itemStatements = collect(itemAliases)
+        val allStatements = blockStatements + itemStatements
+        if (allStatements.isEmpty()) return null
+
+        fun rangeContains(range: IntRange, offset: Int): Boolean = offset >= range.first && offset <= range.last
+        fun aliasOnlyUsedInRemovedStatements(declaration: ClientColorAliasDeclaration): Boolean =
+            Regex("""\b${Regex.escape(declaration.alias)}\b""").findAll(executableCode).all { match ->
+                rangeContains(declaration.range, match.range.first) ||
+                    allStatements.any { rangeContains(it.range, match.range.first) }
+            }
+
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        allStatements.forEach { edits += it.range to "" }
+        (blockAliases + itemAliases)
+            .filter(::aliasOnlyUsedInRemovedStatements)
+            .forEach { edits += it.range to "" }
+
+        val migrated = applyStringEdits(source, edits)
+        return ClientColorMigration(
+            source = migrated,
+            blockRegistrations = blockStatements.map { it.replacement },
+            itemRegistrations = itemStatements.map { it.replacement },
+            firstEditOffset = edits.minOf { it.first.first }
+        )
+    }
+
+    private fun removeSimpleImportIfUnused(source: String, importName: String, simpleName: String): String {
+        val without = removeExecutableImport(source, importName)
+        return if (!hasSimpleTypeReference(maskJavaCommentsAndLiterals(without), simpleName)) without else source
+    }
+
+    private data class RenderLayerCall(
+        val range: IntRange,
+        val ownerName: String?,
+        val fieldName: String,
+        val renderType: String?,
+        val allowedRenderTypes: Set<String>
+    )
+
+    private data class RenderLayerModelMigration(val element: JsonObject, val changed: Boolean)
+
+    private fun migrateDeprecatedRenderLayerRegistrations(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        val blockIds = collectRegisteredBlockIds(javaFiles)
+        if (blockIds.isEmpty()) return emptyList()
+        val resourceRoots = listOf(
+            projectDir.resolve("src/main/resources"),
+            projectDir.resolve("src/generated/resources")
+        ).filter { it.exists() }
+        if (resourceRoots.isEmpty()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        javaFiles.forEach { javaFile ->
+            val original = javaFile.readText()
+            if (!original.contains("ItemBlockRenderTypes.setRenderLayer")) return@forEach
+            val calls = collectDirectRenderLayerCalls(original)
+            if (calls.isEmpty()) return@forEach
+
+            val removable = mutableListOf<RenderLayerCall>()
+            calls.forEach { call ->
+                val blockId = resolveRegisteredBlockId(blockIds, call.ownerName, call.fieldName) ?: return@forEach
+                val modelFiles = modelFilesForBlockResource(resourceRoots, blockId)
+                if (modelFiles.isEmpty()) return@forEach
+                if (!ensureModelRenderTypes(modelFiles, call.renderType, call.allowedRenderTypes, dryRun, changes)) return@forEach
+                removable += call
+            }
+
+            if (removable.isEmpty()) return@forEach
+            var migrated = applyStringEdits(original, removable.map { it.range to "" })
+            migrated = removeSimpleImportIfUnused(migrated, "net.minecraft.client.renderer.ItemBlockRenderTypes", "ItemBlockRenderTypes")
+            migrated = removeSimpleImportIfUnused(migrated, "net.minecraft.client.renderer.RenderType", "RenderType")
+            changes.add(Change(
+                file = javaFile,
+                line = lineNumberAt(original, removable.minOf { it.range.first }),
+                description = "Migrate deprecated block render-layer calls to model render_type resources",
+                before = "ItemBlockRenderTypes.setRenderLayer(block, RenderType.*())",
+                after = "block model JSON render_type",
+                confidence = Confidence.HIGH,
+                ruleId = "struct-render-layer-model-render-type"
+            ))
+            if (!dryRun) {
+                javaFile.writeText(migrated)
+            }
+        }
+        return changes
+    }
+
+    private fun collectDirectRenderLayerCalls(source: String): List<RenderLayerCall> {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val calls = mutableListOf<RenderLayerCall>()
+        var cursor = 0
+        val token = "ItemBlockRenderTypes.setRenderLayer"
+        while (cursor < executableCode.length) {
+            val callStart = executableCode.indexOf(token, cursor)
+            if (callStart < 0) break
+            val openParen = executableCode.indexOf('(', callStart + token.length)
+            if (openParen < 0) break
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) {
+                cursor = openParen + 1
+                continue
+            }
+            var semicolon = closeParen + 1
+            while (semicolon < executableCode.length && executableCode[semicolon].isWhitespace()) semicolon++
+            if (semicolon >= executableCode.length || executableCode[semicolon] != ';') {
+                cursor = closeParen + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (args.size == 2) {
+                val target = Regex("""^(?:(\w+)\.)?(\w+)\s*\.\s*get\s*\(\s*\)$""")
+                    .matchEntire(args[0].trim())
+                val renderLayer = renderLayerCallSemantics(args[1].trim())
+                if (target != null && renderLayer != null) {
+                    val start = source.lastIndexOf('\n', callStart).let { if (it < 0) 0 else it + 1 }
+                    var end = semicolon
+                    if (end + 1 < source.length && source[end + 1] == '\r') end++
+                    if (end + 1 < source.length && source[end + 1] == '\n') end++
+                    calls += RenderLayerCall(
+                        range = start..end,
+                        ownerName = target.groupValues[1].takeIf { it.isNotBlank() },
+                        fieldName = target.groupValues[2],
+                        renderType = renderLayer.first,
+                        allowedRenderTypes = renderLayer.second
+                    )
+                }
+            }
+            cursor = semicolon + 1
+        }
+        return calls
+    }
+
+    private fun renderLayerCallSemantics(expression: String): Pair<String?, Set<String>>? {
+        directModelRenderType(expression)?.let { return it to setOf(it) }
+        if ("->" !in expression) return null
+        val renderTypes = Regex("""(?:net\.minecraft\.client\.renderer\.)?RenderType\.(\w+)\s*\(""")
+            .findAll(expression)
+            .mapNotNull { directModelRenderType("RenderType.${it.groupValues[1]}()") }
+            .toSet()
+        val solidAndTranslucent = setOf("minecraft:solid", "minecraft:translucent")
+        return if (renderTypes == solidAndTranslucent) null to renderTypes else null
+    }
+
+    private fun directModelRenderType(expression: String): String? {
+        val match = Regex("""^(?:net\.minecraft\.client\.renderer\.)?RenderType\.(\w+)\s*\(\s*\)$""")
+            .matchEntire(expression)
+            ?: return null
+        return when (match.groupValues[1]) {
+            "solid" -> "minecraft:solid"
+            "cutout" -> "minecraft:cutout"
+            "cutoutMipped" -> "minecraft:cutout_mipped"
+            "translucent" -> "minecraft:translucent"
+            "tripwire" -> "minecraft:tripwire"
+            else -> null
+        }
+    }
+
+    private fun collectRegisteredBlockIds(javaFiles: List<Path>): Map<String, String> {
+        val qualified = linkedMapOf<String, String>()
+        val byField = linkedMapOf<String, MutableSet<String>>()
+        val id = """[A-Za-z_$][\w$]*"""
+        val fieldPattern = Regex(
+            """(?s)\bpublic\s+static\s+final\s+[^=;]*(?:\bBlock\b|DeferredHolder\s*<\s*Block\b)[^=;]*\s+($id)\s*=\s*[^;]*?\.register\s*\(\s*"([^"]+)"""
+        )
+        javaFiles.forEach { file ->
+            val source = file.readText()
+            val code = maskJavaComments(source)
+            val executableCode = maskJavaCommentsAndLiterals(source)
+            val className = classNameOfJavaSource(executableCode) ?: return@forEach
+            fieldPattern.findAll(code).forEach { match ->
+                val fieldName = match.groupValues[1]
+                val blockId = match.groupValues[2]
+                qualified["$className.$fieldName"] = blockId
+                byField.getOrPut(fieldName) { linkedSetOf() } += blockId
+            }
+        }
+        byField.forEach { (fieldName, ids) ->
+            if (ids.size == 1) {
+                qualified[fieldName] = ids.single()
+            }
+        }
+        return qualified
+    }
+
+    private fun resolveRegisteredBlockId(blockIds: Map<String, String>, ownerName: String?, fieldName: String): String? =
+        ownerName?.let { blockIds["$it.$fieldName"] } ?: blockIds[fieldName]
+
+    private fun modelFilesForBlockResource(resourceRoots: List<Path>, blockId: String): Set<Path> {
+        val blockstateFiles = resourceRoots.flatMap { root ->
+            val assets = root.resolve("assets")
+            if (!assets.exists()) {
+                emptyList()
+            } else {
+                Files.list(assets).use { namespaces ->
+                    namespaces
+                        .filter { it.isDirectory() }
+                        .map { it.resolve("blockstates/$blockId.json") }
+                        .filter { it.exists() }
+                        .toList()
+                }
+            }
+        }
+        if (blockstateFiles.isEmpty()) return emptySet()
+
+        val modelIds = linkedSetOf<String>()
+        blockstateFiles.forEach { blockstateFile ->
+            val root = parseStructuralResourceJson(blockstateFile.readText()) ?: return@forEach
+            val namespace = blockstateFile.parent?.parent?.fileName?.toString() ?: return@forEach
+            collectModelIds(root, modelIds, namespace)
+        }
+        if (modelIds.isEmpty()) return emptySet()
+
+        val modelFiles = linkedSetOf<Path>()
+        modelIds.forEach { modelId ->
+            val namespace = modelId.substringBefore(':')
+            val path = modelId.substringAfter(':', modelId)
+            resourceRoots
+                .map { it.resolve("assets/$namespace/models/$path.json") }
+                .firstOrNull { it.exists() }
+                ?.let { modelFiles.add(it) }
+                ?: return emptySet()
+        }
+        return modelFiles
+    }
+
+    private fun collectModelIds(element: JsonElement, output: MutableSet<String>, defaultNamespace: String) {
+        when (element) {
+            is JsonObject -> element.forEach { (key, value) ->
+                if (key == "model" && value is JsonPrimitive && value.isString) {
+                    val modelId = value.content
+                    output += if (':' in modelId) modelId else "$defaultNamespace:$modelId"
+                } else {
+                    collectModelIds(value, output, defaultNamespace)
+                }
+            }
+            is JsonArray -> element.forEach { collectModelIds(it, output, defaultNamespace) }
+            else -> {}
+        }
+    }
+
+    private fun ensureModelRenderTypes(
+        modelFiles: Set<Path>,
+        renderType: String?,
+        allowedRenderTypes: Set<String>,
+        dryRun: Boolean,
+        changes: MutableList<Change>
+    ): Boolean {
+        val migrated = linkedMapOf<Path, JsonObject>()
+        modelFiles.forEach { modelFile ->
+            val root = parseStructuralResourceJson(modelFile.readText()) as? JsonObject ?: return false
+            val migration = ensureModelRenderType(root, renderType, allowedRenderTypes) ?: return false
+            if (migration.changed) {
+                migrated[modelFile] = migration.element
+            }
+        }
+        migrated.forEach { (modelFile, element) ->
+            changes.add(Change(
+                file = modelFile,
+                line = 0,
+                description = "Write model render_type for migrated render-layer registration",
+                before = "(missing model render_type)",
+                after = renderType ?: allowedRenderTypes.sorted().joinToString("|"),
+                confidence = Confidence.HIGH,
+                ruleId = "struct-render-layer-model-render-type"
+            ))
+            if (!dryRun) {
+                modelFile.writeText(STRUCTURAL_RESOURCE_JSON.encodeToString(JsonElement.serializer(), element) + "\n")
+            }
+        }
+        return true
+    }
+
+    private fun ensureModelRenderType(
+        root: JsonObject,
+        renderType: String?,
+        allowedRenderTypes: Set<String>
+    ): RenderLayerModelMigration? {
+        val fallbackRenderType = renderType ?: "minecraft:solid".takeIf { it in allowedRenderTypes }
+        val existing = root["render_type"] as? JsonPrimitive
+        if (existing != null) {
+            return if (existing.isString && existing.content in allowedRenderTypes) {
+                RenderLayerModelMigration(root, changed = false)
+            } else {
+                null
+            }
+        }
+
+        val loader = (root["loader"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        if (loader == "neoforge:composite") {
+            val children = root["children"] as? JsonObject ?: return RenderLayerModelMigration(root, changed = false)
+            var changed = false
+            val migratedChildren = linkedMapOf<String, JsonElement>()
+            children.forEach { (name, child) ->
+                val childObject = child as? JsonObject ?: return null
+                val childExisting = childObject["render_type"] as? JsonPrimitive
+                if (childExisting != null) {
+                    if (!childExisting.isString || childExisting.content !in allowedRenderTypes) return null
+                    migratedChildren[name] = childObject
+                } else {
+                    val childRenderType = fallbackRenderType ?: return null
+                    val entries = linkedMapOf<String, JsonElement>()
+                    childObject.forEach { (key, value) -> entries[key] = value }
+                    entries["render_type"] = JsonPrimitive(childRenderType)
+                    migratedChildren[name] = JsonObject(entries)
+                    changed = true
+                }
+            }
+            if (!changed) return RenderLayerModelMigration(root, changed = false)
+            val entries = linkedMapOf<String, JsonElement>()
+            root.forEach { (key, value) ->
+                entries[key] = if (key == "children") JsonObject(migratedChildren) else value
+            }
+            return RenderLayerModelMigration(JsonObject(entries), changed = true)
+        }
+
+        val modelRenderType = fallbackRenderType ?: return null
+
+        val entries = linkedMapOf<String, JsonElement>()
+        var inserted = false
+        root.forEach { (key, value) ->
+            if (!inserted && key == "parent") {
+                entries[key] = value
+                entries["render_type"] = JsonPrimitive(modelRenderType)
+                inserted = true
+            } else {
+                entries[key] = value
+            }
+        }
+        if (!inserted) {
+            entries["render_type"] = JsonPrimitive(modelRenderType)
+        }
+        return RenderLayerModelMigration(JsonObject(entries), changed = true)
     }
 
     private fun migrateLegacyItemHandlerHelperStackComparisons(source: String): String {
