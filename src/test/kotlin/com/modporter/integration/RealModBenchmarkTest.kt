@@ -1036,6 +1036,20 @@ class RealModBenchmarkTest {
     }
 
     @Test
+    fun `client runtime staging disables early display before title screen gate`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("project")
+        projectDir.createDirectories()
+
+        stageClientRuntime(projectDir)
+
+        assertTrue(projectDir.resolve("run/options.txt").readText().contains("pauseOnLostFocus:false"))
+        val fmlConfig = projectDir.resolve("run/config/fml.toml").readText()
+        assertTrue(fmlConfig.contains("earlyWindowControl = false"))
+        assertTrue(fmlConfig.contains("earlyWindowProvider = \"fmlearlywindow\""))
+        assertTrue(fmlConfig.contains("versionCheck = false"))
+    }
+
+    @Test
     fun `converted project validation rejects main source excludes`(@TempDir tempDir: Path) {
         tempDir.resolve("src/main/resources/META-INF").createDirectories()
         tempDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").writeText("modLoader=\"javafml\"\n")
@@ -1396,6 +1410,7 @@ class RealModBenchmarkTest {
             var runClient = CheckResult.notRun("MODPORTER_BENCHMARK_RUNCLIENT=false")
             if (structureIssues.isEmpty() && compile.passedOrNotRun && artifactPublish.passedOrNotRun &&
                 runServer.passedOrNotRun && runGameTestServer.passedOrNotRun && options.runClient) {
+                stageClientRuntime(projectDir = outputDir)
                 runClient = runRuntimeGradleTask(
                     outputDir,
                     reportsDir,
@@ -2543,9 +2558,13 @@ class RealModBenchmarkTest {
         savesDir.createDirectories()
         resetDirectory(clientWorld, projectDir)
         copyDirectoryForRuntimeWorld(fixtureWorld, clientWorld)
+        stageClientRuntime(projectDir)
+        return emptyList()
+    }
+
+    private fun stageClientRuntime(projectDir: Path) {
         stageClientRuntimeOptions(projectDir)
         stageBenchmarkFmlConfig(projectDir)
-        return emptyList()
     }
 
     private fun stageClientRuntimeOptions(projectDir: Path) {

@@ -111,7 +111,7 @@ tasks.register<Test>("strictRealModBenchmark") {
     useJUnitPlatform()
     environment("MODPORTER_REAL_MOD_TEST", "true")
     defaultEnvironment("MODPORTER_BENCHMARK_STRICT_RUNTIME", "true")
-    defaultEnvironment("MODPORTER_BENCHMARK_CASES", "constructionwand,instantworldmirror,hotbath,showercore,sakura,twilightforest,aether")
+    defaultEnvironment("MODPORTER_BENCHMARK_CASES", "constructionwand,instantworldmirror,hotbath,showercore,sakura,twilightforest,aether,beyondtheveil")
     defaultEnvironment("MODPORTER_BENCHMARK_TIMEOUT_SECONDS", "540")
     filter {
         includeTestsMatching("com.modporter.integration.RealModBenchmarkTest")

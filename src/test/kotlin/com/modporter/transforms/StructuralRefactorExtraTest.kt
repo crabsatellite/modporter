@@ -2594,6 +2594,41 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `map entry value migration does not rewrite java Optional get calls`() {
+        val projectDir = createFile("CapabilityOptionalUsage.java", """
+            package com.example;
+
+            import java.util.Map;
+            import java.util.Map.Entry;
+            import java.util.Optional;
+
+            public class CapabilityOptionalUsage {
+                void read(Player player) {
+                    Optional<ResearchData> capability = player.getCapability(ResearchProvider.RESEARCH, null).resolve();
+                    if (capability.isPresent()) {
+                        Map<String, ResearchStatus> status = capability.get().getResearches();
+                    }
+                    for (Map.Entry<String, ResearchStatus> entry : capability.get().getResearches().entrySet()) {
+                        ResearchStatus state = entry.get();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/CapabilityOptionalUsage.java")
+            .readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("Optional<ResearchData> capability = player.getCapability(ResearchProvider.RESEARCH, null).resolve();"), migrated)
+        assertTrue(migrated.contains("Map<String, ResearchStatus> status = capability.get().getResearches();"), migrated)
+        assertTrue(migrated.contains("ResearchStatus state = entry.getValue();"), migrated)
+        assertFalse(migrated.contains("capability.getValue()"), migrated)
+        assertFalse(migrated.contains("entry.get();"), migrated)
+    }
+
+    @Test
     fun `packet migration does not replace mod main class with SimpleChannel`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val networkDir = srcDir.resolve("network")
@@ -4276,6 +4311,38 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(mainText.contains("Registration.init(modEventBus);"), mainText)
         assertTrue(helperText.contains("public static void init(IEventBus bus)"), helperText)
         assertTrue(helperText.contains("Blocks.init(bus);"), helperText)
+        assertFalse(helperText.contains("FMLJavaModLoadingContext"), helperText)
+    }
+
+    @Test
+    fun `static FML mod event bus helper keeps signature when call sites are not proven`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val helper = srcDir.resolve("Registration.java")
+        helper.writeText("""
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;
+
+            @EventBusSubscriber(value = Dist.CLIENT, modid = ExampleMod.ID)
+            public class Registration {
+                public static void init() {
+                    IEventBus bus = FMLJavaModLoadingContext.get().getModEventBus();
+                    Blocks.init(bus);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val helperText = helper.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(result.changes.any { it.ruleId == "struct-static-fml-helper-eventbus" })
+        assertTrue(helperText.contains("public static void init()"), helperText)
+        assertTrue(helperText.contains("net.neoforged.fml.ModList.get().getModContainerById(ExampleMod.ID).orElseThrow().getEventBus()"), helperText)
         assertFalse(helperText.contains("FMLJavaModLoadingContext"), helperText)
     }
 
@@ -7630,6 +7697,140 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `container helper default interface methods thread holder lookup provider across entity callers`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LootBuffer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.item.ItemStack;
+
+            public interface LootBuffer {
+                NonNullList<ItemStack> getItems();
+
+                default void addDeathItemsSaveData(CompoundTag tag) {
+                    ContainerHelper.saveAllItems(tag, this.getItems());
+                }
+
+                default void readDeathItemsSaveData(CompoundTag tag) {
+                    ContainerHelper.loadAllItems(tag, this.getItems());
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BossEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            public abstract class BossEntity extends LivingEntity implements LootBuffer {
+                private final NonNullList<ItemStack> items = NonNullList.withSize(1, ItemStack.EMPTY);
+
+                protected BossEntity(EntityType<? extends LivingEntity> type, Level level) {
+                    super(type, level);
+                }
+
+                public NonNullList<ItemStack> getItems() {
+                    return this.items;
+                }
+
+                protected void addAdditionalSaveData(CompoundTag compound) {
+                    this.addDeathItemsSaveData(compound);
+                }
+
+                protected void readAdditionalSaveData(CompoundTag compound) {
+                    this.readDeathItemsSaveData(compound);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val buffer = srcDir.resolve("LootBuffer.java").readText()
+        val boss = srcDir.resolve("BossEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-container-helper-provider-thread" }, "changes=${result.changes}")
+        assertTrue(buffer.contains("import net.minecraft.core.HolderLookup;"), buffer)
+        assertTrue(buffer.contains("default void addDeathItemsSaveData(CompoundTag tag, HolderLookup.Provider registries)"), buffer)
+        assertTrue(buffer.contains("ContainerHelper.saveAllItems(tag, this.getItems(), registries);"), buffer)
+        assertTrue(buffer.contains("default void readDeathItemsSaveData(CompoundTag tag, HolderLookup.Provider registries)"), buffer)
+        assertTrue(buffer.contains("ContainerHelper.loadAllItems(tag, this.getItems(), registries);"), buffer)
+        assertTrue(boss.contains("this.addDeathItemsSaveData(compound, this.registryAccess());"), boss)
+        assertTrue(boss.contains("this.readDeathItemsSaveData(compound, this.registryAccess());"), boss)
+        assertFalse(buffer.contains("RegistryAccess.EMPTY"), buffer)
+    }
+
+    @Test
+    fun `container helper provider threading recognizes source superclass chain through vanilla ghast`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LootBuffer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.item.ItemStack;
+
+            public interface LootBuffer {
+                NonNullList<ItemStack> getItems();
+
+                default void save(CompoundTag tag) {
+                    ContainerHelper.saveAllItems(tag, this.getItems());
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CustomGhast.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.monster.Ghast;
+            import net.minecraft.world.level.Level;
+
+            public class CustomGhast extends Ghast {
+                public CustomGhast(EntityType<? extends Ghast> type, Level level) {
+                    super(type, level);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BossGhast.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public class BossGhast extends CustomGhast implements LootBuffer {
+                private final NonNullList<ItemStack> items = NonNullList.withSize(1, ItemStack.EMPTY);
+
+                public NonNullList<ItemStack> getItems() {
+                    return this.items;
+                }
+
+                protected void addAdditionalSaveData(CompoundTag compound) {
+                    this.save(compound);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val buffer = srcDir.resolve("LootBuffer.java").readText()
+        val boss = srcDir.resolve("BossGhast.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(buffer.contains("default void save(CompoundTag tag, HolderLookup.Provider registries)"), buffer)
+        assertTrue(buffer.contains("ContainerHelper.saveAllItems(tag, this.getItems(), registries);"), buffer)
+        assertTrue(boss.contains("this.save(compound, this.registryAccess());"), boss)
+    }
+
+    @Test
     fun `item stack nbt data methods thread holder lookup provider through proven receivers`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -8419,6 +8620,32 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `redundant float casts are removed only for method local float variables`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("Particles.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.particles.ColorParticleOption;
+            import net.minecraft.core.particles.ParticleTypes;
+
+            public class Particles {
+                public Object spawn(double red) {
+                    float green = 0.5F;
+                    final float blue = 0.75F;
+                    return ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, (float)(red), (float)(green), (float)(blue));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("Particles.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, (float)(red), green, blue)"), migrated)
+    }
+
+    @Test
     fun `mob effect variables passed to effect instances are wrapped as holders`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -8684,6 +8911,56 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `deferred holder block helper return type migrates field declarations`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BlockRegistry.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.IronBarsBlock;
+            import net.minecraft.world.level.block.TransparentBlock;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockRegistry {
+                private static final DeferredRegister<Block> BLOCKS = DeferredRegister.create(Registries.BLOCK, "example");
+
+                public static final DeferredHolder<TransparentBlock, TransparentBlock> GLASS = register("glass", () -> new TransparentBlock(Block.Properties.of()));
+                public static final DeferredHolder<IronBarsBlock, IronBarsBlock> PANE = register("pane", () -> new IronBarsBlock(Block.Properties.of()));
+                public static final DeferredHolder<CustomChestBlock, CustomChestBlock> CHEST = registerBaked("chest", () -> new CustomChestBlock(Block.Properties.of()));
+
+                private static <B extends Block> DeferredHolder<Block, B> register(String name, Supplier<? extends Block> block) {
+                    return BLOCKS.register(name, (Supplier<B>) block);
+                }
+
+                public static <T extends Block> DeferredHolder<Block, T> registerBaked(String name, Supplier<T> block) {
+                    return BLOCKS.register(name, block);
+                }
+            }
+
+            class CustomChestBlock extends Block {
+                CustomChestBlock(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("BlockRegistry.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("DeferredHolder<Block, TransparentBlock> GLASS = register("), migrated)
+        assertTrue(migrated.contains("DeferredHolder<Block, IronBarsBlock> PANE = register("), migrated)
+        assertTrue(migrated.contains("DeferredHolder<Block, CustomChestBlock> CHEST = registerBaked("), migrated)
+        assertFalse(migrated.contains("DeferredHolder<TransparentBlock, TransparentBlock>"), migrated)
+        assertFalse(migrated.contains("DeferredHolder<IronBarsBlock, IronBarsBlock>"), migrated)
+        assertFalse(migrated.contains("DeferredHolder<CustomChestBlock, CustomChestBlock>"), migrated)
+    }
+
+    @Test
     fun `fluid holder constructor arguments unwrap proven holder fields and tuple accesses`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -8777,6 +9054,58 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("super.loadAdditional(tag, registries);"), migrated)
         assertTrue(Regex("""class\s+Memory\s+extends\s+Reminiscence[\s\S]*?public\s+void\s+load\s*\(\s*CompoundTag\s+tag\s*\)""").containsMatchIn(migrated), migrated)
         assertFalse(Regex("""class\s+Memory\s+extends\s+Reminiscence[\s\S]*?protected\s+void\s+loadAdditional""").containsMatchIn(migrated), migrated)
+    }
+
+    @Test
+    fun `vanilla skull block entity subclasses receive holder lookup serialization migration`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CandleSkullBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.block.entity.SkullBlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class CandleSkullBlockEntity extends SkullBlockEntity {
+                public CandleSkullBlockEntity(BlockPos pos, BlockState state) {
+                    super(pos, state);
+                }
+
+                @Override
+                public void saveAdditional(CompoundTag tag) {
+                    super.saveAdditional(tag);
+                    tag.putInt("Color", 1);
+                }
+
+                @Override
+                public void load(CompoundTag tag) {
+                    super.load(tag);
+                }
+
+                @Override
+                public CompoundTag getUpdateTag() {
+                    CompoundTag tag = new CompoundTag();
+                    saveAdditional(tag);
+                    return tag;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("CandleSkullBlockEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("import net.minecraft.core.HolderLookup;"), migrated)
+        assertTrue(migrated.contains("public void saveAdditional(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("super.saveAdditional(tag, registries);"), migrated)
+        assertTrue(migrated.contains("protected void loadAdditional(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("super.loadAdditional(tag, registries);"), migrated)
+        assertTrue(migrated.contains("public CompoundTag getUpdateTag(HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("saveAdditional(tag, registries);"), migrated)
+        assertFalse(migrated.contains("public void load(CompoundTag tag)"), migrated)
+        assertFalse(migrated.contains("super.load(tag);"), migrated)
     }
 
     @Test
@@ -17388,8 +17717,16 @@ bus.addListener(ActualListenerRegistry::register);
                     return entity.getAttribute(NeoForgeMod.STEP_HEIGHT_ADDITION.get());
                 }
 
+                public AttributeInstance bare(Entity entity) {
+                    return entity.getAttribute(NeoForgeMod.STEP_HEIGHT_ADDITION);
+                }
+
                 public AttributeInstance qualified(Entity entity) {
                     return entity.getAttribute(net.neoforged.neoforge.common.NeoForgeMod.STEP_HEIGHT_ADDITION.get());
+                }
+
+                public AttributeInstance qualifiedBare(Entity entity) {
+                    return entity.getAttribute(net.neoforged.neoforge.common.NeoForgeMod.STEP_HEIGHT_ADDITION);
                 }
             }
         """.trimIndent())
@@ -17398,6 +17735,7 @@ bus.addListener(ActualListenerRegistry::register);
 
         val migrated = projectDir.resolve("src/main/java/com/example/StepHeightSurface.java").readText()
         assertTrue(migrated.contains("return entity.getAttribute(Attributes.STEP_HEIGHT);"), migrated)
+        assertEquals(4, Regex("""return entity\.getAttribute\(Attributes\.STEP_HEIGHT\);""").findAll(migrated).count(), migrated)
         assertTrue(migrated.contains("""private static final String DOC = "NeoForgeMod.STEP_HEIGHT_ADDITION.get()";"""), migrated)
         assertTrue(migrated.contains("""private static final String FQN_DOC = "net.neoforged.neoforge.common.NeoForgeMod.STEP_HEIGHT_ADDITION.get()";"""), migrated)
         assertTrue(migrated.contains("import net.minecraft.world.entity.ai.attributes.Attributes;"), migrated)
@@ -17446,6 +17784,12 @@ bus.addListener(ActualListenerRegistry::register);
                             && entity.getAttribute(NeoForgeMod.ENTITY_REACH.get()) != null;
                 }
 
+                boolean bareAttributeConstants(Entity entity) {
+                    return entity.getAttribute(NeoForgeMod.BLOCK_REACH) != null
+                            && entity.getAttribute(net.neoforged.neoforge.common.NeoForgeMod.ENTITY_REACH) != null
+                            && entity.getAttribute(net.neoforged.neoforge.common.NeoForgeMod.ENTITY_GRAVITY) != null;
+                }
+
                 boolean holderReal(RegistryThing thing, EffectInstance effect, Object source) {
                     return thing.VALUE.getHolder().orElseThrow() != null
                             && effect.getEffect().isInstantenous(source);
@@ -17461,6 +17805,7 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(migrated.contains("level.getBiome(pos).value().toString().isEmpty()"), migrated)
         assertTrue(migrated.contains("entity.getAttribute(Attributes.BLOCK_INTERACTION_RANGE) != null"), migrated)
         assertTrue(migrated.contains("entity.getAttribute(Attributes.ENTITY_INTERACTION_RANGE) != null"), migrated)
+        assertTrue(migrated.contains("entity.getAttribute(Attributes.GRAVITY) != null"), migrated)
         assertTrue(migrated.contains("thing.VALUE.getDelegate() != null"), migrated)
         assertTrue(migrated.contains("effect.getEffect().value().isInstantenous(source)"), migrated)
         assertTrue(migrated.contains("import net.minecraft.core.component.DataComponents;"), migrated)
@@ -25116,6 +25461,12 @@ bus.addListener(ActualListenerRegistry::register);
                     target.setTag(slotResult.stack().getTag());
                 }
 
+                public void copyExternalSlot(top.theillusivec4.curios.api.SlotResult curiosSlotResult, ItemStack target) {
+                    if (curiosSlotResult.stack().has(DataComponents.CUSTOM_DATA)) {
+                        target.set(DataComponents.CUSTOM_DATA, CustomData.of(curiosSlotResult.stack().getTag()));
+                    }
+                }
+
                 public void projectHelper(Object player, CompoundTag tag) {
                     DataUtil.setTag(player, "custom", tag);
                 }
@@ -25136,10 +25487,12 @@ bus.addListener(ActualListenerRegistry::register);
 
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
         assertTrue(migrated.contains("target.set(DataComponents.CUSTOM_DATA, source.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
-        assertTrue(migrated.contains("target.set(DataComponents.CUSTOM_DATA, slotResult.stack().getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
+        assertTrue(migrated.contains("target.set(DataComponents.CUSTOM_DATA, curiosSlotResult.stack().getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
         assertTrue(migrated.contains("target.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, slotResult.stack().getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
+        assertTrue(migrated.contains("target.set(DataComponents.CUSTOM_DATA, slotResult.stack().getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
         assertFalse(migrated.contains("CustomData.of(source.getTag())"), migrated)
         assertFalse(migrated.contains("CustomData.of(slotResult.stack().getTag())"), migrated)
+        assertFalse(migrated.contains("CustomData.of(curiosSlotResult.stack().getTag())"), migrated)
         assertFalse(migrated.contains("setTag(slotResult.stack().getTag())"), migrated)
         assertTrue(migrated.contains("DataUtil.setTag(player, \"custom\", tag);"), migrated)
     }
@@ -26551,7 +26904,7 @@ bus.addListener(ActualListenerRegistry::register);
             import net.minecraft.world.level.Level;
             import org.jetbrains.annotations.Nullable;
 
-            public record LegacyShapedRecordRecipe(ResourceLocation recipeID, int cost, int width, int height, Ingredient input, int count, NonNullList<Ingredient> resultItems) implements CraftingRecipe, ShapedRecipe {
+            public record LegacyShapedRecordRecipe(ResourceLocation recipeID, int cost, int width, int height, Ingredient input, int count, NonNullList<Ingredient> resultItems) implements CraftingRecipe {
                 @Override
                 public boolean matches(CraftingContainer container, Level level) { return false; }
 
@@ -27713,8 +28066,8 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(meleeAttackGoalSurface.contains("super.checkAndPerformAttack(target);"))
         assertTrue(apiBridgeSurface.contains("ResourceLocation.CODEC.listOf()"))
         assertTrue(apiBridgeSurface.contains("modelView.mulPose(source.last().pose());"))
-        assertTrue(apiBridgeSurface.contains("protected void loadAdditional(Level level, BlockPos pos, CompoundTag tag, HolderLookup.Provider registries)"), apiBridgeSurface)
-        assertTrue(apiBridgeSurface.contains("blockentity.loadWithComponents(tag, registries);"), apiBridgeSurface)
+        assertTrue(apiBridgeSurface.contains("public void load(Level level, BlockPos pos, CompoundTag tag)"), apiBridgeSurface)
+        assertTrue(apiBridgeSurface.contains("blockentity.loadWithComponents(tag, level.registryAccess());"), apiBridgeSurface)
         assertTrue(apiBridgeSurface.contains("Tags.Items.TOOLS_BOW"))
         assertTrue(apiBridgeSurface.contains("Tags.Items.TOOLS_CROSSBOW"))
         assertTrue(apiBridgeSurface.contains("Tags.Items.TOOLS_FISHING_ROD"))
@@ -27849,12 +28202,13 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(legacyLootTables.contains("SetContainerContents.setContents(ContainerComponentManipulators.BUNDLE_CONTENTS)"), legacyLootTables)
         assertTrue(legacyLootTables.contains("withEntry(LootItem.lootTableItem(Items.DIAMOND))"), legacyLootTables)
         assertTrue(legacyLootTables.contains("withEntry(LootItem.lootTableItem(Items.EMERALD).apply(SetItemCountFunction.setCount(ConstantValue.exactly(2))))"), legacyLootTables)
-        assertTrue(legacyLootTables.contains("SetCustomDataFunction.setCustomData(blockEntityTag)"), legacyLootTables)
+        assertTrue(legacyLootTables.contains("DatagenCompat.setCustomData(blockEntityTag)"), legacyLootTables)
         assertTrue(legacyLootTables.contains("SetContainerContents.setContents(ContainerComponentManipulators.CONTAINER).withEntry(DynamicLoot.dynamicEntry(ResourceLocation.parse(\"minecraft:contents\")))"), legacyLootTables)
         assertTrue(legacyLootTables.contains("EnchantWithLevelsFunction.enchantWithLevels(this.registries, ConstantValue.exactly(20))"), legacyLootTables)
         assertTrue(legacyLootTables.contains("withEnchantment(this.registries.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.PROTECTION), ConstantValue.exactly(1))"), legacyLootTables)
         assertTrue(legacyLootTables.contains("withEnchantment(this.registries.lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(ExampleEnchantments.CUSTOM))"), legacyLootTables)
         assertTrue(!legacyLootTables.contains("SetNbtFunction"), legacyLootTables)
+        assertTrue(!legacyLootTables.contains("SetCustomDataFunction"), legacyLootTables)
         assertTrue(!legacyLootTables.contains("ALL_DAMAGE_PROTECTION"), legacyLootTables)
         assertTrue(legacyEntityLootTables.contains("protected LegacyEntityLootTables(HolderLookup.Provider registries)"), legacyEntityLootTables)
         assertTrue(legacyEntityLootTables.contains("super(FeatureFlags.REGISTRY.allFlags(), registries);"), legacyEntityLootTables)
@@ -32256,6 +32610,7 @@ bus.addListener(ActualListenerRegistry::register);
 
             import net.minecraft.core.BlockPos;
             import net.minecraft.core.Holder;
+            import net.minecraft.world.entity.Entity;
             import net.minecraft.world.item.BowlFoodItem;
             import net.minecraft.world.item.FoodProperties;
             import net.minecraft.world.item.Item;
@@ -32265,6 +32620,8 @@ bus.addListener(ActualListenerRegistry::register);
             import net.minecraft.world.level.block.Block;
             import net.minecraft.core.registries.BuiltInRegistries;
             import net.neoforged.neoforge.common.NeoForgeMod;
+            import net.neoforged.neoforge.fluids.FluidInteractionRegistry;
+            import net.neoforged.neoforge.fluids.FluidType;
 
             public class HolderAndItemSurface {
                 private final Holder<Widget> widget = null;
@@ -32294,6 +32651,16 @@ bus.addListener(ActualListenerRegistry::register);
 
                 public Object vanillaFluidTypes() {
                     return java.util.List.of(NeoForgeMod.EMPTY_TYPE.get(), NeoForgeMod.WATER_TYPE.get(), NeoForgeMod.LAVA_TYPE.get(), NeoForgeMod.MILK_TYPE.get());
+                }
+
+                public void fluidInteraction() {
+                    FluidInteractionRegistry.addInteraction(NeoForgeMod.WATER_TYPE, new FluidInteractionRegistry.InteractionInformation(null, null));
+                }
+
+                public boolean fluidChecks(Entity entity, FluidType type) {
+                    return entity.isEyeInFluidType(NeoForgeMod.WATER_TYPE)
+                            || type == NeoForgeMod.MILK_TYPE
+                            || net.neoforged.neoforge.common.NeoForgeMod.LAVA_TYPE != type;
                 }
 
                 public Object sword(Tier tier) {
@@ -32475,6 +32842,10 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(holderAndItem.contains("NeoForgeMod.WATER_TYPE.value()"))
         assertTrue(holderAndItem.contains("NeoForgeMod.LAVA_TYPE.value()"))
         assertTrue(holderAndItem.contains("NeoForgeMod.MILK_TYPE.get()"))
+        assertTrue(holderAndItem.contains("FluidInteractionRegistry.addInteraction(NeoForgeMod.WATER_TYPE.value(), new FluidInteractionRegistry.InteractionInformation(null, null))"), holderAndItem)
+        assertTrue(holderAndItem.contains("entity.isEyeInFluidType(NeoForgeMod.WATER_TYPE.value())"), holderAndItem)
+        assertTrue(holderAndItem.contains("type == NeoForgeMod.MILK_TYPE.value()"), holderAndItem)
+        assertTrue(holderAndItem.contains("net.neoforged.neoforge.common.NeoForgeMod.LAVA_TYPE.value() != type"), holderAndItem)
         assertTrue(holderAndItem.contains("new SwordItem(tier, new Item.Properties().attributes(SwordItem.createAttributes(tier, 3, -2.4F)))"))
         assertTrue(holderAndItem.contains("new Item(new Item.Properties().food(new FoodProperties.Builder().nutrition(1).build()))"))
         assertTrue(recipeAndMenu.contains("super(category);"))
@@ -33020,6 +33391,230 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(blockEntity.contains("protected void loadAdditional(CompoundTag tag, HolderLookup.Provider registries)"))
         assertTrue(blockEntity.contains("super.loadAdditional(tag, registries);"))
         assertTrue(!blockEntity.contains("loadFromTag"))
+    }
+
+    @Test
+    fun `structure start loadFromTag calls use source declared custom load hooks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleStructureStart.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.ChunkPos;
+            import net.minecraft.world.level.levelgen.structure.Structure;
+            import net.minecraft.world.level.levelgen.structure.StructureStart;
+            import net.minecraft.world.level.levelgen.structure.pieces.PiecesContainer;
+
+            public class ExampleStructureStart extends StructureStart {
+                private boolean conquered;
+
+                public ExampleStructureStart(Structure structure, ChunkPos chunkPos, int references, PiecesContainer pieces) {
+                    super(structure, chunkPos, references, pieces);
+                }
+
+                public void load(CompoundTag nbt) {
+                    this.conquered = nbt.getBoolean("conquered");
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("StructureFactory.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.ChunkPos;
+            import net.minecraft.world.level.levelgen.structure.Structure;
+            import net.minecraft.world.level.levelgen.structure.pieces.PiecesContainer;
+
+            public interface StructureFactory {
+                default ExampleStructureStart forDeserialization(Structure structure, ChunkPos chunkPos, int references, PiecesContainer pieces, CompoundTag nbt) {
+                    ExampleStructureStart start = new ExampleStructureStart(structure, chunkPos, references, pieces);
+                    start.loadFromTag(nbt);
+                    return start;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val factory = srcDir.resolve("StructureFactory.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-structure-start-load" }, "changes=${result.changes}")
+        assertTrue(factory.contains("start.load(nbt);"), factory)
+        assertFalse(factory.contains("loadFromTag"), factory)
+    }
+
+    @Test
+    fun `randomizable container loot table resource keys keep seed updates scoped`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DeepChestBE.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity;
+
+            public abstract class DeepChestBE extends RandomizableContainerBlockEntity {
+            }
+        """.trimIndent())
+        srcDir.resolve("LootKeyContainer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.LevelAccessor;
+            import net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity;
+            import net.minecraft.world.level.storage.loot.LootTable;
+
+            public class LootKeyContainer {
+                private final ResourceKey<LootTable> lootTable = ResourceKey.create(Registries.LOOT_TABLE, ResourceLocation.fromNamespaceAndPath("example", "bonus"));
+
+                public void fill(LevelAccessor world, BlockPos pos, long seed) {
+                    if (world.getBlockEntity(pos) instanceof RandomizableContainerBlockEntity lootContainer)
+                        lootContainer.setLootTable(this.lootTable, seed);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LootKeyContainer.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("if (world.getBlockEntity(pos) instanceof RandomizableContainerBlockEntity lootContainer) {\n            lootContainer.setLootTable(this.lootTable);\n            lootContainer.setLootTableSeed(seed);\n        }"), migrated)
+        assertFalse(migrated.contains("ResourceKey.create(Registries.LOOT_TABLE, this.lootTable)"), migrated)
+    }
+
+    @Test
+    fun `loot table key field migration simplifies randomizable container double wrapped resource keys`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LootKeyContainer.java").writeText("""
+            package com.example;
+
+            import java.util.Set;
+            import com.google.common.collect.Sets;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.loot.LootTableProvider;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.level.LevelAccessor;
+            import net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity;
+
+            public class LootKeyContainer {
+                private static final Set<ResourceLocation> LOOT_TABLES = Sets.newHashSet();
+                public final ResourceLocation lootTable;
+
+                private LootKeyContainer(String path) {
+                    this.lootTable = ResourceLocation.fromNamespaceAndPath("example", path);
+                }
+
+                public void fill(LevelAccessor world, BlockPos pos, long seed) {
+                    if (world.getBlockEntity(pos) instanceof RandomizableContainerBlockEntity lootContainer) {
+                        lootContainer.setLootTable(this.lootTable, seed);
+                    }
+                }
+
+                public LootTableProvider provider(PackOutput output) {
+                    return new LootTableProvider(output, LOOT_TABLES, java.util.List.of());
+                }
+
+                private static ResourceLocation register(ResourceLocation id) {
+                    if (LOOT_TABLES.add(id)) {
+                        return id;
+                    }
+                    throw new IllegalArgumentException(id.toString());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("LootKeyContainer.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("Set<ResourceKey<LootTable>> LOOT_TABLES"), migrated)
+        assertTrue(migrated.contains("public final ResourceKey<LootTable> lootTable;"), migrated)
+        assertTrue(migrated.contains("lootContainer.setLootTable(this.lootTable);"), migrated)
+        assertTrue(migrated.contains("lootContainer.setLootTableSeed(seed);"), migrated)
+        assertFalse(migrated.contains("ResourceKey.create(Registries.LOOT_TABLE, this.lootTable)"), migrated)
+    }
+
+    @Test
+    fun `legacy armor color hooks stop claiming removed ArmorItem overrides`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TintedArmorItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ArmorItem;
+            import net.minecraft.world.item.ArmorMaterial;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.core.Holder;
+
+            public class TintedArmorItem extends ArmorItem {
+                public TintedArmorItem(Holder<ArmorMaterial> material, Type type, Properties properties) {
+                    super(material, type, properties);
+                }
+
+                @Override
+                public boolean hasCustomColor(ItemStack stack) {
+                    return true;
+                }
+
+                @Override
+                public int getColor(ItemStack stack) {
+                    return 0xFFFFFF;
+                }
+
+                @Override
+                public void clearColor(ItemStack stack) {
+                }
+
+                @Override
+                public void setColor(ItemStack stack, int color) {
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("TintedArmorItem.java").readText()
+
+        assertTrue(migrated.contains("public boolean hasCustomColor(ItemStack stack)"), migrated)
+        assertTrue(migrated.contains("public int getColor(ItemStack stack)"), migrated)
+        assertTrue(migrated.contains("public void clearColor(ItemStack stack)"), migrated)
+        assertTrue(migrated.contains("public void setColor(ItemStack stack, int color)"), migrated)
+        assertFalse(migrated.contains("@Override\n    public boolean hasCustomColor"), migrated)
+        assertFalse(migrated.contains("@Override\n    public int getColor"), migrated)
+        assertFalse(migrated.contains("@Override\n    public void clearColor"), migrated)
+        assertFalse(migrated.contains("@Override\n    public void setColor"), migrated)
+    }
+
+    @Test
+    fun `recipe holder ids migrate from getId to id by declared holder type`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RecipeHolderIds.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.item.crafting.CraftingInput;
+            import net.minecraft.world.item.crafting.CraftingRecipe;
+            import net.minecraft.world.item.crafting.RecipeHolder;
+            import net.minecraft.world.level.Level;
+
+            public class RecipeHolderIds {
+                public boolean allowed(Level level, CraftingInput input, RecipeHolder<CraftingRecipe> recipe, ServerPlayer player) {
+                    level.getRecipeManager();
+                    return player.getRecipeBook().contains(recipe.getId());
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("RecipeHolderIds.java").readText()
+
+        assertTrue(migrated.contains("player.getRecipeBook().contains(recipe.id())"), migrated)
+        assertFalse(migrated.contains("recipe.getId()"), migrated)
     }
 
     @Test
@@ -37859,6 +38454,44 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(source.contains("private static final String SAMPLE"), source)
         assertFalse(source.contains("hasData(ExampleAttachments.TIME.get())"), source)
         assertFalse(source.contains("var time = level.getData"), source)
+    }
+
+    @Test
+    fun `migrates attachment getData resolve Optional branch to hasData direct access`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AttachmentResolveSurface.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+
+            public class AttachmentResolveSurface {
+                public void open(Level level) {
+                    Optional<TimeData> timeOptional = level.getData(ExampleAttachments.TIME.get()).resolve();
+                    if (timeOptional.isPresent()) {
+                        if (!timeOptional.get().isLocked()) {
+                            openScreen(timeOptional.get());
+                        }
+                    } else {
+                        openScreen(TimeData.DEFAULT);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("AttachmentResolveSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("if (level.hasData(ExampleAttachments.TIME.get())) {"), migrated)
+        assertTrue(migrated.contains("TimeData timeOptional = level.getData(ExampleAttachments.TIME.get());"), migrated)
+        assertTrue(migrated.contains("if (!timeOptional.isLocked()) {"), migrated)
+        assertTrue(migrated.contains("openScreen(timeOptional);"), migrated)
+        assertTrue(migrated.contains("} else {\n            openScreen(TimeData.DEFAULT);"), migrated)
+        assertFalse(migrated.contains("Optional<TimeData>"), migrated)
+        assertFalse(migrated.contains(".resolve()"), migrated)
+        assertFalse(migrated.contains("timeOptional.get()"), migrated)
+        assertFalse(migrated.contains("import java.util.Optional;"), migrated)
     }
 
     @Test

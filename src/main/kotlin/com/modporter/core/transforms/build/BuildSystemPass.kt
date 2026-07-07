@@ -5177,6 +5177,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                 // Track what was resolved
                 resolvedPrefixes.addAll(resolution.coords.map { it.coord.substringBefore(":") })
                 emittedCoords.addAll(resolution.coords.map { it.coord })
+                resolution.coords.mapNotNull { it.mavenRepositoryUrl() }.forEach(newMavenRepos::add)
                 resolution.mavenUrl?.let { newMavenRepos.add(it) }
             } else if (resolution is DepResolution.Remove) {
                 for (k in (j - 1) downTo blockStart) lines.removeAt(k)
@@ -5290,6 +5291,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         when {
             coord.startsWith("curse.maven:") -> "https://www.cursemaven.com"
             coord.startsWith("maven.modrinth:") -> "https://api.modrinth.com/maven"
+            coord.startsWith("net.fabricmc:") -> "https://maven.fabricmc.net/"
             else -> null
         }
 
