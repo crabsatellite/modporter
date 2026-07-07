@@ -9,33 +9,33 @@ import kotlin.test.assertTrue
 
 class StrictBenchmarkConfigTest {
     @Test
-    fun `strict benchmark default cases include all required real mod providers`() {
-        val requiredIds = Paths.get("src/test/resources/benchmarks/real-mods.tsv")
+    fun `strict benchmark default cases are derived from all available real mod providers`() {
+        val availableIds = Paths.get("src/test/resources/benchmarks/real-mods.tsv")
             .readLines()
             .asSequence()
             .map { it.trim() }
             .filter { it.isNotEmpty() && !it.startsWith("#") }
             .map { it.split('\t') }
-            .filter { columns -> columns.size >= 7 && columns[6].equals("true", ignoreCase = true) }
+            .filter { columns -> columns.size >= 7 && !columns[2].equals("missing", ignoreCase = true) }
             .map { columns -> columns[0] }
             .toSet()
 
         val buildScript = Paths.get("build.gradle.kts").readText()
-        val configuredCases = Regex(
-            """defaultEnvironment\("MODPORTER_BENCHMARK_CASES",\s*"([^"]*)"\)"""
-        ).find(buildScript)
-
-        assertNotNull(configuredCases, "strictRealModBenchmark must configure MODPORTER_BENCHMARK_CASES explicitly")
-        val defaultIds = configuredCases.groupValues[1]
-            .split(',')
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .toSet()
-
-        val missing = requiredIds - defaultIds
         assertTrue(
-            missing.isEmpty(),
-            "strictRealModBenchmark default cases must include every required benchmark id: missing ${missing.sorted()}"
+            buildScript.contains("fun realModBenchmarkCaseIds(): String"),
+            "strictRealModBenchmark must derive cases from real-mods.tsv instead of a hand-written list"
+        )
+        assertTrue(
+            buildScript.contains("""!columns[2].equals("missing", ignoreCase = true)"""),
+            "strictRealModBenchmark must include every available provider and exclude only missing providers"
+        )
+        assertTrue(
+            buildScript.contains("""defaultEnvironment("MODPORTER_BENCHMARK_CASES", realModBenchmarkCaseIds())"""),
+            "strictRealModBenchmark must use the manifest-derived default case list"
+        )
+        assertTrue(
+            availableIds.size == 8,
+            "Current strict default should cover the eight available real-mod benchmarks, got ${availableIds.sorted()}"
         )
     }
 

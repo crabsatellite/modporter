@@ -316,6 +316,14 @@ class BuildSystemTest {
     fun `updates known dependency version properties from mapping database`() {
         val projectDir = tempDir.resolve("known-dependency-version-props")
         projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation fg.deobf("com.aetherteam.nitrogen:nitrogen_internals:${'$'}{project.nitrogen_version}")
+                implementation fg.deobf("com.aetherteam.cumulus:cumulus_menus:${'$'}{project.cumulus_version}")
+                implementation fg.deobf("com.github.glitchfiend:TerraBlender-forge:${'$'}{project.terrablender_version}")
+                compileOnly fg.deobf("top.theillusivec4.curios:curios-forge:${'$'}{project.curios_version}:api")
+            }
+        """.trimIndent())
         projectDir.resolve("gradle.properties").writeText("""
             minecraft_version=1.20.1
             nitrogen_version=1.20.1-1.0.12-neoforge
@@ -5336,6 +5344,75 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `dependency version properties update only when matching dependency is declared`() {
+        val projectDir = tempDir.resolve("p19-version-property-scope")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                implementation "com.example:unrelated:1.0.0"
+            }
+        """.trimIndent())
+        projectDir.resolve("gradle.properties").writeText("""
+            minecraft_version=1.20.1
+            jade_version=4681833
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val props = projectDir.resolve("gradle.properties").readText()
+
+        assertTrue(props.contains("jade_version=4681833"), props)
+        assertFalse(props.contains("jade_version=5813144"), props)
+    }
+
+    @Test
+    fun `dependency resolver ignores known prefixes outside parsed coordinates`() {
+        val projectDir = tempDir.resolve("p19-structured-dependency-no-comment-match")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                implementation "com.example:library:1.0.0" // curse.maven:create-328085:7178761 documents an optional manual test
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "build-resolve-dep" }, result.changes.joinToString("\n"))
+        assertTrue(content.contains("""implementation "com.example:library:1.0.0""""))
+        assertFalse(content.contains("curse.maven:create-328085:7408951"), content)
+    }
+
+    @Test
+    fun `dependency resolver handles Gradle map notation as structured coordinates`() {
+        val projectDir = tempDir.resolve("p19-structured-map-notation")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                compileOnly group: 'curse.maven', name: 'create-328085', version: '7178761'
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(content.contains("""compileOnly "curse.maven:create-328085:7408951""""))
+        assertFalse(content.contains("7178761"), content)
+    }
+
+    @Test
     fun `resolves TerraBlender and Curios Forge coordinates to target NeoForge artifacts`() {
         val projectDir = tempDir.resolve("p19-btv-public-libraries")
         projectDir.createDirectories()
@@ -5440,6 +5517,29 @@ class BuildSystemTest {
         assertFalse(content.contains("curse.maven:museum-curator-859070"))
         assertFalse(content.contains("4629894"))
         assertTrue(props.contains("lootr_version=5832064"), props)
+    }
+
+    @Test
+    fun `runtime absent dependency mapping does not remove compile api declarations`() {
+        val projectDir = tempDir.resolve("p19-runtime-absent-scope")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                compileOnly "curse.maven:museum-curator-859070:4629894"
+                runtimeOnly fg.deobf("curse.maven:museum-curator-859070:4629894")
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-remove-dep" })
+        assertTrue(content.contains("""compileOnly "curse.maven:museum-curator-859070:4629894""""))
+        assertFalse(content.contains("""runtimeOnly "curse.maven:museum-curator-859070:4629894""""))
     }
 
     @Test

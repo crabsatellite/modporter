@@ -92,8 +92,8 @@
         { "config": "compileOnly", "coord": "curse.maven:alexs-mobs-1-21-1-port-1415721:7391745" }
       ],
       "mavenUrl": null,
-      "status": "available",
-      "notes": "Alex's Mobs CurseMaven: 7391745 provides a NeoForge 1.21.1 compatible compile-only optional API target"
+      "status": "compile_only_compat",
+      "notes": "Alex's Mobs CurseMaven: 7391745 is a community-maintained NeoForge 1.21.1 compatibility coordinate; use only for compile-only optional API references"
     },
     {
       "forgePrefix": "curse.maven:citadel-331936",
@@ -115,8 +115,8 @@
         { "config": "compileOnly", "coord": "curse.maven:alexs-caves-unofficial-port-1420348:7485074" }
       ],
       "mavenUrl": null,
-      "status": "available",
-      "notes": "Alex's Caves CurseMaven: 7485074 provides a NeoForge 1.21.1 compatible compile-only optional API target"
+      "status": "compile_only_compat",
+      "notes": "Alex's Caves CurseMaven: 7485074 is a community-maintained NeoForge 1.21.1 compatibility coordinate; use only for compile-only optional API references"
     },
     {
       "forgePrefix": "curse.maven:epic-fight-mod-405076",
@@ -185,8 +185,10 @@
         { "config": "runtimeOnly", "coord": "com.telepathicgrunt:CommandStructures-Neoforge:4.3.2+1.20.6" }
       ],
       "mavenUrl": "https://nexus.resourcefulbees.com/repository/maven-public/",
-      "status": "available",
-      "notes": "CrossDimCommands: replaced by a CommandStructures NeoForge runtime coordinate for the compatible structure-command API"
+      "status": "replacement",
+      "replacementPolicy": "runtime-api-successor",
+      "replacementFor": "team-twilight:crossdimcommands",
+      "notes": "CrossDimCommands has no same-artifact NeoForge 1.21.1 runtime coordinate; CommandStructures-Neoforge supplies the compatible runtime structure-command API used by the source dependency"
     },
     {
       "forgePrefix": "curse.maven:jade-324717",
@@ -237,8 +239,9 @@
       "modrinthSlug": null,
       "neoforgeCoords": [],
       "mavenUrl": null,
-      "status": "remove",
-      "notes": "Museum Curator: remove this optional runtime integration because no NeoForge 1.21.1 runtime target is declared"
+      "status": "runtime_absent",
+      "removeConfigurations": ["runtimeOnly"],
+      "notes": "Museum Curator has no declared NeoForge 1.21.1 runtime coordinate; remove only optional runtimeOnly declarations and leave compile/API use unresolved"
     },
     {
       "forgePrefix": "curse.maven:serene-seasons-291874",
@@ -347,7 +350,7 @@
       "neoforgeCoords": [
         { "config": "compileOnly", "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1:api" },
         { "config": "compileOnly", "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1" },
-        { "config": "compileOnly", "coord": "net.fabricmc:fabric-loader:0.16.14" },
+        { "config": "compileOnly", "coord": "net.fabricmc:fabric-loader:0.16.14", "role": "compile-support" },
         { "config": "runtimeOnly", "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1" }
       ],
       "versionProperties": [

@@ -3682,7 +3682,10 @@ $registrations
 
         for (file in javaFiles) {
             val original = file.readText()
-            if (!original.contains("BasePacket") || !original.contains("decode(") || !original.contains("execute(")) {
+            val executableCode = maskJavaCommentsAndLiterals(original)
+            if (!hasNitrogenBasePacketApiReference(original) ||
+                !executableCode.contains("decode(") ||
+                !executableCode.contains("execute(")) {
                 continue
             }
             val packageName = packageNameOf(original)
@@ -3691,7 +3694,8 @@ $registrations
             if (payloadTypes.isEmpty()) continue
 
             var modified = original
-            modified = modified.replace("implements BasePacket", "implements CustomPacketPayload")
+            modified = Regex("""implements\s+(?:com\.aetherteam\.nitrogen\.network\.)?BasePacket""")
+                .replace(modified, "implements CustomPacketPayload")
             modified = removeImportIfPresent(modified, "com.aetherteam.nitrogen.network.BasePacket")
             modified = removeImportIfPresent(modified, "net.minecraftforge.network.NetworkEvent")
             modified = addImportIfMissing(modified, "net.minecraft.network.codec.StreamCodec")
@@ -3736,7 +3740,7 @@ $registrations
                     before = "implements BasePacket + encode/decode/execute(Player)",
                     after = "implements CustomPacketPayload + TYPE/STREAM_CODEC",
                     confidence = Confidence.HIGH,
-                    ruleId = "struct-basepacket-payload"
+                    ruleId = "struct-nitrogen-basepacket-payload"
                 ))
             }
         }
@@ -3753,15 +3757,35 @@ $registrations
         ownerClassName: String
     ): List<BasePacketPayloadInfo> {
         val results = mutableListOf<BasePacketPayloadInfo>()
+        val code = maskJavaComments(source)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val imports = javaNonStaticImports(code)
+        val wildcardImports = javaNonStaticWildcardImports(code)
+        val sourceDeclaredBasePacketTypes = sourceDeclaredNitrogenBasePacketTypeNames(
+            source,
+            packageName,
+            imports,
+            wildcardImports
+        )
         val decodePattern = Regex(
             """public\s+static\s+(?:[A-Za-z_$][\w$]*\.)*([A-Za-z_$][\w$]*)\s+decode\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+([A-Za-z_$][\w$]*)\s*\)"""
         )
-        for (decode in decodePattern.findAll(source)) {
+        for (decode in decodePattern.findAll(executableCode)) {
             val simpleName = decode.groupValues[1]
             val bufferType = decode.groupValues[2]
             val typeStart = findTypeDeclarationStart(source, simpleName) ?: continue
             val openBrace = source.indexOf('{', typeStart)
             if (openBrace < 0 || decode.range.first < openBrace) continue
+            val header = source.substring(typeStart, openBrace)
+            if (!typeHeaderDeclaresOrInheritsNitrogenBasePacket(
+                    header,
+                    packageName,
+                    imports,
+                    wildcardImports,
+                    sourceDeclaredBasePacketTypes
+                )) {
+                continue
+            }
             val closeBrace = findMatchingBrace(source, openBrace)
             if (closeBrace <= openBrace || decode.range.first > closeBrace) continue
             val body = source.substring(openBrace + 1, closeBrace)
@@ -3786,7 +3810,12 @@ $registrations
         val ownerOpenBrace = ownerTypeStart?.let { source.indexOf('{', it) } ?: -1
         val topLevelImplementsBasePacket = ownerTypeStart != null &&
             ownerOpenBrace > ownerTypeStart &&
-            source.substring(ownerTypeStart, ownerOpenBrace).contains("implements BasePacket")
+            typeHeaderImplementsNitrogenBasePacket(
+                source.substring(ownerTypeStart, ownerOpenBrace),
+                packageName,
+                imports,
+                wildcardImports
+            )
         if (topLevelImplementsBasePacket &&
             results.none { it.simpleName == ownerClassName } &&
             Regex("""\bvoid\s+encode\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+[A-Za-z_$][\w$]*\s*\)""").containsMatchIn(source)) {
@@ -3842,9 +3871,10 @@ $registrations
             .toList()
             .forEach { file ->
                 val original = file.readText()
-                if (!original.contains("BasePacket") ||
-                    !original.contains("messageBuilder") ||
-                    !original.contains("register(")) {
+                val executableCode = maskJavaCommentsAndLiterals(original)
+                if (!hasNitrogenBasePacketApiReference(original) ||
+                    !executableCode.contains("messageBuilder") ||
+                    !executableCode.contains("register(")) {
                     return@forEach
                 }
                 val registrations = Regex("""register\s*\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.class\s*,\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*::decode\s*\)\s*;""")
@@ -3886,11 +3916,11 @@ ${registrations.distinct().joinToString("\n")}
                     file = file,
                     line = 1,
                     description = "Migrate BasePacket SimpleChannel registrations to PayloadRegistrar",
-                    before = "SimpleChannel.messageBuilder(... BasePacket::handle)",
-                    after = "RegisterPayloadHandlersEvent PayloadRegistrar registrations",
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-basepacket-handler-registration"
-                ))
+                before = "SimpleChannel.messageBuilder(... BasePacket::handle)",
+                after = "RegisterPayloadHandlersEvent PayloadRegistrar registrations",
+                confidence = Confidence.HIGH,
+                ruleId = "struct-nitrogen-basepacket-handler-registration"
+            ))
                 val mainClass = detectModMainClass(projectDir) ?: return@forEach
                 val mainOriginal = mainClass.readText()
                 val busName = detectModBusVariable(mainOriginal) ?: return@forEach
@@ -3911,7 +3941,7 @@ ${registrations.distinct().joinToString("\n")}
                         before = "$className.register()",
                         after = "$busName.addListener($className::register)",
                         confidence = Confidence.HIGH,
-                        ruleId = "struct-basepacket-main-registration"
+                        ruleId = "struct-nitrogen-basepacket-main-registration"
                     ))
                 }
             }
@@ -3938,7 +3968,7 @@ ${registrations.distinct().joinToString("\n")}
             val decode = Regex(
                 """public\s+static\s+(?:(?:${Regex.escape(packetRef)})|(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(simpleName)})\s+decode\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+[A-Za-z_$][\w$]*\s*\)"""
             ).find(source) ?: continue
-            if (!hasRegisteredPayloadSourceShape(source, ownerClassName, simpleName)) continue
+            if (!hasRegisteredPayloadSourceShape(source, packageName, ownerClassName, simpleName)) continue
             return BasePacketPayloadInfo(
                 file = file,
                 packageName = packageName,
@@ -3967,7 +3997,12 @@ ${registrations.distinct().joinToString("\n")}
         }
     }
 
-    private fun hasRegisteredPayloadSourceShape(source: String, ownerClassName: String, simpleName: String): Boolean {
+    private fun hasRegisteredPayloadSourceShape(
+        source: String,
+        packageName: String,
+        ownerClassName: String,
+        simpleName: String
+    ): Boolean {
         val typeStart = findTypeDeclarationStart(source, simpleName) ?: findTypeDeclarationStart(source, ownerClassName) ?: return false
         val openBrace = source.indexOf('{', typeStart)
         if (openBrace < 0) return false
@@ -3975,7 +4010,22 @@ ${registrations.distinct().joinToString("\n")}
         if (closeBrace <= openBrace) return false
         val header = source.substring(typeStart, openBrace)
         val body = source.substring(openBrace + 1, closeBrace)
-        return header.contains("implements BasePacket") ||
+        val code = maskJavaComments(source)
+        val imports = javaNonStaticImports(code)
+        val wildcardImports = javaNonStaticWildcardImports(code)
+        val sourceDeclaredBasePacketTypes = sourceDeclaredNitrogenBasePacketTypeNames(
+            source,
+            packageName,
+            imports,
+            wildcardImports
+        )
+        return typeHeaderDeclaresOrInheritsNitrogenBasePacket(
+            header,
+            packageName,
+            imports,
+            wildcardImports,
+            sourceDeclaredBasePacketTypes
+        ) ||
             header.contains("extends SyncEntityPacket<") ||
             header.contains("extends SyncLevelPacket<") ||
             body.contains("CustomPacketPayload.Type<") ||
@@ -3989,7 +4039,7 @@ ${registrations.distinct().joinToString("\n")}
             .toList()
             .forEach { file ->
                 val original = file.readText()
-                if (!maskJavaCommentsAndLiterals(original).contains("PacketRelay.")) return@forEach
+                if (!hasNitrogenPacketRelayApiReference(original)) return@forEach
                 var modified = original
                 modified = rewriteJavaInvocation(modified, "PacketRelay.sendToServer") { args ->
                     if (args.size == 2) "PacketDistributor.sendToServer(${args[1].trim()})" else null
@@ -4020,12 +4070,99 @@ ${registrations.distinct().joinToString("\n")}
                         before = "PacketRelay.sendTo*(channel, packet, ...)",
                         after = "PacketDistributor.sendTo*(packet, ...)",
                         confidence = Confidence.HIGH,
-                        ruleId = "struct-packetrelay-distributor"
+                        ruleId = "struct-nitrogen-packetrelay-distributor"
                     ))
                 }
             }
         return changes
     }
+
+    private fun hasNitrogenBasePacketApiReference(source: String): Boolean =
+        hasResolvedNitrogenNetworkTypeReference(source, "BasePacket", "com.aetherteam.nitrogen.network.BasePacket")
+
+    private fun hasNitrogenPacketRelayApiReference(source: String): Boolean =
+        hasResolvedNitrogenNetworkTypeReference(source, "PacketRelay", "com.aetherteam.nitrogen.network.PacketRelay") &&
+            maskJavaCommentsAndLiterals(source).contains("PacketRelay.")
+
+    private fun hasResolvedNitrogenNetworkTypeReference(source: String, simpleName: String, fqn: String): Boolean {
+        val code = maskJavaComments(source)
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(simpleName) && !executableCode.contains(fqn)) return false
+        val packageName = packageNameOf(code)
+        val imports = javaNonStaticImports(code)
+        val wildcardImports = javaNonStaticWildcardImports(code)
+        val referencePattern = Regex("""(?:${Regex.escape(fqn)}|(?<![.\w$])${Regex.escape(simpleName)}(?![\w$]))""")
+        return referencePattern.findAll(executableCode).any { match ->
+            resolveKnownJavaTypeReference(
+                match.value,
+                packageName,
+                imports,
+                wildcardImports,
+                setOf(fqn)
+            ) == fqn
+        }
+    }
+
+    private fun sourceDeclaredNitrogenBasePacketTypeNames(
+        source: String,
+        packageName: String,
+        imports: Map<String, String>,
+        wildcardImports: Set<String>
+    ): Set<String> =
+        Regex("""\b(?:class|record)\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(source)
+            .mapNotNull { match ->
+                val typeName = match.groupValues[1]
+                val typeStart = findTypeDeclarationStart(source, typeName) ?: return@mapNotNull null
+                val openBrace = source.indexOf('{', typeStart)
+                if (openBrace < 0) return@mapNotNull null
+                val header = source.substring(typeStart, openBrace)
+                if (typeHeaderImplementsNitrogenBasePacket(header, packageName, imports, wildcardImports)) {
+                    typeName
+                } else {
+                    null
+                }
+            }
+            .toSet()
+
+    private fun typeHeaderDeclaresOrInheritsNitrogenBasePacket(
+        header: String,
+        packageName: String,
+        imports: Map<String, String>,
+        wildcardImports: Set<String>,
+        sourceDeclaredBasePacketTypes: Set<String>
+    ): Boolean =
+        typeHeaderImplementsNitrogenBasePacket(header, packageName, imports, wildcardImports) ||
+            typeHeaderExtendsSimpleName(header)?.let { it in sourceDeclaredBasePacketTypes } == true
+
+    private fun typeHeaderImplementsNitrogenBasePacket(
+        header: String,
+        packageName: String,
+        imports: Map<String, String>,
+        wildcardImports: Set<String>
+    ): Boolean {
+        val implementedTypes = Regex("""\bimplements\s+(.+)$""")
+            .find(header)
+            ?.groupValues
+            ?.get(1)
+            ?: return false
+        return splitTopLevelJavaArgs(implementedTypes).any { implemented ->
+            resolveKnownJavaTypeReference(
+                implemented,
+                packageName,
+                imports,
+                wildcardImports,
+                setOf("com.aetherteam.nitrogen.network.BasePacket")
+            ) == "com.aetherteam.nitrogen.network.BasePacket"
+        }
+    }
+
+    private fun typeHeaderExtendsSimpleName(header: String): String? =
+        Regex("""\bextends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)""")
+            .find(header.substringBefore(" implements "))
+            ?.groupValues
+            ?.get(1)
+            ?.substringAfterLast('.')
 
     private fun rewriteJavaInvocation(source: String, qualifiedName: String, replacement: (List<String>) -> String?): String {
         var result = source

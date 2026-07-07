@@ -84,6 +84,19 @@ fun Test.defaultEnvironment(name: String, value: String) {
     }
 }
 
+fun realModBenchmarkCaseIds(): String =
+    file("src/test/resources/benchmarks/real-mods.tsv")
+        .takeIf { it.exists() }
+        ?.readLines()
+        ?.asSequence()
+        ?.map { it.trim() }
+        ?.filter { it.isNotEmpty() && !it.startsWith("#") }
+        ?.map { it.split('\t') }
+        ?.filter { columns -> columns.size >= 7 && !columns[2].equals("missing", ignoreCase = true) }
+        ?.map { columns -> columns[0] }
+        ?.joinToString(",")
+        ?: ""
+
 tasks.register<Test>("realModBenchmark") {
     description = "Ports real mod benchmark targets from src/test/resources/benchmarks/real-mods.tsv"
     group = "verification"
@@ -111,7 +124,7 @@ tasks.register<Test>("strictRealModBenchmark") {
     useJUnitPlatform()
     environment("MODPORTER_REAL_MOD_TEST", "true")
     defaultEnvironment("MODPORTER_BENCHMARK_STRICT_RUNTIME", "true")
-    defaultEnvironment("MODPORTER_BENCHMARK_CASES", "constructionwand,instantworldmirror,hotbath,showercore,sakura,twilightforest,aether,beyondtheveil")
+    defaultEnvironment("MODPORTER_BENCHMARK_CASES", realModBenchmarkCaseIds())
     defaultEnvironment("MODPORTER_BENCHMARK_TIMEOUT_SECONDS", "540")
     filter {
         includeTestsMatching("com.modporter.integration.RealModBenchmarkTest")

@@ -470,8 +470,17 @@ class RealModBenchmarkTest {
         val projectDir = tempDir.resolve("work/aether")
         projectDir.createDirectories()
         projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "maven.modrinth:quark:4.1-480"
+            }
+        """.trimIndent() + "\n")
         val logFile = tempDir.resolve("external-mob-category.log")
         logFile.writeText("""
+            [05:05:50] [main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/]:
+                 Mod List:
+                    Quark 4.1-480 (quark)
+                    The Aether 0.0NONE (aether)
             [05:06:10] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected quark:stoneling that was registered with CREATURE mob category but was added under MONSTER mob category for aether:skyroot_forest biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
         """.trimIndent() + "\n")
 
@@ -479,8 +488,26 @@ class RealModBenchmarkTest {
 
         assertTrue(audit.findings.isEmpty(), "Expected external dependency mob warning to be allowlisted: ${audit.findings}")
         assertTrue(
-            audit.allowedIssues.any { it.contains("entity 'quark:stoneling' is not the target mod namespace") },
+            audit.allowedIssues.any { it.contains("entity 'quark:stoneling' belongs to external dependency namespace 'quark'") },
             "Expected machine evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps external mob category warning without dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        val logFile = tempDir.resolve("external-mob-category-no-evidence.log")
+        logFile.writeText("""
+            [05:06:10] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected quark:stoneling that was registered with CREATURE mob category but was added under MONSTER mob category for aether:skyroot_forest biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Detected quark:stoneling") },
+            "External dependency mob warnings need active dependency or runtime Mod List evidence"
         )
     }
 
@@ -489,8 +516,17 @@ class RealModBenchmarkTest {
         val projectDir = tempDir.resolve("work/example")
         projectDir.createDirectories()
         projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "maven.modrinth:external:1.0.0"
+            }
+        """.trimIndent() + "\n")
         val logFile = tempDir.resolve("repeated-external-mob-category.log")
         logFile.writeText("""
+            [05:05:50] [main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/]:
+                 Mod List:
+                    External 1.0.0 (external)
+                    Example 0.0NONE (example)
             [05:06:10] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected external:scout that was registered with CREATURE mob category but was added under MONSTER mob category for example:highlands biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
             [05:06:11] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected external:burrower that was registered with CREATURE mob category but was added under MONSTER mob category for example:highlands biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
             [05:06:12] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected external:scout that was registered with CREATURE mob category but was added under MONSTER mob category for example:grove biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
@@ -507,14 +543,14 @@ class RealModBenchmarkTest {
         assertTrue(
             audit.allowedIssues.any {
                 it.contains("3 occurrences") &&
-                    it.contains("entity 'external:scout' is not the target mod namespace")
+                    it.contains("entity 'external:scout' belongs to external dependency namespace 'external'")
             },
             "Expected repeated external entity evidence to be summarized with count, got: ${audit.allowedIssues}"
         )
         assertTrue(
             audit.allowedIssues.any {
                 it.startsWith("line ") &&
-                    it.contains("entity 'external:burrower' is not the target mod namespace")
+                    it.contains("entity 'external:burrower' belongs to external dependency namespace 'external'")
             },
             "Single warnings should retain their direct line evidence, got: ${audit.allowedIssues}"
         )
@@ -818,6 +854,74 @@ class RealModBenchmarkTest {
         assertTrue(
             audit.findings.any { it.contains("Unable to load model: 'depmod:item/missing_widget'") },
             "External missing model warnings require active dependency evidence"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows external dependency sound and logger warnings with dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/sakura")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=sakura\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                runtimeOnly "curse.maven:patchouli-306770:6164575"
+                runtimeOnly "maven.modrinth:mysterious_mountain_lib:1.0.0"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("external-dependency-sounds.log")
+        logFile.writeText("""
+            [05:05:50] [main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/]:
+                 Mod List:
+                    Patchouli 1.21-88 (patchouli)
+                    Mysterious Mountain Lib 1.0.0 (mysterious_mountain_lib)
+                    Sakura 0.0NONE (sakura)
+            [06:14:12] [Render thread/WARN] [patchouli/]: Could not locate JEI keybindings, lookups in books may not work
+            [06:14:13] [Worker-Main-3/WARN] [minecraft/SoundManager]: File mmlib:sounds/presented_by_zaia.ogg does not exist, cannot add it to event mysterious_mountain_lib:presented_by_zaia
+            [06:14:14] [Render thread/ERROR] [minecraft/SoundEngine]: Missing subtitle translation{key='mmlib.sound.presented_by_zaia', args=[]} for sound event: mysterious_mountain_lib:presented_by_zaia
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected external dependency warnings to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("Patchouli/JEI integration warning") && it.contains("patchouli") },
+            "Expected Patchouli owner evidence, got: ${audit.allowedIssues}"
+        )
+        assertTrue(
+            audit.allowedIssues.any { it.contains("external dependency missing sound file warning") && it.contains("mysterious_mountain_lib") },
+            "Expected external sound file evidence, got: ${audit.allowedIssues}"
+        )
+        assertTrue(
+            audit.allowedIssues.any { it.contains("external dependency missing subtitle warning") && it.contains("mysterious_mountain_lib") },
+            "Expected external subtitle evidence, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps external dependency sound and logger warnings without dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/sakura")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=sakura\n")
+        val logFile = tempDir.resolve("external-dependency-sounds-no-evidence.log")
+        logFile.writeText("""
+            [06:14:12] [Render thread/WARN] [patchouli/]: Could not locate JEI keybindings, lookups in books may not work
+            [06:14:13] [Worker-Main-3/WARN] [minecraft/SoundManager]: File mmlib:sounds/presented_by_zaia.ogg does not exist, cannot add it to event mysterious_mountain_lib:presented_by_zaia
+            [06:14:14] [Render thread/ERROR] [minecraft/SoundEngine]: Missing subtitle translation{key='mmlib.sound.presented_by_zaia', args=[]} for sound event: mysterious_mountain_lib:presented_by_zaia
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Could not locate JEI keybindings") },
+            "Patchouli/JEI warning must not be allowed by static substring"
+        )
+        assertTrue(
+            audit.findings.any { it.contains("File mmlib:sounds/presented_by_zaia.ogg") },
+            "External missing sound file warning must not be allowed by static substring"
+        )
+        assertTrue(
+            audit.findings.any { it.contains("Missing subtitle translation") },
+            "External missing subtitle warning must not be allowed by static substring"
         )
     }
 
@@ -3169,7 +3273,7 @@ class RealModBenchmarkTest {
         externalDependencyMissingMixinEvidence(lines, index, evidenceCache)?.let {
             return "external dependency optional mixin target warning ($it)"
         }
-        externalDependencyMobCategoryEvidence(lines[index], evidenceCache)?.let {
+        externalDependencyMobCategoryEvidence(lines, index, evidenceCache)?.let {
             return "external dependency mob-category warning ($it)"
         }
         externalDependencyConfigCorrectionEvidence(lines, index, evidenceCache)?.let {
@@ -3180,6 +3284,15 @@ class RealModBenchmarkTest {
         }
         externalDependencyMissingModelEvidence(lines, index, evidenceCache)?.let {
             return "external dependency missing model warning ($it)"
+        }
+        externalDependencyPatchouliJeiKeybindingEvidence(lines, index, evidenceCache)?.let {
+            return "external dependency Patchouli/JEI integration warning ($it)"
+        }
+        externalDependencyMissingSoundFileEvidence(lines, index, evidenceCache)?.let {
+            return "external dependency missing sound file warning ($it)"
+        }
+        externalDependencyMissingSubtitleEvidence(lines, index, evidenceCache)?.let {
+            return "external dependency missing subtitle warning ($it)"
         }
         sourceInheritedCreativeTabDuplicateEvidence(lines, index, evidenceCache)?.let {
             return "source-inherited creative-tab duplicate item warning ($it)"
@@ -3304,18 +3417,21 @@ class RealModBenchmarkTest {
     }
 
     private fun externalDependencyMobCategoryEvidence(
-        line: String,
+        lines: List<String>,
+        index: Int,
         evidenceCache: RuntimeLogEvidenceCache
     ): String? {
         evidenceCache.projectDir ?: return null
         val match = Regex("""Detected ([a-z0-9_.-]+:[a-z0-9_./-]+) that was registered with [A-Z_]+ mob category but was added under [A-Z_]+ mob category""")
-            .find(line)
+            .find(lines[index])
             ?: return null
         val entityId = match.groupValues[1]
         val targetMod = evidenceCache.targetMod
-        if (targetMod != null && entityId.substringBefore(':') == targetMod) return null
+        val namespace = entityId.substringBefore(':')
+        if (targetMod != null && namespace == targetMod) return null
         if (evidenceCache.containsText(entityId)) return null
-        return "entity '$entityId' is not the target mod namespace and is absent from converted/input project sources"
+        val evidence = externalDependencyNamespaceEvidence(namespace, lines, evidenceCache) ?: return null
+        return "entity '$entityId' belongs to external dependency namespace '$namespace' with $evidence evidence and is absent from converted/input project sources"
     }
 
     private fun externalDependencyConfigCorrectionEvidence(
@@ -3401,6 +3517,62 @@ class RealModBenchmarkTest {
         return "input and converted resources declare sound file '$soundReference' for event '$eventNamespace:$eventPath' but both omit sounds/$soundFilePath.ogg"
     }
 
+    private fun externalDependencyPatchouliJeiKeybindingEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val match = Regex("""\[[^\]]*/(?:WARN|ERROR)]\s+\[([a-z0-9_.-]+)/]: Could not locate JEI keybindings, lookups in books may not work""")
+            .find(lines[index])
+            ?: return null
+        val ownerMod = match.groupValues[1]
+        if (ownerMod != "patchouli") return null
+        val evidence = externalDependencyNamespaceEvidence(ownerMod, lines, evidenceCache) ?: return null
+        return "logger owner '$ownerMod' is an external dependency with $evidence evidence"
+    }
+
+    private fun externalDependencyMissingSoundFileEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val match = Regex("""File ([a-z0-9_.-]+):sounds/([a-z0-9_./-]+)\.ogg does not exist, cannot add it to event ([a-z0-9_.-]+):([a-z0-9_./-]+)""")
+            .find(lines[index])
+            ?: return null
+        val fileNamespace = match.groupValues[1]
+        val soundFilePath = match.groupValues[2]
+        val eventNamespace = match.groupValues[3]
+        val eventPath = match.groupValues[4]
+        val project = evidenceCache.projectDir ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (eventNamespace == targetMod || fileNamespace == targetMod) return null
+        val soundReference = "$fileNamespace:$soundFilePath"
+        val soundEvent = "$eventNamespace:$eventPath"
+        if (evidenceCache.containsAnyText(soundReference, soundEvent)) return null
+        if (resourceHasSoundFile(project, fileNamespace, soundFilePath)) return null
+        val evidence = externalDependencyNamespaceEvidence(eventNamespace, lines, evidenceCache) ?: return null
+        return "sound event '$soundEvent' belongs to external dependency namespace '$eventNamespace' with $evidence evidence; converted/input sources do not reference '$soundReference'"
+    }
+
+    private fun externalDependencyMissingSubtitleEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val match = Regex("""Missing subtitle translation\{key='([^']+)'[^}]*} for sound event: ([a-z0-9_.-]+):([a-z0-9_./-]+)""")
+            .find(lines[index])
+            ?: return null
+        val key = match.groupValues[1]
+        val eventNamespace = match.groupValues[2]
+        val eventPath = match.groupValues[3]
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (eventNamespace == targetMod) return null
+        val soundEvent = "$eventNamespace:$eventPath"
+        if (evidenceCache.containsAnyText(key, soundEvent)) return null
+        val evidence = externalDependencyNamespaceEvidence(eventNamespace, lines, evidenceCache) ?: return null
+        return "subtitle '$key' belongs to external dependency sound event '$soundEvent' with $evidence evidence and is absent from converted/input project sources"
+    }
+
     private fun externalDependencyMissingModelEvidence(
         lines: List<String>,
         index: Int,
@@ -3411,14 +3583,25 @@ class RealModBenchmarkTest {
         val targetMod = evidenceCache.targetMod ?: return null
         if (warning.namespace == targetMod) return null
         if (resourceHasModelFile(project, warning.namespace, warning.modelFolder, warning.modelPath)) return null
-        val activeDependency = evidenceCache.buildFileContainsDependencyId(warning.namespace)
-        val loadedMod = warning.namespace in loadedRuntimeModIds(lines)
+        val evidence = externalDependencyNamespaceEvidence(warning.namespace, lines, evidenceCache) ?: return null
+        return "model '${warning.namespace}:${warning.modelFolder}/${warning.modelPath}' belongs to external dependency namespace '${warning.namespace}' with $evidence evidence"
+    }
+
+    private fun externalDependencyNamespaceEvidence(
+        namespace: String,
+        lines: List<String>,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        evidenceCache.projectDir ?: return null
+        val targetMod = evidenceCache.targetMod
+        if (targetMod != null && namespace == targetMod) return null
+        val activeDependency = evidenceCache.buildFileContainsDependencyId(namespace)
+        val loadedMod = namespace in loadedRuntimeModIds(lines)
         if (!activeDependency && !loadedMod) return null
-        val evidence = buildList {
+        return buildList {
             if (activeDependency) add("active build dependency")
             if (loadedMod) add("loaded runtime mod")
         }.joinToString(" and ")
-        return "model '${warning.namespace}:${warning.modelFolder}/${warning.modelPath}' belongs to external dependency namespace '${warning.namespace}' with $evidence evidence"
     }
 
     private fun sourceInheritedMissingModelEvidence(
@@ -3433,7 +3616,6 @@ class RealModBenchmarkTest {
         if (resourceHasModelFile(project, warning.namespace, warning.modelFolder, warning.modelPath)) return null
         if (resourceHasModelFile(sourceDir, warning.namespace, warning.modelFolder, warning.modelPath)) return null
         if (!sourceDeclaresRegistryModelId(project, warning.namespace, warning.modelFolder, warning.modelPath)) return null
-        if (!sourceDeclaresRegistryModelId(sourceDir, warning.namespace, warning.modelFolder, warning.modelPath)) return null
         val relative = "assets/${warning.namespace}/models/${warning.modelFolder}/${warning.modelPath}.json"
         return "input and converted sources declare ${warning.modelFolder} id '${warning.namespace}:${warning.modelPath}' and both omit model '$relative'"
     }
@@ -5116,10 +5298,6 @@ class RealModBenchmarkTest {
             "Assets URL 'union:",
             "Failed to process update information",
             "Class version 65 required is higher than the class version supported by the current version of Mixin",
-            // Upstream dependency noise from Patchouli/MMLib jars, not emitted by converted project source.
-            "Could not locate JEI keybindings, lookups in books may not work",
-            "File mmlib:sounds/presented_by_zaia.ogg does not exist, cannot add it to event mysterious_mountain_lib:presented_by_zaia",
-            "Missing subtitle translation{key='mmlib.sound.presented_by_zaia'",
             "Missing sound for event: minecraft:item.goat_horn.play",
             "Missing sound for event: minecraft:entity.goat.screaming.horn_break",
             "Shader rendertype_entity_translucent_emissive could not find sampler named Sampler2",

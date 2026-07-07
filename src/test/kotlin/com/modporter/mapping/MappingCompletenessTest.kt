@@ -187,7 +187,15 @@ class MappingCompletenessTest {
             ?.readText()
             ?: error("neoforge-deps.json missing")
         val dependencies = Json.parseToJsonElement(text).jsonObject.getValue("dependencies").jsonArray
-        val supported = setOf("available", "unavailable", "check_online", "remove")
+        val supported = setOf(
+            "available",
+            "unavailable",
+            "check_online",
+            "compile_only_compat",
+            "replacement",
+            "runtime_absent",
+            "remove"
+        )
 
         val offenders = dependencies.flatMap { element ->
             val dep = element.jsonObject
@@ -201,6 +209,43 @@ class MappingCompletenessTest {
                 }
                 if (status == "available" && coords.isEmpty()) {
                     add("$prefix is available without NeoForge coordinates")
+                }
+                if (status == "compile_only_compat") {
+                    if (coords.isEmpty()) {
+                        add("$prefix is compile_only_compat without compatibility coordinates")
+                    }
+                    val nonCompileOnly = coords.map { it.jsonObject }
+                        .filter { it["config"]?.jsonPrimitive?.content != "compileOnly" }
+                    if (nonCompileOnly.isNotEmpty()) {
+                        add("$prefix compile_only_compat must declare only compileOnly coordinates")
+                    }
+                    if (!notes.contains("compile-only", ignoreCase = true)) {
+                        add("$prefix compile_only_compat notes must state compile-only scope")
+                    }
+                }
+                if (status == "replacement") {
+                    if (coords.isEmpty()) {
+                        add("$prefix is replacement without replacement coordinates")
+                    }
+                    if (dep["replacementFor"]?.jsonPrimitive?.content != prefix) {
+                        add("$prefix replacement must declare replacementFor equal to forgePrefix")
+                    }
+                    if (dep["replacementPolicy"]?.jsonPrimitive?.content.isNullOrBlank()) {
+                        add("$prefix replacement must declare replacementPolicy")
+                    }
+                }
+                if (status == "runtime_absent") {
+                    if (coords.isNotEmpty()) {
+                        add("$prefix is runtime_absent but still declares NeoForge coordinates")
+                    }
+                    val removeConfigurations = dep["removeConfigurations"]?.jsonArray.orEmpty()
+                        .map { it.jsonPrimitive.content }
+                    if (removeConfigurations != listOf("runtimeOnly")) {
+                        add("$prefix runtime_absent must be scoped exactly to runtimeOnly removal")
+                    }
+                    if (!notes.contains("no declared NeoForge 1.21.1 runtime coordinate")) {
+                        add("$prefix runtime_absent notes must explain the missing target runtime coordinate")
+                    }
                 }
                 if (status == "remove" && coords.isNotEmpty()) {
                     add("$prefix is remove but still declares NeoForge coordinates")
@@ -229,6 +274,60 @@ class MappingCompletenessTest {
         assertTrue(
             offenders.isEmpty(),
             "Dependency mappings must express supported automated resolution semantics: $offenders"
+        )
+    }
+
+    @Test
+    fun `dependency mappings classify non equivalent artifacts explicitly`() {
+        val text = javaClass.getResourceAsStream("/mappings/forge2neo/neoforge-deps.json")
+            ?.bufferedReader()
+            ?.readText()
+            ?: error("neoforge-deps.json missing")
+        val dependencies = Json.parseToJsonElement(text).jsonObject.getValue("dependencies").jsonArray
+
+        val offenders = dependencies.flatMap { element ->
+            val dep = element.jsonObject
+            val prefix = dep.getValue("forgePrefix").jsonPrimitive.content
+            val prefixGroup = prefix.substringBefore(':')
+            val prefixArtifact = prefix.substringAfter(':', "")
+            val hasArtifactPrefix = ':' in prefix
+            val status = dep["status"]?.jsonPrimitive?.content ?: "unavailable"
+            dep["neoforgeCoords"]?.jsonArray.orEmpty().flatMap { coordElement ->
+                val coordObject = coordElement.jsonObject
+                val coord = coordObject.getValue("coord").jsonPrimitive.content
+                val config = coordObject["config"]?.jsonPrimitive?.content ?: "implementation"
+                val role = coordObject["role"]?.jsonPrimitive?.content
+                val parts = coord.split(":")
+                val targetGroup = parts.getOrNull(0).orEmpty()
+                val targetArtifact = parts.getOrNull(1).orEmpty()
+                val targetVersion = parts.getOrNull(2).orEmpty()
+                buildList {
+                    val sameArtifactFamily = if (hasArtifactPrefix) {
+                        targetGroup == prefixGroup &&
+                            (targetArtifact == prefixArtifact || targetArtifact.startsWith("$prefixArtifact-"))
+                    } else {
+                        targetGroup == prefix || targetGroup.startsWith("$prefix.")
+                    }
+                    val supportCoordinate = role == "compile-support" && config == "compileOnly"
+                    if (!sameArtifactFamily &&
+                        !supportCoordinate &&
+                        status in setOf("available") &&
+                        status !in setOf("compile_only_compat", "replacement")) {
+                        add("$prefix maps to non-equivalent artifact $coord without explicit compatibility/replacement status")
+                    }
+                    if (role == "compile-support" && config != "compileOnly") {
+                        add("$prefix support coordinate $coord must be compileOnly")
+                    }
+                    if (Regex("""\b1\.20(?:\.\d+)?\b""").containsMatchIn(targetVersion) && status != "replacement") {
+                        add("$prefix maps to old-Minecraft coordinate $coord without replacement status")
+                    }
+                }
+            }
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Dependency mappings must make compatibility shims and replacement artifacts explicit: $offenders"
         )
     }
 
@@ -10414,11 +10513,22 @@ class MappingCompletenessTest {
         val body = source.substring(start, end)
         val offenders = listOf(
             "java file-name owner" to Regex("""file\.fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
-            "java file-name candidate filter" to Regex("""fileName\.toString\(\)\.removeSuffix\("\.java"\)""")
+            "java file-name candidate filter" to Regex("""fileName\.toString\(\)\.removeSuffix\("\.java"\)"""),
+            "raw BasePacket marker" to Regex("""contains\("BasePacket"\)"""),
+            "raw PacketRelay marker" to Regex("""contains\("PacketRelay\."\)""")
         )
             .filter { (_, pattern) -> pattern.containsMatchIn(body) }
             .map { (label, _) -> "BasePacket migration contains $label" }
 
+        assertTrue(
+            source.contains("private fun hasNitrogenBasePacketApiReference") &&
+                source.contains("private fun hasNitrogenPacketRelayApiReference") &&
+                source.contains("resolveKnownJavaTypeReference(") &&
+                source.contains("com.aetherteam.nitrogen.network.BasePacket") &&
+                source.contains("com.aetherteam.nitrogen.network.PacketRelay") &&
+                source.contains("typeHeaderImplementsNitrogenBasePacket"),
+            "BasePacket migrations must resolve the Nitrogen API owner through Java imports/FQNs"
+        )
         assertTrue(
             offenders.isEmpty(),
             "BasePacket migrations must use source-declared Java owners, not Java file-name fallback inference: $offenders"

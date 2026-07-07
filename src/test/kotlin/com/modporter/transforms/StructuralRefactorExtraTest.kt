@@ -3846,10 +3846,10 @@ bus.addListener(ActualListenerRegistry::register);
         val main = srcDir.resolve("ExampleMod.java").readText()
         val relay = srcDir.resolve("RelayUse.java").readText()
 
-        assertTrue(result.changes.any { it.ruleId == "struct-basepacket-payload" })
-        assertTrue(result.changes.any { it.ruleId == "struct-basepacket-handler-registration" })
-        assertTrue(result.changes.any { it.ruleId == "struct-basepacket-main-registration" })
-        assertTrue(result.changes.any { it.ruleId == "struct-packetrelay-distributor" })
+        assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-basepacket-payload" })
+        assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-basepacket-handler-registration" })
+        assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-basepacket-main-registration" })
+        assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-packetrelay-distributor" })
         assertTrue(clientPacket.contains("implements CustomPacketPayload"), clientPacket)
         assertTrue(clientPacket.contains("StreamCodec.of((buf, packet) -> packet.encode(buf), ClientNoticePacket::decode)"), clientPacket)
         assertFalse(clientPacket.contains("BasePacket"), clientPacket)
@@ -3952,9 +3952,9 @@ bus.addListener(ActualListenerRegistry::register);
         val handler = networkDir.resolve("WrongPacketHandlerFile.java").readText()
         val main = networkDir.resolve("ExampleMod.java").readText()
 
-        assertTrue(result.changes.any { it.ruleId == "struct-basepacket-payload" })
-        assertTrue(result.changes.any { it.ruleId == "struct-basepacket-handler-registration" })
-        assertTrue(result.changes.any { it.ruleId == "struct-basepacket-main-registration" })
+        assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-basepacket-payload" })
+        assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-basepacket-handler-registration" })
+        assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-basepacket-main-registration" })
         assertTrue(packet.contains("record ActualNoticePacket(int value) implements CustomPacketPayload"), packet)
         assertTrue(packet.contains("CustomPacketPayload.Type<ActualNoticePacket> TYPE"), packet)
         assertTrue(packet.contains("StreamCodec.of((buf, packet) -> packet.encode(buf), ActualNoticePacket::decode)"), packet)
@@ -3965,6 +3965,66 @@ bus.addListener(ActualListenerRegistry::register);
         assertFalse(handler.contains("WrongPacketHandlerFile"), handler)
         assertTrue(main.contains("modEventBus.addListener(ActualPacketHandler::register);"), main)
         assertFalse(main.contains("WrongPacketHandlerFile::register"), main)
+    }
+
+    @Test
+    fun `base packet migration ignores local same-name packet interfaces`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BasePacket.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.world.entity.player.Player;
+
+            interface BasePacket {
+                void encode(FriendlyByteBuf buf);
+                void execute(Player player);
+            }
+        """.trimIndent())
+        srcDir.resolve("LocalNoticePacket.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.world.entity.player.Player;
+
+            public record LocalNoticePacket(int value) implements BasePacket {
+                public void encode(FriendlyByteBuf buf) {
+                    buf.writeInt(this.value());
+                }
+
+                public static LocalNoticePacket decode(FriendlyByteBuf buf) {
+                    return new LocalNoticePacket(buf.readInt());
+                }
+
+                public void execute(Player player) {
+                    player.getId();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LocalRelay.java").writeText("""
+            package com.example;
+
+            public final class LocalRelay {
+                static final class PacketRelay {
+                    static void sendToServer(Object channel, Object packet) {
+                    }
+                }
+
+                public void send(Object channel) {
+                    PacketRelay.sendToServer(channel, new LocalNoticePacket(1));
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val packet = srcDir.resolve("LocalNoticePacket.java").readText()
+        val relay = srcDir.resolve("LocalRelay.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId.startsWith("struct-nitrogen-basepacket") }, result.changes.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "struct-nitrogen-packetrelay-distributor" }, result.changes.joinToString("\n"))
+        assertTrue(packet.contains("implements BasePacket"), packet)
+        assertTrue(relay.contains("PacketRelay.sendToServer(channel, new LocalNoticePacket(1));"), relay)
     }
 
     @Test

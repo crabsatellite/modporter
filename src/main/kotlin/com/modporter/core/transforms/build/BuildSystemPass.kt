@@ -4520,10 +4520,16 @@ $body
             ))
         }
 
+        val projectBuildText = listOf(
+            file.parent.resolve("build.gradle"),
+            file.parent.resolve("build.gradle.kts")
+        )
+            .filter { it.exists() }
+            .joinToString("\n") { it.readText() }
         val dependencyVersionProperties = DependencyResolver(
             offlineMode = true,
             mappingsPrefix = mappingsPrefix
-        ).targetVersionProperties()
+        ).targetVersionPropertiesForBuild(projectBuildText)
         for (versionProperty in dependencyVersionProperties) {
             val pattern = Regex("""(?m)^${Regex.escape(versionProperty.name)}\s*=\s*.+$""")
             val match = pattern.find(content) ?: continue
