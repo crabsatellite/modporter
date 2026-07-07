@@ -842,6 +842,83 @@ class RealModBenchmarkTest {
     }
 
     @Test
+    fun `runtime log audit allowlists source inherited slow deferred work`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeSourceInheritedDeferredWorkEvidence(
+            sourceDir,
+            forgePackage = "net.minecraftforge",
+            resourceLocationCall = "new ResourceLocation(\"example\", \"overworld\")"
+        )
+        writeSourceInheritedDeferredWorkEvidence(
+            projectDir,
+            forgePackage = "net.neoforged",
+            resourceLocationCall = "ResourceLocation.fromNamespaceAndPath(\"example\", \"overworld\")"
+        )
+        val logFile = tempDir.resolve("deferred-work-inherited.log")
+        logFile.writeText("""
+            [06:14:12] [Render thread/WARN] [ne.ne.fm.DeferredWorkQueue/LOADING]: Mod 'example' took 1.082 s to run a deferred task.
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected source-inherited slow deferred work warning to be allowlisted: $audit")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("source-inherited slow deferred work warning") },
+            "Expected deferred-work evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps slow deferred work warning without source evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        writeSourceInheritedDeferredWorkEvidence(
+            projectDir,
+            forgePackage = "net.neoforged",
+            resourceLocationCall = "ResourceLocation.fromNamespaceAndPath(\"example\", \"overworld\")"
+        )
+        val logFile = tempDir.resolve("deferred-work-no-source.log")
+        logFile.writeText("""
+            [06:14:12] [Render thread/WARN] [ne.ne.fm.DeferredWorkQueue/LOADING]: Mod 'example' took 1.082 s to run a deferred task.
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("took 1.082 s to run a deferred task") },
+            "Slow deferred work warnings require input source evidence"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps slow deferred work warning when setup fingerprints diverge`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeSourceInheritedDeferredWorkEvidence(
+            sourceDir,
+            forgePackage = "net.minecraftforge",
+            resourceLocationCall = "new ResourceLocation(\"example\", \"overworld\")",
+            extraDeferredCall = "DifferentRegistry.register();"
+        )
+        writeSourceInheritedDeferredWorkEvidence(
+            projectDir,
+            forgePackage = "net.neoforged",
+            resourceLocationCall = "ResourceLocation.fromNamespaceAndPath(\"example\", \"overworld\")"
+        )
+        val logFile = tempDir.resolve("deferred-work-diverged.log")
+        logFile.writeText("""
+            [06:14:12] [Render thread/WARN] [ne.ne.fm.DeferredWorkQueue/LOADING]: Mod 'example' took 1.082 s to run a deferred task.
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("took 1.082 s to run a deferred task") },
+            "Slow deferred work warnings require identical input and converted enqueueWork call fingerprints"
+        )
+    }
+
+    @Test
     fun `runtime log audit keeps texture mip warning when input dimensions differ`(@TempDir tempDir: Path) {
         val projectDir = tempDir.resolve("work/example")
         val sourceDir = tempDir.resolve("sources/example")
@@ -2268,6 +2345,40 @@ class RealModBenchmarkTest {
         ImageIO.write(image, "png", textureDir.resolve("odd_mip_overlay.png").toFile())
     }
 
+    private fun writeSourceInheritedDeferredWorkEvidence(
+        projectDir: Path,
+        forgePackage: String,
+        resourceLocationCall: String,
+        extraDeferredCall: String = ""
+    ) {
+        val javaDir = projectDir.resolve("src/main/java/example")
+        javaDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        javaDir.resolve("ExampleMod.java").writeText("""
+            package example;
+
+            import net.minecraft.resources.ResourceLocation;
+            import $forgePackage.fml.event.lifecycle.FMLCommonSetupEvent;
+
+            public final class ExampleMod {
+                private void setup(final FMLCommonSetupEvent event) {
+                    event.enqueueWork(() -> {
+                        Messages.register();
+                        ResearchRegistry.registerResearchesFirst();
+                        ResearchRegistry.registerResearchesSecond();
+                        DialogueRegistry.registerDialogues();
+                        ExchangeRegistry.registerExchanges();
+                        Regions.register(new OverworldRegion($resourceLocationCall, 5));
+                        SurfaceRuleManager.addSurfaceRules(SurfaceRuleManager.RuleCategory.OVERWORLD, "example", TerrablenderSurfaceRules.makeRules());
+                        AlembicsRecipeRegistry.registerRecipes();
+                        MultiblockRegistry.registerMultiblocks();
+                        $extraDeferredCall
+                    });
+                }
+            }
+        """.trimIndent() + "\n")
+    }
+
     private fun terminateProcessTree(process: Process, forcibly: Boolean) {
         val descendants = process.toHandle().descendants().iterator().asSequence().toList().asReversed()
         for (handle in descendants) {
@@ -3085,6 +3196,9 @@ class RealModBenchmarkTest {
         sourceInheritedTextureMipEvidence(lines[index], evidenceCache)?.let {
             return "source-inherited texture mip warning ($it)"
         }
+        sourceInheritedSlowDeferredWorkEvidence(lines[index], evidenceCache)?.let {
+            return "source-inherited slow deferred work warning ($it)"
+        }
         return null
     }
 
@@ -3363,6 +3477,158 @@ class RealModBenchmarkTest {
         if (projectSize != expectedSize || sourceSize != expectedSize) return null
         return "input and converted resources contain texture '$namespace:$texturePath' with inherited size ${expectedSize.width}x${expectedSize.height}"
     }
+
+    private fun sourceInheritedSlowDeferredWorkEvidence(
+        line: String,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val match = Regex("""Mod '([a-z0-9_.-]+)' took ([0-9.]+) s to run a deferred task""")
+            .find(line)
+            ?: return null
+        val modId = match.groupValues[1]
+        val seconds = match.groupValues[2]
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+        val targetMod = evidenceCache.targetMod ?: return null
+        if (modId != targetMod) return null
+
+        val convertedFingerprints = commonSetupDeferredWorkFingerprints(project)
+        val sourceFingerprints = commonSetupDeferredWorkFingerprints(sourceDir)
+        for (converted in convertedFingerprints) {
+            for (source in sourceFingerprints) {
+                if (converted.calls.size >= 3 && converted.calls == source.calls) {
+                    val renderedCalls = converted.calls.sorted().take(6).joinToString(", ")
+                    return "input and converted sources retain identical common setup enqueueWork call fingerprint(s) " +
+                        "[$renderedCalls] for mod '$modId' (${seconds}s)"
+                }
+            }
+        }
+        return null
+    }
+
+    private fun commonSetupDeferredWorkFingerprints(projectDir: Path): List<DeferredWorkFingerprint> {
+        if (!projectDir.exists()) return emptyList()
+        return javaAndKotlinSourceFiles(projectDir).flatMap { file ->
+            val active = activeCode(file.readText())
+            if (!active.contains("FMLCommonSetupEvent") || !active.contains("enqueueWork")) {
+                emptyList()
+            } else {
+                extractEnqueueWorkBodies(active).mapNotNull { body ->
+                    val calls = deferredWorkCallFingerprints(body)
+                    if (calls.isEmpty()) null else DeferredWorkFingerprint(calls)
+                }
+            }
+        }
+    }
+
+    private fun extractEnqueueWorkBodies(source: String): List<String> {
+        val bodies = mutableListOf<String>()
+        var searchIndex = 0
+        while (true) {
+            val callIndex = source.indexOf("enqueueWork", searchIndex)
+            if (callIndex < 0) break
+            val openParen = source.indexOf('(', callIndex)
+            if (openParen < 0) break
+            val closeParen = matchingDelimiterIndex(source, openParen, '(', ')')
+            if (closeParen == null) {
+                searchIndex = openParen + 1
+            } else {
+                bodies.add(source.substring(openParen + 1, closeParen))
+                searchIndex = closeParen + 1
+            }
+        }
+        return bodies
+    }
+
+    private fun matchingDelimiterIndex(source: String, openIndex: Int, open: Char, close: Char): Int? {
+        var depth = 0
+        var inString: Char? = null
+        var escaped = false
+        for (index in openIndex until source.length) {
+            val char = source[index]
+            if (inString != null) {
+                if (escaped) {
+                    escaped = false
+                } else if (char == '\\') {
+                    escaped = true
+                } else if (char == inString) {
+                    inString = null
+                }
+                continue
+            }
+            if (char == '"' || char == '\'') {
+                inString = char
+                continue
+            }
+            if (char == open) depth++
+            if (char == close) {
+                depth--
+                if (depth == 0) return index
+            }
+        }
+        return null
+    }
+
+    private fun deferredWorkCallFingerprints(body: String): Set<String> {
+        val methodCallPattern = Regex("""\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\s*\(""")
+        val methodReferencePattern = Regex("""\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)::([A-Za-z_][A-Za-z0-9_]*)""")
+        return statementFragments(body)
+            .mapNotNull { statement ->
+                methodCallPattern.find(statement)?.groupValues?.get(1)
+                    ?: methodReferencePattern.find(statement)?.let { match ->
+                        val receiver = match.groupValues[1]
+                        val method = match.groupValues[2]
+                        if (receiver.isBlank()) method else "$receiver.$method"
+                    }
+            }
+            .map { it.removePrefix("this.") }
+            .filterNot { it == "event.enqueueWork" }
+            .toSet()
+    }
+
+    private fun statementFragments(source: String): List<String> {
+        val fragments = mutableListOf<String>()
+        var start = 0
+        var parenDepth = 0
+        var bracketDepth = 0
+        var inString: Char? = null
+        var escaped = false
+        for (index in source.indices) {
+            val char = source[index]
+            if (inString != null) {
+                if (escaped) {
+                    escaped = false
+                } else if (char == '\\') {
+                    escaped = true
+                } else if (char == inString) {
+                    inString = null
+                }
+                continue
+            }
+            if (char == '"' || char == '\'') {
+                inString = char
+                continue
+            }
+            when (char) {
+                '(' -> parenDepth++
+                ')' -> if (parenDepth > 0) parenDepth--
+                '[' -> bracketDepth++
+                ']' -> if (bracketDepth > 0) bracketDepth--
+                ';' -> if (parenDepth == 0 && bracketDepth == 0) {
+                    val fragment = source.substring(start, index).trim()
+                    if (fragment.isNotBlank()) fragments += fragment
+                    start = index + 1
+                }
+            }
+        }
+        val tail = source.substring(start).trim()
+        if (tail.isNotBlank()) fragments += tail
+        return fragments
+    }
+
+    private data class DeferredWorkFingerprint(
+        val calls: Set<String>
+    )
 
     private fun externalDependencyCreativeTabDuplicateEvidence(
         lines: List<String>,
