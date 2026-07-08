@@ -9,11 +9,11 @@ patterns that have appeared in real mods, generalizing those patterns into deter
 build, and resource transformations, and then protecting them with regression tests and strict
 runtime gates.
 
-Passing the current eight benchmark mods does not mean the ninth mod you try is guaranteed to
-work. A new mod may use Forge APIs, library surfaces, project layouts, data formats, or runtime
-behaviors that none of the current benchmarks exercise yet. In that case the right next step is
-not a one-off bypass for that mod, but a new general rule that captures the underlying pattern and
-keeps all previously supported mods passing.
+Passing the currently configured benchmark mods does not mean an untested mod you try next is
+guaranteed to work. A new mod may use Forge APIs, library surfaces, project layouts, data formats,
+or runtime behaviors that none of the current benchmarks exercise yet. In that case the right next
+step is not a one-off bypass for that mod, but a new general rule that captures the underlying
+pattern and keeps all previously supported mods passing.
 
 The intended outcome is cumulative engineering reuse: once a migration pattern is implemented and
 gated, future ports should not repeat that manual work. As the ruleset grows, ModPorter should
@@ -29,7 +29,7 @@ General-purpose Minecraft mod migration tool. Currently supports **Forge 1.20.1 
 
 ## Current Milestone
 
-As of the `v0.3.0` release candidate, the strict real-mod gate has been locally verified for all eight configured benchmark targets that are currently available in the maintainer benchmark environment:
+As of the `v0.3.0` release candidate, the strict real-mod gate has been locally verified for the configured benchmark targets currently available in the maintainer benchmark environment:
 
 | Target | Provider | Source | Strict gate status |
 |--------|----------|--------|--------------------|
