@@ -32,6 +32,27 @@ class CliTest {
         return projectDir
     }
 
+    private fun setupMiniModWithMetadata(): Path {
+        val projectDir = setupMiniMod()
+        val metaInf = projectDir.resolve("src/main/resources/META-INF")
+        metaInf.createDirectories()
+        metaInf.resolve("mods.toml").writeText("""
+            modLoader="javafml"
+            loaderVersion="[47,)"
+            license="MIT"
+            [[mods]]
+            modId="minimod"
+            displayName="Mini Mod"
+            authors="Original Author"
+            description='''Example'''
+            [[dependencies.minimod]]
+            modId="forge"
+            mandatory=true
+            versionRange="[47,)"
+        """.trimIndent())
+        return projectDir
+    }
+
     private fun setupBrokenForgeMod(): Path {
         val projectDir = tempDir.resolve("brokenmod")
         val srcDir = projectDir.resolve("src/main/java/com/example")
@@ -210,6 +231,22 @@ class CliTest {
         assertFalse(content.contains("MinecraftForge"), "Old references should be gone")
 
         assertTrue(reportPath.exists(), "Report should be generated")
+    }
+
+    @Test
+    fun `port command add tool credit appends metadata credits`() {
+        val projectDir = setupMiniModWithMetadata()
+        val outDir = tempDir.resolve("credited-neoforge")
+
+        PortCommand().parse(listOf(
+            "--src", projectDir.toString(),
+            "--out", outDir.toString(),
+            "--add-tool-credit"
+        ))
+
+        val metadata = outDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").readText()
+        assertTrue(metadata.contains("credits=\"Ported with ModPorter: https://github.com/crabsatellite/modporter\""), metadata)
+        assertTrue(metadata.contains("authors=\"Original Author\""), metadata)
     }
 
     @Test

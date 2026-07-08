@@ -829,6 +829,7 @@ class StructuralRefactorPass : Pass {
         val methodCounts = allMethods.groupingBy { it.method.name }.eachCount()
         val candidates = allMethods.filter { candidate ->
             methodCounts[candidate.method.name] == 1 &&
+                isPrivateOrPackagePrivateJavaMethodHeader(candidate.method.header) &&
                 !candidate.method.header.contains("HolderLookup.Provider") &&
                 candidate.source.substring(candidate.method.range).let { methodText ->
                     methodText.contains("ContainerHelper.saveAllItems(") ||
@@ -2365,7 +2366,7 @@ ${indent}}
         contextVars.forEach { contextVar ->
             result = replaceExecutableRegex(
                 result,
-                Regex("""(?m)^([ \t]*)ServerPlayer\s+(\w+)\s*=\s*${Regex.escape(contextVar)}\.getSender\(\);\s*\r?\n\1if\s*\(\s*\2\s*!=\s*null\s*\)\s*\{"""),
+                Regex("""(?m)^([ \t]*)ServerPlayer\s+(\w+)\s*=\s*${Regex.escape(contextVar)}\.(?:getSender|player)\(\);\s*\r?\n[ \t]*if\s*\(\s*\2\s*!=\s*null\s*\)\s*\{"""),
             ) { match -> "${match.groupValues[1]}if ($contextVar.player() instanceof ServerPlayer ${match.groupValues[2]}) {" }
             result = replaceExecutableRegex(
                 result,
@@ -2539,9 +2540,10 @@ ${indent}}
                 continue
             }
             val parameterName = parameterMatch.groupValues[1]
+            val executableMethodText = maskJavaCommentsAndLiterals(methodText)
             val declaration = Regex(
                 """(?m)^([ \t]*)NetworkEvent\.Context\s+($id)\s*=\s*${Regex.escape(parameterName)}\.get\(\);\s*\r?\n"""
-            ).find(methodText)
+            ).find(executableMethodText)
             if (declaration == null) {
                 cursor = method.range.last + 1
                 continue
@@ -2560,6 +2562,10 @@ ${indent}}
                 migratedMethod,
                 Regex("""\b${Regex.escape(contextName)}\.getSender\(\)""")
             ) { "$contextName.player()" }
+            migratedMethod = replaceExecutableRegex(
+                migratedMethod,
+                Regex("""(?m)^([ \t]*)ServerPlayer\s+($id)\s*=\s*\(ServerPlayer\)\s*${Regex.escape(contextName)}\.player\(\);\s*\r?\n[ \t]*if\s*\(\s*\2\s*!=\s*null\s*\)\s*\{""")
+            ) { match -> "${match.groupValues[1]}if ($contextName.player() instanceof ServerPlayer ${match.groupValues[2]}) {" }
             migratedMethod = replaceExecutableRegex(
                 migratedMethod,
                 Regex("""\b${Regex.escape(contextName)}\.getDirection\(\)""")
@@ -10631,6 +10637,7 @@ public class DelegatingPackResources extends AbstractPackResources {
         branchBody: String,
         source: String
     ): LegacyCapabilityProvider? {
+        val preserveLazyOptionalField = legacyLazyOptionalFieldHasLifecycle(source, fieldName)
         val branchInitializer = if (index == null) {
             lazyOptionalAssignmentInitializer(branchBody, fieldName)
         } else {
@@ -10647,6 +10654,10 @@ public class DelegatingPackResources extends AbstractPackResources {
             null
         }
         if (initializer != null) {
+            if (!preserveLazyOptionalField) {
+                legacyLazyOptionalInitializerToProvider(initializer)
+                    ?.let { return LegacyCapabilityProvider(it, setOf(fieldName)) }
+            }
             return LegacyCapabilityProvider("blockEntity.$fieldName.orElse(null)")
         }
 
@@ -10658,6 +10669,13 @@ public class DelegatingPackResources extends AbstractPackResources {
         }
 
         return null
+    }
+
+    private fun legacyLazyOptionalFieldHasLifecycle(source: String, fieldName: String): Boolean {
+        val executable = maskJavaCommentsAndLiterals(source)
+        val field = Regex.escape(fieldName)
+        return Regex("""(?m)^[ \t]*(?:this\.)?$field(?:\s*\[[^]\r\n]+])?\.invalidate\s*\(""").containsMatchIn(executable) ||
+            Regex("""(?m)^[ \t]*(?:this\.)?$field(?:\s*\[[^]\r\n]+])?\s*=\s*(?:LazyOptional\.of|SidedInvWrapper\.create|null)\b""").containsMatchIn(executable)
     }
 
     private fun lazyOptionalAssignmentInitializer(source: String, fieldName: String): String? {
@@ -13223,7 +13241,7 @@ $fields
         val legacyLootTableResourceLocationReferences = collectLegacyLootTableResourceLocationReferences(javaFiles)
         val inbtSerializableTypeFqns = collectProjectINBTSerializableTypes(javaFiles)
         val itemStackNbtMethods = collectItemStackNbtMethodsNeedingHolderLookup(javaFiles, javaInheritanceIndex)
-        val itemStackNbtConstructors = collectItemStackNbtConstructorsNeedingHolderLookup(javaFiles, itemStackNbtMethods)
+        val itemStackNbtConstructors = collectItemStackNbtConstructorsNeedingHolderLookup(javaFiles, itemStackNbtMethods, javaInheritanceIndex)
         val constructorFactoryMethods = collectHolderLookupConstructorFactoryMethods(javaFiles, itemStackNbtConstructors, javaInheritanceIndex)
         val savedDataHolderLookupMethods = collectSavedDataHolderLookupMethods(javaFiles, savedDataClassNames)
         val existingHolderLookupNbtMethods = collectExistingHolderLookupNbtMethods(javaFiles)
@@ -13749,6 +13767,20 @@ $fields
                         ruleId = "struct-vanilla-121-api"
                     ))
                     text = vanilla121Migrated
+                }
+
+                val fluidTypeValueMigrated = migrateNeoForgeFluidTypeValueContexts(text)
+                if (fluidTypeValueMigrated != text) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 0,
+                        description = "Migrate NeoForge fluid type holders to value contexts",
+                        before = "NeoForgeMod.*_TYPE holder used as a FluidType",
+                        after = "NeoForgeMod.*_TYPE.value() in FluidType API contexts",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-vanilla-121-api"
+                    ))
+                    text = fluidTypeValueMigrated
                 }
 
                 val placementModifierHolderAccessMigrated = migratePlacementModifierTypeDeferredHolderReferences(
@@ -18800,7 +18832,9 @@ ${entries.joinToString(",\n")}
                 Regex("""\b(?:this\.)?load\s*\(\s*([^;\r\n]+?\.getTag\(\)|[A-Za-z_$][\w$]*)\s*\)\s*;""")
             ) { match ->
                     needsHolderLookup = true
-                    "this.loadWithComponents(${match.groupValues[1].trim()}, $providerName);"
+                    val tagExpression = match.groupValues[1].trim()
+                    val methodName = if (tagExpression.endsWith(".getTag()")) "loadAdditional" else "loadWithComponents"
+                    "this.$methodName($tagExpression, $providerName);"
                 }
             if (migratedMethod != method) {
                 val methodStart = result.indexOf(method)
@@ -19593,7 +19627,6 @@ ${entries.joinToString(",\n")}
             val fieldPattern = Regex.escape(fieldName)
             val holderUse =
                 Regex("""BuiltInRegistries\.MOB_EFFECT\.wrapAsHolder\s*\(\s*$fieldPattern\s*\)""").containsMatchIn(executableCode) ||
-                    Regex("""new\s+MobEffectInstance\s*\(\s*$fieldPattern\s*,""").containsMatchIn(executableCode) ||
                     Regex("""\b$fieldPattern\s*(?:==|!=)\s*MobEffects\.[A-Z0-9_]+\b""").containsMatchIn(executableCode) ||
                     Regex("""\b$fieldPattern\.getDisplayName\s*\(""").containsMatchIn(executableCode)
             if (!holderUse) continue
@@ -20819,8 +20852,11 @@ $migratedRecipes
         result = migrateLegacyDoEnchantDamageEffectsSource(result)
         result = migrateMobEffectApplicableEventSource(result)
         result = migrateLivingDamageEventBoundarySource(result)
+        val hadLazyOptionalCompatImport = Regex(
+            """(?m)^[ \t]*import\s+(?:com\.modporter(?:\.generated\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)?\.compat|net\.(?:neo)?forged\.common\.util)\.LazyOptional;\s*$"""
+        ).containsMatchIn(maskJavaCommentsAndLiterals(result))
         result = migrateGeneratedLazyOptionalImportSource(result, generatedCompatPackage)
-        result = removeUnusedLazyOptionalFields(result)
+        result = removeUnusedLazyOptionalFields(result, allowPlainUnusedCleanup = hadLazyOptionalCompatImport)
 
         if (result.contains(".effects()") && result.contains("mapOfKeys(")) {
             Regex("""mapOfKeys\(\s*[A-Za-z_$][\w$]*\.class\s*,\s*([A-Za-z_$][\w$]*)\s*->""")
@@ -30964,6 +31000,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         )
         val candidates = mutableListOf<Candidate>()
         val projectSerializableTypeFqns = collectProjectINBTSerializableTypes(javaFiles)
+        val entityCapabilityTypes = collectEntityCapabilityValueTypes(javaFiles)
         for (javaFile in javaFiles) {
             val source = runCatching { javaFile.readText() }.getOrDefault("")
             if (!source.contains("CompoundTag")) continue
@@ -31040,10 +31077,83 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             return fqn in projectSerializableTypeFqns
         }
 
-        fun providerEvidenceAtCallSite(source: String, offset: Int): Boolean =
+        fun constructorHasProviderAwareCallSite(owner: String, parameterCount: Int): Boolean {
+            val token = "new $owner("
+            for (javaFile in javaFiles) {
+                val source = runCatching { javaFile.readText() }.getOrDefault("")
+                if (!source.contains(token)) continue
+                val executableCode = maskJavaCommentsAndLiterals(source)
+                var cursor = 0
+                while (true) {
+                    val tokenIndex = executableCode.indexOf(token, cursor)
+                    if (tokenIndex < 0) break
+                    val openParen = tokenIndex + token.length - 1
+                    val closeParen = findMatchingParen(executableCode, openParen)
+                    if (closeParen < 0) {
+                        cursor = tokenIndex + token.length
+                        continue
+                    }
+                    val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+                    if (args.size == parameterCount &&
+                        (
+                            holderLookupProviderNamesAt(source, tokenIndex).isNotEmpty() ||
+                                registryAccessExpressionAt(source, tokenIndex, javaInheritanceIndex) != null
+                            )
+                    ) {
+                        return true
+                    }
+                    cursor = closeParen + 1
+                }
+            }
+            return false
+        }
+
+        fun enclosingProviderAwareConstructorCallSite(source: String, offset: Int): Boolean {
+            val executableCode = maskJavaCommentsAndLiterals(source)
+            val type = javaTypeBlocks(source, executableCode)
+                .lastOrNull { offset in it.bodyStart..it.end }
+                ?: return false
+            val constructorPattern = Regex(
+                """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:public|protected|private)?\s*${Regex.escape(type.name)}\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\{"""
+            )
+            val constructor = constructorPattern.findAll(executableCode)
+                .firstOrNull { match ->
+                    if (match.range.first <= type.bodyStart || match.range.first >= type.end) return@firstOrNull false
+                    val openBrace = executableCode.indexOf('{', match.range.last - 1)
+                    val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
+                    openBrace >= 0 && closeBrace >= offset && closeBrace <= type.end
+                }
+                ?: return false
+            val openBrace = executableCode.indexOf('{', constructor.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
+            if (openBrace < 0 || closeBrace < offset || closeBrace > type.end) return false
+            val constructorText = source.substring(constructor.range.first, closeBrace + 1)
+            val classDeclarationsByName = collectJavaClassDeclarations(source).associateBy { it.name }
+            if (!methodTextNeedsHolderLookupProvider(
+                    constructorText,
+                    collectItemStackValueNames(source),
+                    collectItemStackCollectionNames(source),
+                    collectItemStackHandlerValueNames(source),
+                    collectFluidTankValueNames(source),
+                    classDeclarationsByName[type.name]?.let {
+                        javaClassExtendsAny(it, setOf("ItemStackHandler"), javaInheritanceIndex)
+                    } == true
+                )
+            ) {
+                return false
+            }
+            return constructorHasProviderAwareCallSite(type.name, javaMethodParameterCount(constructor.value))
+        }
+
+        fun providerEvidenceAtCallSite(source: String, offset: Int, receiver: String, targetOwner: String): Boolean =
             holderLookupProviderNamesAt(source, offset).isNotEmpty() ||
                 registryAccessExpressionAt(source, offset, javaInheritanceIndex) != null ||
-                legacyINBTSerializableProviderCallSite(source, offset)
+                legacyINBTSerializableProviderCallSite(source, offset) ||
+                enclosingProviderAwareConstructorCallSite(source, offset) ||
+                (
+                    capabilityLambdaReceiverOwner(source, offset, receiver.trim(), entityCapabilityTypes) == targetOwner &&
+                        capabilityLambdaRegistryAccess(source, offset, receiver.trim()) != null
+                    )
 
         fun hasProviderAwareProjectCallSite(target: Candidate): Boolean {
             val token = ".${target.methodName}("
@@ -31076,8 +31186,10 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                         continue
                     }
                     val receiver = source.substring(receiverStart, tokenIndex)
-                    if (receiverOwnerAt(source, executableCode, receiver, tokenIndex) == target.owner &&
-                        providerEvidenceAtCallSite(source, tokenIndex)
+                    val receiverOwner = receiverOwnerAt(source, executableCode, receiver, tokenIndex)
+                        ?: capabilityLambdaReceiverOwner(source, tokenIndex, receiver.trim(), entityCapabilityTypes)
+                    if (receiverOwner == target.owner &&
+                        providerEvidenceAtCallSite(source, tokenIndex, receiver, target.owner)
                     ) {
                         return true
                     }
@@ -31117,10 +31229,11 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
 
     private fun collectItemStackNbtConstructorsNeedingHolderLookup(
         javaFiles: List<Path>,
-        methods: Set<HolderLookupNbtMethod>
+        methods: Set<HolderLookupNbtMethod>,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
     ): Set<HolderLookupNbtConstructor> {
-        if (methods.isEmpty()) return emptySet()
-        val result = linkedSetOf<HolderLookupNbtConstructor>()
+        data class Candidate(val owner: String, val parameterCount: Int)
+        val candidates = linkedSetOf<Candidate>()
         val methodsByName = methods.groupBy { it.methodName }
         val ownerNames = methods.map { it.owner }.toSet()
         val ownerAlternation = ownerNames.joinToString("|") { Regex.escape(it) }
@@ -31158,11 +31271,11 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                             itemStackHandlerNames,
                             fluidTankNames,
                             classDeclarationsByName[type.name]?.let {
-                                javaClassExtendsAny(it, setOf("ItemStackHandler"), JavaInheritanceIndex.EMPTY)
-                            } == true
+                            javaClassExtendsAny(it, setOf("ItemStackHandler"), JavaInheritanceIndex.EMPTY)
+                        } == true
                         )
                     ) {
-                        result += HolderLookupNbtConstructor(type.name, parameterCount)
+                        candidates += Candidate(type.name, parameterCount)
                         return@forEach
                     }
                     val body = executableCode.substring(openBrace + 1, closeBrace)
@@ -31175,11 +31288,44 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                                 receiverOwner != null && targets.any { it.owner == receiverOwner }
                             }
                     }
-                    if (callsTarget) result += HolderLookupNbtConstructor(type.name, parameterCount)
+                    if (callsTarget) candidates += Candidate(type.name, parameterCount)
                 }
             }
         }
-        return result
+        if (candidates.isEmpty()) return emptySet()
+        fun constructorHasProviderAwareCallSite(candidate: Candidate): Boolean {
+            val token = "new ${candidate.owner}("
+            for (javaFile in javaFiles) {
+                val source = runCatching { javaFile.readText() }.getOrDefault("")
+                if (!source.contains(token)) continue
+                val executableCode = maskJavaCommentsAndLiterals(source)
+                var cursor = 0
+                while (true) {
+                    val tokenIndex = executableCode.indexOf(token, cursor)
+                    if (tokenIndex < 0) break
+                    val openParen = tokenIndex + token.length - 1
+                    val closeParen = findMatchingParen(executableCode, openParen)
+                    if (closeParen < 0) {
+                        cursor = tokenIndex + token.length
+                        continue
+                    }
+                    val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+                    if (args.size == candidate.parameterCount &&
+                        (
+                            holderLookupProviderNamesAt(source, tokenIndex).isNotEmpty() ||
+                                registryAccessExpressionAt(source, tokenIndex, javaInheritanceIndex) != null
+                            )
+                    ) {
+                        return true
+                    }
+                    cursor = closeParen + 1
+                }
+            }
+            return false
+        }
+        return candidates
+            .filter(::constructorHasProviderAwareCallSite)
+            .mapTo(linkedSetOf()) { HolderLookupNbtConstructor(it.owner, it.parameterCount) }
     }
 
     private fun collectHolderLookupConstructorFactoryMethods(
@@ -32256,6 +32402,32 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             }
             return false
         }
+        fun itemStackReceiverRegistryAccess(receiver: String, offset: Int): String? {
+            val normalized = receiver.trim()
+            Regex("""^([A-Za-z_$][\w$]*)\.(?:copy|copyWithCount)\s*\(""")
+                .find(normalized)
+                ?.groupValues
+                ?.get(1)
+                ?.let { copied ->
+                    val methodPrefix = enclosingMethodText(result, offset)
+                        ?.let { method ->
+                            val relative = offset - result.indexOf(method)
+                            if (relative > 0 && relative <= method.length) method.substring(0, relative) else method
+                        }
+                        ?: result.substring(0, offset.coerceAtMost(result.length))
+                    Regex("""\bItemStack\s+${Regex.escape(copied)}\s*=\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.(?:getItemInHand|getMainHandItem|getOffhandItem)\s*\(""")
+                        .find(maskJavaCommentsAndLiterals(methodPrefix))
+                        ?.groupValues
+                        ?.get(1)
+                        ?.let { return "$it.registryAccess()" }
+                }
+            Regex("""^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.(?:getItemInHand|getMainHandItem|getOffhandItem)\s*\(""")
+                .find(normalized)
+                ?.groupValues
+                ?.get(1)
+                ?.let { return "$it.registryAccess()" }
+            return null
+        }
         result = Regex("""ItemStack\.parseOptional\(\s*player\.registryAccess\(\)\s*,""")
             .replace(result) { match ->
                 val registryAccess = registryAccessAt(match.range.first)
@@ -32295,14 +32467,18 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         }
         result = rewriteExecutableJavaCallWithOffset(result, "save") { receiver, args, offset ->
             if (!isItemStackReceiver(receiver, offset)) return@rewriteExecutableJavaCallWithOffset null
-            val registryAccess = registryAccessAt(offset) ?: return@rewriteExecutableJavaCallWithOffset null
+            val registryAccess = itemStackReceiverRegistryAccess(receiver, offset)
+                ?: registryAccessAt(offset)
+                ?: return@rewriteExecutableJavaCallWithOffset null
             when (args.size) {
                 0 -> "$receiver.saveOptional($registryAccess)"
                 1 -> {
                     val tagArg = args[0].trim()
                     if (tagArg == registryAccess || tagArg.endsWith(".registryAccess()")) {
                         null
-                    } else if (tagArg == "new CompoundTag()" || tagArg == "new net.minecraft.nbt.CompoundTag()") {
+                    } else if (tagArg == "new net.minecraft.nbt.CompoundTag()") {
+                        "$receiver.save($registryAccess, $tagArg)"
+                    } else if (tagArg == "new CompoundTag()") {
                         "$receiver.saveOptional($registryAccess)"
                     } else {
                         "$receiver.save($registryAccess, $tagArg)"
@@ -32581,7 +32757,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         val match = setterPattern.find(executableCode) ?: return source
         val classDeclaration = enclosingJavaClassDeclaration(executableCode, match.range.first) ?: return source
         val directSuper = classDeclaration.directSuper.substringAfterLast('.')
-        if (directSuper !in javaEntityBaseTypes() && !directSuper.endsWith("Entity")) return source
+        if (directSuper !in javaEntityBaseTypes()) return source
         val stepHeight = match.groupValues[2]
         var result = source.removeRange(match.range)
         val method = """
@@ -34926,14 +35102,26 @@ public $className(Properties $propertiesName, WoodType $typeName) {
     private fun migrateDeprecatedTextureAtlasLocationConstants(source: String): String {
         val executableCode = maskJavaCommentsAndLiterals(source)
         if (!executableCode.contains("LOCATION_BLOCKS")) return source
+        fun insideGeneratedFluidSpritesHelper(offset: Int): Boolean =
+            javaMethodRangesIncludingDefault(source).any { method ->
+                method.name == "modporter${'$'}getFluidSprites" && offset in method.range
+            }
         var result = replaceExecutableJavaRegex(
             source,
             Regex("""\bnet\.minecraft\.client\.renderer\.texture\.TextureAtlas\.LOCATION_BLOCKS\b""")
-        ) {
-            "net.minecraft.world.inventory.InventoryMenu.BLOCK_ATLAS"
+        ) { match ->
+            if (insideGeneratedFluidSpritesHelper(match.range.first)) {
+                match.value
+            } else {
+                "net.minecraft.world.inventory.InventoryMenu.BLOCK_ATLAS"
+            }
         }
-        result = replaceExecutableJavaRegex(result, Regex("""\bTextureAtlas\.LOCATION_BLOCKS\b""")) {
-            "InventoryMenu.BLOCK_ATLAS"
+        result = replaceExecutableJavaRegex(result, Regex("""\bTextureAtlas\.LOCATION_BLOCKS\b""")) { match ->
+            if (insideGeneratedFluidSpritesHelper(match.range.first)) {
+                match.value
+            } else {
+                "InventoryMenu.BLOCK_ATLAS"
+            }
         }
         if (result == source) return source
         if (maskJavaCommentsAndLiterals(result).contains("InventoryMenu.BLOCK_ATLAS")) {
@@ -34985,6 +35173,12 @@ public $className(Properties $propertiesName, WoodType $typeName) {
             }
             .distinct()
             .sortedByDescending { it.length }
+        val holderMobEffectFields = Regex(
+            """(?m)^[ \t]*(?:private|protected|public)\s+(?:final\s+)?(?:net\.minecraft\.core\.)?Holder\s*<\s*(?:net\.minecraft\.world\.effect\.)?MobEffect\s*>\s+([A-Za-z_$][\w$]*)\b"""
+        )
+            .findAll(executableCode)
+            .map { it.groupValues[1] }
+            .toSet()
 
         fun holderKeyExpression(argument: String): String? {
             val trimmed = argument.trim()
@@ -34999,6 +35193,16 @@ public $className(Properties $propertiesName, WoodType $typeName) {
 
         return rewriteExecutableJavaCall(source, "is") { receiver, args ->
             if (args.size != 1) return@rewriteExecutableJavaCall null
+            val normalizedReceiver = receiver.trim().removePrefix("this.")
+            if (normalizedReceiver in holderMobEffectFields) {
+                val effect = Regex("""^(MobEffects\.[A-Z0-9_]+)(?:\.unwrapKey\(\)\.orElseThrow\(\))?$""")
+                    .find(args[0].trim())
+                    ?.groupValues
+                    ?.get(1)
+                if (effect != null) {
+                    return@rewriteExecutableJavaCall "${receiver.trim()}.is($effect)"
+                }
+            }
             val key = holderKeyExpression(args[0]) ?: return@rewriteExecutableJavaCall null
             "${receiver.trim()}.is($key)"
         }
@@ -38496,6 +38700,8 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
     ): String {
         val executableCode = maskJavaCommentsAndLiterals(source)
         if (!executableCode.contains("setLootTable(")) return source
+        if (!executableCode.contains("RandomizableContainerBlockEntity.setLootTable(") &&
+            !executableCode.contains(".setLootTable(")) return source
         var result = rewriteExecutableJavaCall(source, "setLootTable") { receiver, args ->
             if (receiver != "RandomizableContainerBlockEntity" || args.size != 4) return@rewriteExecutableJavaCall null
             "RandomizableContainer.setBlockEntityLootTable(${args.joinToString(", ") { it.trim() }})"
@@ -38622,41 +38828,100 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
     private fun migrateLegacyBucketPickupAndLiquidContainerCalls(source: String): String {
         val executableCode = maskJavaCommentsAndLiterals(source)
         if (!executableCode.contains("pickupBlock(") && !executableCode.contains("canPlaceLiquid(")) return source
-        var changed = false
-        var result = rewriteExecutableJavaCallWithOffset(source, "pickupBlock") { receiver, args, offset ->
-            if (receiver.isBlank() || args.size != 3) return@rewriteExecutableJavaCallWithOffset null
-            val player = nearestPlayerExpressionBeforeOffset(source, offset)
-                ?: "null"
-            changed = true
-            "$receiver.pickupBlock($player, ${args.joinToString(", ") { it.trim() }})"
+        var result = source
+        if (executableCode.contains("BucketPickup") && executableCode.contains(".pickupBlock(")) {
+            result = migrateLegacyBucketPickupCallSites(result)
         }
-        result = rewriteExecutableJavaCallWithOffset(result, "canPlaceLiquid") { receiver, args, offset ->
-            if (receiver.isBlank() || args.size != 4) return@rewriteExecutableJavaCallWithOffset null
-            val player = nearestPlayerExpressionBeforeOffset(result, offset)
-                ?: "null"
-            changed = true
-            "$receiver.canPlaceLiquid($player, ${args.joinToString(", ") { it.trim() }})"
+        if (maskJavaCommentsAndLiterals(result).contains("LiquidBlockContainer") &&
+            maskJavaCommentsAndLiterals(result).contains(".canPlaceLiquid(")) {
+            result = migrateLegacyLiquidContainerCallSites(result)
         }
-        return if (changed) result else source
+        return result
     }
 
-    private fun nearestPlayerExpressionBeforeOffset(source: String, offset: Int): String? {
-        val methodRange = enclosingMethodRange(source, offset) ?: return null
-        val prefix = source.substring(methodRange.first, offset)
-        val playerType = """(?:net\.minecraft\.server\.level\.)?ServerPlayer|(?:net\.minecraft\.world\.entity\.player\.)?Player"""
-        val parameterPlayer = javaMethodRangesIncludingDefault(source)
-            .firstOrNull { offset in it.range }
-            ?.header
-            ?.let(::javaMethodParameterText)
-            ?.let(::singlePlayerParameterName)
-        val candidates = mutableListOf<Pair<Int, String>>()
-        Regex("""\b(?:$playerType)\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(prefix)
-            .forEach { candidates += it.range.first to it.groupValues[1] }
-        Regex("""\binstanceof\s+(?:$playerType)\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(prefix)
-            .forEach { candidates += it.range.first to it.groupValues[1] }
-        return candidates.maxByOrNull { it.first }?.second ?: parameterPlayer
+    private fun migrateLegacyLiquidContainerCallSites(source: String): String =
+        rewriteExecutableJavaCallWithOffset(source, "canPlaceLiquid") { receiver, args, offset ->
+            if (receiver.isBlank() || args.size != 4) return@rewriteExecutableJavaCallWithOffset null
+            val player = liquidContainerPlayerArgumentForEnclosingMethod(source, offset)
+                ?: "null"
+            if (!isLiquidBlockContainerReceiverInMethod(source, receiver, offset)) {
+                return@rewriteExecutableJavaCallWithOffset null
+            }
+            "$receiver.canPlaceLiquid($player, ${args.joinToString(", ") { it.trim() }})"
+        }
+
+    private fun liquidContainerPlayerArgumentForEnclosingMethod(source: String, offset: Int): String? {
+        val method = javaMethodRangesIncludingDefault(source).firstOrNull { offset in it.range } ?: return null
+        val paramsText = javaMethodParameterText(method.header) ?: return null
+        return singlePlayerParameterName(paramsText)
+    }
+
+    private fun isLiquidBlockContainerReceiverInMethod(source: String, receiver: String, offset: Int): Boolean {
+        if (isExplicitCastReceiverToSimpleType(receiver, "LiquidBlockContainer")) return true
+        if (!Regex("""[A-Za-z_$][\w$]*""").matches(receiver)) return false
+        return receiverHasMethodScopedTypeEvidence(source, receiver, offset, "LiquidBlockContainer")
+    }
+
+    private fun isExplicitCastReceiverToSimpleType(receiver: String, simpleType: String): Boolean {
+        val type = """(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(simpleType)}"""
+        return Regex("""^\s*\(+\s*$type\s*\)\s*.+\)?\s*$""").matches(receiver)
+    }
+
+    private fun receiverHasMethodScopedTypeEvidence(
+        source: String,
+        receiver: String,
+        offset: Int,
+        simpleType: String
+    ): Boolean {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val method = javaMethodRangesIncludingDefault(executableCode).firstOrNull { offset in it.range } ?: return false
+        val header = executableCode.substring(method.range.first, executableCode.indexOf('{', method.range.first).takeIf { it >= 0 && it <= method.range.last } ?: return false)
+        val parameters = javaMethodParameterText(header)
+            ?.let(::parseJavaParameters)
+            .orEmpty()
+        if (parameters.any { it.name == receiver && simpleJavaTypeName(it.type) == simpleType }) {
+            return true
+        }
+        val methodText = executableCode.substring(method.range)
+        val relativeOffset = offset - method.range.first
+        val openBrace = methodText.indexOf('{')
+        if (openBrace < 0 || relativeOffset <= openBrace) return false
+        val bodyPrefix = methodText.substring(openBrace + 1, relativeOffset)
+        val localType = nearestLocalDeclarationSimpleType(bodyPrefix, receiver)
+        if (localType != null) return localType == simpleType
+        return patternVariableScopeContainsOffset(methodText, receiver, simpleType, relativeOffset)
+    }
+
+    private fun nearestLocalDeclarationSimpleType(prefix: String, receiver: String): String? {
+        val type = """(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*(?:\s*<[^;{}()=]*>)?(?:\s*\[\s*])?"""
+        val declarationPattern = Regex("""(?m)(?:^|[;{}\r\n])\s*(?:final\s+)?($type)\s+${Regex.escape(receiver)}\b""")
+        return declarationPattern.findAll(prefix)
+            .lastOrNull()
+            ?.groupValues
+            ?.get(1)
+            ?.let(::simpleJavaTypeName)
+    }
+
+    private fun patternVariableScopeContainsOffset(
+        methodText: String,
+        receiver: String,
+        simpleType: String,
+        relativeOffset: Int
+    ): Boolean {
+        val type = """(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(simpleType)}"""
+        val pattern = Regex("""\binstanceof\s+$type\s+${Regex.escape(receiver)}\b""")
+        return pattern.findAll(methodText).any { match ->
+            val openBrace = methodText.indexOf('{', match.range.last + 1)
+            if (openBrace >= 0 && openBrace <= relativeOffset) {
+                val closeBrace = findMatchingBrace(methodText, openBrace)
+                if (closeBrace >= openBrace && relativeOffset in openBrace..closeBrace) return@any true
+            }
+            val betweenPatternAndCall = methodText.substring(match.range.last + 1, relativeOffset)
+            "&&" in betweenPatternAndCall &&
+                !betweenPatternAndCall.contains(';') &&
+                !betweenPatternAndCall.contains('{') &&
+                !betweenPatternAndCall.contains('}')
+        }
     }
 
     private fun migrateLegacyMobTypeTagChecks(source: String): String {
@@ -43730,31 +43995,74 @@ ${indent}}
     private fun migrateLegacyFluidInterfacePlayerParametersSource(source: String): Pair<String, Boolean> {
         val executableCode = maskJavaCommentsAndLiterals(source)
         if (!executableCode.contains("pickupBlock(") && !executableCode.contains("canPlaceLiquid(")) return source to false
-        val id = """[A-Za-z_$][\w$]*"""
-        val pickupSignature = Regex("""pickupBlock\s*\(\s*LevelAccessor\s+($id)\s*,\s*BlockPos\s+($id)\s*,\s*BlockState\s+($id)\s*\)""")
-        val canPlaceLiquidSignature = Regex("""canPlaceLiquid\s*\(\s*BlockGetter\s+($id)\s*,\s*BlockPos\s+($id)\s*,\s*BlockState\s+($id)\s*,\s*Fluid\s+($id)\s*\)""")
         val edits = mutableListOf<Pair<IntRange, String>>()
+        var needsNullable = false
         for (method in javaMethodRangesIncludingDefault(executableCode)) {
-            val pickupMatch = pickupSignature.find(method.header)
-            if (method.name == "pickupBlock" && pickupMatch != null) {
-                val absoluteRange = (method.range.first + pickupMatch.range.first)..(method.range.first + pickupMatch.range.last)
-                if (source.substring(absoluteRange) == pickupMatch.value) {
-                    val level = pickupMatch.groupValues[1]
-                    val pos = pickupMatch.groupValues[2]
-                    val state = pickupMatch.groupValues[3]
-                    edits += absoluteRange to "pickupBlock(Player player, LevelAccessor $level, BlockPos $pos, BlockState $state)"
-                    collectSuperPickupBlockEdits(source, executableCode, method, level, pos, state, edits)
-                }
+            val paramsText = javaMethodParameterText(method.header) ?: continue
+            val rawParams = splitTopLevelJavaArgs(paramsText).map { it.trim() }
+            val params = parseJavaParameters(paramsText)
+            if (rawParams.size != params.size) continue
+            val openParen = method.header.indexOf('(')
+            if (openParen < 0) continue
+            val closeParen = findMatchingParen(method.header, openParen)
+            if (closeParen <= openParen) continue
+            val parameterRange = (method.range.first + openParen + 1)..(method.range.first + closeParen - 1)
+            if (method.name == "pickupBlock" &&
+                params.size == 3 &&
+                simpleJavaTypeName(params[0].type) == "LevelAccessor" &&
+                simpleJavaTypeName(params[1].type) == "BlockPos" &&
+                simpleJavaTypeName(params[2].type) == "BlockState") {
+                val playerParam = legacyFluidPlayerParameter(rawParams)
+                if (playerParam.startsWith("@Nullable")) needsNullable = true
+                edits += parameterRange to (listOf(playerParam) + rawParams).joinToString(", ")
+                collectSuperPickupBlockEdits(source, executableCode, method, params[0].name, params[1].name, params[2].name, edits, requireExecutableSourceMatch = true)
             }
-            val canPlaceMatch = canPlaceLiquidSignature.find(method.header)
-            if (method.name == "canPlaceLiquid" && canPlaceMatch != null) {
-                val absoluteRange = (method.range.first + canPlaceMatch.range.first)..(method.range.first + canPlaceMatch.range.last)
-                if (source.substring(absoluteRange) == canPlaceMatch.value) {
-                    edits += absoluteRange to "canPlaceLiquid(Player player, BlockGetter ${canPlaceMatch.groupValues[1]}, BlockPos ${canPlaceMatch.groupValues[2]}, BlockState ${canPlaceMatch.groupValues[3]}, Fluid ${canPlaceMatch.groupValues[4]})"
-                }
+            if (method.name == "canPlaceLiquid" &&
+                params.size == 4 &&
+                simpleJavaTypeName(params[0].type) == "BlockGetter" &&
+                simpleJavaTypeName(params[1].type) == "BlockPos" &&
+                simpleJavaTypeName(params[2].type) == "BlockState" &&
+                simpleJavaTypeName(params[3].type) == "Fluid") {
+                val playerParam = legacyFluidPlayerParameter(rawParams)
+                if (playerParam.startsWith("@Nullable")) needsNullable = true
+                edits += parameterRange to (listOf(playerParam) + rawParams).joinToString(", ")
             }
         }
-        return applyStringEdits(source, edits) to edits.isNotEmpty()
+        var result = applyStringEdits(source, edits)
+        if (needsNullable &&
+            !maskJavaCommentsAndLiterals(result).contains("import org.jetbrains.annotations.Nullable;") &&
+            !maskJavaCommentsAndLiterals(result).contains("import javax.annotation.Nullable;")) {
+            result = addImportIfMissing(result, "javax.annotation.Nullable")
+        }
+        return result to edits.isNotEmpty()
+    }
+
+    private fun legacyFluidPlayerParameter(rawParams: List<String>): String =
+        if (rawParams.any(::hasJavaNonNullAnnotation)) "@Nullable Player player" else "Player player"
+
+    private fun hasJavaNonNullAnnotation(parameterText: String): Boolean =
+        Regex("""@\s*(?:[A-Za-z_$][\w$]*\.)*(?:NotNull|Nonnull|NonNull)\b""").containsMatchIn(parameterText)
+
+    private fun collectSuperPickupBlockEdits(
+        source: String,
+        executableCode: String,
+        method: JavaMethodRange,
+        level: String,
+        pos: String,
+        state: String,
+        edits: MutableList<Pair<IntRange, String>>,
+        requireExecutableSourceMatch: Boolean
+    ) {
+        val methodText = executableCode.substring(method.range)
+        val pickupPattern = Regex(
+            """super\.pickupBlock\(\s*${Regex.escape(level)}\s*,\s*${Regex.escape(pos)}\s*,\s*${Regex.escape(state)}\s*\)"""
+        )
+        pickupPattern.findAll(methodText).forEach { pickupMatch ->
+            val absoluteRange = (method.range.first + pickupMatch.range.first)..(method.range.first + pickupMatch.range.last)
+            if (!requireExecutableSourceMatch || source.substring(absoluteRange) == pickupMatch.value) {
+                edits += absoluteRange to "super.pickupBlock(player, $level, $pos, $state)"
+            }
+        }
     }
 
     private fun migrateLegacyBucketPickupCallSites(source: String): String {
@@ -43852,8 +44160,7 @@ ${indent}}
         val paramsText = javaMethodParameterText(method.header) ?: return null
         val playerArgument = singlePlayerParameterName(paramsText)
         if (playerArgument != null) return playerArgument
-        if (isDispenserExecuteMethod(method, paramsText)) return "null"
-        return null
+        return "null"
     }
 
     private fun javaMethodParameterText(methodHeader: String): String? {
@@ -43862,14 +44169,6 @@ ${indent}}
         val closeParen = findMatchingParen(methodHeader, openParen)
         if (closeParen <= openParen) return null
         return methodHeader.substring(openParen + 1, closeParen)
-    }
-
-    private fun isDispenserExecuteMethod(method: JavaMethodRange, paramsText: String): Boolean {
-        if (method.name != "execute") return false
-        val params = parseJavaParameters(paramsText)
-        return params.size == 2 &&
-            simpleJavaTypeName(params[0].type) == "BlockSource" &&
-            simpleJavaTypeName(params[1].type) == "ItemStack"
     }
 
     private fun singlePlayerParameterName(parameters: String): String? {
@@ -43901,30 +44200,10 @@ ${indent}}
     }
 
     private fun migrateLegacyBucketPickupCallsForReceiver(source: String, receiver: String, playerArgument: String): String {
-        val token = "$receiver.pickupBlock"
-        val migrated = StringBuilder()
-        var cursor = 0
-        while (cursor < source.length) {
-            val tokenIndex = source.indexOf(token, cursor)
-            if (tokenIndex < 0) break
-            val openParen = tokenIndex + token.length
-            if (openParen >= source.length || source[openParen] != '(') {
-                migrated.append(source, cursor, openParen)
-                cursor = openParen
-                continue
-            }
-            val closeParen = findMatchingParen(source, openParen)
-            if (closeParen < 0) break
-            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
-            val migratedArgs = if (args.size == 3) listOf(playerArgument) + args else args
-            migrated.append(source, cursor, openParen + 1)
-            migrated.append(migratedArgs.joinToString(", ") { it.trim() })
-            migrated.append(")")
-            cursor = closeParen + 1
+        return rewriteExecutableJavaCallWithOffset(source, "pickupBlock") { callReceiver, args, _ ->
+            if (callReceiver != receiver || args.size != 3) return@rewriteExecutableJavaCallWithOffset null
+            "$receiver.pickupBlock($playerArgument, ${args.joinToString(", ") { it.trim() }})"
         }
-        if (cursor == 0) return source
-        migrated.append(source, cursor, source.length)
-        return migrated.toString()
     }
 
     private data class SoundEventSupplierConstructor(
@@ -44464,7 +44743,7 @@ ${indent}}
             val receiver = result.substring(receiverStart, tokenIndex).trim()
             val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen)).map { it.trim() }
             val playerArgument = bucketPickupPlayerArgumentForEnclosingMethod(result, tokenIndex)
-            if (args.size != 3 || playerArgument == null || !bucketPickupReceiverHasTypeEvidence(executableCode, receiver)) {
+            if (args.size != 3 || playerArgument == null || !bucketPickupReceiverHasTypeEvidence(result, receiver, tokenIndex)) {
                 cursor = closeParen + 1
                 continue
             }
@@ -44475,12 +44754,9 @@ ${indent}}
         return result
     }
 
-    private fun bucketPickupReceiverHasTypeEvidence(executableCode: String, receiver: String): Boolean {
+    private fun bucketPickupReceiverHasTypeEvidence(source: String, receiver: String, offset: Int): Boolean {
         if (!Regex("""^[A-Za-z_$][\w$]*$""").matches(receiver)) return false
-        val name = Regex.escape(receiver)
-        val type = """(?:net\.minecraft\.world\.level\.block\.)?BucketPickup"""
-        return Regex("""\b$type\s+$name\b""").containsMatchIn(executableCode) ||
-            Regex("""\binstanceof\s+$type\s+$name\b""").containsMatchIn(executableCode)
+        return receiverHasMethodScopedTypeEvidence(source, receiver, offset, "BucketPickup")
     }
 
     private fun migratedItemUseDurationCall(
@@ -45754,7 +46030,11 @@ ${indent}}
             return null
         }
 
-        var result = rewriteExecutableJavaInvocationArguments(source, "FluidInteractionRegistry.addInteraction") { args ->
+        var result = replaceExecutableRegex(
+            source,
+            Regex("""\b((?:net\.neoforged\.neoforge\.common\.)?NeoForgeMod\.(?:EMPTY_TYPE|WATER_TYPE|LAVA_TYPE))\.get\(\)""")
+        ) { match -> "${match.groupValues[1]}.value()" }
+        result = rewriteExecutableJavaInvocationArguments(result, "FluidInteractionRegistry.addInteraction") { args ->
             if (args.isNotEmpty()) {
                 val migrated = fluidTypeValueExpression(args[0])
                 if (migrated != null) args.toMutableList().also { it[0] = migrated } else null
@@ -45778,6 +46058,14 @@ ${indent}}
             result,
             Regex("""(==|!=)\s*$fluidTypeConstant(?!\s*\.)""")
         ) { match -> "${match.groupValues[1]} ${match.groupValues[2]}.value()" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(?<![\w$.])((?:net\.neoforged\.neoforge\.common\.)?NeoForgeMod\.(?:EMPTY_TYPE|WATER_TYPE|LAVA_TYPE))(?!\s*\.)""")
+        ) { match -> "${match.groupValues[1]}.value()" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(?<![\w$.])((?:net\.neoforged\.neoforge\.common\.)?NeoForgeMod\.MILK_TYPE)(?!\s*\.)""")
+        ) { match -> "${match.groupValues[1]}.get()" }
         return result
     }
 
@@ -48311,7 +48599,7 @@ ${modifierLines.joinToString("\n")}
 
         var result = rewriteCanBlockContainFluidCallSitesWithPlayer(source)
         val helperPattern = Regex(
-            """(?m)^([ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private)\s+)?)boolean\s+canBlockContainFluid\s*\(\s*(?:Level|BlockGetter)\s+([A-Za-z_$][\w$]*)\s*,\s*BlockPos\s+([A-Za-z_$][\w$]*)\s*,\s*BlockState\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
+            """(?m)^([ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private)\s+)?)boolean\s+canBlockContainFluid\s*\(\s*(?:Level|LevelAccessor|BlockGetter)\s+([A-Za-z_$][\w$]*)\s*,\s*BlockPos\s+([A-Za-z_$][\w$]*)\s*,\s*BlockState\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
         )
         var changed = result != source
         val executableResult = maskJavaCommentsAndLiterals(result)
@@ -48324,13 +48612,19 @@ ${modifierLines.joinToString("\n")}
             val stateName = match.groupValues[4]
             val body = result.substring(openBrace + 1, closeBrace)
             val rewrittenBody = rewriteExecutableJavaCall(body, "canPlaceLiquid") { receiver, args ->
-                if (args.size != 4 ||
-                    args[0].trim() != levelName ||
-                    args[1].trim() != posName ||
-                    args[2].trim() != stateName) {
-                    return@rewriteExecutableJavaCall null
+                val fluidArg = when {
+                    args.size == 4 &&
+                        args[0].trim() == levelName &&
+                        args[1].trim() == posName &&
+                        args[2].trim() == stateName -> args[3].trim()
+                    args.size == 5 &&
+                        args[0].trim() == "null" &&
+                        args[1].trim() == levelName &&
+                        args[2].trim() == posName &&
+                        args[3].trim() == stateName -> args[4].trim()
+                    else -> return@rewriteExecutableJavaCall null
                 }
-                "$receiver.canPlaceLiquid(player, $levelName, $posName, $stateName, ${args[3].trim()})"
+                "$receiver.canPlaceLiquid(player, $levelName, $posName, $stateName, $fluidArg)"
             }
             if (rewrittenBody == body) return@forEach
             val replacement = "${match.groupValues[1]}boolean canBlockContainFluid(Player player, BlockGetter $levelName, BlockPos $posName, BlockState $stateName) {$rewrittenBody}"
@@ -48821,9 +49115,18 @@ ${indent}}
         return addImportIfMissing(source, "$compatPackage.LazyOptional")
     }
 
-    private fun removeUnusedLazyOptionalFields(source: String): String {
+    private fun removeUnusedLazyOptionalFields(
+        source: String,
+        allowPlainUnusedCleanup: Boolean = true
+    ): String {
         val executableCode = maskJavaCommentsAndLiterals(source)
         if (!Regex("""\bLazyOptional\s*<""").containsMatchIn(executableCode)) return source
+        if (!allowPlainUnusedCleanup &&
+            !executableCode.contains("Capabilities.") &&
+            !executableCode.contains("getCapability(") &&
+            !executableCode.contains("registerCapabilities(")) {
+            return source
+        }
         var result = source
         val fieldPattern = Regex(
             """(?m)^([ \t]*)(?:private|protected|public)\s+(?:final\s+)?LazyOptional\s*<[^;\r\n]+>\s+([A-Za-z_$][\w$]*)\s*(?:=\s*LazyOptional\.of\([^;\r\n]*\))?\s*;\s*\r?\n?"""
@@ -51147,7 +51450,7 @@ ${indent}}
         }
 
         val recipeHolderLocalAssignments = mutableMapOf<String, String>()
-        result = Regex("""(?m)^([ \t]*)CraftingRecipe\s+($id)\s*=\s*($id)\.get\(\)\s*;""")
+        result = Regex("""(?m)^([ \t]*)CraftingRecipe\s+($id)\s*=\s*($id)\.get\(\)(?:\.value\(\))?\s*;""")
             .replace(result) { match ->
                 val optionalName = match.groupValues[3]
                 val optionalHolderPattern = Regex(
@@ -53594,7 +53897,7 @@ $encodeLines
     private fun parseJavaParameters(paramsText: String): List<JavaParameterInfo> =
         splitTopLevelJavaArgs(paramsText).mapNotNull { raw ->
             val cleaned = raw.trim()
-                .replace(Regex("""^(?:@\w+(?:\([^)]*\))?\s+)+"""), "")
+                .replace(Regex("""^(?:@[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\([^)]*\))?\s+)+"""), "")
                 .removePrefix("final ")
                 .trim()
             Regex("""(.+?)\s+([A-Za-z_$][\w$]*)$""")

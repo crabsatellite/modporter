@@ -78,6 +78,12 @@ class PortCommand : CliktCommand(
     private val resolveDeps by option("--resolve-deps", help = "Auto-resolve NeoForge versions of third-party deps (default: true)")
         .flag("--no-resolve-deps", default = true)
 
+    private val addToolCredit by option(
+        "--add-tool-credit",
+        help = "Append a ModPorter credit to supported mod metadata credits fields"
+    )
+        .flag(default = false)
+
     override fun run() {
         val pipelineDef = resolvePipeline(pipelineId, src)
         val projectDir = out ?: src.resolveSibling("${src.fileName}-neoforge")
@@ -97,7 +103,11 @@ class PortCommand : CliktCommand(
         }
 
         val targetDir = if (dryRun) src else projectDir
-        val options = PipelineOptions(offline = offline, resolveDeps = resolveDeps)
+        val options = PipelineOptions(
+            offline = offline,
+            resolveDeps = resolveDeps,
+            addToolCredit = addToolCredit
+        )
 
         echo("===========================================")
         echo("  ModPorter v0.2.0")
@@ -107,6 +117,7 @@ class PortCommand : CliktCommand(
         echo("  Mode: ${if (dryRun) "DRY RUN" else "APPLY"}")
         echo("  Min confidence: $confidence")
         if (resolveDeps) echo("  Dep resolution: ${if (offline) "offline only" else "online + offline"}")
+        if (addToolCredit) echo("  Tool credit: enabled")
         echo("===========================================")
         echo()
 

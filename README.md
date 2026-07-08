@@ -1,19 +1,50 @@
 # ModPorter
 
-> **Work in progress / developer preview:** ModPorter is under active development. It is already useful for developers moving Forge 1.20.1 projects to NeoForge 1.21.1, and the current benchmark milestone proves hands-off strict runtime ports for selected large public mods. It is not yet a general guarantee that every Forge 1.20.1 mod will port without engineering work. A port is only considered successful when the automated build, dedicated server, GameTest server, client boot, client saved-world load, and log-clean gates pass.
+> **Work in progress / developer preview:** ModPorter is under active development. It is already useful for developers moving Forge 1.20.1 projects to NeoForge 1.21.1, and the current benchmark milestone demonstrates hands-off strict runtime ports for selected benchmark mods, including large public mods. It is not yet a general guarantee that every Forge 1.20.1 mod will port without engineering work. A port is only considered successful when the automated build, dedicated server, GameTest server, client boot, client saved-world load, and log-clean gates pass.
+
+## What ModPorter Is
+
+ModPorter is a ruleset-driven migration project. Its value comes from collecting migration
+patterns that have appeared in real mods, generalizing those patterns into deterministic source,
+build, and resource transformations, and then protecting them with regression tests and strict
+runtime gates.
+
+Passing the current eight benchmark mods does not mean the ninth mod you try is guaranteed to
+work. A new mod may use Forge APIs, library surfaces, project layouts, data formats, or runtime
+behaviors that none of the current benchmarks exercise yet. In that case the right next step is
+not a one-off bypass for that mod, but a new general rule that captures the underlying pattern and
+keeps all previously supported mods passing.
+
+The intended outcome is cumulative engineering reuse: once a migration pattern is implemented and
+gated, future ports should not repeat that manual work. As the ruleset grows, ModPorter should
+become more broadly useful, while still remaining honest about its coverage. This is why the
+project is positioned as a developer time-saver, not a universal one-click converter.
+
+Contributions are welcome when they expand general migration coverage without regression. A useful
+PR should add or improve deterministic rules, include focused tests, and preserve the existing
+strict benchmark results. The long-term direction is not limited to Forge 1.20.1 -> NeoForge
+1.21.1; the same gate-driven approach can support multiple Minecraft version migration pipelines.
 
 General-purpose Minecraft mod migration tool. Currently supports **Forge 1.20.1 -> NeoForge 1.21.1**.
 
 ## Current Milestone
 
-As of the current repository state, the strict real-mod gate has been verified for these large public benchmark targets:
+As of the `v0.3.0` release candidate, the strict real-mod gate has been locally verified for all eight configured benchmark targets that are currently available in the maintainer benchmark environment:
 
-| Target | Source | Strict gate status | Notes |
-|--------|--------|--------------------|-------|
-| The Aether | `The-Aether-Team/The-Aether`, `1.20.1-develop` | PASS | Compile, dedicated server, GameTest server, client boot, saved-world load, and log-clean audit passed. Remaining allowed log findings are machine-evidenced external dependency or source-inherited issues. |
-| Twilight Forest | `TeamTwilight/twilightforest`, `1.20.1` | PASS | Compile, dedicated server, GameTest server, client boot, saved-world load, and log-clean audit passed. The remaining allowed finding is a machine-evidenced source-inherited creative-tab duplicate for `twilightforest:glass_sword`. |
+| Target | Provider | Source | Strict gate status |
+|--------|----------|--------|--------------------|
+| ConstructionWand | Git | `Theta-Dev/ConstructionWand`, `1.20` | PASS |
+| InstantWorldMirror | Local | `..\InstantWorldMirror - 1.20.1` | PASS |
+| HotBath | Local | `..\hotBath-1.20` | PASS |
+| ShowerCore | Local | `..\ShowerCore-1.20` with `hotbath` dependency | PASS |
+| Sakura Mod | Local | `..\Sakura_mod-1.20.1` | PASS |
+| Twilight Forest | Git | `TeamTwilight/twilightforest`, `1.20.1` | PASS |
+| The Aether | Git | `The-Aether-Team/The-Aether`, `1.20.1-develop` | PASS |
+| Beyond the Veil | Git | `valeriotor/Beyond-The-Veil`, `1.20` | PASS |
 
-This is a publishable **developer-preview milestone**, not a final compatibility guarantee. The benchmark harness is the source of truth: new mods should be treated as unsupported until they pass the strict gate, and failures should become deterministic migration rules or explicit evidence-backed allowlist entries.
+Each PASS means the converted project passed hands-off compile, dedicated server lifecycle, GameTest server, client boot, saved-world quick-load, and warning-clean runtime log gates. Remaining allowed log findings must be machine-evidenced as source-inherited behavior or external dependency behavior; benchmark-specific bypasses are not accepted.
+
+This is a publishable **developer-preview milestone**, not a final compatibility guarantee. The benchmark harness is the source of truth: new mods should be treated as unsupported until they pass the strict gate, and failures should become deterministic migration rules or explicit evidence-backed allowlist entries. The local-provider rows require sibling source checkouts matching the paths shown above; the public Git-provider rows are fetched automatically by the benchmark harness.
 
 ## Quick Start
 
@@ -22,15 +53,21 @@ This is a publishable **developer-preview milestone**, not a final compatibility
 ./gradlew shadowJar
 
 # Port a mod
-java -jar build/libs/modporter-0.2.0-all.jar port \
+java -jar build/libs/modporter-0.3.0-all.jar port \
   --src /path/to/forge-mod \
   --out /path/to/output
 
+# Optionally add a tool credit to supported mod metadata
+java -jar build/libs/modporter-0.3.0-all.jar port \
+  --src /path/to/forge-mod \
+  --out /path/to/output \
+  --add-tool-credit
+
 # List available pipelines
-java -jar build/libs/modporter-0.2.0-all.jar list
+java -jar build/libs/modporter-0.3.0-all.jar list
 
 # Analyze a mod (dry run)
-java -jar build/libs/modporter-0.2.0-all.jar analyze --src /path/to/forge-mod
+java -jar build/libs/modporter-0.3.0-all.jar analyze --src /path/to/forge-mod
 ```
 
 ## Pipeline: forge2neo
@@ -65,6 +102,28 @@ or `medium` to inspect a subset of proposed changes; apply mode requires the def
 threshold so the tool does not silently apply lower-confidence rewrites while hiding them from
 the report.
 
+### Optional Tool Credit
+
+By default, ModPorter preserves mod author metadata and does not write itself into `authors`.
+If you want the converted project to visibly acknowledge the migration tool, pass
+`--add-tool-credit`. This appends a concise `Ported with ModPorter: https://github.com/crabsatellite/modporter`
+entry to supported `credits` metadata, preserving existing credits and authors.
+
+### Release Validation
+
+A release candidate is ready only after the default tests, fat JAR build, and strict real-mod
+benchmark pass locally:
+
+```bash
+./gradlew test
+./gradlew shadowJar
+./gradlew strictRealModBenchmark
+```
+
+The GitHub Actions workflow runs the default test suite and package build. The strict real-mod
+benchmark is intentionally treated as a local maintainer gate because it needs large public sources,
+local benchmark checkouts, Minecraft runtime launches, and longer machine time.
+
 ### Real Mod Benchmark
 
 ```bash
@@ -75,7 +134,7 @@ the report.
 ```
 
 ```powershell
-# Reproduce the current large-mod milestone on one target at a time
+# Reproduce one configured target at a time
 $env:MODPORTER_BENCHMARK_CASES="aether"; ./gradlew.bat strictRealModBenchmark --no-daemon
 $env:MODPORTER_BENCHMARK_CASES="twilightforest"; ./gradlew.bat strictRealModBenchmark --no-daemon
 ```
@@ -88,7 +147,7 @@ successfully ported when the strict runtime benchmark passes.
 
 ### Open Automated Migration Work
 
-These Forge -> NeoForge areas remain strict-gate blockers until structural/API rules and tests cover them:
+These Forge -> NeoForge areas still need broader automated coverage before ModPorter can claim general compatibility beyond the current benchmark set:
 - Enchantment (now data-driven JSON, no longer extensible class)
 - Ingredient (now final, needs ICustomIngredient)
 - LazyOptional/Capability system (full rewrite required)

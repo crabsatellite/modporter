@@ -111,7 +111,10 @@ private val MODEL_EXTENSION_RENAMES_121 = linkedMapOf(
  * Handles data folder renames, mods.toml migration, and pack format updates.
  */
 class ResourceMigrationPass(
-    private val mappingDb: MappingDatabase
+    private val mappingDb: MappingDatabase,
+    private val addToolCredit: Boolean = false,
+    private val toolCreditName: String = "ModPorter",
+    private val toolCreditUrl: String = "https://github.com/crabsatellite/modporter"
 ) : Pass {
     override val name = "Resource Migration"
     override val order = 5
@@ -143,6 +146,13 @@ class ResourceMigrationPass(
                 if (!dryRun) {
                     Files.move(modsToml, target, StandardCopyOption.REPLACE_EXISTING)
                     transformModsToml(target)
+                }
+            }
+            if (addToolCredit) {
+                val creditFile = resourceDir.resolve("META-INF/neoforge.mods.toml").takeIf { it.exists() }
+                    ?: modsToml.takeIf { it.exists() }
+                if (creditFile != null) {
+                    appendToolCredit(creditFile, changes, dryRun)
                 }
             }
 
@@ -400,6 +410,12 @@ class ResourceMigrationPass(
                 transformTemplateVariables(target)
                 transformModsToml(target)
             }
+            if (addToolCredit) {
+                val creditFile = target.takeIf { it.exists() } ?: modsToml.takeIf { it.exists() }
+                if (creditFile != null) {
+                    appendToolCredit(creditFile, changes, dryRun)
+                }
+            }
         }
     }
 
@@ -468,6 +484,78 @@ class ResourceMigrationPass(
 
         file.writeText(content)
     }
+
+    private fun appendToolCredit(file: Path, changes: MutableList<Change>, dryRun: Boolean) {
+        val before = file.readText()
+        val after = appendToolCreditToModsToml(before)
+        if (after == before) return
+        changes.add(Change(
+            file = file,
+            line = 0,
+            description = "Append ModPorter tool credit to mod metadata",
+            before = "credits",
+            after = toolCreditText(),
+            confidence = Confidence.HIGH,
+            ruleId = "res-tool-credit"
+        ))
+        if (!dryRun) {
+            file.writeText(after)
+        }
+    }
+
+    internal fun appendToolCreditToModsToml(content: String): String {
+        val credit = toolCreditText()
+        if (content.contains(toolCreditUrl) || content.contains("Ported with $toolCreditName")) return content
+
+        val simpleCredits = Regex("""(?m)^([ \t]*credits\s*=\s*")([^"\r\n]*)(".*)$""")
+        simpleCredits.find(content)?.let { match ->
+            val current = match.groupValues[2].trim()
+            val separator = if (current.isBlank()) "" else "; "
+            val replacement = "${match.groupValues[1]}${current}${separator}${escapeTomlBasicString(credit)}${match.groupValues[3]}"
+            return content.substring(0, match.range.first) + replacement + content.substring(match.range.last + 1)
+        }
+
+        val literalCredits = Regex(
+            """^([ \t]*credits\s*=\s*''')(.*?)('''[ \t]*(?:#.*)?$)""",
+            setOf(RegexOption.MULTILINE, RegexOption.DOT_MATCHES_ALL)
+        )
+        literalCredits.find(content)?.let { match ->
+            val current = match.groupValues[2].trim()
+            val separator = if (current.isBlank()) "" else "; "
+            val replacement = "${match.groupValues[1]}${current}${separator}$credit${match.groupValues[3]}"
+            return content.substring(0, match.range.first) + replacement + content.substring(match.range.last + 1)
+        }
+
+        val modsHeader = Regex("""(?m)^[ \t]*\[\[\s*mods\s*]][ \t]*(?:#.*)?$""").find(content)
+            ?: return content
+        val nextTable = Regex("""(?m)^[ \t]*\[\[""")
+            .find(content, modsHeader.range.last + 1)
+            ?.range
+            ?.first
+            ?: content.length
+        val modBlock = content.substring(modsHeader.range.first, nextTable)
+        val insertRelative = Regex("""(?m)^[ \t]*(?:authors|description)\s*=""")
+            .find(modBlock)
+            ?.range
+            ?.first
+            ?: modBlock.length
+        val indent = Regex("""(?m)^([ \t]*)modId\s*=""")
+            .find(modBlock)
+            ?.groupValues
+            ?.get(1)
+            ?: ""
+        val insertAt = modsHeader.range.first + insertRelative
+        val prefix = content.substring(0, insertAt)
+        val suffix = content.substring(insertAt)
+        val newlineBefore = if (prefix.endsWith("\n") || prefix.isEmpty()) "" else "\n"
+        val newlineAfter = if (suffix.startsWith("\n") || suffix.isEmpty()) "" else "\n"
+        return prefix + newlineBefore + indent + "credits=\"${escapeTomlBasicString(credit)}\"" + "\n" + newlineAfter + suffix
+    }
+
+    private fun toolCreditText(): String = "Ported with $toolCreditName: $toolCreditUrl"
+
+    private fun escapeTomlBasicString(value: String): String =
+        value.replace("\\", "\\\\").replace("\"", "\\\"")
 
     private fun migrateCustomEnchantmentData(projectDir: Path, changes: MutableList<Change>, errors: MutableList<String>) {
         val srcDir = projectDir.resolve("src/main/java")
@@ -1490,65 +1578,65 @@ class ResourceMigrationPass(
     }
 
     private fun collectRecipeDataCodecHints(projectDir: Path): RecipeDataCodecHints {
-        val sourceHints = collectProjectRecipeDataCodecHints(projectDir)
+        val javaSources = collectJavaSourceInfos(projectDir)
+        val sourceHints = if (javaSources.isEmpty()) {
+            RecipeDataCodecHints.EMPTY
+        } else {
+            val index = JavaSourceIndex(javaSources)
+            val stringConstants = collectJavaStringConstants(javaSources.map { it.content })
+            val registryNamespaces = collectRecipeSerializerRegistryNamespaces(javaSources, stringConstants)
+            if (registryNamespaces.isEmpty()) {
+                RecipeDataCodecHints.EMPTY
+            } else {
+                val itemStackFields = linkedMapOf<String, MutableSet<String>>()
+                val itemStackListEntryFields = linkedMapOf<String, MutableMap<String, MutableSet<String>>>()
+                val compoundTagFields = linkedMapOf<String, MutableSet<String>>()
+                val registerPattern = Regex(
+                    """\b([A-Za-z_$][\w$]*)\.register\(\s*"([^"]+)"\s*,\s*(?:(?:\(\)\s*->\s*new\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?))|([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)::new)"""
+                )
+
+                for (source in javaSources) {
+                    if (!source.executableCode.contains(".register(")) continue
+                    registerPattern.findAll(source.code)
+                        .filter { match ->
+                            val executableSegment = source.executableCode.substring(match.range.first, match.range.last + 1)
+                            executableSegment.contains(".register(") &&
+                                (executableSegment.contains("new") || executableSegment.contains("::new"))
+                        }
+                        .forEach { match ->
+                            val namespace = registryNamespaces[match.groupValues[1]] ?: return@forEach
+                            val serializerId = match.groupValues[2]
+                            val factoryReference = match.groupValues[3].ifBlank { match.groupValues[4] }
+                            val fields = recipeCodecFieldsForFactory(factoryReference, source, index)
+                            if (fields.isEmpty) return@forEach
+
+                            val typeId = "$namespace:$serializerId"
+                            if (fields.itemStackFields.isNotEmpty()) {
+                                itemStackFields.getOrPut(typeId) { linkedSetOf() }.addAll(fields.itemStackFields)
+                            }
+                            fields.itemStackFieldsByListField.forEach { (listField, entryFields) ->
+                                itemStackListEntryFields
+                                    .getOrPut(typeId) { linkedMapOf() }
+                                    .getOrPut(listField) { linkedSetOf() }
+                                    .addAll(entryFields)
+                            }
+                            if (fields.compoundTagFields.isNotEmpty()) {
+                                compoundTagFields.getOrPut(typeId) { linkedSetOf() }.addAll(fields.compoundTagFields)
+                            }
+                        }
+                }
+
+                RecipeDataCodecHints(
+                    itemStackFieldsByType = itemStackFields.mapValues { it.value.toSet() },
+                    itemStackListEntryFieldsByType = itemStackListEntryFields.mapValues { (_, fieldsByList) ->
+                        fieldsByList.mapValues { it.value.toSet() }
+                    },
+                    compoundTagFieldsByType = compoundTagFields.mapValues { it.value.toSet() }
+                )
+            }
+        }
         val dependencyHints = collectDependencyRecipeDataShapeHints(projectDir)
         return sourceHints + dependencyHints
-    }
-
-    private fun collectProjectRecipeDataCodecHints(projectDir: Path): RecipeDataCodecHints {
-        val javaSources = collectJavaSourceInfos(projectDir)
-        if (javaSources.isEmpty()) return RecipeDataCodecHints.EMPTY
-
-        val index = JavaSourceIndex(javaSources)
-        val stringConstants = collectJavaStringConstants(javaSources.map { it.content })
-        val registryNamespaces = collectRecipeSerializerRegistryNamespaces(javaSources, stringConstants)
-        if (registryNamespaces.isEmpty()) return RecipeDataCodecHints.EMPTY
-
-        val itemStackFields = linkedMapOf<String, MutableSet<String>>()
-        val itemStackListEntryFields = linkedMapOf<String, MutableMap<String, MutableSet<String>>>()
-        val compoundTagFields = linkedMapOf<String, MutableSet<String>>()
-        val registerPattern = Regex(
-            """\b([A-Za-z_$][\w$]*)\.register\(\s*"([^"]+)"\s*,\s*(?:(?:\(\)\s*->\s*new\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?))|([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)::new)"""
-        )
-
-        for (source in javaSources) {
-            if (!source.executableCode.contains(".register(")) continue
-            registerPattern.findAll(source.code)
-                .filter { match ->
-                    val executableSegment = source.executableCode.substring(match.range.first, match.range.last + 1)
-                    executableSegment.contains(".register(") &&
-                        (executableSegment.contains("new") || executableSegment.contains("::new"))
-                }
-                .forEach { match ->
-                    val namespace = registryNamespaces[match.groupValues[1]] ?: return@forEach
-                    val serializerId = match.groupValues[2]
-                    val factoryReference = match.groupValues[3].ifBlank { match.groupValues[4] }
-                    val fields = recipeCodecFieldsForFactory(factoryReference, source, index)
-                    if (fields.isEmpty) return@forEach
-
-                    val typeId = "$namespace:$serializerId"
-                    if (fields.itemStackFields.isNotEmpty()) {
-                        itemStackFields.getOrPut(typeId) { linkedSetOf() }.addAll(fields.itemStackFields)
-                    }
-                    fields.itemStackFieldsByListField.forEach { (listField, entryFields) ->
-                        itemStackListEntryFields
-                            .getOrPut(typeId) { linkedMapOf() }
-                            .getOrPut(listField) { linkedSetOf() }
-                            .addAll(entryFields)
-                    }
-                    if (fields.compoundTagFields.isNotEmpty()) {
-                        compoundTagFields.getOrPut(typeId) { linkedSetOf() }.addAll(fields.compoundTagFields)
-                    }
-                }
-        }
-
-        return RecipeDataCodecHints(
-            itemStackFieldsByType = itemStackFields.mapValues { it.value.toSet() },
-            itemStackListEntryFieldsByType = itemStackListEntryFields.mapValues { (_, fieldsByList) ->
-                fieldsByList.mapValues { it.value.toSet() }
-            },
-            compoundTagFieldsByType = compoundTagFields.mapValues { it.value.toSet() }
-        )
     }
 
     private fun collectDependencyRecipeDataShapeHints(projectDir: Path): RecipeDataCodecHints {

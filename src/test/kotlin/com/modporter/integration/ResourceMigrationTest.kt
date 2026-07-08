@@ -19,8 +19,8 @@ class ResourceMigrationTest {
     @TempDir
     lateinit var tempDir: Path
 
-    private fun setupResourceProject(): Path {
-        val projectDir = tempDir.resolve("resmod")
+    private fun setupResourceProject(name: String = "resmod"): Path {
+        val projectDir = tempDir.resolve(name)
         val resourceDir = projectDir.resolve("src/main/resources")
 
         // mods.toml
@@ -128,6 +128,46 @@ class ResourceMigrationTest {
 
         val content = projectDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").readText()
         assertTrue(content.contains("neoforge"), "Should reference neoforge instead of forge")
+    }
+
+    @Test
+    fun `tool credit is opt in and does not mention a fixed target version`() {
+        val projectDir = setupResourceProject()
+        val db = MappingDatabase.loadDefault()
+
+        ResourceMigrationPass(db).apply(projectDir)
+        val defaultContent = projectDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").readText()
+        assertFalse(defaultContent.contains("Ported with ModPorter"), "Tool credit should not be added by default")
+
+        val creditedProject = setupResourceProject("credited-opt-in")
+        ResourceMigrationPass(db, addToolCredit = true).apply(creditedProject)
+        val creditedContent = creditedProject.resolve("src/main/resources/META-INF/neoforge.mods.toml").readText()
+
+        assertTrue(creditedContent.contains("credits=\"Ported with ModPorter: https://github.com/crabsatellite/modporter\""), creditedContent)
+        assertFalse(creditedContent.contains("Ported with ModPorter to NeoForge 1.21.1"), creditedContent)
+    }
+
+    @Test
+    fun `tool credit appends to existing credits without changing authors`() {
+        val projectDir = tempDir.resolve("creditedmod")
+        val metaInf = projectDir.resolve("src/main/resources/META-INF")
+        metaInf.createDirectories()
+        metaInf.resolve("mods.toml").writeText("""
+            modLoader="javafml"
+            loaderVersion="[47,)"
+            [[mods]]
+            modId="creditedmod"
+            displayName="Credited Mod"
+            credits="Original helpers"
+            authors="Original Author"
+            description='''Example'''
+        """.trimIndent())
+
+        ResourceMigrationPass(MappingDatabase.loadDefault(), addToolCredit = true).apply(projectDir)
+
+        val content = metaInf.resolve("neoforge.mods.toml").readText()
+        assertTrue(content.contains("credits=\"Original helpers; Ported with ModPorter: https://github.com/crabsatellite/modporter\""), content)
+        assertTrue(content.contains("authors=\"Original Author\""), content)
     }
 
     @Test

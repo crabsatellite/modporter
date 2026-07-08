@@ -1047,22 +1047,22 @@ class MappingCompletenessTest {
     }
 
     @Test
-    fun `bucket pickup call site migration requires source player or dispenser evidence`() {
+    fun `bucket pickup call site migration requires scoped receiver evidence before nullable player`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
             .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
             .readText()
         val start = source.indexOf("private fun migrateLegacyBucketPickupCallSites")
         assertTrue(start >= 0, "migrateLegacyBucketPickupCallSites is missing")
-        val end = source.indexOf("private fun migrateLegacyBucketPickupLocalDeclarationBody", start + 1).let {
+        val end = source.indexOf("private fun migratedItemUseDurationCall", start + 1).let {
             if (it < 0) source.length else it
         }
         val body = source.substring(start, end)
         val offenders = listOf(
             "missing enclosing method falls back to null player" to "lastOrNull() ?: return \"null\"",
             "out-of-scope method falls back to null player" to "if (closeBrace <= offset) return \"null\"",
-            "missing Player parameter falls back to nullable null" to "singlePlayerParameterName(method.groupValues[1]) ?: \"null\"",
-            "missing Player parameter in direct call migration falls back to nullable null" to "singlePlayerParameterName(match.groupValues[1]) ?: \"null\""
+            "direct migration guesses nearest player expression" to "nearestPlayerExpressionBeforeOffset",
+            "direct migration uses whole-file executable type evidence" to "bucketPickupReceiverHasTypeEvidence(executableCode, receiver)"
         )
             .filter { (_, marker) -> body.contains(marker) }
             .map { (label, _) -> label }
@@ -1072,17 +1072,16 @@ class MappingCompletenessTest {
                 body.contains("javaMethodRangesIncludingDefault(source).firstOrNull { offset in it.range } ?: return null") &&
                 body.contains("val paramsText = javaMethodParameterText(method.header) ?: return null") &&
                 body.contains("if (playerArgument != null) return playerArgument") &&
-                body.contains("if (isDispenserExecuteMethod(method, paramsText)) return \"null\"") &&
-                body.contains("private fun isDispenserExecuteMethod(method: JavaMethodRange, paramsText: String): Boolean") &&
-                body.contains("simpleJavaTypeName(params[0].type) == \"BlockSource\"") &&
-                body.contains("simpleJavaTypeName(params[1].type) == \"ItemStack\"") &&
-                body.contains("if (playerArgument == null)") &&
-                body.contains("val playerArgument = singlePlayerParameterName(paramsText)"),
-            "BucketPickup call-site migration must rewrite only when the current Java method exposes a Player/ServerPlayer parameter or an execute(BlockSource, ItemStack) dispenser method"
+                body.contains("return \"null\"") &&
+                body.contains("val playerArgument = bucketPickupPlayerArgumentForEnclosingMethod(result, tokenIndex)") &&
+                body.contains("bucketPickupReceiverHasTypeEvidence(result, receiver, tokenIndex)") &&
+                body.contains("private fun bucketPickupReceiverHasTypeEvidence(source: String, receiver: String, offset: Int): Boolean") &&
+                body.contains("receiverHasMethodScopedTypeEvidence(source, receiver, offset, \"BucketPickup\")"),
+            "BucketPickup call-site migration may use nullable null only after the call is inside a parsed Java method and the receiver has method-scoped BucketPickup evidence"
         )
         assertTrue(
             offenders.isEmpty(),
-            "BucketPickup call-site migration must not use nullable null as a fallback for missing source Player evidence: $offenders"
+            "BucketPickup call-site migration must not use nearest-player or whole-file fallback evidence: $offenders"
         )
     }
 

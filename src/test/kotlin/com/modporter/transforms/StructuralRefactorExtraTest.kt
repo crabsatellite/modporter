@@ -11554,6 +11554,7 @@ bus.addListener(ActualListenerRegistry::register);
             import net.minecraft.world.level.block.LiquidBlockContainer;
             import net.minecraft.world.level.block.state.BlockState;
             import net.minecraft.world.level.material.Fluid;
+            import net.minecraft.world.level.material.Fluids;
             import net.neoforged.neoforge.common.NeoForgeMod;
             import net.neoforged.neoforge.common.util.TriState;
             import net.neoforged.neoforge.event.entity.player.CanPlayerSleepEvent;
@@ -11584,6 +11585,14 @@ bus.addListener(ActualListenerRegistry::register);
 
                 public boolean canContainWater(Level level, BlockPos pos, BlockState state, LiquidBlockContainer container, Fluid fluid) {
                     return container.canPlaceLiquid(level, pos, state, fluid);
+                }
+
+                public boolean canContainWaterCast(Level level, BlockPos pos, BlockState state, Block block) {
+                    return block instanceof LiquidBlockContainer && ((LiquidBlockContainer)block).canPlaceLiquid(level, pos, state, Fluids.WATER);
+                }
+
+                public boolean canContainWaterPattern(Level level, BlockPos pos, BlockState state) {
+                    return state.getBlock() instanceof LiquidBlockContainer lbc && lbc.canPlaceLiquid(level, pos, state, Fluids.WATER);
                 }
 
                 public void thrower(ItemEntity itemEntity, LivingEntity entity) {
@@ -11799,6 +11808,8 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(surface.contains("pickup.pickupBlock(player, level, pos, state);"), surface)
         assertTrue(surface.contains("container.canPlaceLiquid(player, level, pos, state, fluid);"), surface)
         assertTrue(surface.contains("return container.canPlaceLiquid(null, level, pos, state, fluid);"), surface)
+        assertTrue(surface.contains("((LiquidBlockContainer)block).canPlaceLiquid(null, level, pos, state, Fluids.WATER)"), surface)
+        assertTrue(surface.contains("lbc.canPlaceLiquid(null, level, pos, state, Fluids.WATER)"), surface)
         assertTrue(surface.contains("itemEntity.setThrower(entity);"), surface)
         assertTrue(surface.contains("target.getType().is(EntityTypeTags.ARTHROPOD)"), surface)
         assertTrue(surface.contains("!target.getType().is(EntityTypeTags.UNDEAD)"), surface)
@@ -30141,15 +30152,15 @@ bus.addListener(ActualListenerRegistry::register);
         val migrated = srcDir.resolve("BucketPickupCalls.java").readText()
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertTrue(migrated.contains("ItemStack stack = bucketPickup.pickupBlock(level, pos, state);"))
+        assertTrue(migrated.contains("ItemStack stack = bucketPickup.pickupBlock(null, level, pos, state);"))
         assertTrue(migrated.contains("void fromPlayerPattern(Block block, Player player, LevelAccessor level, BlockPos pos, BlockState state) {\n        if (block instanceof BucketPickup bucketPickup) {\n            bucketPickup.pickupBlock(player, level, pos, state);"))
-        assertTrue(migrated.contains("void fromParameter(BucketPickup bucketPickup, LevelAccessor level, BlockPos pos, BlockState state) {\n        bucketPickup.pickupBlock(level, pos, state);"))
+        assertTrue(migrated.contains("void fromParameter(BucketPickup bucketPickup, LevelAccessor level, BlockPos pos, BlockState state) {\n        bucketPickup.pickupBlock(null, level, pos, state);"))
         assertTrue(migrated.contains("void fromPlayerParameter(BucketPickup bucketPickup, Player player, LevelAccessor level, BlockPos pos, BlockState state) {\n        bucketPickup.pickupBlock(player, level, pos, state);"))
-        assertTrue(migrated.contains("void fromDeclaration(LevelAccessor level, BlockPos pos, BlockState state) {\n        BucketPickup bucketPickup = null;\n        bucketPickup.pickupBlock(level, pos, state);"))
+        assertTrue(migrated.contains("void fromDeclaration(LevelAccessor level, BlockPos pos, BlockState state) {\n        BucketPickup bucketPickup = null;\n        bucketPickup.pickupBlock(null, level, pos, state);"))
         assertTrue(migrated.contains("void fromPlayerDeclaration(Player player, LevelAccessor level, BlockPos pos, BlockState state) {\n        BucketPickup bucketPickup = null;\n        bucketPickup.pickupBlock(player, level, pos, state);"))
         assertTrue(migrated.contains("public ItemStack execute(BlockSource source, ItemStack stack) {\n        LevelAccessor level = source.level();\n        BlockPos pos = source.pos();\n        BlockState state = level.getBlockState(pos);\n        Block block = state.getBlock();\n        if (block instanceof BucketPickup bucketPickup) {\n            return bucketPickup.pickupBlock(null, level, pos, state);"))
         assertTrue(migrated.contains("Other bucketPickup = new Other();\n        bucketPickup.pickupBlock(level, pos, state);"))
-        assertEquals(1, Regex("""pickupBlock\(null, level, pos, state\)""").findAll(migrated).count(), migrated)
+        assertEquals(4, Regex("""pickupBlock\(null, level, pos, state\)""").findAll(migrated).count(), migrated)
     }
 
     @Test

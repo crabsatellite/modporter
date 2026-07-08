@@ -9,7 +9,10 @@ import java.nio.file.Path
  */
 data class PipelineOptions(
     val offline: Boolean = false,
-    val resolveDeps: Boolean = true
+    val resolveDeps: Boolean = true,
+    val addToolCredit: Boolean = false,
+    val toolCreditName: String = "ModPorter",
+    val toolCreditUrl: String = "https://github.com/crabsatellite/modporter"
 )
 
 /**

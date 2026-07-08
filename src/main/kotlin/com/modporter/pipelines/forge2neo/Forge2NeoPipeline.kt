@@ -27,7 +27,12 @@ object Forge2NeoPipeline {
                     offlineMode = options.offline || !options.resolveDeps,
                     mappingsPrefix = "/mappings/forge2neo"
                 ),
-                ResourceMigrationPass(mappingDb)
+                ResourceMigrationPass(
+                    mappingDb,
+                    addToolCredit = options.addToolCredit,
+                    toolCreditName = options.toolCreditName,
+                    toolCreditUrl = options.toolCreditUrl
+                )
             )
         },
         validationPatterns = listOf(
