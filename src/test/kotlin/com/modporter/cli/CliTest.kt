@@ -1,10 +1,14 @@
 package com.modporter.cli
 
 import com.github.ajalt.clikt.core.UsageError
+import com.modporter.AppInfo
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.Paths
 import kotlin.io.path.*
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
@@ -67,6 +71,30 @@ class CliTest {
             }
         """.trimIndent())
         return projectDir
+    }
+
+    @Test
+    fun `application version metadata comes from Gradle project version`() {
+        val buildVersion = Regex("""(?m)^version\s*=\s*"([^"]+)"""")
+            .find(Paths.get("build.gradle.kts").readText())
+            ?.groupValues
+            ?.get(1)
+            ?: error("build.gradle.kts project version not found")
+
+        assertEquals(buildVersion, AppInfo.version)
+        assertEquals("modporter/$buildVersion", AppInfo.userAgent)
+    }
+
+    @Test
+    fun `production code does not hardcode rendered tool version surfaces`() {
+        val hardcodedVersionSurface = Regex("""(?:ModPorter v|modporter/)\d+\.\d+\.\d+""")
+        val offenders = Files.walk(Paths.get("src/main"))
+            .filter { Files.isRegularFile(it) }
+            .filter { it.toString().endsWith(".kt") || it.toString().endsWith(".java") }
+            .filter { hardcodedVersionSurface.containsMatchIn(it.readText()) }
+            .toList()
+
+        assertTrue(offenders.isEmpty(), "Tool version surfaces must read AppInfo instead of hardcoding: $offenders")
     }
 
     @Test

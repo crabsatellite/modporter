@@ -3476,6 +3476,8 @@ config="$configName"
                 "public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer heightRandB"
             "public net.minecraft.world.entity.animal.Parrot f_29358_" ->
                 "public net.minecraft.world.entity.animal.Parrot MOB_SOUND_MAP"
+            "public net.minecraft.entity.ai.brain.task.GiveHeroGiftsTask field_220403_a" ->
+                "public net.minecraft.world.entity.ai.behavior.GiveGiftToHero GIFTS"
             "public net.minecraft.world.level.block.ComposterBlock m_51920_(FLnet/minecraft/world/level/ItemLike;)V" ->
                 "public net.minecraft.world.level.block.ComposterBlock add(FLnet/minecraft/world/level/ItemLike;)V"
             "public-f net.minecraft.world.item.AxeItem f_150683_" ->
@@ -3622,7 +3624,8 @@ config="$configName"
             entry.contains("net.minecraft.world.entity.LivingEntity getDeathSound()") ||
             entry.contains("net.minecraft.world.entity.decoration.HangingEntity setDirection(") ||
             entry.contains("net.neoforged.neoforge.client.event.EntityRenderersEvent\$AddLayers renderers") ||
-            entry.contains("net.minecraft.client.renderer.WeatherEffectRenderer rainSoundTime")
+            entry.contains("net.minecraft.client.renderer.WeatherEffectRenderer rainSoundTime") ||
+            entry.contains("net.minecraft.village.PointOfInterestType func_221052_a(")
 
     private fun normalizeAccessTransformerEntry(line: String): String? {
         val withoutComment = line.substringBefore("#").trim()
@@ -7451,15 +7454,16 @@ public abstract class FluidIngredient implements Predicate<FluidStack> {
     public static boolean isFluidIngredient(JsonElement json) {
         if (json == null || !json.isJsonObject()) return false;
         JsonObject obj = json.getAsJsonObject();
-        return obj.has("fluid") || obj.has("tag");
+        return obj.has("fluid") || obj.has("tag") || obj.has("fluidTag") || obj.has("null_fluid");
     }
 
     public static FluidIngredient deserialize(JsonElement json) {
         if (json == null || !json.isJsonObject()) return EMPTY;
         JsonObject obj = json.getAsJsonObject();
+        if (obj.has("null_fluid")) return EMPTY;
         int amount = obj.has("amount") ? obj.get("amount").getAsInt() : 1000;
-        if (obj.has("tag")) {
-            ResourceLocation tagId = ResourceLocation.parse(obj.get("tag").getAsString());
+        if (obj.has("tag") || obj.has("fluidTag")) {
+            ResourceLocation tagId = ResourceLocation.parse(obj.has("tag") ? obj.get("tag").getAsString() : obj.get("fluidTag").getAsString());
             return fromTag(TagKey.create(Registries.FLUID, tagId), amount);
         }
         if (obj.has("fluid")) {
@@ -7752,10 +7756,37 @@ public class AbstractRecipeSerializer<T extends AbstractRecipe> implements Recip
         @Override
         public FluidStack deserialize(JsonElement json, Type typeOfT, JsonDeserializationContext context) throws JsonParseException {
             if (json == null || json.isJsonNull()) return FluidStack.EMPTY;
-            return FluidStack.CODEC.decode(JsonOps.INSTANCE, json).result()
+            JsonElement normalized = normalizeLegacyFluidStackJson(json);
+            if (normalized == null || normalized.isJsonNull()) return FluidStack.EMPTY;
+            return FluidStack.CODEC.decode(JsonOps.INSTANCE, normalized).result()
                     .map(com.mojang.datafixers.util.Pair::getFirst)
                     .orElse(FluidStack.EMPTY);
         }
+    }
+
+    private static JsonElement normalizeLegacyFluidStackJson(JsonElement json) {
+        if (json == null || json.isJsonNull()) return JsonNull.INSTANCE;
+        if (!json.isJsonObject()) return json;
+        JsonObject obj = json.getAsJsonObject();
+        if (obj.has("fluid")
+                && obj.get("fluid").isJsonPrimitive()
+                && "minecraft:empty".equals(obj.get("fluid").getAsString())) {
+            return JsonNull.INSTANCE;
+        }
+        if (!obj.has("fluid") || obj.has("id")) return json;
+
+        JsonObject normalized = new JsonObject();
+        normalized.add("id", obj.get("fluid"));
+        copyIfPresent(obj, normalized, "amount");
+        copyIfPresent(obj, normalized, "components");
+        if (obj.has("nbt")) {
+            JsonObject components = normalized.has("components") && normalized.get("components").isJsonObject()
+                    ? normalized.getAsJsonObject("components")
+                    : new JsonObject();
+            components.add("minecraft:custom_data", obj.get("nbt"));
+            normalized.add("components", components);
+        }
+        return normalized;
     }
 
     private static class FluidIngredientAdapter implements JsonSerializer<FluidIngredient>, JsonDeserializer<FluidIngredient> {
@@ -8698,15 +8729,16 @@ public abstract class FluidIngredient implements Predicate<FluidStack> {
     public static boolean isFluidIngredient(JsonElement json) {
         if (json == null || !json.isJsonObject()) return false;
         JsonObject obj = json.getAsJsonObject();
-        return obj.has("fluid") || obj.has("tag");
+        return obj.has("fluid") || obj.has("tag") || obj.has("fluidTag") || obj.has("null_fluid");
     }
 
     public static FluidIngredient deserialize(JsonElement json) {
         if (json == null || !json.isJsonObject()) return EMPTY;
         JsonObject obj = json.getAsJsonObject();
+        if (obj.has("null_fluid")) return EMPTY;
         int amount = obj.has("amount") ? obj.get("amount").getAsInt() : 1000;
-        if (obj.has("tag")) {
-            ResourceLocation tagId = ResourceLocation.parse(obj.get("tag").getAsString());
+        if (obj.has("tag") || obj.has("fluidTag")) {
+            ResourceLocation tagId = ResourceLocation.parse(obj.has("tag") ? obj.get("tag").getAsString() : obj.get("fluidTag").getAsString());
             return fromTag(TagKey.create(Registries.FLUID, tagId), amount);
         }
         if (obj.has("fluid")) {

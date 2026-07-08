@@ -126,6 +126,7 @@ tasks.register<Test>("strictRealModBenchmark") {
     defaultEnvironment("MODPORTER_BENCHMARK_STRICT_RUNTIME", "true")
     defaultEnvironment("MODPORTER_BENCHMARK_CASES", realModBenchmarkCaseIds())
     defaultEnvironment("MODPORTER_BENCHMARK_TIMEOUT_SECONDS", "540")
+    defaultEnvironment("MODPORTER_BENCHMARK_UPDATE_README", "true")
     filter {
         includeTestsMatching("com.modporter.integration.RealModBenchmarkTest")
     }
@@ -144,9 +145,20 @@ kotlin {
     jvmToolchain(17)
 }
 
-tasks.jar {
+tasks.processResources {
+    inputs.property("version", project.version.toString())
+    filesMatching("modporter-version.properties") {
+        expand("version" to project.version.toString())
+    }
+}
+
+tasks.withType<Jar>().configureEach {
     manifest {
-        attributes["Main-Class"] = "com.modporter.cli.MainKt"
+        attributes(
+            "Main-Class" to "com.modporter.cli.MainKt",
+            "Implementation-Title" to "ModPorter",
+            "Implementation-Version" to project.version.toString()
+        )
     }
 }
 

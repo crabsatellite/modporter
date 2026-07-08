@@ -16,11 +16,20 @@ Provider types:
 | Provider | Meaning |
 |----------|---------|
 | `git` | Clone `location` at `ref` into a temporary source directory. |
-| `local` | Copy a local source directory from `location`; relative paths resolve from the repo root. |
+| `local` | Copy a local source directory from `location`; reserved for private experiments and environment overrides, not the committed release manifest. |
 | `missing` | Known benchmark target without a configured source provider yet; skipped unless strict mode is enabled. |
+
+Committed benchmark entries that participate in the release gate must use reproducible Git
+providers. `local` sources are useful for development overrides, but they make the default strict
+gate depend on one maintainer machine and are rejected by the config tests.
 
 The benchmark deletes fetched sources and converted outputs by default. Only reports and logs stay
 under `build/real-mod-benchmark/reports/`.
+
+`strictRealModBenchmark` also updates the README benchmark snapshot after a complete strict-runtime
+success over every currently available Git-backed manifest entry. The generated README block records
+the resolved Git commit hash for each source, so release documentation points at the exact upstream
+revision that passed the gate.
 
 `dependencies` is a comma-separated list of other benchmark ids, or `-`. When a selected case has
 dependencies, the harness expands the run list transitively, compiles dependency cases first, builds
@@ -116,6 +125,9 @@ $env:MODPORTER_BENCHMARK_STRICT_RUNTIME = "true"
 
 # Keep fetched sources and converted outputs for debugging.
 $env:MODPORTER_BENCHMARK_KEEP_WORK = "true"
+
+# Refresh the README benchmark snapshot after a complete strict success.
+$env:MODPORTER_BENCHMARK_UPDATE_README = "true"
 ```
 
 For the full success gate, prefer:
@@ -129,10 +141,10 @@ For the full success gate, prefer:
 | Target | Provider | Notes |
 |--------|----------|-------|
 | ConstructionWand | `git` | Required baseline target |
-| InstantWorldMirror | `local` | Uses sibling `..\InstantWorldMirror - 1.20.1` when present |
-| HotBath | `local` | Publishes a temporary benchmark jar for dependents |
-| ShowerCore | `local` | Depends on `hotbath`; dependency jar is staged automatically |
-| Sakura Mod | `local` | Larger local baseline with broad API coverage |
+| InstantWorldMirror | `git` | Public benchmark target from `crabsatellite/InstantWorldMirror` branch `1.20.1` |
+| HotBath | `git` | Public benchmark target from `crabsatellite/hotBath` branch `1.20.1`; publishes a temporary benchmark jar for dependents |
+| ShowerCore | `git` | Public benchmark target from `crabsatellite/ShowerCore` branch `1.20.1`; depends on `hotbath`, whose dependency jar is staged automatically |
+| Sakura Mod | `git` | Public benchmark target from upstream `0999312/Sakura_mod` branch `1.20.1` with broad API coverage |
 | Twilight Forest | `git` | Public large-mod target from official `TeamTwilight/twilightforest` branch `1.20.1`; compare failures against their official `1.21.1` branch |
 | The Aether | `git` | Public large-mod target from official `The-Aether-Team/The-Aether` branch `1.20.1-develop` |
 | Beyond the Veil | `git` | Public large-mod target from `valeriotor/Beyond-The-Veil` branch `1.20` |
@@ -149,7 +161,8 @@ The intended iteration loop is:
 7. Enable `MODPORTER_BENCHMARK_RUNCLIENT=true` for client boot coverage.
 8. Enable `MODPORTER_BENCHMARK_RUNCLIENTWORLD=true` for client saved-world load coverage.
 9. Enable `MODPORTER_BENCHMARK_LOG_CLEAN=true` to enforce warning-clean runtime logs.
-10. Use `MODPORTER_BENCHMARK_STRICT_RUNTIME=true` or `strictRealModBenchmark` as the success bar.
+10. Enable `MODPORTER_BENCHMARK_UPDATE_README=true` only for a complete strict run that should refresh release documentation.
+11. Use `MODPORTER_BENCHMARK_STRICT_RUNTIME=true` or `strictRealModBenchmark` as the success bar.
 
 ## Runtime Coverage Boundary
 

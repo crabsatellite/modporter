@@ -51,6 +51,83 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `fluid ingredient recipe getters preserve empty semantics when gson leaves field null`() {
+        val projectDir = createFile("CookingRecipe.java", """
+            package com.example;
+
+            import com.google.gson.annotations.Expose;
+            import com.google.gson.annotations.SerializedName;
+            import com.example.base.FluidIngredient;
+
+            public class CookingRecipe {
+                @Expose
+                @SerializedName("fluid")
+                public FluidIngredient fluidInput;
+
+                public FluidIngredient getRequiredFluid() {
+                    return fluidInput;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val source = tempDir.resolve("src/main/java/com/example/CookingRecipe.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-fluid-ingredient-null-empty" })
+        assertTrue(source.contains("return fluidInput == null ? FluidIngredient.EMPTY : fluidInput;"), source)
+    }
+
+    @Test
+    fun `fluid stack recipe getters preserve empty semantics when gson leaves field null`() {
+        val projectDir = createFile("FermentingRecipe.java", """
+            package com.example;
+
+            import com.google.gson.annotations.Expose;
+            import com.google.gson.annotations.SerializedName;
+            import net.neoforged.neoforge.fluids.FluidStack;
+
+            public class FermentingRecipe {
+                @Expose
+                @SerializedName("result_fluid")
+                public FluidStack outputFluid;
+
+                public FluidStack getResultFluid() {
+                    return outputFluid;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val source = tempDir.resolve("src/main/java/com/example/FermentingRecipe.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-fluid-stack-null-empty" })
+        assertTrue(source.contains("return outputFluid == null ? FluidStack.EMPTY : outputFluid;"), source)
+    }
+
+    @Test
+    fun `recipe getter null semantics require gson field evidence`() {
+        val projectDir = createFile("RuntimeFluidState.java", """
+            package com.example;
+
+            import net.neoforged.neoforge.fluids.FluidStack;
+
+            public class RuntimeFluidState {
+                private FluidStack maybeNullRuntimeFluid;
+
+                public FluidStack getFluid() {
+                    return maybeNullRuntimeFluid;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val source = tempDir.resolve("src/main/java/com/example/RuntimeFluidState.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-fluid-stack-null-empty" })
+        assertTrue(source.contains("return maybeNullRuntimeFluid;"), source)
+    }
+
+    @Test
     fun `recipe display recipe id migration binds arbitrary recipe receiver names`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -9273,6 +9350,65 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `fluid tank lazy optional callbacks reuse existing holder lookup provider`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExistingProviderTankBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.LazyOptional;
+            import java.util.Optional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.fluids.capability.templates.FluidTank;
+
+            public class ExistingProviderTankBlockEntity extends BlockEntity {
+                private LazyOptional<FluidTank> fluidTank;
+                private Optional<String> cachedRecipeId = Optional.empty();
+
+                public ExistingProviderTankBlockEntity(BlockPos pos, BlockState state) {
+                    super((BlockEntityType<?>) null, pos, state);
+                    this.fluidTank = LazyOptional.of(this::createFluidHandler);
+                }
+
+                public void replayCachedRecipe() {
+                    cachedRecipeId.ifPresent(recipe -> recipe.toString());
+                }
+
+                @Override
+                protected void loadAdditional(CompoundTag compound, HolderLookup.Provider registries) {
+                    super.loadAdditional(compound, registries);
+                    fluidTank.ifPresent(fluid -> fluid.readFromNBT(compound.getCompound("FluidTank")));
+                }
+
+                @Override
+                public void saveAdditional(CompoundTag compound, HolderLookup.Provider registries) {
+                    super.saveAdditional(compound, registries);
+                    CompoundTag nbt = new CompoundTag();
+                    fluidTank.ifPresent(fluid -> compound.put("FluidTank", fluid.writeToNBT(nbt)));
+                }
+
+                private FluidTank createFluidHandler() {
+                    return new FluidTank(1000);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("ExistingProviderTankBlockEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("fluid.readFromNBT(registries, compound.getCompound(\"FluidTank\"))"), migrated)
+        assertTrue(migrated.contains("fluid.writeToNBT(registries, nbt)"), migrated)
+        assertFalse(migrated.contains("fluid.readFromNBT(compound.getCompound"), migrated)
+        assertFalse(migrated.contains("fluid.writeToNBT(nbt)"), migrated)
+    }
+
+    @Test
     fun `block codec generation keeps vanilla plant superclass return bounds`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -18465,6 +18601,10 @@ bus.addListener(ActualListenerRegistry::register);
                     world.getRecipeManager().byKey(entry.getKey()).ifPresent(recipe -> use(((CookingRecipe) recipe.get()).getExperience()));
                 }
 
+                public void grantAlreadyHolderValue(Level world, java.util.Map.Entry<ResourceLocation, Integer> entry) {
+                    world.getRecipeManager().byKey(entry.getKey()).ifPresent(recipe -> use(((CookingRecipe) recipe.value().get()).getExperience()));
+                }
+
                 public void collect(Level world, java.util.List<java.util.Optional<? extends Recipe<?>>> recipes, ResourceLocation key) {
                     recipes.add(world.getRecipeManager().byKey(key).map(RecipeHolder::value).map(RecipeHolder::value));
                 }
@@ -18484,6 +18624,7 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
         assertTrue(recipe.contains("((CookingRecipe) recipe.value()).getExperience()"))
         assertFalse(recipe.contains("recipe.get()).getExperience()"))
+        assertFalse(recipe.contains("recipe.value().get()).getExperience()"))
         assertTrue(recipe.contains("recipes.add(world.getRecipeManager().byKey(key).map(RecipeHolder::value));"), recipe)
         assertFalse(recipe.contains(".map(RecipeHolder::value).map(RecipeHolder::value)"), recipe)
     }
@@ -19859,8 +20000,6 @@ bus.addListener(ActualListenerRegistry::register);
             import cn.mcmod_mmf.mmlib.data.AbstractBlockStateProvider;
             import net.minecraft.data.PackOutput;
             import net.minecraft.resources.ResourceLocation;
-            import net.minecraft.world.level.block.Block;
-            import net.minecraft.world.level.block.SlabBlock;
             import net.minecraft.world.level.block.state.properties.BlockStateProperties;
             import net.neoforged.neoforge.common.data.ExistingFileHelper;
 
@@ -19911,6 +20050,8 @@ bus.addListener(ActualListenerRegistry::register);
 
         assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
         assertTrue(blockProvider.contains("import java.util.function.Supplier;"))
+        assertTrue(blockProvider.contains("import net.minecraft.world.level.block.Block;"))
+        assertTrue(blockProvider.contains("import net.minecraft.world.level.block.SlabBlock;"))
         assertTrue(blockProvider.contains("log(BlockRegistry.SAKURA_LOG::get);"))
         assertTrue(blockProvider.contains("crossBlock(BlockRegistry.SAKURA_SAPLING::get);"))
         assertTrue(blockProvider.contains("stageBlock(BlockRegistry.BUCKWHEAT_CROP::get, BlockStateProperties.AGE_7);"))
@@ -21709,6 +21850,68 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(transformed.contains("for (RecipeHolder<FreezableRecipe> freezableRecipeHolder : level.getRecipeManager().getAllRecipesFor(ExampleRecipeTypes.FREEZABLE.get())) {"), transformed)
         assertTrue(transformed.contains("FreezableRecipe freezableRecipe = freezableRecipeHolder.value();"), transformed)
         assertFalse(transformed.contains("recipe instanceof FreezableRecipe"), transformed)
+        assertFalse(transformed.contains("import net.minecraft.world.item.crafting.Recipe;"), transformed)
+    }
+
+    @Test
+    fun `migrates getAllRecipesFor id lookups to recipe holders`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("MachineRecipes.java").writeText("""
+            package com.example;
+
+            import java.util.Optional;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.level.Level;
+            import net.neoforged.neoforge.items.wrapper.RecipeWrapper;
+
+            public class MachineRecipes {
+                private ResourceLocation lastRecipeID;
+
+                private Optional<StoneMortarRecipe> findStone(Level level, RecipeWrapper wrapper) {
+                    Recipe<RecipeWrapper> recipe = level.getRecipeManager().getAllRecipesFor(ExampleRecipeTypes.STONE.get()).stream().filter(now -> now.id().equals(lastRecipeID)).findFirst().get();
+                    if (recipe instanceof StoneMortarRecipe) {
+                        if (recipe.matches(wrapper, level)) {
+                            return Optional.of((StoneMortarRecipe) recipe);
+                        }
+                    }
+                    return Optional.empty();
+                }
+
+                private Optional<CookingPotRecipe> findCooking(Level level, RecipeWrapper wrapper) {
+                    Recipe<RecipeWrapper> recipe = level.getRecipeManager().getAllRecipesFor(ExampleRecipeTypes.COOKING.get()).stream().filter(now -> now.id().equals(lastRecipeID)).findFirst().get();
+                    if (recipe instanceof CookingPotRecipe cookingRecipe) {
+                        if (cookingRecipe.matchesWithFluid(null, wrapper, level)) {
+                            return Optional.of(cookingRecipe);
+                        }
+                    }
+                    return Optional.empty();
+                }
+
+                private boolean findChopping(Level level, RecipeWrapper wrapper, net.minecraft.world.item.ItemStack toolStack) {
+                    Recipe<RecipeWrapper> recipe = level.getRecipeManager().getAllRecipesFor(ExampleRecipeTypes.CHOPPING.get()).stream().filter(now -> now.id().equals(lastRecipeID)).findFirst().get();
+                    if (recipe instanceof ChoppingRecipe && recipe.matches(wrapper, level) && ((ChoppingRecipe) recipe).getTool().test(toolStack)) {
+                        return true;
+                    }
+                    return false;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("MachineRecipes.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("import net.minecraft.world.item.crafting.RecipeHolder;"), transformed)
+        assertTrue(transformed.contains("RecipeHolder<?> recipe = level.getRecipeManager().getAllRecipesFor(ExampleRecipeTypes.STONE.get()).stream().filter(now -> now.id().equals(lastRecipeID)).findFirst().get();"), transformed)
+        assertTrue(transformed.contains("if (recipe.value() instanceof StoneMortarRecipe stoneMortarRecipe)"), transformed)
+        assertTrue(transformed.contains("if (stoneMortarRecipe.matches(wrapper, level))"), transformed)
+        assertTrue(transformed.contains("return Optional.of(stoneMortarRecipe);"), transformed)
+        assertTrue(transformed.contains("if (recipe.value() instanceof CookingPotRecipe cookingRecipe)"), transformed)
+        assertTrue(transformed.contains("if (recipe.value() instanceof ChoppingRecipe choppingRecipe && choppingRecipe.matches(wrapper, level) && (choppingRecipe).getTool().test(toolStack))"), transformed)
+        assertFalse(transformed.contains("Recipe<RecipeWrapper> recipe"), transformed)
+        assertFalse(transformed.contains("recipe.matches(wrapper, level)"), transformed)
         assertFalse(transformed.contains("import net.minecraft.world.item.crafting.Recipe;"), transformed)
     }
 

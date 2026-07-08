@@ -1139,6 +1139,19 @@ class ResourceMigrationTest {
                   }
                 },
                 {
+                  "condition": "minecraft:alternative",
+                  "terms": [
+                    {
+                      "condition": "minecraft:random_chance",
+                      "chance": 0.25
+                    },
+                    {
+                      "condition": "forge:loot_table_id",
+                      "loot_table_id": "minecraft:gameplay/fishing"
+                    }
+                  ]
+                },
+                {
                   "condition": "block_state_property",
                   "block": "minecraft:grass"
                 }
@@ -1162,10 +1175,123 @@ class ResourceMigrationTest {
         assertTrue(lootModifier.contains(""""condition": "minecraft:random_chance""""))
         assertTrue(lootModifier.contains(""""condition": "minecraft:inverted""""))
         assertTrue(lootModifier.contains(""""condition": "minecraft:match_tool""""))
+        assertTrue(lootModifier.contains(""""condition": "minecraft:any_of""""))
+        assertTrue(lootModifier.contains(""""condition": "neoforge:loot_table_id""""))
         assertTrue(lootModifier.contains(""""condition": "minecraft:block_state_property""""))
         assertTrue(lootModifier.contains(""""block": "minecraft:short_grass""""))
         assertFalse(lootModifier.contains(""""neoforge:conditions""""))
+        assertFalse(lootModifier.contains("minecraft:alternative"))
         assertFalse(lootModifier.contains("minecraft:grass"))
+    }
+
+    @Test
+    fun `source defined project block tags get empty data pack definitions`() {
+        val projectDir = setupResourceProject()
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("resmod")
+            public class ExampleMod {
+                public static final String MODID = "resmod";
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleBlockTags.java").writeText("""
+            package com.example;
+
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.block.Block;
+
+            public class ExampleBlockTags {
+                public static final TagKey<Block> MINEABLE_WITH_KNIFE = TagUtils.modBlockTag("resmod", "mineable_with_knife");
+                public static final TagKey<Block> EXTERNAL_HEAT = TagUtils.modBlockTag("othermod", "heat_sources");
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val generatedTag = projectDir.resolve("src/main/resources/data/resmod/tags/block/mineable_with_knife.json")
+        assertTrue(result.changes.any { it.ruleId == "res-source-defined-block-tag" })
+        assertTrue(generatedTag.exists(), "Project-owned source-defined block tag should be materialized")
+        assertTrue(generatedTag.readText().contains(""""values": []"""))
+        assertFalse(projectDir.resolve("src/main/resources/data/othermod/tags/block/heat_sources.json").exists())
+    }
+
+    @Test
+    fun `liquid block registrations get complete level blockstates from registry namespace`() {
+        val projectDir = setupResourceProject()
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("resmod")
+            public class ExampleMod {
+                public static final String MODID = "resmod";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModFluidBlocks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.LiquidBlock;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ModFluidBlocks {
+                public static final DeferredRegister<Block> BLOCKS = DeferredRegister.create(Registries.BLOCK, ExampleMod.MODID);
+                public static final DeferredRegister<Block> UNCLEAR_BLOCKS = DeferredRegister.create(Registries.BLOCK, UNKNOWN_MODID);
+
+                public static final Object MOLTEN_TEA = BLOCKS.register("molten_tea", () ->
+                    new LiquidBlock(null, BlockBehaviour.Properties.of()));
+                public static final Object RICE_WINE = BLOCKS.register("rice_wine", () ->
+                    new LiquidBlock(null, BlockBehaviour.Properties.of()));
+                public static final Object UNKNOWN = UNCLEAR_BLOCKS.register("should_not_exist", () ->
+                    new LiquidBlock(null, BlockBehaviour.Properties.of()));
+            }
+        """.trimIndent())
+        val assetsDir = projectDir.resolve("src/main/resources/assets/resmod")
+        assetsDir.resolve("blockstates").createDirectories()
+        assetsDir.resolve("models/block").createDirectories()
+        assetsDir.resolve("blockstates/molten_tea.json").writeText("""
+            {
+              "variants": {
+                "": {
+                  "model": "resmod:block/molten_tea"
+                }
+              }
+            }
+        """.trimIndent())
+        assetsDir.resolve("models/block/molten_tea.json").writeText("""
+            {
+              "textures": {
+                "particle": "resmod:block/molten_tea"
+              }
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val moltenTeaBlockstate = assetsDir.resolve("blockstates/molten_tea.json").readText()
+        val riceWineBlockstate = assetsDir.resolve("blockstates/rice_wine.json").readText()
+        val riceWineModel = assetsDir.resolve("models/block/rice_wine.json").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "res-liquid-blockstate-level-variants" })
+        assertTrue(result.changes.any { it.ruleId == "res-liquid-block-model" })
+        assertFalse(moltenTeaBlockstate.contains("\"\":"), "LiquidBlock empty variant should be replaced by level variants")
+        assertTrue(moltenTeaBlockstate.contains("\"level=0\""))
+        assertTrue(moltenTeaBlockstate.contains("\"level=15\""))
+        assertTrue(riceWineBlockstate.contains("\"model\": \"resmod:block/rice_wine\""))
+        assertTrue(riceWineBlockstate.contains("\"level=15\""))
+        assertTrue(riceWineModel.contains("\"particle\": \"minecraft:block/water_still\""))
+        assertFalse(assetsDir.resolve("blockstates/should_not_exist.json").exists())
     }
 
     @Test

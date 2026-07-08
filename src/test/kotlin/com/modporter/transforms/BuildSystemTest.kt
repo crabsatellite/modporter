@@ -3322,6 +3322,8 @@ class BuildSystemTest {
             public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer f_70264_ # heightRandA
             public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer f_70265_ # heightRandB
             public net.minecraft.world.entity.animal.Parrot f_29358_ # MOB_SOUND_MAP
+            public net.minecraft.entity.ai.brain.task.GiveHeroGiftsTask field_220403_a # GIFTS
+            public net.minecraft.village.PointOfInterestType func_221052_a(Lnet/minecraft/village/PointOfInterestType;)Lnet/minecraft/village/PointOfInterestType; # registerBlockStates
             public net.minecraft.world.level.block.ComposterBlock m_51920_(FLnet/minecraft/world/level/ItemLike;)V # add
             public-f net.minecraft.world.item.AxeItem f_150683_ # STRIPPABLES
             public-f net.minecraft.world.entity.player.Inventory f_35978_ # player
@@ -3364,6 +3366,7 @@ class BuildSystemTest {
         assertTrue(at.contains("public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer heightRandA # heightRandA"))
         assertTrue(at.contains("public net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer heightRandB # heightRandB"))
         assertTrue(at.contains("public net.minecraft.world.entity.animal.Parrot MOB_SOUND_MAP # MOB_SOUND_MAP"))
+        assertTrue(at.contains("public net.minecraft.world.entity.ai.behavior.GiveGiftToHero GIFTS # GIFTS"))
         assertTrue(at.contains("public net.minecraft.world.level.block.ComposterBlock add(FLnet/minecraft/world/level/ItemLike;)V # add"))
         assertTrue(at.contains("public-f net.minecraft.world.item.AxeItem STRIPPABLES # STRIPPABLES"))
         assertTrue(at.contains("public-f net.minecraft.world.entity.player.Inventory player # player"))
@@ -3392,6 +3395,8 @@ class BuildSystemTest {
         assertFalse(at.contains("f_47891_"))
         assertFalse(at.contains("m_223138_"))
         assertFalse(at.contains("f_60442_"))
+        assertFalse(at.contains("func_221052_a"))
+        assertFalse(at.contains("registerBlockStates"))
         assertFalse(at.contains("BlockBehaviour material"))
         assertFalse(at.contains("m_21424_"))
         assertFalse(at.contains("maybeDisableShield"))
@@ -4929,6 +4934,13 @@ class BuildSystemTest {
         assertTrue(serializerSource.contains("ItemStack stack = decodeItemStack(chanceResultStackJson(obj), \"ChanceResult.item\");"))
         assertTrue(serializerSource.contains("orElseThrow(() -> new JsonParseException("))
         assertFalse(serializerSource.contains(".orElse(ItemStack.EMPTY);"))
+        assertTrue(serializerSource.contains("private static JsonElement normalizeLegacyFluidStackJson(JsonElement json)"))
+        assertTrue(serializerSource.contains("normalized.add(\"id\", obj.get(\"fluid\"));"))
+        assertTrue(serializerSource.contains("\"minecraft:empty\".equals(obj.get(\"fluid\").getAsString())"))
+        val fluidIngredientSource = projectDir.resolve("src/main/java/com/example/content/cooking/base/FluidIngredient.java").readText()
+        assertTrue(fluidIngredientSource.contains("obj.has(\"fluidTag\")"))
+        assertTrue(fluidIngredientSource.contains("obj.has(\"null_fluid\")"))
+        assertTrue(fluidIngredientSource.contains("obj.has(\"tag\") ? obj.get(\"tag\").getAsString() : obj.get(\"fluidTag\").getAsString()"))
         assertFalse(projectDir.resolve("src/main/java/cn/mcmod_mmf/mmlib/fluid/FluidIngredient.java").exists())
         assertFalse(projectDir.resolve("src/main/java/cn/mcmod_mmf/mmlib/recipe/AbstractRecipe.java").exists())
         assertFalse(projectDir.resolve("src/main/java/cn/mcmod_mmf/mmlib/recipe/ChanceResult.java").exists())

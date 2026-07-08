@@ -228,6 +228,7 @@ class ResourceMigrationPass(
                 if (!dryRun) {
                     transformDataJsonFiles(dataDir, projectDir, changes, errors)
                     transformDataFunctionFiles(dataDir, changes, errors)
+                    generateMissingSourceDefinedBlockTags(projectDir, resourceDir, changes, errors, dryRun)
                 }
                 migrateBannerPatternDataResources(dataDir, changes, errors, dryRun)
             }
@@ -258,6 +259,7 @@ class ResourceMigrationPass(
         }
 
         if (!dryRun) {
+            generateMissingLiquidBlockAssets(projectDir, resourceDirs, changes, errors)
             generateLegacyNitrogenFuelSprites(projectDir, resourceDirs, changes, errors)
         }
 
@@ -624,6 +626,275 @@ class ResourceMigrationPass(
             projectDir.resolve("src/main/resources"),
             projectDir.resolve("src/generated/resources")
         ).any { root -> root.resolve("data/${key.modId}/enchantment/${key.name}.json").exists() }
+
+    private fun generateMissingSourceDefinedBlockTags(
+        projectDir: Path,
+        resourceDir: Path,
+        changes: MutableList<Change>,
+        errors: MutableList<String>,
+        dryRun: Boolean
+    ) {
+        try {
+            val javaSources = collectJavaSourceInfos(projectDir)
+            if (javaSources.isEmpty()) return
+            val ownedNamespaces = detectJavaModIds(javaSources.map { it.file to it.content })
+                .values
+                .toSet()
+            if (ownedNamespaces.isEmpty()) return
+
+            val blockTags = collectSourceDefinedBlockTags(javaSources)
+                .filter { it.namespace in ownedNamespaces }
+                .toSet()
+            for (tag in blockTags) {
+                if (sourceDefinedBlockTagExists(projectDir, tag)) continue
+                val target = resourceDir.resolve("data/${tag.namespace}/tags/block/${tag.path}.json")
+                changes.add(Change(
+                    file = target,
+                    line = 0,
+                    description = "Create empty data pack definition for source-defined block tag '${tag.namespace}:${tag.path}'",
+                    before = "(missing)",
+                    after = "data/${tag.namespace}/tags/block/${tag.path}.json",
+                    confidence = Confidence.HIGH,
+                    ruleId = "res-source-defined-block-tag"
+                ))
+                if (!dryRun) {
+                    target.parent.createDirectories()
+                    target.writeText(emptyTagJson())
+                }
+            }
+        } catch (e: Exception) {
+            errors.add("Failed to generate source-defined block tag resources: ${e.message}")
+        }
+    }
+
+    private fun collectSourceDefinedBlockTags(javaSources: List<JavaSourceInfo>): Set<SourceDefinedBlockTag> {
+        val tags = linkedSetOf<SourceDefinedBlockTag>()
+        val literalPairPatterns = listOf(
+            Regex("""\b(?:[A-Za-z_$][\w$]*\.)?(?:modBlockTag|blockTag)\s*\(\s*"([a-z0-9_.-]+)"\s*,\s*"([a-z0-9_./-]+)"\s*\)"""),
+            Regex("""\bBlockTags\.create\s*\(\s*(?:ResourceLocation|net\.minecraft\.resources\.ResourceLocation)\.fromNamespaceAndPath\s*\(\s*"([a-z0-9_.-]+)"\s*,\s*"([a-z0-9_./-]+)"\s*\)\s*\)"""),
+            Regex("""\bTagKey\.create\s*\(\s*(?:Registries|net\.minecraft\.core\.registries\.Registries)\.BLOCK\s*,\s*(?:ResourceLocation|net\.minecraft\.resources\.ResourceLocation)\.fromNamespaceAndPath\s*\(\s*"([a-z0-9_.-]+)"\s*,\s*"([a-z0-9_./-]+)"\s*\)\s*\)""")
+        )
+        for (source in javaSources) {
+            val executableCode = source.executableCode
+            if (!executableCode.contains("BlockTag") &&
+                !executableCode.contains("BlockTags.create") &&
+                !executableCode.contains("Registries.BLOCK")) {
+                continue
+            }
+            for (pattern in literalPairPatterns) {
+                pattern.findAll(source.code).forEach { match ->
+                    val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)
+                    if (!executableSegment.contains("BlockTag") &&
+                        !executableSegment.contains("BlockTags.create") &&
+                        !executableSegment.contains("Registries.BLOCK")) {
+                        return@forEach
+                    }
+                    val path = match.groupValues[2].trim('/')
+                    if (path.isNotBlank()) {
+                        tags += SourceDefinedBlockTag(match.groupValues[1], path)
+                    }
+                }
+            }
+        }
+        return tags
+    }
+
+    private fun sourceDefinedBlockTagExists(projectDir: Path, tag: SourceDefinedBlockTag): Boolean =
+        listOf(
+            projectDir.resolve("src/main/resources"),
+            projectDir.resolve("src/generated/resources")
+        ).any { root -> root.resolve("data/${tag.namespace}/tags/block/${tag.path}.json").exists() }
+
+    private fun emptyTagJson(): String = "{\n    \"values\": []\n}\n"
+
+    private data class SourceDefinedBlockTag(val namespace: String, val path: String)
+
+    private fun generateMissingLiquidBlockAssets(
+        projectDir: Path,
+        resourceDirs: List<Path>,
+        changes: MutableList<Change>,
+        errors: MutableList<String>
+    ) {
+        if (resourceDirs.isEmpty()) return
+        try {
+            val liquidBlocks = collectRegisteredLiquidBlocks(projectDir)
+            if (liquidBlocks.isEmpty()) return
+
+            val targetRoot = resourceDirs.firstOrNull { it.resolve("assets").exists() } ?: resourceDirs.first()
+            for (block in liquidBlocks) {
+                val blockstateRelative = "assets/${block.namespace}/blockstates/${block.path}.json"
+                val modelRelative = "assets/${block.namespace}/models/block/${block.path}.json"
+                val existingBlockstate = resourceDirs
+                    .map { it.resolve(blockstateRelative) }
+                    .firstOrNull { it.exists() }
+                val blockstateFile = existingBlockstate ?: targetRoot.resolve(blockstateRelative)
+                if (existingBlockstate == null) {
+                    blockstateFile.parent.createDirectories()
+                    blockstateFile.writeText(liquidBlockStateJson(block.namespace, block.path))
+                    changes.add(Change(
+                        file = blockstateFile,
+                        line = 0,
+                        description = "Create LiquidBlock blockstate level variants for '${block.namespace}:${block.path}'",
+                        before = "(missing blockstate)",
+                        after = blockstateRelative,
+                        confidence = Confidence.HIGH,
+                        ruleId = "res-liquid-blockstate-level-variants"
+                    ))
+                } else {
+                    val original = blockstateFile.readText()
+                    val migrated = addLiquidBlockStateLevelVariants(original, block.namespace, block.path)
+                    if (migrated != null && migrated != original) {
+                        blockstateFile.writeText(migrated)
+                        changes.add(Change(
+                            file = blockstateFile,
+                            line = 0,
+                            description = "Complete LiquidBlock blockstate level variants for '${block.namespace}:${block.path}'",
+                            before = "missing level variants",
+                            after = "level=0..15",
+                            confidence = Confidence.HIGH,
+                            ruleId = "res-liquid-blockstate-level-variants"
+                        ))
+                    }
+                }
+
+                val existingModel = resourceDirs
+                    .map { it.resolve(modelRelative) }
+                    .firstOrNull { it.exists() }
+                if (existingModel == null) {
+                    val modelFile = targetRoot.resolve(modelRelative)
+                    modelFile.parent.createDirectories()
+                    modelFile.writeText(liquidBlockModelJson())
+                    changes.add(Change(
+                        file = modelFile,
+                        line = 0,
+                        description = "Create minimal LiquidBlock model for '${block.namespace}:${block.path}'",
+                        before = "(missing block model)",
+                        after = modelRelative,
+                        confidence = Confidence.HIGH,
+                        ruleId = "res-liquid-block-model"
+                    ))
+                }
+            }
+        } catch (e: Exception) {
+            errors.add("Failed to generate LiquidBlock asset resources: ${e.message}")
+        }
+    }
+
+    private fun collectRegisteredLiquidBlocks(projectDir: Path): Set<RegisteredLiquidBlock> {
+        val javaSources = collectJavaSourceInfos(projectDir)
+        if (javaSources.isEmpty()) return emptySet()
+        val modIds = detectJavaModIds(javaSources.map { it.file to it.content })
+        if (modIds.isEmpty()) return emptySet()
+
+        val blocks = linkedSetOf<RegisteredLiquidBlock>()
+        val deferredRegisterPattern = Regex(
+            """\b([A-Za-z_$][\w$]*)\s*=\s*(?:(?:[A-Za-z_$][\w$]*\.)*)DeferredRegister\.create\s*\("""
+        )
+        val registerPattern = Regex("""\b([A-Za-z_$][\w$]*)\.register\s*\(\s*"([a-z0-9_./-]+)"\s*,""")
+
+        for (source in javaSources) {
+            if (!source.executableCode.contains("DeferredRegister") ||
+                !source.executableCode.contains("LiquidBlock")) {
+                continue
+            }
+            val blockRegistries = linkedMapOf<String, String>()
+            for (match in deferredRegisterPattern.findAll(source.code)) {
+                val openParen = source.code.indexOf('(', match.range.first)
+                val closeParen = findMatchingJavaParen(source.code, openParen)
+                if (openParen < 0 || closeParen < 0) continue
+                val executableSegment = source.executableCode.substring(match.range.first, closeParen + 1)
+                if (!executableSegment.contains("DeferredRegister") ||
+                    !executableSegment.contains("create") ||
+                    !executableSegment.contains("BLOCK")) {
+                    continue
+                }
+                val args = splitTopLevelJavaArguments(source.code.substring(openParen + 1, closeParen))
+                if (args.size < 2 || !isBlockRegistryArgument(args[0])) continue
+                val namespace = resolveModIdExpression(
+                    args[1],
+                    modIds,
+                    source.code,
+                    match.range.first,
+                    source.packageName
+                ) ?: continue
+                blockRegistries[match.groupValues[1]] = namespace
+            }
+            if (blockRegistries.isEmpty()) continue
+
+            for (match in registerPattern.findAll(source.code)) {
+                val namespace = blockRegistries[match.groupValues[1]] ?: continue
+                val openParen = source.code.indexOf('(', match.range.first)
+                val closeParen = findMatchingJavaParen(source.code, openParen)
+                if (openParen < 0 || closeParen < 0) continue
+                val executableSegment = source.executableCode.substring(match.range.first, closeParen + 1)
+                if (!executableSegment.contains(".register") ||
+                    !executableSegment.contains("new") ||
+                    !executableSegment.contains("LiquidBlock")) {
+                    continue
+                }
+                blocks += RegisteredLiquidBlock(namespace, match.groupValues[2].trim('/'))
+            }
+        }
+        return blocks
+    }
+
+    private fun isBlockRegistryArgument(argument: String): Boolean {
+        val compact = argument.replace(Regex("""\s+"""), "")
+        return compact == "Registries.BLOCK" ||
+            compact == "BuiltInRegistries.BLOCK" ||
+            compact == "net.minecraft.core.registries.Registries.BLOCK" ||
+            compact == "net.minecraft.core.registries.BuiltInRegistries.BLOCK"
+    }
+
+    private fun addLiquidBlockStateLevelVariants(content: String, namespace: String, path: String): String? {
+        val root = parseResourceJson(content) as? JsonObject ?: return null
+        val variants = root["variants"] as? JsonObject ?: return null
+        val entries = linkedMapOf<String, JsonElement>()
+        var changed = false
+        for ((key, value) in variants) {
+            if (key.isBlank()) {
+                changed = true
+            } else {
+                entries[key] = value
+            }
+        }
+        for (level in 0..15) {
+            val key = "level=$level"
+            if (entries[key] == null) {
+                entries[key] = liquidBlockVariant(namespace, path)
+                changed = true
+            }
+        }
+        if (!changed) return content
+
+        val migrated = linkedMapOf<String, JsonElement>()
+        for ((key, value) in root) {
+            migrated[key] = if (key == "variants") JsonObject(entries) else value
+        }
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), JsonObject(migrated)) + "\n"
+    }
+
+    private fun liquidBlockStateJson(namespace: String, path: String): String {
+        val variants = linkedMapOf<String, JsonElement>()
+        for (level in 0..15) {
+            variants["level=$level"] = liquidBlockVariant(namespace, path)
+        }
+        val root = JsonObject(mapOf("variants" to JsonObject(variants)))
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), root) + "\n"
+    }
+
+    private fun liquidBlockVariant(namespace: String, path: String): JsonObject =
+        JsonObject(mapOf("model" to JsonPrimitive("$namespace:block/$path")))
+
+    private fun liquidBlockModelJson(): String = """
+{
+  "textures": {
+    "particle": "minecraft:block/water_still"
+  }
+}
+""".trimIndent() + "\n"
+
+    private data class RegisteredLiquidBlock(val namespace: String, val path: String)
 
     private fun migrateBannerPatternDataResources(
         dataDir: Path,
@@ -2146,6 +2417,99 @@ class ResourceMigrationPass(
         return -1
     }
 
+    private fun findMatchingJavaParen(source: String, openParen: Int): Int {
+        if (openParen < 0 || source.getOrNull(openParen) != '(') return -1
+        var depth = 0
+        var index = openParen
+        var inString = false
+        var inChar = false
+        var inLineComment = false
+        var inBlockComment = false
+        var escaped = false
+        while (index < source.length) {
+            val char = source[index]
+            val next = source.getOrNull(index + 1)
+            when {
+                inLineComment -> {
+                    if (char == '\n' || char == '\r') inLineComment = false
+                }
+                inBlockComment -> {
+                    if (char == '*' && next == '/') {
+                        inBlockComment = false
+                        index++
+                    }
+                }
+                escaped -> escaped = false
+                inString -> when (char) {
+                    '\\' -> escaped = true
+                    '"' -> inString = false
+                }
+                inChar -> when (char) {
+                    '\\' -> escaped = true
+                    '\'' -> inChar = false
+                }
+                char == '/' && next == '/' -> {
+                    inLineComment = true
+                    index++
+                }
+                char == '/' && next == '*' -> {
+                    inBlockComment = true
+                    index++
+                }
+                char == '"' -> inString = true
+                char == '\'' -> inChar = true
+                char == '(' -> depth++
+                char == ')' -> {
+                    depth--
+                    if (depth == 0) return index
+                }
+            }
+            index++
+        }
+        return -1
+    }
+
+    private fun splitTopLevelJavaArguments(arguments: String): List<String> {
+        val result = mutableListOf<String>()
+        var depthParen = 0
+        var depthBrace = 0
+        var depthBracket = 0
+        var start = 0
+        var index = 0
+        var inString = false
+        var inChar = false
+        var escaped = false
+        while (index < arguments.length) {
+            val char = arguments[index]
+            when {
+                escaped -> escaped = false
+                inString -> when (char) {
+                    '\\' -> escaped = true
+                    '"' -> inString = false
+                }
+                inChar -> when (char) {
+                    '\\' -> escaped = true
+                    '\'' -> inChar = false
+                }
+                char == '"' -> inString = true
+                char == '\'' -> inChar = true
+                char == '(' -> depthParen++
+                char == ')' -> if (depthParen > 0) depthParen--
+                char == '{' -> depthBrace++
+                char == '}' -> if (depthBrace > 0) depthBrace--
+                char == '[' -> depthBracket++
+                char == ']' -> if (depthBracket > 0) depthBracket--
+                char == ',' && depthParen == 0 && depthBrace == 0 && depthBracket == 0 -> {
+                    result += arguments.substring(start, index).trim()
+                    start = index + 1
+                }
+            }
+            index++
+        }
+        result += arguments.substring(start).trim()
+        return result.filter { it.isNotBlank() }
+    }
+
     private fun migrateRecipeResultEntries(
         content: String,
         recipeCodecHints: RecipeDataCodecHints = RecipeDataCodecHints.EMPTY
@@ -2740,7 +3104,13 @@ class ResourceMigrationPass(
             ?.takeIf { it.isString }
             ?.content
             ?: return element
-        return JsonPrimitive(if (":" in value) value else "minecraft:$value")
+        val normalized = if (":" in value) value else "minecraft:$value"
+        return JsonPrimitive(
+            when (normalized) {
+                "minecraft:alternative" -> "minecraft:any_of"
+                else -> normalized
+            }
+        )
     }
 
     private fun normalizeTagReferenceNamespaces(content: String): String {

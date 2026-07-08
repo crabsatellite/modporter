@@ -1,5 +1,6 @@
 package com.modporter.core.transforms.build
 
+import com.modporter.AppInfo
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.slf4j.LoggerFactory
@@ -152,7 +153,7 @@ class DependencyResolver(
 
             val request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .header("User-Agent", "modporter/0.2.0")
+                .header("User-Agent", AppInfo.userAgent)
                 .timeout(Duration.ofSeconds(15))
                 .GET()
                 .build()

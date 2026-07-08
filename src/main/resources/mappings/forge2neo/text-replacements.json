@@ -1479,6 +1479,14 @@
       "isRegex": true
     },
     {
+      "id": "forgeregistries-keys-BIOME_MODIFIERS",
+      "pattern": "ForgeRegistries\\.Keys\\.BIOME_MODIFIERS",
+      "replacement": "NeoForgeRegistries.Keys.BIOME_MODIFIERS",
+      "description": "ForgeRegistries.Keys.BIOME_MODIFIERS -> NeoForgeRegistries.Keys.BIOME_MODIFIERS",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "forgeregistries-biomes-getRegistryKey",
       "pattern": "ForgeRegistries\\.BIOMES\\.getRegistryKey\\(\\)",
       "replacement": "Registries.BIOME",

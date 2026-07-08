@@ -221,6 +221,7 @@ class TextReplacementTest {
             DeferredRegister.create(ForgeRegistries.WORLD_CARVERS, MOD_ID);
             DeferredRegister.create(ForgeRegistries.Keys.FLUID_TYPES, MOD_ID);
             DeferredRegister.create(ForgeRegistries.Keys.GLOBAL_LOOT_MODIFIER_SERIALIZERS, MOD_ID);
+            ResourceKey.create(ForgeRegistries.Keys.BIOME_MODIFIERS, id);
             DeferredRegister
                 .create(ForgeRegistries.RECIPE_TYPES, MOD_ID);
             DeferredRegister.create(
@@ -250,6 +251,7 @@ class TextReplacementTest {
         assertTrue(transformed.contains("DeferredRegister.create(Registries.CARVER"))
         assertTrue(transformed.contains("DeferredRegister.create(NeoForgeRegistries.Keys.FLUID_TYPES"))
         assertTrue(transformed.contains("DeferredRegister.create(NeoForgeRegistries.Keys.GLOBAL_LOOT_MODIFIER_SERIALIZERS"))
+        assertTrue(transformed.contains("ResourceKey.create(NeoForgeRegistries.Keys.BIOME_MODIFIERS, id)"))
         assertTrue(transformed.contains("DeferredRegister.create(Registries.RECIPE_TYPE"))
         assertTrue(transformed.contains("DeferredRegister.create(Registries.FEATURE"))
         // Non-DeferredRegister context uses BuiltInRegistries (Registry instance)

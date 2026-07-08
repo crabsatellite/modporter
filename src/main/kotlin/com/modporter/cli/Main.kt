@@ -8,6 +8,7 @@ import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.options.required
 import com.github.ajalt.clikt.parameters.types.path
+import com.modporter.AppInfo
 import com.modporter.core.pipeline.Confidence
 import com.modporter.core.pipeline.Pipeline
 import com.modporter.core.pipeline.PipelineResult
@@ -110,7 +111,7 @@ class PortCommand : CliktCommand(
         )
 
         echo("===========================================")
-        echo("  ModPorter v0.2.0")
+        echo("  ${AppInfo.name} v${AppInfo.version}")
         echo("  Pipeline: ${pipelineDef.displayName}")
         echo("  Source: $src")
         echo("  Target: $targetDir")

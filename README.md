@@ -1,6 +1,6 @@
 # ModPorter
 
-> **Work in progress / developer preview:** ModPorter is under active development. It is already useful for developers moving Forge 1.20.1 projects to NeoForge 1.21.1, and the current benchmark milestone demonstrates hands-off strict runtime ports for selected benchmark mods, including large public mods. It is not yet a general guarantee that every Forge 1.20.1 mod will port without engineering work. A port is only considered successful when the automated build, dedicated server, GameTest server, client boot, client saved-world load, and log-clean gates pass.
+> **Work in progress / developer preview:** ModPorter is under active development. It is already useful for developers moving Forge 1.20.1 projects to NeoForge 1.21.1, and the current benchmark milestone demonstrates hands-off strict runtime ports for the benchmark set currently committed to this repository, including large public mods. That result is evidence for the rules covered so far, not a guarantee that the next untested Forge 1.20.1 mod will port without engineering work. A port is only considered successful when the automated build, dedicated server, GameTest server, client boot, client saved-world load, and log-clean gates pass.
 
 ## What ModPorter Is
 
@@ -16,7 +16,7 @@ step is not a one-off bypass for that mod, but a new general rule that captures 
 pattern and keeps all previously supported mods passing.
 
 The intended outcome is cumulative engineering reuse: once a migration pattern is implemented and
-gated, future ports should not repeat that manual work. As the ruleset grows, ModPorter should
+gated, future ports should not repeat that porting work. As the ruleset grows, ModPorter should
 become more broadly useful, while still remaining honest about its coverage. This is why the
 project is positioned as a developer time-saver, not a universal one-click converter.
 
@@ -29,22 +29,24 @@ General-purpose Minecraft mod migration tool. Currently supports **Forge 1.20.1 
 
 ## Current Milestone
 
-As of the `v0.3.0` release candidate, the strict real-mod gate has been locally verified for the configured benchmark targets currently available in the maintainer benchmark environment:
+As of the `v0.3.0` release candidate, the strict real-mod gate has been locally verified for the public Git-backed benchmark snapshot below:
 
-| Target | Provider | Source | Strict gate status |
-|--------|----------|--------|--------------------|
-| ConstructionWand | Git | `Theta-Dev/ConstructionWand`, `1.20` | PASS |
-| InstantWorldMirror | Local | `..\InstantWorldMirror - 1.20.1` | PASS |
-| HotBath | Local | `..\hotBath-1.20` | PASS |
-| ShowerCore | Local | `..\ShowerCore-1.20` with `hotbath` dependency | PASS |
-| Sakura Mod | Local | `..\Sakura_mod-1.20.1` | PASS |
-| Twilight Forest | Git | `TeamTwilight/twilightforest`, `1.20.1` | PASS |
-| The Aether | Git | `The-Aether-Team/The-Aether`, `1.20.1-develop` | PASS |
-| Beyond the Veil | Git | `valeriotor/Beyond-The-Veil`, `1.20` | PASS |
+<!-- MODPORTER:BENCHMARK-SNAPSHOT:START -->
+| Target | Provider | Source | Resolved Git commit | Strict gate status |
+|--------|----------|--------|---------------------|--------------------|
+| ConstructionWand | Git | `Theta-Dev/ConstructionWand`, `1.20` | `bc64f11a7d799e921995821878a031bcfde4e22a` | PASS |
+| InstantWorldMirror | Git | `crabsatellite/InstantWorldMirror`, `1.20.1` | `eb51c07f0c3353d7b5cc3787642615a043e122bf` | PASS |
+| HotBath | Git | `crabsatellite/hotBath`, `1.20.1` | `6b2d0925cf04d58fc6dc21e687ef98324ac6d8cc` | PASS |
+| ShowerCore | Git | `crabsatellite/ShowerCore`, `1.20.1` with `hotbath` dependency | `0b25a6d04ca7daa6dbdfb25d94434a8e7f8edaee` | PASS |
+| Sakura Mod | Git | `0999312/Sakura_mod`, `1.20.1` | `0201301e5aa371d7f0816b1d786ca89e99936912` | PASS |
+| Twilight Forest | Git | `TeamTwilight/twilightforest`, `1.20.1` | `1bc3a4c21213bc443967e92125613cb9ef47891e` | PASS |
+| The Aether | Git | `The-Aether-Team/The-Aether`, `1.20.1-develop` | `2f0be3a51bae2f434fbf5b5c0aecc56b50f921b7` | PASS |
+| Beyond the Veil | Git | `valeriotor/Beyond-The-Veil`, `1.20` | `ce8dfdbca00d956516c23de989d45bd138ee6867` | PASS |
+<!-- MODPORTER:BENCHMARK-SNAPSHOT:END -->
 
-Each PASS means the converted project passed hands-off compile, dedicated server lifecycle, GameTest server, client boot, saved-world quick-load, and warning-clean runtime log gates. Remaining allowed log findings must be machine-evidenced as source-inherited behavior or external dependency behavior; benchmark-specific bypasses are not accepted.
+Each PASS means that benchmark target passed hands-off compile, dedicated server lifecycle, GameTest server, client boot, saved-world quick-load, and warning-clean runtime log gates at the resolved Git commit shown in the table. The table is a reproducible coverage record, not a fixed compatibility catalog and not a promise that an unlisted mod will pass. Remaining allowed log findings must be machine-evidenced as source-inherited behavior or external dependency behavior; benchmark-specific bypasses are not accepted.
 
-This is a publishable **developer-preview milestone**, not a final compatibility guarantee. The benchmark harness is the source of truth: new mods should be treated as unsupported until they pass the strict gate, and failures should become deterministic migration rules or explicit evidence-backed allowlist entries. The local-provider rows require sibling source checkouts matching the paths shown above; the public Git-provider rows are fetched automatically by the benchmark harness.
+This is a publishable **developer-preview milestone**, not a final compatibility guarantee. The benchmark harness is the source of truth: new mods should be treated as unsupported until they pass the strict gate, and failures should become deterministic migration rules or explicit evidence-backed allowlist entries. The committed benchmark manifest is Git-backed so the release gate is reproducible outside one maintainer machine; local source paths are reserved for explicit developer overrides.
 
 ## Quick Start
 
@@ -121,8 +123,8 @@ benchmark pass locally:
 ```
 
 The GitHub Actions workflow runs the default test suite and package build. The strict real-mod
-benchmark is intentionally treated as a local maintainer gate because it needs large public sources,
-local benchmark checkouts, Minecraft runtime launches, and longer machine time.
+benchmark is intentionally treated as a maintainer-run release gate because it needs large public
+Git sources, Minecraft runtime launches, and longer machine time.
 
 ### Real Mod Benchmark
 

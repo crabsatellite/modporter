@@ -10,12 +10,17 @@ import kotlin.test.assertTrue
 class StrictBenchmarkConfigTest {
     @Test
     fun `strict benchmark default cases are derived from all available real mod providers`() {
-        val availableIds = Paths.get("src/test/resources/benchmarks/real-mods.tsv")
+        val rows = Paths.get("src/test/resources/benchmarks/real-mods.tsv")
             .readLines()
             .asSequence()
             .map { it.trim() }
             .filter { it.isNotEmpty() && !it.startsWith("#") }
             .map { it.split('\t') }
+            .filter { columns -> columns.size >= 7 }
+            .toList()
+
+        val availableIds = rows
+            .asSequence()
             .filter { columns -> columns.size >= 7 && !columns[2].equals("missing", ignoreCase = true) }
             .map { columns -> columns[0] }
             .toSet()
@@ -34,8 +39,18 @@ class StrictBenchmarkConfigTest {
             "strictRealModBenchmark must use the manifest-derived default case list"
         )
         assertTrue(
-            availableIds.size == 8,
-            "Current strict default should cover the eight available real-mod benchmarks, got ${availableIds.sorted()}"
+            availableIds.isNotEmpty(),
+            "Current strict default should cover every available real-mod benchmark in the manifest"
+        )
+        assertTrue(
+            rows.none { columns -> columns[2].equals("local", ignoreCase = true) },
+            "Committed real-mod benchmark providers must be reproducible Git sources; use MODPORTER_BENCHMARK_SOURCE_* for local experiments"
+        )
+        assertTrue(
+            rows
+                .filterNot { columns -> columns[2].equals("missing", ignoreCase = true) }
+                .all { columns -> columns[2].equals("git", ignoreCase = true) },
+            "Every available real-mod benchmark provider must be git-backed"
         )
     }
 

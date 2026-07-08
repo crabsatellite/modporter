@@ -660,6 +660,20 @@ class StructuralRefactorPass : Pass {
             errors.add("MMLib recipe id tracking migration error: ${e.message}")
         }
 
+        try {
+            val fluidIngredientGetterChanges = migrateFluidIngredientGetterNullSemantics(projectDir, dryRun)
+            changes.addAll(fluidIngredientGetterChanges)
+        } catch (e: Exception) {
+            errors.add("FluidIngredient getter null-semantics migration error: ${e.message}")
+        }
+
+        try {
+            val fluidStackGetterChanges = migrateFluidStackGetterNullSemantics(projectDir, dryRun)
+            changes.addAll(fluidStackGetterChanges)
+        } catch (e: Exception) {
+            errors.add("FluidStack getter null-semantics migration error: ${e.message}")
+        }
+
         // RegistryObject.isPresent() became DeferredHolder.isBound() after
         // registry holder type migration.
         try {
@@ -815,6 +829,99 @@ class StructuralRefactorPass : Pass {
     }
 
     private data class ProjectJavaMethod(val file: Path, val source: String, val method: JavaMethodRange)
+
+    private fun migrateFluidIngredientGetterNullSemantics(projectDir: Path, dryRun: Boolean): List<Change> =
+        migrateNullableGsonRecipeGetterNullSemantics(
+            projectDir = projectDir,
+            dryRun = dryRun,
+            targetSimpleType = "FluidIngredient",
+            ruleId = "struct-fluid-ingredient-null-empty",
+            description = "Preserve FluidIngredient.EMPTY semantics for nullable Gson recipe fields",
+            before = "return fluidIngredient;",
+            after = "return fluidIngredient == null ? FluidIngredient.EMPTY : fluidIngredient;"
+        )
+
+    private fun migrateFluidStackGetterNullSemantics(projectDir: Path, dryRun: Boolean): List<Change> =
+        migrateNullableGsonRecipeGetterNullSemantics(
+            projectDir = projectDir,
+            dryRun = dryRun,
+            targetSimpleType = "FluidStack",
+            ruleId = "struct-fluid-stack-null-empty",
+            description = "Preserve FluidStack.EMPTY semantics for nullable Gson recipe fields",
+            before = "return fluidStack;",
+            after = "return fluidStack == null ? FluidStack.EMPTY : fluidStack;"
+        )
+
+    private fun migrateNullableGsonRecipeGetterNullSemantics(
+        projectDir: Path,
+        dryRun: Boolean,
+        targetSimpleType: String,
+        ruleId: String,
+        description: String,
+        before: String,
+        after: String
+    ): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val changes = mutableListOf<Change>()
+        val methodPattern = Regex(
+            """(?s)\b((?:public|protected|private)\s+)?((?:[A-Za-z_$][\w$]*\.)*${Regex.escape(targetSimpleType)})\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{\s*return\s+(this\.)?([A-Za-z_$][\w$]*)\s*;\s*\}"""
+        )
+        Files.walk(srcDir)
+            .filter { Files.isRegularFile(it) && it.toString().endsWith(".java") }
+            .forEach { file ->
+                val source = file.readText()
+                if (!source.contains(targetSimpleType)) return@forEach
+                val executable = maskJavaCommentsAndLiterals(source)
+                val edits = mutableListOf<Pair<IntRange, String>>()
+                for (match in methodPattern.findAll(executable)) {
+                    val returnType = match.groupValues[2]
+                    val receiver = match.groupValues[4]
+                    val fieldName = match.groupValues[5]
+                    if (!hasAnnotatedGsonRecipeField(executable, returnType, fieldName)) continue
+                    val methodText = source.substring(match.range)
+                    val emptyValue = "$returnType.EMPTY"
+                    val returnedField = "$receiver$fieldName"
+                    val migrated = Regex("""return\s+${Regex.escape(receiver)}${Regex.escape(fieldName)}\s*;""")
+                        .replace(methodText, "return $returnedField == null ? $emptyValue : $returnedField;")
+                    if (migrated != methodText) {
+                        edits += match.range to migrated
+                    }
+                }
+                if (edits.isEmpty()) return@forEach
+
+                var migratedSource = source
+                for ((range, replacement) in edits.sortedByDescending { it.first.first }) {
+                    migratedSource = migratedSource.replaceRange(range, replacement)
+                }
+                changes.add(Change(
+                    file = file,
+                    line = lineNumberAt(source, edits.minOf { it.first.first }),
+                    description = description,
+                    before = before,
+                    after = after,
+                    confidence = Confidence.HIGH,
+                    ruleId = ruleId
+                ))
+                if (!dryRun) {
+                    file.writeText(migratedSource)
+                }
+            }
+        return changes
+    }
+
+    private fun hasAnnotatedGsonRecipeField(executableSource: String, returnType: String, fieldName: String): Boolean {
+        val simpleType = returnType.substringAfterLast('.')
+        val typePattern = listOf(returnType, simpleType)
+            .distinct()
+            .joinToString("|") { Regex.escape(it) }
+        return Regex(
+            """(?s)(?:@\s*(?:[A-Za-z_$][\w$]*\.)?(?:Expose|SerializedName)\s*(?:\([^)]*\))?\s*)+""" +
+                """(?:public|protected|private)?\s*(?:static\s+|final\s+|transient\s+|volatile\s+)*""" +
+                """(?:$typePattern)\s+${Regex.escape(fieldName)}\b"""
+        )
+            .containsMatchIn(executableSource)
+    }
 
     private fun migrateProjectContainerHelperProviderMethods(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
@@ -20825,6 +20932,7 @@ $migratedRecipes
         result = migrateIngredientNetworkCodecs(result, javaInheritanceIndex)
         result = migrateCacheableFunctionOptionalBoundaries(result)
         result = migrateRecipeHolderAccess(result)
+        result = migrateGetAllRecipesForSingleHolderLookups(result)
         result = migrateRecipeManagerByKeyHolderAccessSource(result)
         result = collapseDuplicateRecipeHolderValueMaps(result)
         result = migrateMapEntryValueGetCalls(result)
@@ -20841,6 +20949,7 @@ $migratedRecipes
         result = migrateRecipeDisplayRecipeIdWithoutHolderSource(result, javaInheritanceIndex, recipeImplementationClasses)
         result = migrateRecipeHolderOptionalMapLambdaValueAccess(result)
         result = migrateRecipeHolderAccess(result)
+        result = migrateGetAllRecipesForSingleHolderLookups(result)
         result = collapseDuplicateRecipeHolderValueMaps(result)
         result = migrateMerchantOfferItemCosts(result)
         result = migrateMerchantOffersNbtCodecs(result, javaInheritanceIndex)
@@ -21276,7 +21385,9 @@ $migratedRecipes
         if (needsRegistryFriendlyByteBuf) result = addImportIfMissing(result, "net.minecraft.network.RegistryFriendlyByteBuf")
         if (needsEntityWithComplexSpawn) result = addImportIfMissing(result, "net.neoforged.neoforge.entity.IEntityWithComplexSpawn")
         if (needsDatagenBlockHelpers) {
+            result = addImportIfMissing(result, "net.minecraft.world.level.block.Block")
             result = addImportIfMissing(result, "net.minecraft.world.level.block.RotatedPillarBlock")
+            result = addImportIfMissing(result, "net.minecraft.world.level.block.SlabBlock")
             result = addImportIfMissing(result, "net.minecraft.world.level.block.state.properties.IntegerProperty")
             result = addImportIfMissing(result, "net.minecraft.world.level.block.state.properties.Property")
             result = addImportIfMissing(result, "net.minecraft.world.level.block.state.properties.SlabType")
@@ -34897,11 +35008,16 @@ public $className(Properties $propertiesName, WoodType $typeName) {
             .findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
-        val lazyOptionalTankVariables = Regex(
-            """\bLazyOptional\s*<\s*$fluidTankType\s*>\s+[A-Za-z_$][\w$]*[\s\S]*?\.ifPresent\s*\(\s*([A-Za-z_$][\w$]*)\s*->"""
+        val lazyOptionalTankFields = Regex(
+            """\bLazyOptional\s*<\s*$fluidTankType\s*>\s+([A-Za-z_$][\w$]*)\b"""
         ).findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
+        val lazyOptionalTankVariables = lazyOptionalTankFields.flatMap { field ->
+            Regex("""\b(?:this\.)?${Regex.escape(field)}\.ifPresent\s*\(\s*([A-Za-z_$][\w$]*)\s*->""")
+                .findAll(executableCode)
+                .map { it.groupValues[1] }
+        }.toSet()
         val tankVariables = declaredTankVariables + lazyOptionalTankVariables
         if (tankVariables.isEmpty()) return source
 
@@ -51009,6 +51125,144 @@ ${indent}}
         return result
     }
 
+    private fun migrateGetAllRecipesForSingleHolderLookups(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("getAllRecipesFor(") ||
+            !executableCode.contains(".findFirst()") ||
+            !executableCode.contains("Recipe<")) {
+            return source
+        }
+
+        val id = """[A-Za-z_$][\w$]*"""
+        val convertedVariables = linkedSetOf<String>()
+        val singleLookupPattern = Regex(
+            """(?s)\b(?:net\.minecraft\.world\.item\.crafting\.)?Recipe\s*<\s*[^;=]+?\s*>\s+($id)\s*=\s*([^;]*?getAllRecipesFor\s*\([^;]*?\)\s*\.stream\s*\(\s*\)\s*\.filter\s*\([^;]*?\)\s*\.findFirst\s*\(\s*\)\s*\.get\s*\(\s*\))\s*;"""
+        )
+        var result = replaceExecutableRegex(source, singleLookupPattern) { match ->
+            val variable = match.groupValues[1]
+            convertedVariables += variable
+            "RecipeHolder<?> $variable = ${match.groupValues[2].trim()};"
+        }
+        if (convertedVariables.isEmpty()) return source
+
+        convertedVariables.forEach { variable ->
+            result = migrateRecipeHolderBareInstanceofBlocks(result, variable)
+            result = migrateRecipeHolderInlineInstanceofConditions(result, variable)
+            val escapedVariable = Regex.escape(variable)
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b$escapedVariable\s+instanceof\s+($id(?:\.$id)*)\s+($id)\b""")
+            ) { match ->
+                "$variable.value() instanceof ${match.groupValues[1]} ${match.groupValues[2]}"
+            }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\(\s*($id(?:\.$id)*)\s*\)\s*$escapedVariable\b""")
+            ) { match ->
+                "(${match.groupValues[1]}) $variable.value()"
+            }
+        }
+
+        result = addExecutableImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeHolder")
+        val withoutRecipeImport = removeExecutableImport(result, "net.minecraft.world.item.crafting.Recipe")
+        if (!hasSimpleTypeReference(withoutRecipeImport, "Recipe")) {
+            result = withoutRecipeImport
+        }
+        return result
+    }
+
+    private fun migrateRecipeHolderInlineInstanceofConditions(source: String, variable: String): String {
+        val id = """[A-Za-z_$][\w$]*"""
+        val escapedVariable = Regex.escape(variable)
+        val instancePattern = Regex("""\b$escapedVariable\s+instanceof\s+($id(?:\.$id)*)\s*&&""")
+        var result = source
+        var cursor = 0
+        while (true) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val ifMatch = Regex("""\bif\s*\(""").find(executableCode, cursor) ?: break
+            val openParen = executableCode.indexOf('(', ifMatch.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(executableCode, openParen) else -1
+            if (openParen < 0 || closeParen < 0) {
+                cursor = ifMatch.range.last + 1
+                continue
+            }
+            val condition = result.substring(openParen + 1, closeParen)
+            val executableCondition = executableCode.substring(openParen + 1, closeParen)
+            val instanceMatch = instancePattern.find(executableCondition)
+            if (instanceMatch == null) {
+                cursor = closeParen + 1
+                continue
+            }
+
+            val recipeType = instanceMatch.groupValues[1]
+            val typedVariable = recipeType.substringAfterLast('.')
+                .replaceFirstChar { it.lowercase() }
+                .let { if (it == variable) "${it}Value" else it }
+            var migratedCondition = replaceExecutableRegex(
+                condition,
+                Regex("""\(\s*${Regex.escape(recipeType)}\s*\)\s*$escapedVariable\.value\(\)""")
+            ) { typedVariable }
+            migratedCondition = replaceExecutableRegex(
+                migratedCondition,
+                Regex("""\(\s*${Regex.escape(recipeType)}\s*\)\s*$escapedVariable\b""")
+            ) { typedVariable }
+            migratedCondition = replaceExecutableRegex(
+                migratedCondition,
+                Regex("""\b$escapedVariable\.""")
+            ) { "$typedVariable." }
+            migratedCondition = replaceExecutableRegex(migratedCondition, instancePattern) {
+                "$variable.value() instanceof $recipeType $typedVariable &&"
+            }
+            if (migratedCondition != condition) {
+                result = result.substring(0, openParen + 1) + migratedCondition + result.substring(closeParen)
+                cursor = openParen + 1 + migratedCondition.length
+            } else {
+                cursor = closeParen + 1
+            }
+        }
+        return result
+    }
+
+    private fun migrateRecipeHolderBareInstanceofBlocks(source: String, variable: String): String {
+        val id = """[A-Za-z_$][\w$]*"""
+        val pattern = Regex("""if\s*\(\s*${Regex.escape(variable)}\s+instanceof\s+($id(?:\.$id)*)\s*\)\s*\{""")
+        var result = source
+        var cursor = 0
+        while (true) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val match = pattern.find(executableCode, cursor) ?: break
+            val sourceMatch = pattern.find(result, match.range.first)
+                ?.takeIf { it.range == match.range }
+            if (sourceMatch == null) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val openBrace = executableCode.indexOf('{', match.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val recipeType = sourceMatch.groupValues[1]
+            val typedVariable = recipeType.substringAfterLast('.')
+                .replaceFirstChar { it.lowercase() }
+                .let { if (it == variable) "${it}Value" else it }
+            val body = result.substring(openBrace + 1, closeBrace)
+            var migratedBody = replaceExecutableRegex(
+                body,
+                Regex("""\b${Regex.escape(variable)}\.""")
+            ) { "$typedVariable." }
+            migratedBody = replaceExecutableRegex(
+                migratedBody,
+                Regex("""\(\s*${Regex.escape(recipeType)}\s*\)\s*${Regex.escape(variable)}\b""")
+            ) { typedVariable }
+            val replacement = "if ($variable.value() instanceof $recipeType $typedVariable) {$migratedBody}"
+            result = result.substring(0, match.range.first) + replacement + result.substring(closeBrace + 1)
+            cursor = match.range.first + replacement.length
+        }
+        return result
+    }
+
     private fun collapseDuplicateRecipeHolderValueMaps(source: String): String =
         replaceExecutableRegex(
             source,
@@ -51290,7 +51544,9 @@ ${indent}}
         return Regex("""(?s)byKey\(.*?\)\.ifPresent\(\s*($id)\s*->\s*(.*?)\)\s*;""")
             .replace(source) { match ->
                 val recipeVar = match.groupValues[1]
-                match.value.replace("$recipeVar.get()", "$recipeVar.value()")
+                match.value
+                    .replace("$recipeVar.value().get()", "$recipeVar.value()")
+                    .replace("$recipeVar.get()", "$recipeVar.value()")
             }
     }
 

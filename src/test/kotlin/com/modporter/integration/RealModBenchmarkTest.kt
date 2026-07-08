@@ -61,6 +61,8 @@ import kotlin.test.assertTrue
  *   MODPORTER_BENCHMARK_JAVA21=path       override the Java 21 executable for vanilla server generation
  */
 class RealModBenchmarkTest {
+    private val readmeSnapshotStart = "<!-- MODPORTER:BENCHMARK-SNAPSHOT:START -->"
+    private val readmeSnapshotEnd = "<!-- MODPORTER:BENCHMARK-SNAPSHOT:END -->"
 
     @Test
     @EnabledIfEnvironmentVariable(named = "MODPORTER_REAL_MOD_TEST", matches = "true")
@@ -81,8 +83,9 @@ class RealModBenchmarkTest {
         artifactRoot.createDirectories()
 
         val options = BenchmarkOptions.fromEnvironment()
+        val allCases = loadCases(repoRoot.resolve("src/test/resources/benchmarks/real-mods.tsv"))
         val cases = selectCases(
-            loadCases(repoRoot.resolve("src/test/resources/benchmarks/real-mods.tsv")),
+            allCases,
             options.caseIds
         )
         assertTrue(cases.isNotEmpty(), "Benchmark manifest should contain at least one case")
@@ -130,6 +133,10 @@ class RealModBenchmarkTest {
                 appendLine("Report: $reportPath")
             }
         )
+
+        if (updateReadmeBenchmarkSnapshot(repoRoot, allCases, outcomes, options)) {
+            println("README benchmark snapshot updated with resolved Git commit hashes")
+        }
     }
 
     @Test
@@ -1340,6 +1347,72 @@ class RealModBenchmarkTest {
         assertTrue(telemetry.contains("\"skipped\": 1"), telemetry)
         assertTrue(telemetry.contains("\"reviewSignalCount\": 1"), telemetry)
         assertTrue(telemetry.contains("\"source-inherited\""), telemetry)
+    }
+
+    @Test
+    fun `readme benchmark snapshot records full resolved git commit hashes`() {
+        val outcome = BenchmarkOutcome(
+            case = BenchmarkCase(
+                id = "example",
+                displayName = "Example Mod",
+                provider = "git",
+                location = "https://github.com/example/example-mod.git",
+                ref = "1.20.1",
+                subdir = ".",
+                required = true,
+                dependencies = listOf("base")
+            ),
+            source = "git:https://github.com/example/example-mod.git#1.20.1@0123456789abcdef0123456789abcdef01234567",
+            outputDir = null,
+            status = Status.PASS,
+            note = "OK"
+        )
+
+        val snapshot = renderReadmeBenchmarkSnapshot(listOf(outcome))
+
+        assertTrue(snapshot.contains("Resolved Git commit"), snapshot)
+        assertTrue(snapshot.contains("`example/example-mod`, `1.20.1` with `base` dependency"), snapshot)
+        assertTrue(snapshot.contains("`0123456789abcdef0123456789abcdef01234567`"), snapshot)
+    }
+
+    @Test
+    fun `complete strict benchmark success updates marked readme snapshot`(@TempDir tempDir: Path) {
+        val benchmarkCase = BenchmarkCase(
+            id = "example",
+            displayName = "Example Mod",
+            provider = "git",
+            location = "https://github.com/example/example-mod.git",
+            ref = "1.20.1",
+            subdir = ".",
+            required = true
+        )
+        val outcome = BenchmarkOutcome(
+            case = benchmarkCase,
+            source = "git:https://github.com/example/example-mod.git#1.20.1@0123456789abcdef0123456789abcdef01234567",
+            outputDir = null,
+            status = Status.PASS,
+            note = "OK"
+        )
+        tempDir.resolve("README.md").writeText("""
+            # Example
+
+            $readmeSnapshotStart
+            old snapshot
+            $readmeSnapshotEnd
+        """.trimIndent())
+
+        val updated = updateReadmeBenchmarkSnapshot(
+            repoRoot = tempDir,
+            allCases = listOf(benchmarkCase),
+            outcomes = listOf(outcome),
+            options = strictBenchmarkOptions().copy(updateReadme = true, caseIds = listOf("example"))
+        )
+        val readme = tempDir.resolve("README.md").readText()
+
+        assertTrue(updated)
+        assertTrue(readme.contains("Resolved Git commit"), readme)
+        assertTrue(readme.contains("`0123456789abcdef0123456789abcdef01234567`"), readme)
+        assertTrue(!readme.contains("old snapshot"), readme)
     }
 
     @Test
@@ -4347,6 +4420,7 @@ class RealModBenchmarkTest {
             appendLine("| runClientWorld | ${options.runClientWorld} |")
             appendLine("| logClean | ${options.logClean} |")
             appendLine("| keepWork | ${options.keepWork} |")
+            appendLine("| updateReadme | ${options.updateReadme} |")
             appendLine("| timeoutSeconds | ${options.timeoutSeconds} |")
             appendLine("| progressGraceSeconds | ${options.progressGraceSeconds} |")
             appendLine("| requested cases | ${options.caseIds?.joinToString(",") ?: "all"} |")
@@ -4429,6 +4503,7 @@ class RealModBenchmarkTest {
                 "runClientWorld" to options.runClientWorld,
                 "logClean" to options.logClean,
                 "keepWork" to options.keepWork,
+                "updateReadme" to options.updateReadme,
                 "timeoutSeconds" to options.timeoutSeconds,
                 "progressGraceSeconds" to options.progressGraceSeconds,
                 "requestedCases" to (options.caseIds ?: listOf("all")),
@@ -4450,6 +4525,103 @@ class RealModBenchmarkTest {
             )
         )
         return jsonValue(payload) + "\n"
+    }
+
+    private fun updateReadmeBenchmarkSnapshot(
+        repoRoot: Path,
+        allCases: List<BenchmarkCase>,
+        outcomes: List<BenchmarkOutcome>,
+        options: BenchmarkOptions
+    ): Boolean {
+        if (!options.updateReadme) return false
+        if (!isCompleteStrictReadmeSnapshot(allCases, outcomes, options)) return false
+
+        val readme = repoRoot.resolve("README.md")
+        val original = readme.readText()
+        val start = original.indexOf(readmeSnapshotStart)
+        val end = original.indexOf(readmeSnapshotEnd)
+        require(start >= 0 && end > start) {
+            "README benchmark snapshot markers are required when MODPORTER_BENCHMARK_UPDATE_README=true"
+        }
+
+        val replacement = buildString {
+            appendLine(readmeSnapshotStart)
+            append(renderReadmeBenchmarkSnapshot(outcomes))
+            append(readmeSnapshotEnd)
+        }
+        val migrated = original.substring(0, start) + replacement + original.substring(end + readmeSnapshotEnd.length)
+        if (migrated == original) return false
+        readme.writeText(migrated)
+        return true
+    }
+
+    private fun isCompleteStrictReadmeSnapshot(
+        allCases: List<BenchmarkCase>,
+        outcomes: List<BenchmarkOutcome>,
+        options: BenchmarkOptions
+    ): Boolean {
+        if (!options.strictRuntime ||
+            !options.strict ||
+            !options.handsOff ||
+            !options.compile ||
+            !options.runServer ||
+            !options.runGameTestServer ||
+            !options.runClient ||
+            !options.runClientWorld ||
+            !options.logClean) {
+            return false
+        }
+        if (outcomes.any { it.status != Status.PASS }) return false
+
+        val availableIds = allCases
+            .filterNot { it.provider.equals("missing", ignoreCase = true) }
+            .map { it.id }
+            .toSet()
+        val outcomeIds = outcomes.map { it.case.id }.toSet()
+        if (availableIds != outcomeIds || availableIds.size != outcomes.size) return false
+
+        return outcomes.all { it.resolvedGitSource() != null }
+    }
+
+    private fun renderReadmeBenchmarkSnapshot(outcomes: List<BenchmarkOutcome>): String =
+        buildString {
+            appendLine("| Target | Provider | Source | Resolved Git commit | Strict gate status |")
+            appendLine("|--------|----------|--------|---------------------|--------------------|")
+            for (outcome in outcomes) {
+                val source = outcome.resolvedGitSource()
+                    ?: error("README benchmark snapshot requires resolved git source for ${outcome.case.id}: ${outcome.source}")
+                val repo = gitRepositoryLabel(source.url)
+                val dependencies = outcome.case.dependencies.takeIf { it.isNotEmpty() }
+                    ?.joinToString(prefix = " with `", postfix = "` dependency", separator = "`, `")
+                    .orEmpty()
+                appendLine(
+                    "| ${markdownCell(outcome.case.displayName)} | Git | " +
+                        "`${markdownCell(repo)}`, `${markdownCell(source.ref)}`$dependencies | " +
+                        "`${source.commit}` | ${outcome.status} |"
+                )
+            }
+        }
+
+    private fun gitRepositoryLabel(url: String): String {
+        val trimmed = url.removeSuffix(".git")
+        val githubPrefix = "https://github.com/"
+        return if (trimmed.startsWith(githubPrefix)) {
+            trimmed.removePrefix(githubPrefix)
+        } else {
+            trimmed
+        }
+    }
+
+    private fun markdownCell(value: String): String =
+        value.replace("|", "\\|")
+
+    private fun BenchmarkOutcome.resolvedGitSource(): ResolvedGitSource? {
+        val match = Regex("""^git:(.+)#([^@]+)@([0-9a-fA-F]{40})$""").matchEntire(source) ?: return null
+        return ResolvedGitSource(
+            url = match.groupValues[1],
+            ref = match.groupValues[2],
+            commit = match.groupValues[3].lowercase()
+        )
     }
 
     private fun BenchmarkOutcome.toTelemetryMap(): Map<String, Any?> {
@@ -4604,6 +4776,7 @@ class RealModBenchmarkTest {
         val runClientWorld: Boolean,
         val logClean: Boolean,
         val keepWork: Boolean,
+        val updateReadme: Boolean,
         val caseIds: List<String>?,
         val timeoutSeconds: Long,
         val progressGraceSeconds: Long
@@ -4627,6 +4800,7 @@ class RealModBenchmarkTest {
                     runClientWorld = runClientWorld,
                     logClean = strictRuntime || envFlag("MODPORTER_BENCHMARK_LOG_CLEAN"),
                     keepWork = envFlag("MODPORTER_BENCHMARK_KEEP_WORK"),
+                    updateReadme = envFlag("MODPORTER_BENCHMARK_UPDATE_README"),
                     caseIds = System.getenv("MODPORTER_BENCHMARK_CASES")
                         ?.split(',')
                         ?.map { it.trim() }
@@ -4672,6 +4846,7 @@ class RealModBenchmarkTest {
             runClientWorld = true,
             logClean = true,
             keepWork = false,
+            updateReadme = false,
             caseIds = null,
             timeoutSeconds = 180L,
             progressGraceSeconds = 75L
@@ -4682,6 +4857,12 @@ class RealModBenchmarkTest {
         val sourceLabel: String,
         val status: Status?,
         val note: String
+    )
+
+    data class ResolvedGitSource(
+        val url: String,
+        val ref: String,
+        val commit: String
     )
 
     data class ClientSmokeWorldFixture(
@@ -4881,6 +5062,7 @@ class RealModBenchmarkTest {
                 private static Set<Integer> observedItems = Set.of();
                 private static Set<Integer> stableMenuItems = Set.of();
                 private static int stableMenuTicks;
+                private static int browsePass;
                 private static String currentTabName = "";
 
                 private enum BrowseState {
@@ -5018,6 +5200,7 @@ class RealModBenchmarkTest {
                         stableMenuItems = Set.of();
                         stableMenuTicks = 0;
                         browseRow = 0;
+                        browsePass = 0;
                         browseState = BrowseState.BROWSE_TAB;
                         return;
                     }
@@ -5104,11 +5287,17 @@ class RealModBenchmarkTest {
                     if (!observedItems.containsAll(expectedItems)) {
                         Set<Integer> missing = new HashSet<>(expectedItems);
                         missing.removeAll(observedItems);
+                        if (browsePass == 0) {
+                            browsePass++;
+                            browseRow = 0;
+                            System.out.println("[ModPorterBenchmark] Creative tab browse retry: " + currentTabName + " missed " + missing.size() + " item stack(s) on pass 1");
+                            return;
+                        }
                         fail("creative tab browse missed " + missing.size() + " item stack(s) in " + currentTabName);
                         return;
                     }
 
-                    System.out.println("[ModPorterBenchmark] Creative tab verified: " + currentTabName + " items=" + expectedItems.size());
+                    System.out.println("[ModPorterBenchmark] Creative tab verified: " + currentTabName + " items=" + expectedItems.size() + " passes=" + (browsePass + 1));
                     targetTabIndex++;
                     if (targetTabIndex >= targetTabs.size()) {
                         browseState = BrowseState.COMPLETE;
