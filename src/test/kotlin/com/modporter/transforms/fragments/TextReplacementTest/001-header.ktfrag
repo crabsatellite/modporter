@@ -1,0 +1,1140 @@
+package com.modporter.transforms
+
+import com.modporter.core.pipeline.Confidence
+import com.modporter.core.transforms.structural.StructuralRefactorPass
+import com.modporter.core.transforms.text.TextReplacementPass
+import com.modporter.mapping.MappingDatabase
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.nio.file.Path
+import kotlin.io.path.*
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+class TextReplacementTest {
+
+    @TempDir
+    lateinit var tempDir: Path
+
+    private fun createTestFile(content: String): Path {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("TestMod.java")
+        file.writeText(content)
+        return tempDir
+    }
+
+    @Test
+    fun `package renames are applied correctly`() {
+        val projectDir = createTestFile("""
+            package com.example;
+            import net.minecraftforge.common.MinecraftForge;
+            import net.minecraftforge.fml.common.Mod;
+            import net.minecraftforge.eventbus.api.IEventBus;
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("net.neoforged.neoforge.common.NeoForge"))
+        assertTrue(transformed.contains("net.neoforged.fml.common.Mod"))
+        assertTrue(transformed.contains("net.neoforged.bus.api.IEventBus"))
+        assertTrue(!transformed.contains("net.minecraftforge"))
+
+        assertTrue(result.changeCount > 0)
+        assertTrue(result.changes.all { it.confidence == Confidence.HIGH })
+    }
+
+    @Test
+    fun `source level test assertions migrate forge names inside strings`() {
+        val testDir = tempDir.resolve("src/test/java/com/example")
+        testDir.createDirectories()
+        testDir.resolve("SourceContractTest.java").writeText("""
+            package com.example;
+
+            class SourceContractTest {
+                void contract(String source) {
+                    assert source.contains("import net.minecraftforge.fluids.FluidStack;");
+                    assert source.contains("MinecraftForge.EVENT_BUS.register(ServerEvent.class)");
+                    assert source.matches(".*MinecraftForge\\s*\\.\\s*EVENT_BUS.*");
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(tempDir)
+        val transformed = testDir.resolve("SourceContractTest.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(transformed.contains("import net.neoforged.neoforge.fluids.FluidStack;"), transformed)
+        assertTrue(transformed.contains("NeoForge.EVENT_BUS.register(ServerEvent.class)"), transformed)
+        assertTrue(transformed.contains("NeoForge\\\\s*\\\\.\\\\s*EVENT_BUS"), transformed)
+        assertFalse(transformed.contains("net.minecraftforge"), transformed)
+        assertFalse(transformed.contains("MinecraftForge"), transformed)
+    }
+
+    @Test
+    fun `forge internal names in mixin descriptors use neoforge owners`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+            import org.spongepowered.asm.mixin.injection.At;
+
+            public class TestMod {
+                @WrapOperation(method = "render(Lnet/minecraft/client/gui/GuiGraphics;IIF)V", at = @At(value = "INVOKE", target = "Lnet/minecraftforge/internal/BrandingControl;forEachLine(ZZLjava/util/function/BiConsumer;)V"))
+                private void branding() {}
+
+                String fml = "Lnet/minecraftforge/fml/ModLoadingContext;";
+                String bus = "Lnet/minecraftforge/eventbus/api/IEventBus;";
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "forge-internal-name-descriptors" })
+        assertTrue(transformed.contains("Lnet/neoforged/neoforge/internal/BrandingControl;"), transformed)
+        assertTrue(transformed.contains("Lnet/neoforged/fml/ModLoadingContext;"), transformed)
+        assertTrue(transformed.contains("Lnet/neoforged/bus/api/IEventBus;"), transformed)
+        assertFalse(transformed.contains("Lnet/minecraftforge/"), transformed)
+        assertFalse(transformed.contains("Lnet/neoforged/neoforge/fml/"), transformed)
+        assertFalse(transformed.contains("Lnet/neoforged/neoforge/eventbus/"), transformed)
+    }
+
+    @Test
+    fun `colorless glass tag constants use renamed glass block constants`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.neoforged.neoforge.common.Tags;
+
+            public class TestMod {
+                Object blockTag = Tags.Blocks.GLASS_COLORLESS;
+                Object itemTag = Tags.Items.GLASS_COLORLESS;
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+        assertTrue(transformed.contains("Tags.Blocks.GLASS_BLOCKS_COLORLESS"), transformed)
+        assertTrue(transformed.contains("Tags.Items.GLASS_BLOCKS_COLORLESS"), transformed)
+        assertFalse(transformed.contains("GLASS_COLORLESS"), transformed)
+    }
+
+    @Test
+    fun `class renames are applied correctly`() {
+        val projectDir = createTestFile("""
+            MinecraftForge.EVENT_BUS.register(this);
+            ForgeConfigSpec.Builder builder = new ForgeConfigSpec.Builder();
+            ForgeHooks.onLivingAttack(entity, source, amount);
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("NeoForge.EVENT_BUS"))
+        assertTrue(transformed.contains("ModConfigSpec.Builder"))
+        assertTrue(transformed.contains("CommonHooks.onLivingAttack"))
+    }
+
+    @Test
+    fun `forge gui helper migrates to vanilla gui instead of removed extended gui`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraftforge.client.gui.overlay.ForgeGui;
+
+            public class TestMod {
+                void render(ForgeGui gui) {
+                    Object accessor = gui;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.client.gui.Gui;"))
+        assertTrue(transformed.contains("void render(Gui gui)"))
+        assertFalse(transformed.contains("ExtendedGui"))
+        assertFalse(transformed.contains("net.neoforged.neoforge.client.gui.overlay.Gui"))
+        assertFalse(transformed.contains("ForgeGui"))
+    }
+
+    @Test
+    fun `vanilla options screen imports migrate to options package`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.OptionsScreen;
+
+            public class TestMod {
+                net.minecraft.client.gui.screens.OptionsScreen screen;
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.client.gui.screens.options.OptionsScreen;"), transformed)
+        assertTrue(transformed.contains("net.minecraft.client.gui.screens.options.OptionsScreen screen;"), transformed)
+        assertFalse(transformed.contains("net.minecraft.client.gui.screens.OptionsScreen"), transformed)
+    }
+
+    @Test
+    fun `network direction checks are not replaced with constant placeholders`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            public class TestMod {
+                public boolean server(Object ctx) {
+                    return ctx.get().getDirection().getReceptionSide().isServer();
+                }
+
+                public boolean client(Object ctx) {
+                    return ctx.get().getDirection().getReceptionSide().isClient();
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("ctx.get().getDirection().getReceptionSide().isServer()"))
+        assertTrue(transformed.contains("ctx.get().getDirection().getReceptionSide().isClient()"))
+        assertFalse(transformed.contains("true /*"))
+        assertFalse(transformed.contains("direction check"))
+    }
+
+    @Test
+    fun `business state get calls are not rewritten as blockstate property reads`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            public class TestMod {
+                void render(MirrorConfigState state, MirrorKind kind) {
+                    Object value = state.get(kind);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("state.get(kind)"), transformed)
+        assertFalse(transformed.contains("state.getValue(kind)"), transformed)
+    }
+
+    @Test
+    fun `registry constants are replaced`() {
+        val projectDir = createTestFile("""
+            DeferredRegister.create(ForgeRegistries.ITEMS, MOD_ID);
+            DeferredRegister.create(ForgeRegistries.BLOCKS, MOD_ID);
+            DeferredRegister.create(ForgeRegistries.ENTITY_TYPES, MOD_ID);
+            DeferredRegister.create(ForgeRegistries.FLUIDS, MOD_ID);
+            DeferredRegister.create(ForgeRegistries.POI_TYPES, MOD_ID);
+            DeferredRegister.create(ForgeRegistries.VILLAGER_PROFESSIONS, MOD_ID);
+            DeferredRegister.create(ForgeRegistries.FOLIAGE_PLACER_TYPES, MOD_ID);
+            DeferredRegister.create(ForgeRegistries.TREE_DECORATOR_TYPES, MOD_ID);
+            DeferredRegister.create(ForgeRegistries.WORLD_CARVERS, MOD_ID);
+            DeferredRegister.create(ForgeRegistries.Keys.FLUID_TYPES, MOD_ID);
+            DeferredRegister.create(ForgeRegistries.Keys.GLOBAL_LOOT_MODIFIER_SERIALIZERS, MOD_ID);
+            ResourceKey.create(ForgeRegistries.Keys.BIOME_MODIFIERS, id);
+            DeferredRegister
+                .create(ForgeRegistries.RECIPE_TYPES, MOD_ID);
+            DeferredRegister.create(
+                ForgeRegistries.FEATURES, MOD_ID);
+            ForgeRegistries.ITEMS.getKey(item);
+            ForgeRegistries.FLUIDS.getValue(fluidId);
+            ForgeRegistries.POTIONS.getKey(potion);
+            ForgeRegistries.PAINTING_VARIANTS.getKey(art);
+            BootstapContext<?> context;
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        // DeferredRegister.create uses Registries (ResourceKey)
+        assertTrue(transformed.contains("DeferredRegister.create(Registries.ITEM"))
+        assertTrue(transformed.contains("DeferredRegister.create(Registries.BLOCK"))
+        assertTrue(transformed.contains("DeferredRegister.create(Registries.ENTITY_TYPE"))
+        assertTrue(transformed.contains("DeferredRegister.create(Registries.FLUID"))
+        assertTrue(transformed.contains("DeferredRegister.create(Registries.POINT_OF_INTEREST_TYPE"))
+        assertTrue(transformed.contains("DeferredRegister.create(Registries.VILLAGER_PROFESSION"))
+        assertTrue(transformed.contains("DeferredRegister.create(Registries.FOLIAGE_PLACER_TYPE"))
+        assertTrue(transformed.contains("DeferredRegister.create(Registries.TREE_DECORATOR_TYPE"))
+        assertTrue(transformed.contains("DeferredRegister.create(Registries.CARVER"))
+        assertTrue(transformed.contains("DeferredRegister.create(NeoForgeRegistries.Keys.FLUID_TYPES"))
+        assertTrue(transformed.contains("DeferredRegister.create(NeoForgeRegistries.Keys.GLOBAL_LOOT_MODIFIER_SERIALIZERS"))
+        assertTrue(transformed.contains("ResourceKey.create(NeoForgeRegistries.Keys.BIOME_MODIFIERS, id)"))
+        assertTrue(transformed.contains("DeferredRegister.create(Registries.RECIPE_TYPE"))
+        assertTrue(transformed.contains("DeferredRegister.create(Registries.FEATURE"))
+        // Non-DeferredRegister context uses BuiltInRegistries (Registry instance)
+        assertTrue(transformed.contains("BuiltInRegistries.ITEM.getKey"))
+        assertTrue(transformed.contains("BuiltInRegistries.FLUID.get(fluidId)"))
+        assertTrue(transformed.contains("BuiltInRegistries.POTION.getKey(potion)"))
+        assertTrue(transformed.contains("BuiltInRegistries.PAINTING_VARIANT.getKey(art)"))
+        assertTrue(transformed.contains("BootstrapContext<?> context"))
+    }
+
+    @Test
+    fun `removed DistExecutor imports do not leave migration placeholders`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.neoforged.fml.DistExecutor;
+
+            public class TestMod {
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertFalse(transformed.contains("DistExecutor"))
+        assertFalse(transformed.contains("[forge2neo]"))
+        assertFalse(transformed.contains("removed in NeoForge"))
+    }
+
+    @Test
+    fun `syntax sensitive migrations keep valid Java statements`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.entity.ai.goal.MeleeAttackGoal;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            public class TestMod extends MeleeAttackGoal {
+                public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
+                    ExampleMod.prefix("channel"),
+                    () -> "1",
+                    "1"::equals,
+                    "1"::equals
+                );
+
+                public void render() {
+                    Tesselator tesselator = Tesselator.getInstance();
+                    BufferBuilder bufferbuilder = tesselator.getBuilder();
+                    bufferbuilder.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.PARTICLE);
+                }
+
+                public void tick() {
+                    if (true)
+                        super.tick();
+                }
+
+                public void save(CompoundTag tag) {
+                    ContainerHelper.saveAllItems(tag, this.getItemStacks());
+                    ContainerHelper.loadAllItems(tag, this.getItemStacks());
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(
+            transformed.contains("BufferBuilder bufferbuilder = tesselator.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.PARTICLE);") ||
+                transformed.contains("bufferbuilder = Tesselator.getInstance().begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.PARTICLE);")
+        )
+        assertTrue(transformed.contains("super.tick();"))
+        assertTrue(transformed.contains("ContainerHelper.saveAllItems(tag, this.getItemStacks());"))
+        assertTrue(transformed.contains("ContainerHelper.loadAllItems(tag, this.getItemStacks());"))
+        assertTrue(transformed.contains("NetworkRegistry.newSimpleChannel("))
+        assertFalse(transformed.contains("TODO: [forge2neo]"))
+        assertFalse(transformed.contains("this.getItemStacks(,"))
+    }
+
+    @Test
+    fun `rendered buffer rename adds mesh data import`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+
+            public interface TestMod {
+                BufferBuilder.RenderedBuffer build(BufferBuilder builder);
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import com.mojang.blaze3d.vertex.MeshData;"))
+        assertTrue(transformed.contains("MeshData build(BufferBuilder builder);"))
+        assertFalse(transformed.contains("BufferBuilder.RenderedBuffer"))
+    }
+
+    @Test
+    fun `gui overlay render event migrates type and layer name access`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.neoforged.neoforge.client.event.RenderGuiOverlayEvent;
+            import net.neoforged.neoforge.client.gui.overlay.VanillaGuiOverlay;
+
+            public class TestMod {
+                public static void preOverlay(RenderGuiOverlayEvent.Pre event) {
+                    if (event.getOverlay().id() == VanillaGuiOverlay.MOUNT_HEALTH.id()) {
+                        event.setCanceled(true);
+                    }
+                }
+
+                public static void anyOverlay(RenderGuiOverlayEvent event) {
+                    if (event.getOverlay() == VanillaGuiOverlay.SLEEP_FADE.type()) {
+                        event.setCanceled(true);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.neoforged.neoforge.client.event.RenderGuiLayerEvent;"))
+        assertTrue(transformed.contains("import net.neoforged.neoforge.client.gui.VanillaGuiLayers;"))
+        assertTrue(transformed.contains("preOverlay(RenderGuiLayerEvent.Pre event)"))
+        assertTrue(transformed.contains("anyOverlay(RenderGuiLayerEvent event)"))
+        assertTrue(transformed.contains("event.getName().equals(VanillaGuiLayers.VEHICLE_HEALTH)"))
+        assertTrue(transformed.contains("event.getName().equals(VanillaGuiLayers.SLEEP_OVERLAY)"))
+        assertFalse(transformed.contains("RenderGuiOverlayEvent"))
+        assertFalse(transformed.contains("VanillaGuiOverlay"))
+        assertFalse(transformed.contains("getOverlay()"))
+    }
+
+    @Test
+    fun `IForgeXXX interface renames via text rules`() {
+        val projectDir = createTestFile("""
+            ForgeSpawnEggItem egg = new ForgeSpawnEggItem(entity, color1, color2, props);
+            ForgeTier myTier = new ForgeTier(5, 2000, 10.0f, 4.0f, 20, tags, repairIngredient);
+            ToolActions.DIG = new ToolAction();
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("DeferredSpawnEggItem"))
+        assertTrue(transformed.contains("SimpleTier"))
+        assertTrue(transformed.contains("ItemAbilities"))
+    }
+
+    @Test
+    fun `selection list coordinate rules do not rewrite local variables`() {
+        val projectDir = createTestFile("""
+            private void fillBox(int x1, int y1, int z1, int x2, int y2, int z2) {
+                for (int x = x1; x <= x2; x++) {
+                    for (int y = y1; y <= y2; y++) {
+                    }
+                }
+                int left = this.x0;
+                int bottom = super.y1;
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("fillBox(int x1, int y1, int z1, int x2, int y2, int z2)"))
+        assertTrue(transformed.contains("for (int x = x1; x <= x2; x++)"))
+        assertTrue(transformed.contains("for (int y = y1; y <= y2; y++)"))
+        assertTrue(transformed.contains("int left = this.getX();"))
+        assertTrue(transformed.contains("int bottom = super.getBottom();"))
+    }
+
+    @Test
+    fun `render highlight chained partial tick uses delta tracker accessor`() {
+        val projectDir = createTestFile("""
+            double partialTicks = event.getPartialTick().getGameTimeDeltaPartialTick(false);
+            double directPartialTicks = event.getPartialTick();
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("event.getDeltaTracker().getGameTimeDeltaPartialTick(false)"))
+        assertTrue(transformed.contains("double directPartialTicks = event.getPartialTick();"))
+    }
+
+    @Test
+    fun `hurtAndBreak lambda callback becomes equipment slot overload`() {
+        val projectDir = createTestFile("""
+            import net.minecraft.world.InteractionHand;
+
+            public class TestMod {
+                void damage(ItemStack wand, Player player) {
+                    wand.hurtAndBreak(1, player, e -> e.onEquippedItemBroken(InteractionHand.MAIN_HAND));
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.world.entity.EquipmentSlot;"))
+        assertTrue(transformed.contains("wand.hurtAndBreak(1, player, EquipmentSlot.MAINHAND);"))
+        assertTrue(!transformed.contains("onEquippedItemBroken(InteractionHand.MAIN_HAND)"))
+    }
+
+    @Test
+    fun `legacy hand references after useWithoutItem migration use main hand`() {
+        val projectDir = createTestFile("""
+            public class TestMod {
+                void useWithoutItem(Player player, ItemStack heldStack) {
+                    ItemStack stack = player.getItemInHand(hand);
+                    player.swing(handIn);
+                    heldStack.hurtAndBreak(1, player, p -> p.onEquippedItemBroken(hand));
+                    this.takePlates(level, pos, state, player, handIn);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.world.InteractionHand;"))
+        assertTrue(transformed.contains("import net.minecraft.world.entity.EquipmentSlot;"))
+        assertTrue(transformed.contains("ItemStack stack = player.getMainHandItem();"))
+        assertTrue(transformed.contains("player.swing(InteractionHand.MAIN_HAND);"))
+        assertTrue(transformed.contains("heldStack.hurtAndBreak(1, player, EquipmentSlot.MAINHAND);"))
+        assertTrue(transformed.contains("this.takePlates(level, pos, state, player, InteractionHand.MAIN_HAND);"))
+        assertFalse(transformed.contains("handIn"))
+        assertFalse(transformed.contains("onEquippedItemBroken(hand"))
+    }
+
+    @Test
+    fun `gui overlay registration migrates to layered draw API`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.neoforged.neoforge.client.event.RegisterGuiOverlaysEvent;
+            import net.neoforged.neoforge.client.gui.overlay.ExtendedGui;
+            import net.neoforged.neoforge.client.gui.overlay.IGuiOverlay;
+            import net.neoforged.neoforge.client.gui.overlay.VanillaGuiOverlay;
+
+            public class TestMod {
+                public static void registerGuiOverlays(RegisterGuiOverlaysEvent event) {
+                    event.registerAbove(
+                            VanillaGuiOverlay.HOTBAR.id(),
+                            "cooldown_hud",
+                            new CooldownHudOverlay()
+                    );
+                }
+            }
+
+            class CooldownHudOverlay implements IGuiOverlay {
+                public static final ResourceLocation OVERLAY_ID = ResourceLocation.fromNamespaceAndPath("example", "cooldown_hud");
+
+                @Override
+                public void render(ExtendedGui gui, GuiGraphics guiGraphics, float partialTick, int screenWidth, int screenHeight) {
+                    for (int i = 0; i < player.getInventory().size(); i++) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.neoforged.neoforge.client.event.RegisterGuiLayersEvent;"))
+        assertTrue(transformed.contains("import net.neoforged.neoforge.client.gui.VanillaGuiLayers;"))
+        assertTrue(transformed.contains("import net.minecraft.client.gui.LayeredDraw;"))
+        assertTrue(transformed.contains("import net.minecraft.client.DeltaTracker;"))
+        assertTrue(transformed.contains("registerGuiOverlays(RegisterGuiLayersEvent event)"))
+        assertTrue(transformed.contains("event.registerAbove(VanillaGuiLayers.HOTBAR, CooldownHudOverlay.OVERLAY_ID, new CooldownHudOverlay())"))
+        assertTrue(transformed.contains("class CooldownHudOverlay implements LayeredDraw.Layer"))
+        assertTrue(transformed.contains("public void render(GuiGraphics guiGraphics, DeltaTracker deltaTracker)"))
+        assertTrue(transformed.contains("player.getInventory().getContainerSize()"))
+        assertTrue(!transformed.contains("RegisterGuiOverlaysEvent"))
+        assertTrue(!transformed.contains("IGuiOverlay"))
+        assertTrue(!transformed.contains("ExtendedGui"))
+        assertTrue(!transformed.contains("VanillaGuiOverlay"))
+    }
+
+    @Test
+    fun `layered draw overlay signatures add delta tracker import`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.LayeredDraw;
+
+            class CooldownHudOverlay implements LayeredDraw.Layer {
+                @Override
+                public void render(GuiGraphics guiGraphics, DeltaTracker deltaTracker) {
+                    guiGraphics.pose();
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.client.DeltaTracker;"), transformed)
+        assertTrue(transformed.contains("public void render(GuiGraphics guiGraphics, DeltaTracker deltaTracker)"), transformed)
+    }
+
+    @Test
+    fun `text replacement does not rewrite collection size on container screens`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.Map;
+            import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+
+            public class TestMod extends AbstractContainerScreen<MenuSurface> {
+                private final Map<Integer, String> pages = new HashMap<>();
+
+                public int pageCount() {
+                    return this.pages.size();
+                }
+            }
+
+            class MenuSurface {
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+        assertTrue(transformed.contains("return this.pages.size();"), transformed)
+        assertTrue(!transformed.contains("this.pages.getSize()"), transformed)
+        assertTrue(!transformed.contains("this.pages.getContainerSize()"), transformed)
+    }
+
+    @Test
+    fun `model render rgba floats migrate to packed color`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+
+            public class TestMod {
+                private Model model;
+                private ModelPart group;
+                // group.render(poseStack, vertexConsumer, packedLight, packedOverlay, red, green, blue, alpha);
+                private static final String RENDER_DOC = "model.renderToBuffer(poseStack, vertexConsumer, packedLight, packedOverlay, 1.0F, 1.0F, 1.0F, alpha);";
+
+                /*
+                 public void renderToBuffer(PoseStack poseStack, VertexConsumer vertexConsumer, int packedLight, int packedOverlay, int color) {
+                     group.render(poseStack, vertexConsumer, packedLight, packedOverlay, red, green, blue, alpha);
+                 }
+                 */
+
+                @Override
+                public void renderToBuffer(PoseStack poseStack, VertexConsumer vertexConsumer, int packedLight, int packedOverlay,
+                                           float red, float green, float blue, float alpha) {
+                    group.render(poseStack, vertexConsumer, packedLight, packedOverlay, red, green, blue, alpha);
+                }
+
+                public void renderExternal(PoseStack poseStack, VertexConsumer vertexConsumer, int packedLight, int packedOverlay, float alpha) {
+                    model.renderToBuffer(poseStack, vertexConsumer, packedLight, packedOverlay,
+                            1.0F, 1.0F, 1.0F, alpha);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.util.FastColor;"))
+        assertTrue(transformed.contains("public void renderToBuffer(PoseStack poseStack, VertexConsumer vertexConsumer, int packedLight, int packedOverlay, int color)"))
+        assertTrue(transformed.contains("group.render(poseStack, vertexConsumer, packedLight, packedOverlay, color);"))
+        assertTrue(transformed.contains("model.renderToBuffer(poseStack, vertexConsumer, packedLight, packedOverlay, FastColor.ARGB32.colorFromFloat(alpha, 1.0F, 1.0F, 1.0F));"))
+        assertTrue(transformed.contains("// group.render(poseStack, vertexConsumer, packedLight, packedOverlay, red, green, blue, alpha);"), transformed)
+        assertTrue(transformed.contains("private static final String RENDER_DOC = \"model.renderToBuffer(poseStack, vertexConsumer, packedLight, packedOverlay, 1.0F, 1.0F, 1.0F, alpha);\";"), transformed)
+        assertTrue(transformed.contains("group.render(poseStack, vertexConsumer, packedLight, packedOverlay, red, green, blue, alpha);"), transformed)
+        assertFalse(transformed.contains("// group.render(poseStack, vertexConsumer, packedLight, packedOverlay, FastColor"), transformed)
+        assertFalse(transformed.contains("RENDER_DOC = \"model.renderToBuffer(poseStack, vertexConsumer, packedLight, packedOverlay, FastColor"), transformed)
+        assertTrue(!transformed.contains("float red, float green, float blue, float alpha"))
+    }
+
+    @Test
+    fun `entity synched data definitions migrate to builder`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.network.syncher.EntityDataAccessor;
+
+            public class TestMod {
+                @Override
+                protected void defineSynchedData() {
+                    super.defineSynchedData();
+                    this.entityData.define(DATA_LIFETIME, 20);
+                    this.getEntityData().define(DATA_LOADING, true);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.network.syncher.SynchedEntityData;"))
+        assertTrue(transformed.contains("protected void defineSynchedData(SynchedEntityData.Builder builder)"))
+        assertTrue(transformed.contains("super.defineSynchedData(builder);"))
+        assertTrue(transformed.contains("builder.define(DATA_LIFETIME, 20);"))
+        assertTrue(transformed.contains("builder.define(DATA_LOADING, true);"))
+        assertTrue(!transformed.contains("this.entityData.define("))
+        assertTrue(!transformed.contains("this.getEntityData().define("))
+        assertTrue(!transformed.contains("super.defineSynchedData();"))
+    }
+
+    @Test
+    fun `public entity synched data definitions keep visibility when migrating to builder`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.network.syncher.EntityDataAccessor;
+
+            public class TestMod {
+                @Override
+                public void defineSynchedData() {
+                    super.defineSynchedData();
+                    this.getEntityData().define(DATA_STATE, false);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.network.syncher.SynchedEntityData;"))
+        assertTrue(transformed.contains("public void defineSynchedData(SynchedEntityData.Builder builder)"))
+        assertTrue(transformed.contains("super.defineSynchedData(builder);"))
+        assertTrue(transformed.contains("builder.define(DATA_STATE, false);"))
+        assertTrue(!transformed.contains("public void defineSynchedData()"))
+        assertTrue(!transformed.contains("super.defineSynchedData();"))
+    }
+
+    @Test
+    fun `saved data computeIfAbsent migrates to factory provider API`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.level.saveddata.SavedData;
+
+            public class TestMod extends SavedData {
+                private static final String DATA_NAME = "example_data";
+
+                public static TestMod load(CompoundTag tag) {
+                    return new TestMod();
+                }
+
+                @Override
+                public CompoundTag save(CompoundTag tag) {
+                    return tag;
+                }
+
+                public static TestMod get(ServerLevel level) {
+                    return level.getDataStorage().computeIfAbsent(
+                            TestMod::load,
+                            TestMod::new,
+                            DATA_NAME
+                    );
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.core.HolderLookup;"))
+        assertTrue(transformed.contains("public static TestMod load(CompoundTag tag, HolderLookup.Provider registries)"))
+        assertTrue(transformed.contains("public CompoundTag save(CompoundTag tag, HolderLookup.Provider registries)"))
+        assertTrue(transformed.contains("computeIfAbsent(new SavedData.Factory<>(TestMod::new, TestMod::load), DATA_NAME"))
+        assertTrue(!transformed.contains("TestMod::load,\n"))
+        assertTrue(!transformed.contains("TestMod::new,\n"))
+    }
+
+    @Test
+    fun `text replacements do not migrate business load compound tag methods without structural owner evidence`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            public abstract class TestMod {
+                public abstract void load(CompoundTag tag);
+
+                public static class Memory extends TestMod {
+                    @Override
+                    public void load(CompoundTag tag) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("public abstract void load(CompoundTag tag);"), transformed)
+        assertTrue(transformed.contains("public void load(CompoundTag tag)"), transformed)
+        assertFalse(transformed.contains("loadAdditional"), transformed)
+        assertFalse(transformed.contains("HolderLookup.Provider registries"), transformed)
+    }
+
+    @Test
+    fun `text replacements do not inject registry access fallbacks for item stack serialization`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import java.util.Optional;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.item.ItemStack;
+
+            public class TestMod {
+                public void save(CompoundTag tag, ItemStack stack) {
+                    ItemStack restored = ItemStack.of(tag.getCompound("Stack"));
+                    Optional.of(tag).map(ItemStack::of);
+                    ContainerHelper.saveAllItems(tag, this.getItemStacks());
+                    ContainerHelper.loadAllItems(tag, this.getItemStacks());
+                    tag.put("Stack", stack.save(new CompoundTag()));
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("ItemStack restored = ItemStack.of(tag.getCompound(\"Stack\"));"), transformed)
+        assertTrue(transformed.contains("Optional.of(tag).map(ItemStack::of);"), transformed)
+        assertTrue(transformed.contains("ContainerHelper.saveAllItems(tag, this.getItemStacks());"), transformed)
+        assertTrue(transformed.contains("ContainerHelper.loadAllItems(tag, this.getItemStacks());"), transformed)
+        assertTrue(transformed.contains("tag.put(\"Stack\", stack.save(new CompoundTag()));"), transformed)
+        assertFalse(transformed.contains("RegistryAccess.EMPTY"), transformed)
+        assertFalse(transformed.contains("player.registryAccess()"), transformed)
+    }
+
+    @Test
+    fun `common 1_21 API moves migrate by text rules`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.chunk.ChunkStatus;
+            import net.neoforged.neoforge.event.entity.living.MobSpawnEvent;
+            import net.neoforged.neoforge.event.level.BlockEvent;
+            import net.neoforged.neoforge.event.tick.LevelTickEvent;
+
+            public class TestMod {
+                public static void onMobSpawn(MobSpawnEvent.FinalizeSpawn event) {
+                }
+
+                public static void onWorldTick(LevelTickEvent event) {
+                    Object level = event.level;
+                    Object status = ChunkStatus.FULL;
+                }
+
+                @Override
+                public int getUseDuration(ItemStack stack) {
+                    return 20;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.world.level.chunk.status.ChunkStatus;"))
+        assertTrue(transformed.contains("import net.neoforged.neoforge.event.entity.living.FinalizeSpawnEvent;"))
+        assertTrue(transformed.contains("import net.neoforged.neoforge.event.level.BlockEvent;"))
+        assertTrue(transformed.contains("public static void onMobSpawn(FinalizeSpawnEvent event)"))
+        assertTrue(transformed.contains("public static void onWorldTick(LevelTickEvent.Post event)"))
+        assertTrue(transformed.contains("Object level = event.getLevel();"))
+        assertTrue(transformed.contains("public int getUseDuration(ItemStack stack, net.minecraft.world.entity.LivingEntity entity)"))
+        assertTrue(!transformed.contains("MobSpawnEvent.FinalizeSpawn"))
+        assertTrue(!transformed.contains("Object level = event.level;"))
+    }
+
+    @Test
+    fun `jade tooltip element helper migrates only declared ITooltip receivers`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import snownee.jade.api.ITooltip;
+
+            public class TestMod {
+                public void appendTooltip(ITooltip tooltip, OtherHelper other, ItemStack stack) {
+                    tooltip.add(tooltip.getElementHelper().smallItem(stack));
+                    tooltip.append(tooltip.getElementHelper().smallItem(stack));
+                    other.getElementHelper();
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "jade-tooltip-elementhelper-static" })
+        assertTrue(transformed.contains("import snownee.jade.api.ui.IElementHelper;"))
+        assertTrue(transformed.contains("tooltip.add(IElementHelper.get().smallItem(stack));"))
+        assertTrue(transformed.contains("tooltip.append(IElementHelper.get().smallItem(stack));"))
+        assertTrue(transformed.contains("other.getElementHelper();"))
+        assertFalse(transformed.contains("tooltip.getElementHelper()"))
+    }
+
+    @Test
+    fun `jade tooltip element helper migration ignores comments and string literals`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import snownee.jade.api.ITooltip;
+
+            public class TestMod {
+                private static final String DOC = "tooltip.getElementHelper()";
+
+                /*
+                 public void docs(ITooltip tooltip, ItemStack stack) {
+                     tooltip.add(tooltip.getElementHelper().smallItem(stack));
+                 }
+                 */
+
+                public void appendTooltip(ITooltip tooltip, OtherHelper other, ItemStack stack) {
+                    tooltip.add(tooltip.getElementHelper().smallItem(stack));
+                    other.getElementHelper();
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("tooltip.add(IElementHelper.get().smallItem(stack));"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"tooltip.getElementHelper()\";"), transformed)
+        assertTrue(transformed.contains("tooltip.add(tooltip.getElementHelper().smallItem(stack));"), transformed)
+        assertTrue(transformed.contains("other.getElementHelper();"), transformed)
+        assertFalse(transformed.contains("DOC = \"IElementHelper.get()"), transformed)
+    }
+
+    @Test
+    fun `lootr loader-specific init package migrates to neoforge namespace`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import noobanidus.mods.lootr.init.ModBlocks;
+            import noobanidus.mods.lootr.config.ConfigManager;
+
+            public class TestMod {
+                public Object chest() {
+                    return ModBlocks.CHEST.get();
+                }
+
+                public boolean oldTextures() {
+                    return ConfigManager.isOldTextures();
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "pkg-lootr-neoforge-init" })
+        assertTrue(result.changes.any { it.ruleId == "pkg-lootr-neoforge-config" })
+        assertTrue(result.changes.any { it.ruleId == "lootr-config-new-textures" })
+        assertTrue(transformed.contains("import noobanidus.mods.lootr.neoforge.init.ModBlocks;"))
+        assertTrue(transformed.contains("import noobanidus.mods.lootr.neoforge.config.ConfigManager;"))
+        assertTrue(transformed.contains("return !ConfigManager.isNewTextures();"))
+        assertFalse(transformed.contains("noobanidus.mods.lootr.init"))
+        assertFalse(transformed.contains("noobanidus.mods.lootr.config"))
+        assertFalse(transformed.contains("isOldTextures"))
+    }
+
+    @Test
+    fun `deferred holder concrete registrations use registry base generic`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class TestMod {
+                public static final DeferredHolder<CoolBlock, CoolBlock> COOL_BLOCK = BLOCKS.register(
+                        "cool_block",
+                        () -> new CoolBlock()
+                );
+
+                public static final DeferredHolder<CoolItem, CoolItem> COOL_ITEM = ITEMS.register(
+                        "cool_item",
+                        () -> new CoolItem()
+                );
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("DeferredHolder<Block, CoolBlock> COOL_BLOCK = BLOCKS.register"))
+        assertTrue(transformed.contains("DeferredHolder<Item, CoolItem> COOL_ITEM = ITEMS.register"))
+    }
+
+    @Test
+    fun `chunk generator codec and abstract signatures migrate to mapcodec api`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import java.util.concurrent.CompletableFuture;
+            import java.util.concurrent.Executor;
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.world.level.StructureManager;
+            import net.minecraft.world.level.chunk.ChunkAccess;
+            import net.minecraft.world.level.chunk.ChunkGenerator;
+            import net.minecraft.world.level.chunk.ChunkGeneratorStructureState;
+            import net.minecraft.world.level.levelgen.RandomState;
+            import net.minecraft.world.level.levelgen.blending.Blender;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class TestMod extends ChunkGenerator {
+                public static final DeferredRegister<Codec<? extends ChunkGenerator>> CHUNK_GENERATORS = null;
+                public static final DeferredHolder<Codec<TestMod>, Codec<TestMod>> TEST_GENERATOR =
+                        CHUNK_GENERATORS.register("test", () -> TestMod.CODEC);
+
+                public static final Codec<TestMod> CODEC = RecordCodecBuilder.create(instance ->
+                        instance.group().apply(instance, TestMod::new)
+                );
+
+                @Override
+                protected Codec<? extends ChunkGenerator> codec() {
+                    return CODEC;
+                }
+
+                @Override
+                public void createStructures(RegistryAccess registryAccess, ChunkGeneratorStructureState structureState,
+                                             StructureManager structureManager, ChunkAccess chunk,
+                                             StructureTemplateManager structureTemplateManager) {
+                }
+
+                @Override
+                public CompletableFuture<ChunkAccess> fillFromNoise(Executor executor, Blender blender, RandomState random, StructureManager structureManager, ChunkAccess chunk) {
+                    return CompletableFuture.completedFuture(chunk);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import com.mojang.serialization.MapCodec;"))
+        assertTrue(transformed.contains("DeferredRegister<MapCodec<? extends ChunkGenerator>> CHUNK_GENERATORS"))
+        assertTrue(transformed.contains("DeferredHolder<MapCodec<? extends ChunkGenerator>, MapCodec<TestMod>> TEST_GENERATOR"))
+        assertTrue(transformed.contains("public static final MapCodec<TestMod> CODEC = RecordCodecBuilder.mapCodec"))
+        assertTrue(transformed.contains("protected MapCodec<? extends ChunkGenerator> codec()"))
+        assertTrue(transformed.contains("StructureTemplateManager structureTemplateManager)"))
+        assertTrue(transformed.contains("fillFromNoise(Blender blender, RandomState random, StructureManager structureManager, ChunkAccess chunk)"))
+    }

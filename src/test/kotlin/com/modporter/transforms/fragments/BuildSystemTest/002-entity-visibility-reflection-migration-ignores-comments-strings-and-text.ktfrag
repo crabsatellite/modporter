@@ -1,0 +1,1170 @@
+
+    @Test
+    fun `entity visibility reflection migration ignores comments strings and text blocks`() {
+        val projectDir = tempDir.resolve("entity-visibility-reflection-docs")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BossVisibility.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.entity.Entity;
+            import java.lang.reflect.Method;
+
+            public class BossVisibility {
+                String note = "declaresVisibilityHook .getMethod( startSeenByPlayer stopSeenByPlayer";
+                String docs = ${"\"\"\""}
+                    private static boolean hasNativePlayerVisibilityHook(Entity entity) {
+                        return declaresVisibilityHook(entity.getClass(), "startSeenByPlayer")
+                                || declaresVisibilityHook(entity.getClass(), "stopSeenByPlayer");
+                    }
+
+                    private static boolean declaresVisibilityHook(Class<?> entityClass, String methodName) {
+                        return entityClass.getMethod(methodName, ServerPlayer.class) != null;
+                    }
+                    ${"\"\"\""};
+
+                private static boolean hasNativePlayerVisibilityHook(Entity entity) {
+                    // declaresVisibilityHook(entity.getClass(), "startSeenByPlayer");
+                    return declaresVisibilityHook(entity.getClass(), "startSeenByPlayer")
+                            || declaresVisibilityHook(entity.getClass(), "stopSeenByPlayer");
+                }
+
+                private static boolean declaresVisibilityHook(Class<?> entityClass, String methodName) {
+                    try {
+                        Method method = entityClass.getMethod(methodName, ServerPlayer.class);
+                        return method.getDeclaringClass() != Entity.class;
+                    } catch (ReflectiveOperationException e) {
+                        return true;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val content = srcDir.resolve("BossVisibility.java").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-entity-visibility-hook-no-reflection" })
+        assertTrue(content.contains("return entity instanceof WitherBoss;"), content)
+        assertTrue(content.contains("String note = \"declaresVisibilityHook .getMethod( startSeenByPlayer stopSeenByPlayer\";"), content)
+        assertTrue(content.contains("entityClass.getMethod(methodName, ServerPlayer.class) != null;"), content)
+        assertTrue(content.contains("declaresVisibilityHook(entity.getClass(), \"startSeenByPlayer\")"), content)
+    }
+
+    @Test
+    fun `entity visibility reflection migration ignores documentation only`() {
+        val projectDir = tempDir.resolve("entity-visibility-reflection-docs-only")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("BossNotes.java")
+        file.writeText("""
+            package com.example;
+
+            public class BossNotes {
+                String note = "declaresVisibilityHook .getMethod( startSeenByPlayer stopSeenByPlayer";
+                String docs = ${"\"\"\""}
+                    private static boolean hasNativePlayerVisibilityHook(Entity entity) {
+                        return declaresVisibilityHook(entity.getClass(), "startSeenByPlayer")
+                                || declaresVisibilityHook(entity.getClass(), "stopSeenByPlayer");
+                    }
+
+                    private static boolean declaresVisibilityHook(Class<?> entityClass, String methodName) {
+                        return entityClass.getMethod(methodName, ServerPlayer.class) != null;
+                    }
+                    ${"\"\"\""};
+            }
+        """.trimIndent())
+        val before = file.readText()
+
+        val result = pass.apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-entity-visibility-hook-no-reflection" })
+        assertEquals(before, file.readText())
+    }
+
+    @Test
+    fun `registers existing mixin configs when migrating away from manifest registration`() {
+        val projectDir = tempDir.resolve("existing-mixin-config-registration")
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        val metaInfDir = resourcesDir.resolve("META-INF")
+        resourcesDir.createDirectories()
+        metaInfDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            tasks.named('jar', Jar).configure {
+                manifest {
+                    attributes([
+                        "MixinConfigs": "example.mixins.json"
+                    ])
+                }
+            }
+        """.trimIndent())
+        metaInfDir.resolve("neoforge.mods.toml").writeText("""
+            modLoader="javafml"
+            loaderVersion="[1,)"
+
+            [[mods]]
+            modId="examplemod"
+
+            [[dependencies.examplemod]]
+            modId="neoforge"
+            type="required"
+
+            [[dependencies.examplemod]]
+            modId="minecraft"
+            type="required"
+        """.trimIndent())
+        resourcesDir.resolve("example.mixins.json").writeText("""
+            {
+              "required": true,
+              "package": "com.example.mixin",
+              "mixins": [
+                "BlockAccessor"
+              ]
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val buildGradle = projectDir.resolve("build.gradle").readText()
+        val modsToml = metaInfDir.resolve("neoforge.mods.toml").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-register-existing-mixin-config" })
+        assertFalse(buildGradle.contains("MixinConfigs"), buildGradle)
+        assertTrue(modsToml.contains("[[mixins]]"), modsToml)
+        assertTrue(modsToml.contains("config=\"example.mixins.json\""), modsToml)
+    }
+
+    @Test
+    fun `migrates class for name compat checks to static API checks`() {
+        val projectDir = tempDir.resolve("class-for-name-compat")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        val metaInfDir = resourcesDir.resolve("META-INF")
+        srcDir.createDirectories()
+        resourcesDir.createDirectories()
+        metaInfDir.createDirectories()
+        metaInfDir.resolve("neoforge.mods.toml").writeText("""
+            modLoader="javafml"
+            loaderVersion="[1,)"
+
+            [[mods]]
+            modId="examplemod"
+        """.trimIndent())
+        resourcesDir.resolve("example.mixins.json").writeText("""
+            {
+              "required": false,
+              "package": "com.example",
+              "mixins": [
+                "FluidMixin"
+              ]
+            }
+        """.trimIndent())
+        srcDir.resolve("CompatManager.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.common.NeoForge;
+            import org.slf4j.Logger;
+            import org.slf4j.LoggerFactory;
+
+            public class CompatManager {
+                private static final Logger LOGGER = LoggerFactory.getLogger(CompatManager.class);
+
+                public static void registerEventHandlers(String modId, Class<?>... handlerClasses) {
+                    for (Class<?> handlerClass : handlerClasses) {
+                        try {
+                            Class.forName(handlerClass.getName(), true, handlerClass.getClassLoader());
+                            NeoForge.EVENT_BUS.register(handlerClass);
+                        } catch (Throwable e) {
+                            throw new RuntimeException("Event handler registration failed", e);
+                        }
+                    }
+                }
+
+                public static void verifyApiClasses(String modId, String... classNames) {
+                    for (String className : classNames) {
+                        try {
+                            Class.forName(className);
+                        } catch (ClassNotFoundException e) {
+                            throw new RuntimeException("Missing API class " + className, e);
+                        }
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FluidMixin.java").writeText("""
+            package com.example;
+
+            public class FluidMixin {
+                @SuppressWarnings({"rawtypes", "unchecked"})
+                private static Object blockingSpaceType() {
+                    try {
+                        Class<?> spaceType = Class.forName("com.simibubi.create.content.fluids.transfer.FluidFillingBehaviour${'$'}SpaceType");
+                        return Enum.valueOf((Class<? extends Enum>) spaceType.asSubclass(Enum.class), "BLOCKING");
+                    } catch (ClassNotFoundException e) {
+                        throw new IllegalStateException("Create FluidFillingBehaviour.SpaceType is unavailable", e);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val manager = srcDir.resolve("CompatManager.java").readText()
+        val mixin = srcDir.resolve("FluidMixin.java").readText()
+        val accessor = srcDir.resolve("modporter/mixin/ModPorterSpaceTypeAccessor.java").readText()
+        val generatedMixinConfig = resourcesDir.resolve("examplemod.modporter.mixins.json").readText()
+        val modsToml = metaInfDir.resolve("neoforge.mods.toml").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertTrue(result.changes.any { it.ruleId == "build-class-forname-enum-mixin-invoker" })
+        assertTrue(result.changes.any { it.ruleId == "build-generated-mixin-config" })
+        assertTrue(manager.contains("NeoForge.EVENT_BUS.register(handlerClass);"), manager)
+        assertTrue(manager.contains("ModList.get().isLoaded(modId)"), manager)
+        assertTrue(manager.contains("import net.neoforged.fml.ModList;"), manager)
+        assertTrue(mixin.contains("import com.example.modporter.mixin.ModPorterSpaceTypeAccessor;"), mixin)
+        assertTrue(mixin.contains("return ModPorterSpaceTypeAccessor.modporter${'$'}valueOf(\"BLOCKING\");"), mixin)
+        assertTrue(accessor.contains("package com.example.modporter.mixin;"), accessor)
+        assertTrue(accessor.contains("@Mixin(targets = \"com.simibubi.create.content.fluids.transfer.FluidFillingBehaviour${'$'}SpaceType\", remap = false)"), accessor)
+        assertTrue(accessor.contains("@Invoker(value = \"valueOf\", remap = false)"), accessor)
+        assertTrue(generatedMixinConfig.contains("\"package\": \"com.example.modporter.mixin\""), generatedMixinConfig)
+        assertTrue(generatedMixinConfig.contains("\"ModPorterSpaceTypeAccessor\""), generatedMixinConfig)
+        assertTrue(modsToml.contains("config=\"examplemod.modporter.mixins.json\""), modsToml)
+        assertFalse(manager.contains("Class.forName"))
+        assertFalse(mixin.contains("Class.forName"))
+        assertFalse(mixin.contains("Enum.valueOf"))
+        assertFalse(mixin.contains("@SuppressWarnings"))
+    }
+
+    @Test
+    fun `does not rewrite API verifier when class-for-name appears only in comments or strings`() {
+        val projectDir = tempDir.resolve("class-for-name-api-verifier-comment-string")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("CompatManager.java").writeText("""
+            package com.example;
+
+            public class CompatManager {
+                public static void verifyApiClasses(String modId, String... classNames) {
+                    String marker = "Class.forName(";
+                    // Class.forName(classNames[0]);
+                    if (marker.isEmpty()) {
+                        throw new IllegalStateException("unreachable");
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("CompatManager.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertTrue(source.contains("""String marker = "Class.forName(";"""), source)
+        assertTrue(source.contains("// Class.forName(classNames[0]);"), source)
+        assertFalse(source.contains("ModList.get().isLoaded(modId)"), source)
+        assertFalse(source.contains("import net.neoforged.fml.ModList;"), source)
+    }
+
+    @Test
+    fun `does not remove commented class-for-name eager load`() {
+        val projectDir = tempDir.resolve("commented-class-for-name-eager-load")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("CompatManager.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.common.NeoForge;
+
+            public class CompatManager {
+                public static void registerEventHandler(Class<?> handlerClass) throws Exception {
+                    /*
+                    Class.forName(handlerClass.getName(), true, handlerClass.getClassLoader());
+                    */
+                    NeoForge.EVENT_BUS.register(handlerClass);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("CompatManager.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertTrue(source.contains("Class.forName(handlerClass.getName(), true, handlerClass.getClassLoader());"), source)
+        assertTrue(source.contains("NeoForge.EVENT_BUS.register(handlerClass);"), source)
+    }
+
+    @Test
+    fun `does not generate enum mixin invoker from commented class-for-name flow`() {
+        val projectDir = tempDir.resolve("commented-enum-class-for-name")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("FluidMixin.java").writeText("""
+            package com.example;
+
+            public class FluidMixin {
+                @SuppressWarnings({"rawtypes", "unchecked"})
+                private static Object blockingSpaceType() {
+                    // try {
+                    //     Class<?> spaceType = Class.forName("com.simibubi.create.content.fluids.transfer.FluidFillingBehaviour${'$'}SpaceType");
+                    //     return Enum.valueOf((Class<? extends Enum>) spaceType.asSubclass(Enum.class), "BLOCKING");
+                    // } catch (ClassNotFoundException e) {
+                    //     throw new IllegalStateException("Create FluidFillingBehaviour.SpaceType is unavailable", e);
+                    // }
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("FluidMixin.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-enum-mixin-invoker" })
+        assertTrue(source.contains("@SuppressWarnings({\"rawtypes\", \"unchecked\"})"), source)
+        assertTrue(source.contains("""//     Class<?> spaceType = Class.forName("com.simibubi.create.content.fluids.transfer.FluidFillingBehaviour${'$'}SpaceType");"""), source)
+        assertFalse(source.contains("ModPorterSpaceTypeAccessor"), source)
+        assertFalse(srcDir.resolve("modporter/mixin/ModPorterSpaceTypeAccessor.java").exists())
+    }
+
+    @Test
+    fun `generated mixin config resolves templated mods toml mod id from gradle properties`() {
+        val projectDir = tempDir.resolve("templated-generated-mixin-config")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        val metaInfDir = resourcesDir.resolve("META-INF")
+        srcDir.createDirectories()
+        resourcesDir.createDirectories()
+        metaInfDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=hotbath\n")
+        metaInfDir.resolve("neoforge.mods.toml").writeText("""
+            modLoader="javafml"
+            loaderVersion="${'$'}{loader_version_range}"
+
+            [[mods]]
+            modId="${'$'}{mod_id}"
+        """.trimIndent())
+        srcDir.resolve("FluidMixin.java").writeText("""
+            package com.example;
+
+            public class FluidMixin {
+                @SuppressWarnings({"rawtypes", "unchecked"})
+                private static Object blockingSpaceType() {
+                    try {
+                        Class<?> spaceType = Class.forName("com.simibubi.create.content.fluids.transfer.FluidFillingBehaviour${'$'}SpaceType");
+                        return Enum.valueOf((Class<? extends Enum>) spaceType.asSubclass(Enum.class), "BLOCKING");
+                    } catch (ClassNotFoundException e) {
+                        throw new IllegalStateException("Create FluidFillingBehaviour.SpaceType is unavailable", e);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val modsToml = metaInfDir.resolve("neoforge.mods.toml").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(resourcesDir.resolve("hotbath.modporter.mixins.json").exists())
+        assertFalse(resourcesDir.resolve("${'$'}{mod_id}.modporter.mixins.json").exists())
+        assertTrue(modsToml.contains("config=\"hotbath.modporter.mixins.json\""), modsToml)
+        assertFalse(modsToml.contains("config=\"${'$'}{mod_id}.modporter.mixins.json\""), modsToml)
+    }
+
+    @Test
+    fun `generated mixin config rejects missing mod id instead of placeholder name`() {
+        val projectDir = tempDir.resolve("missing-modid-generated-mixin-config")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        srcDir.createDirectories()
+        resourcesDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("FluidMixin.java").writeText("""
+            package com.example;
+
+            public class FluidMixin {
+                @SuppressWarnings({"rawtypes", "unchecked"})
+                private static Object blockingSpaceType() {
+                    try {
+                        Class<?> spaceType = Class.forName("com.simibubi.create.content.fluids.transfer.FluidFillingBehaviour${'$'}SpaceType");
+                        return Enum.valueOf((Class<? extends Enum>) spaceType.asSubclass(Enum.class), "BLOCKING");
+                    } catch (ClassNotFoundException e) {
+                        throw new IllegalStateException("Create FluidFillingBehaviour.SpaceType is unavailable", e);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("FluidMixin.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive generated mixin config name") },
+            "Expected missing mod id to hard gate generated mixin config naming; got ${result.errors}"
+        )
+        assertTrue(source.contains("Class.forName("), source)
+        assertFalse(resourcesDir.resolve("modporter.modporter.mixins.json").exists())
+        assertFalse(srcDir.resolve("modporter/mixin/ModPorterSpaceTypeAccessor.java").exists())
+    }
+
+    @Test
+    fun `generated mixin config rejects ambiguous metadata mod ids`() {
+        val projectDir = tempDir.resolve("ambiguous-modid-generated-mixin-config")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        val metaInfDir = resourcesDir.resolve("META-INF")
+        srcDir.createDirectories()
+        metaInfDir.createDirectories()
+        metaInfDir.resolve("mods.toml").writeText("""
+            modLoader="javafml"
+
+            [[mods]]
+            modId="firstmod"
+
+            [[mods]]
+            modId="secondmod"
+        """.trimIndent())
+        srcDir.resolve("FluidMixin.java").writeText("""
+            package com.example;
+
+            public class FluidMixin {
+                @SuppressWarnings({"rawtypes", "unchecked"})
+                private static Object blockingSpaceType() {
+                    try {
+                        Class<?> spaceType = Class.forName("com.simibubi.create.content.fluids.transfer.FluidFillingBehaviour${'$'}SpaceType");
+                        return Enum.valueOf((Class<? extends Enum>) spaceType.asSubclass(Enum.class), "BLOCKING");
+                    } catch (ClassNotFoundException e) {
+                        throw new IllegalStateException("Create FluidFillingBehaviour.SpaceType is unavailable", e);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("FluidMixin.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive generated mixin config name") },
+            "Expected ambiguous metadata mod ids to hard gate generated mixin config naming; got ${result.errors}"
+        )
+        assertTrue(source.contains("Class.forName("), source)
+        assertFalse(resourcesDir.resolve("firstmod.modporter.mixins.json").exists())
+        assertFalse(resourcesDir.resolve("secondmod.modporter.mixins.json").exists())
+        assertFalse(resourcesDir.resolve("modporter.modporter.mixins.json").exists())
+        assertFalse(srcDir.resolve("modporter/mixin/ModPorterSpaceTypeAccessor.java").exists())
+    }
+
+    @Test
+    fun `generated mixin invoker joins conditional parent mixin config`() {
+        val projectDir = tempDir.resolve("conditional-parent-mixin-config")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        val metaInfDir = resourcesDir.resolve("META-INF")
+        srcDir.createDirectories()
+        resourcesDir.createDirectories()
+        metaInfDir.createDirectories()
+        metaInfDir.resolve("neoforge.mods.toml").writeText("""
+            modLoader="javafml"
+            loaderVersion="[1,)"
+
+            [[mods]]
+            modId="examplemod"
+        """.trimIndent())
+        resourcesDir.resolve("example.create.mixins.json").writeText("""
+            {
+              "required": false,
+              "minVersion": "0.8",
+              "package": "com.example",
+              "compatibilityLevel": "JAVA_21",
+              "plugin": "com.example.CreateMixinPlugin",
+              "mixins": [
+              ],
+              "injectors": {
+                "defaultRequire": 0
+              }
+            }
+        """.trimIndent())
+        srcDir.resolve("FluidMixin.java").writeText("""
+            package com.example;
+
+            public class FluidMixin {
+                @SuppressWarnings({"rawtypes", "unchecked"})
+                private static Object blockingSpaceType() {
+                    try {
+                        Class<?> spaceType = Class.forName("com.simibubi.create.content.fluids.transfer.FluidFillingBehaviour${'$'}SpaceType");
+                        return Enum.valueOf((Class<? extends Enum>) spaceType.asSubclass(Enum.class), "BLOCKING");
+                    } catch (ClassNotFoundException e) {
+                        throw new IllegalStateException("Create FluidFillingBehaviour.SpaceType is unavailable", e);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val conditionalConfig = resourcesDir.resolve("example.create.mixins.json").readText()
+        val modsToml = metaInfDir.resolve("neoforge.mods.toml").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(conditionalConfig.contains("\"modporter.mixin.ModPorterSpaceTypeAccessor\""), conditionalConfig)
+        assertFalse(resourcesDir.resolve("examplemod.modporter.mixins.json").exists())
+        assertFalse(modsToml.contains("examplemod.modporter.mixins.json"), modsToml)
+    }
+
+    @Test
+    fun `generated mixin invoker prefers most specific conditional mixin config`() {
+        val projectDir = tempDir.resolve("specific-conditional-mixin-config")
+        val srcDir = projectDir.resolve("src/main/java/com/example/create")
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        val metaInfDir = resourcesDir.resolve("META-INF")
+        srcDir.createDirectories()
+        resourcesDir.createDirectories()
+        metaInfDir.createDirectories()
+        metaInfDir.resolve("neoforge.mods.toml").writeText("""
+            modLoader="javafml"
+            loaderVersion="[1,)"
+
+            [[mods]]
+            modId="examplemod"
+
+            [[mixins]]
+            config="example.mixins.json"
+
+            [[mixins]]
+            config="example.create.mixins.json"
+        """.trimIndent())
+        resourcesDir.resolve("example.mixins.json").writeText("""
+            {
+              "required": false,
+              "package": "com.example",
+              "plugin": "com.example.RootMixinPlugin",
+              "mixins": [
+                "ExistingMixin",
+                "create.modporter.mixin.ModPorterSpaceTypeAccessor"
+              ]
+            }
+        """.trimIndent())
+        resourcesDir.resolve("example.create.mixins.json").writeText("""
+            {
+              "required": false,
+              "minVersion": "0.8",
+              "package": "com.example.create",
+              "compatibilityLevel": "JAVA_21",
+              "plugin": "com.example.create.CreateMixinPlugin",
+              "mixins": [
+              ],
+              "injectors": {
+                "defaultRequire": 0
+              }
+            }
+        """.trimIndent())
+        srcDir.resolve("FluidMixin.java").writeText("""
+            package com.example.create;
+
+            public class FluidMixin {
+                @SuppressWarnings({"rawtypes", "unchecked"})
+                private static Object blockingSpaceType() {
+                    try {
+                        Class<?> spaceType = Class.forName("com.simibubi.create.content.fluids.transfer.FluidFillingBehaviour${'$'}SpaceType");
+                        return Enum.valueOf((Class<? extends Enum>) spaceType.asSubclass(Enum.class), "BLOCKING");
+                    } catch (ClassNotFoundException e) {
+                        throw new IllegalStateException("Create FluidFillingBehaviour.SpaceType is unavailable", e);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val parentConfig = resourcesDir.resolve("example.mixins.json").readText()
+        val createConfig = resourcesDir.resolve("example.create.mixins.json").readText()
+        val modsToml = metaInfDir.resolve("neoforge.mods.toml").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(createConfig.contains("\"modporter.mixin.ModPorterSpaceTypeAccessor\""), createConfig)
+        assertFalse(parentConfig.contains("create.modporter.mixin.ModPorterSpaceTypeAccessor"), parentConfig)
+        assertFalse(resourcesDir.resolve("examplemod.modporter.mixins.json").exists())
+        assertFalse(modsToml.contains("examplemod.modporter.mixins.json"), modsToml)
+    }
+
+    @Test
+    fun `adds compile only dependency for reflected optional API packages`() {
+        val projectDir = tempDir.resolve("reflected-optional-api-dep")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            repositories {
+                mavenCentral()
+            }
+
+            dependencies {
+                implementation "com.example:kept:1.0.0"
+            }
+        """.trimIndent())
+        srcDir.resolve("SeasonCompat.java").writeText("""
+            package com.example;
+
+            public class SeasonCompat {
+                void resolve() throws Exception {
+                    Class.forName("sereneseasons.api.season.SeasonHelper");
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-reflected-optional-api-dependencies" })
+        assertTrue(content.contains("""compileOnly "curse.maven:serene-seasons-291874:6182596""""))
+        assertTrue(content.contains("https://www.cursemaven.com"))
+        assertTrue(content.contains("""includeGroup "curse.maven""""))
+    }
+
+    @Test
+    fun `reflected optional API dependency scan ignores comments`() {
+        val projectDir = tempDir.resolve("reflected-optional-api-comment")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            dependencies {
+                implementation "com.example:kept:1.0.0"
+            }
+        """.trimIndent())
+        srcDir.resolve("SeasonCompat.java").writeText("""
+            package com.example;
+
+            public class SeasonCompat {
+                void resolve() {
+                    // Class.forName("sereneseasons.api.season.SeasonHelper");
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-reflected-optional-api-dependencies" })
+        assertFalse(content.contains("serene-seasons"), content)
+        assertFalse(content.contains("cursemaven"), content)
+    }
+
+    @Test
+    fun `rewrites class for name isInstance checks without member reflection`() {
+        val projectDir = tempDir.resolve("class-for-name-isinstance")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("ExternalEntityCompat.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.Entity;
+
+            public class ExternalEntityCompat {
+                private static Class<?> targetClass = null;
+                private static boolean targetClassResolved = false;
+
+                public static boolean isExternalEntity(Entity entity) {
+                    try {
+                        if (!targetClassResolved) {
+                            targetClassResolved = true;
+                            targetClass = Class.forName("example.optional.ExternalEntity");
+                        }
+                        return targetClass != null && targetClass.isInstance(entity);
+                    } catch (Exception ignored) {
+                        targetClassResolved = true;
+                        return false;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ExternalEntityCompat.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertTrue(content.contains("""return modporterRuntimeInstanceOf(entity, "example.optional.ExternalEntity");"""), content)
+        assertTrue(content.contains("private static boolean modporterRuntimeInstanceOf(Object value, String binaryClassName)"))
+        assertFalse(content.contains("Class.forName"))
+        assertFalse(content.contains("isInstance("))
+        assertFalse(content.contains("targetClassResolved"))
+    }
+
+    @Test
+    fun `class for name isInstance migration ignores commented reflection flow`() {
+        val projectDir = tempDir.resolve("class-for-name-isinstance-comment")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("ExternalEntityCompat.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.Entity;
+
+            public class ExternalEntityCompat {
+                private static Class<?> targetClass = null;
+
+                // try {
+                //     targetClass = Class.forName("example.optional.ExternalEntity");
+                //     return targetClass != null && targetClass.isInstance(entity);
+                // } catch (Exception ignored) {
+                //     return false;
+                // }
+                public static boolean isExternalEntity(Entity entity) {
+                    return false;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ExternalEntityCompat.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertTrue(content.contains("return false;"), content)
+        assertFalse(content.contains("modporterRuntimeInstanceOf"), content)
+    }
+
+    @Test
+    fun `rewrites season helper reflection to static optional API calls`() {
+        val projectDir = tempDir.resolve("season-helper-static-api")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            dependencies {
+            }
+        """.trimIndent())
+        srcDir.resolve("SeasonCompat.java").writeText("""
+            package com.example;
+
+            import java.lang.reflect.Method;
+            import net.minecraft.world.level.Level;
+
+            public class SeasonCompat {
+                public enum WinterSubSeason { NONE, EARLY, MID, LATE }
+
+                private static boolean seasonResolved = false;
+                private static Method seasonHelperGetState;
+                private static Method seasonStateGetSubSeason;
+                private static Method subSeasonName;
+
+                private static void resolveSeasonApi() {
+                    if (seasonResolved) return;
+                    seasonResolved = true;
+                    try {
+                        Class<?> seasonHelper = Class.forName("sereneseasons.api.season.SeasonHelper");
+                        seasonHelperGetState = seasonHelper.getMethod("getSeasonState", Level.class);
+                        Class<?> iSeasonState = Class.forName("sereneseasons.api.season.ISeasonState");
+                        seasonStateGetSubSeason = iSeasonState.getMethod("getSubSeason");
+                        Class<?> subSeason = Class.forName("sereneseasons.api.season.Season${'$'}SubSeason");
+                        subSeasonName = subSeason.getMethod("name");
+                    } catch (Exception ignored) {
+                        seasonHelperGetState = null;
+                    }
+                }
+
+                public static WinterSubSeason getWinterSubSeason(Level level) {
+                    resolveSeasonApi();
+                    if (seasonHelperGetState == null) return WinterSubSeason.NONE;
+                    try {
+                        Object state = seasonHelperGetState.invoke(null, level);
+                        if (state == null) return WinterSubSeason.NONE;
+                        Object sub = seasonStateGetSubSeason.invoke(state);
+                        if (sub == null) return WinterSubSeason.NONE;
+                        String name = (String) subSeasonName.invoke(sub);
+                        if ("EARLY_WINTER".equals(name)) return WinterSubSeason.EARLY;
+                        return WinterSubSeason.NONE;
+                    } catch (Exception ignored) {
+                        return WinterSubSeason.NONE;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("SeasonCompat.java").readText()
+        val build = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertTrue(content.contains("import sereneseasons.api.season.ISeasonState;"), content)
+        assertTrue(content.contains("import sereneseasons.api.season.Season.SubSeason;"), content)
+        assertTrue(content.contains("import sereneseasons.api.season.SeasonHelper;"), content)
+        assertTrue(content.contains("ISeasonState state = SeasonHelper.getSeasonState(level);"), content)
+        assertTrue(content.contains("SubSeason sub = state.getSubSeason();"), content)
+        assertTrue(content.contains("String name = sub.name();"), content)
+        assertTrue(content.contains("if (state == null) return WinterSubSeason.NONE;"), content)
+        assertTrue(content.contains("if (sub == null) return WinterSubSeason.NONE;"), content)
+        assertFalse(content.contains("Season.SubSeason sub"), content)
+        assertTrue(build.contains("""compileOnly "curse.maven:serene-seasons-291874:6182596""""))
+        assertFalse(content.contains("Class.forName"))
+        assertFalse(content.contains(".getMethod("))
+        assertFalse(content.contains("java.lang.reflect.Method"))
+        assertFalse(content.contains(".invoke("))
+    }
+
+    @Test
+    fun `season helper reflection migration ignores commented reflection flow`() {
+        val projectDir = tempDir.resolve("season-helper-comment")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            dependencies {
+            }
+        """.trimIndent())
+        srcDir.resolve("SeasonCompat.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.Level;
+
+            public class SeasonCompat {
+                public enum WinterSubSeason { NONE, EARLY, MID, LATE }
+
+                private static void resolveSeasonApi() {
+                    // Class<?> seasonHelper = Class.forName("sereneseasons.api.season.SeasonHelper");
+                    // seasonHelperGetState = seasonHelper.getMethod("getSeasonState", Level.class);
+                    // Class<?> iSeasonState = Class.forName("sereneseasons.api.season.ISeasonState");
+                    // seasonStateGetSubSeason = iSeasonState.getMethod("getSubSeason");
+                    // Class<?> subSeason = Class.forName("sereneseasons.api.season.Season${'$'}SubSeason");
+                    // subSeasonName = subSeason.getMethod("name");
+                }
+
+                public static WinterSubSeason getWinterSubSeason(Level level) {
+                    return WinterSubSeason.NONE;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("SeasonCompat.java").readText()
+        val build = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertFalse(result.changes.any { it.ruleId == "build-reflected-optional-api-dependencies" })
+        assertFalse(content.contains("SeasonHelper.getSeasonState"), content)
+        assertFalse(build.contains("serene-seasons"), build)
+    }
+
+    @Test
+    fun `season helper reflection migration ignores text block reflection documentation`() {
+        val projectDir = tempDir.resolve("season-helper-text-block")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            dependencies {
+            }
+        """.trimIndent())
+        srcDir.resolve("SeasonCompat.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "import net.minecraft.world.level.Level;",
+            "",
+            "public class SeasonCompat {",
+            "    public enum WinterSubSeason { NONE, EARLY, MID, LATE }",
+            "",
+            "    private static void resolveSeasonApi() {",
+            "        String documented = \"\"\"",
+            "            Class<?> seasonHelper = Class.forName(\"sereneseasons.api.season.SeasonHelper\");",
+            "            seasonHelperGetState = seasonHelper.getMethod(\"getSeasonState\", Level.class);",
+            "            Class<?> iSeasonState = Class.forName(\"sereneseasons.api.season.ISeasonState\");",
+            "            seasonStateGetSubSeason = iSeasonState.getMethod(\"getSubSeason\");",
+            "            Class<?> subSeason = Class.forName(\"sereneseasons.api.season.Season${'$'}SubSeason\");",
+            "            subSeasonName = subSeason.getMethod(\"name\");",
+            "            \"\"\";",
+            "        if (documented.isEmpty()) {",
+            "            throw new IllegalStateException(\"unreachable\");",
+            "        }",
+            "    }",
+            "",
+            "    public static WinterSubSeason getWinterSubSeason(Level level) {",
+            "        return WinterSubSeason.NONE;",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("SeasonCompat.java").readText()
+        val build = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertFalse(result.changes.any { it.ruleId == "build-reflected-optional-api-dependencies" })
+        assertTrue(content.contains("String documented = \"\"\""), content)
+        assertFalse(content.contains("SeasonHelper.getSeasonState(level)"), content)
+        assertFalse(content.contains("import sereneseasons.api.season.SeasonHelper;"), content)
+        assertFalse(build.contains("serene-seasons"), build)
+    }
+
+    @Test
+    fun `rewrites DeferredHolder reflection collectors to explicit registry lists`() {
+        val projectDir = tempDir.resolve("deferredholder-reflection-collector")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BlockItemRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockItemRegistry {
+                public static final DeferredRegister<Item> ITEMS = null;
+                public static final DeferredHolder<Item, Item> FIRST = ITEMS.register("first", Item::new);
+                public static final DeferredHolder<Item, Item> SECOND = ITEMS.register("second", Item::new);
+                private static final DeferredHolder<Item, Item> INTERNAL = ITEMS.register("internal", Item::new);
+            }
+        """.trimIndent())
+        srcDir.resolve("BlockItemsTest.java").writeText("""
+            package com.example;
+
+            import java.lang.reflect.Field;
+            import java.lang.reflect.Modifier;
+            import java.util.ArrayList;
+            import java.util.List;
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class BlockItemsTest {
+                @SuppressWarnings("unchecked")
+                private static List<DeferredHolder<Item, Item>> collect() {
+                    List<DeferredHolder<Item, Item>> out = new ArrayList<>();
+                    for (Field f : BlockItemRegistry.class.getDeclaredFields()) {
+                        int mods = f.getModifiers();
+                        if (!(Modifier.isPublic(mods) && Modifier.isStatic(mods) && Modifier.isFinal(mods))) continue;
+                        if (!DeferredHolder.class.isAssignableFrom(f.getType())) continue;
+                        try {
+                            out.add((DeferredHolder<Item, Item>) f.get(null));
+                        } catch (IllegalAccessException ignored) {}
+                    }
+                    return out;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("BlockItemsTest.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-deferredholder-reflection-collector" })
+        assertTrue(content.contains("out.add(BlockItemRegistry.FIRST);"), content)
+        assertTrue(content.contains("out.add(BlockItemRegistry.SECOND);"), content)
+        assertFalse(content.contains("INTERNAL"), content)
+        assertFalse(content.contains("java.lang.reflect"), content)
+        assertFalse(content.contains("getDeclaredFields"), content)
+    }
+
+    @Test
+    fun `migrates creative selected tab reflection to access transformer`() {
+        val projectDir = tempDir.resolve("creative-selectedtab-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            neoForge {
+                version = "21.1.219"
+            }
+        """.trimIndent())
+        srcDir.resolve("CreativeFilters.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
+            import net.minecraft.world.item.CreativeModeTab;
+            import net.minecraft.world.item.CreativeModeTabs;
+
+            public class CreativeFilters {
+              private static CreativeModeTab getSelectedTab() {
+                try {
+                  java.lang.reflect.Field field =
+                      CreativeModeInventoryScreen.class.getDeclaredField("selectedTab");
+                  field.setAccessible(true);
+                  return (CreativeModeTab) field.get(null);
+                } catch (ReflectiveOperationException | ClassCastException e) {
+                  return CreativeModeTabs.getDefaultTab();
+                }
+              }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("CreativeFilters.java").readText()
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        val build = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-creative-selectedtab-at" })
+        assertTrue(content.contains("CreativeModeInventoryScreen.selectedTab"), content)
+        assertTrue(at.contains("public net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen selectedTab"))
+        assertTrue(build.contains("validateAccessTransformers = true"), build)
+        assertFalse(content.contains("getDeclaredField"))
+        assertFalse(content.contains("setAccessible"))
+        assertFalse(content.contains("java.lang.reflect"))
+    }
+
+    @Test
+    fun `creative selected tab reflection migration ignores comments outside method evidence`() {
+        val projectDir = tempDir.resolve("creative-selectedtab-comment-no-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("CreativeFilters.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
+            import net.minecraft.world.item.CreativeModeTab;
+            import net.minecraft.world.item.CreativeModeTabs;
+
+            public class CreativeFilters {
+              // CreativeModeInventoryScreen.class.getDeclaredField("selectedTab");
+              // field.setAccessible(true);
+              // field.get(null);
+
+              private static CreativeModeTab getSelectedTab() {
+                return CreativeModeTabs.getDefaultTab();
+              }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("CreativeFilters.java").readText()
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-creative-selectedtab-at" })
+        assertTrue(content.contains("return CreativeModeTabs.getDefaultTab();"), content)
+        assertFalse(content.contains("CreativeModeInventoryScreen.selectedTab"), content)
+        assertFalse(atFile.exists())
+    }
+
+    @Test
+    fun `rewrites class-for-name presence checks to class resource probes`() {
+        val projectDir = tempDir.resolve("class-for-name-presence")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("ClientSetup.java").writeText("""
+            package com.example;
+
+            public class ClientSetup {
+                public static boolean optionalPresent = false;
+
+                public static void setup() {
+                    try {
+                        Class.forName("net.optional.ExampleConfig");
+                        optionalPresent = true;
+                    } catch (ClassNotFoundException e) {
+                        optionalPresent = false;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ClientSetup.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertFalse(content.contains("Class.forName"), content)
+        assertTrue(content.contains("""optionalPresent = modporterClassResourcePresent("net.optional.ExampleConfig");"""), content)
+        assertTrue(content.contains("private static boolean modporterClassResourcePresent(String binaryClassName)"), content)
+    }
+
+    @Test
+    fun `does not rewrite commented class-for-name presence checks`() {
+        val projectDir = tempDir.resolve("commented-class-for-name-presence")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+        """.trimIndent())
+        srcDir.resolve("ClientSetup.java").writeText("""
+            package com.example;
+
+            public class ClientSetup {
+                public static boolean optionalPresent = false;
+
+                public static void setup() {
+                    // try {
+                    //     Class.forName("net.optional.ExampleConfig");
+                    //     optionalPresent = true;
+                    // } catch (ClassNotFoundException e) {
+                    //     optionalPresent = false;
+                    // }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = srcDir.resolve("ClientSetup.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-class-forname-no-reflection" })
+        assertTrue(content.contains("""//     Class.forName("net.optional.ExampleConfig");"""), content)
+        assertFalse(content.contains("modporterClassResourcePresent"), content)
+    }

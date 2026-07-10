@@ -56,6 +56,20 @@
       "notes": "JEI: common API plus NeoForge jar are needed on the compile classpath; full NeoForge jar is also staged for runtime"
     },
     {
+      "forgePrefix": "curse.maven:jei-238222",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "mezz.jei:jei-1.21.1-common-api:19.21.2.313" },
+        { "config": "compileOnly", "coord": "mezz.jei:jei-1.21.1-neoforge:19.21.2.313" },
+        { "config": "runtimeOnly", "coord": "mezz.jei:jei-1.21.1-neoforge:19.21.2.313" }
+      ],
+      "mavenUrl": "https://maven.blamejared.com",
+      "status": "replacement",
+      "replacementFor": "curse.maven:jei-238222",
+      "replacementPolicy": "public-artifact-successor",
+      "notes": "JEI CurseMaven project id 238222 resolves to the same public JEI NeoForge 1.21.1 API/runtime coordinates"
+    },
+    {
       "forgePrefix": "com.simibubi.create",
       "modrinthSlug": "create",
       "neoforgeCoords": [
@@ -132,11 +146,66 @@
       "forgePrefix": "curse.maven:farmers-delight-398521",
       "modrinthSlug": null,
       "neoforgeCoords": [
-        { "config": "compileOnly", "coord": "curse.maven:farmers-delight-398521:8083481" }
+        { "config": "compileOnly", "coord": "curse.maven:farmers-delight-398521:8083481" },
+        { "config": "runtimeOnly", "coord": "curse.maven:farmers-delight-398521:8083481" }
       ],
       "mavenUrl": null,
       "status": "available",
-      "notes": "Farmer's Delight CurseMaven: 8083481 exposes NeoForge Holder-based ModEffects for 1.21.1"
+      "notes": "Farmer's Delight CurseMaven: 8083481 exposes NeoForge Holder-based ModEffects for 1.21.1 and can be staged for runtime recipe-condition checks"
+    },
+    {
+      "forgePrefix": "curse.maven:construction-wand-399558",
+      "modrinthSlug": null,
+      "neoforgeCoords": [],
+      "mavenUrl": null,
+      "status": "runtime_absent",
+      "removeConfigurations": ["runtimeOnly"],
+      "notes": "Construction Wand has no declared NeoForge 1.21.1 runtime coordinate; remove only optional runtimeOnly declarations and leave compile/API use unresolved"
+    },
+    {
+      "forgePrefix": "curse.maven:better-combat-by-daedelus-639842",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "runtimeOnly", "coord": "maven.modrinth:better-combat:2.3.2+1.21.1-neoforge" }
+      ],
+      "mavenUrl": "https://api.modrinth.com/maven",
+      "status": "replacement",
+      "replacementFor": "curse.maven:better-combat-by-daedelus-639842",
+      "replacementPolicy": "public-artifact-successor",
+      "notes": "Better Combat CurseMaven project id 639842 resolves to the public Modrinth NeoForge 1.21.1 runtime artifact"
+    },
+    {
+      "forgePrefix": "curse.maven:cloth-config-348521",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "runtimeOnly", "coord": "maven.modrinth:cloth-config:15.0.140+neoforge" }
+      ],
+      "mavenUrl": "https://api.modrinth.com/maven",
+      "status": "replacement",
+      "replacementFor": "curse.maven:cloth-config-348521",
+      "replacementPolicy": "public-artifact-successor",
+      "notes": "Cloth Config CurseMaven project id 348521 resolves to the public Modrinth NeoForge 1.21.1 runtime artifact"
+    },
+    {
+      "forgePrefix": "curse.maven:worldedit-225608",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "runtimeOnly", "coord": "maven.modrinth:worldedit:7.3.8" }
+      ],
+      "mavenUrl": "https://api.modrinth.com/maven",
+      "status": "replacement",
+      "replacementFor": "curse.maven:worldedit-225608",
+      "replacementPolicy": "public-artifact-successor",
+      "notes": "WorldEdit CurseMaven project id 225608 resolves to the public Modrinth NeoForge/Fabric 1.21.1 runtime artifact"
+    },
+    {
+      "forgePrefix": "curse.maven:world-preview-891429",
+      "modrinthSlug": null,
+      "neoforgeCoords": [],
+      "mavenUrl": null,
+      "status": "runtime_absent",
+      "removeConfigurations": ["runtimeOnly"],
+      "notes": "World Preview has no declared NeoForge 1.21.1 runtime coordinate; remove only optional runtimeOnly declarations and leave compile/API use unresolved"
     },
     {
       "forgePrefix": "curse.maven:glitchcore-955399",
@@ -286,6 +355,18 @@
       "notes": "Ponder: part of Create ecosystem, exclude when Create is excluded"
     },
     {
+      "forgePrefix": "curse.maven:playeranimator-658587",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "runtimeOnly", "coord": "maven.modrinth:playeranimator:2.0.4+1.21.1-forge" }
+      ],
+      "mavenUrl": "https://api.modrinth.com/maven",
+      "status": "replacement",
+      "replacementFor": "curse.maven:playeranimator-658587",
+      "replacementPolicy": "public-artifact-successor",
+      "notes": "PlayerAnimator CurseMaven project id 658587 resolves to the public Modrinth NeoForge 1.21.1 runtime artifact; compile API migrations remain blocked by the generic player animation API change"
+    },
+    {
       "forgePrefix": "curse.maven:playeranimator",
       "modrinthSlug": "playeranimator",
       "neoforgeCoords": [
@@ -363,6 +444,46 @@
       "mavenUrl": "https://maven.theillusivec4.top/",
       "status": "available",
       "notes": "Curios API: public NeoForge 1.21.1 API classifier plus runtime jar; fabric-loader is compile-only for Curios classfile annotations"
+    },
+    {
+      "forgePrefix": "curse.maven:curios-309927",
+      "modrinthSlug": null,
+      "packagePrefixes": [
+        "top.theillusivec4.curios."
+      ],
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1:api" },
+        { "config": "compileOnly", "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1" },
+        { "config": "compileOnly", "coord": "net.fabricmc:fabric-loader:0.16.14", "role": "compile-support" },
+        { "config": "runtimeOnly", "coord": "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1" }
+      ],
+      "versionProperties": [
+        {
+          "name": "curios_version",
+          "value": "9.2.3+1.21.1",
+          "notes": "Public NeoForge 1.21.1 Curios API/runtime build"
+        }
+      ],
+      "mavenUrl": "https://maven.theillusivec4.top/",
+      "status": "replacement",
+      "replacementFor": "curse.maven:curios-309927",
+      "replacementPolicy": "public-artifact-successor",
+      "notes": "Curios CurseMaven project id 309927 resolves to the public NeoForge 1.21.1 API/runtime coordinates"
+    },
+    {
+      "forgePrefix": "curse.maven:caelus-308989",
+      "modrinthSlug": null,
+      "packagePrefixes": [
+        "top.theillusivec4.caelus.",
+        "com.illusivesoulworks.caelus."
+      ],
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "curse.maven:caelus-308989:5694215" },
+        { "config": "runtimeOnly", "coord": "curse.maven:caelus-308989:5694215" }
+      ],
+      "mavenUrl": null,
+      "status": "available",
+      "notes": "Caelus CurseMaven: 5694215 is the public NeoForge 1.21.1 file"
     },
     {
       "forgePrefix": "com.blamejared.crafttweaker",

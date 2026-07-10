@@ -1,0 +1,1164 @@
+
+    @Test
+    fun `common 1_21 signature migrations compile against holder and provider APIs`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import com.mojang.authlib.GameProfile;
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.gametest.framework.GameTestHelper;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.nbt.ListTag;
+            import net.minecraft.nbt.Tag;
+            import net.minecraft.network.Connection;
+            import net.minecraft.network.protocol.PacketFlow;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.Enchantments;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.chunk.ChunkAccess;
+            import net.minecraft.world.level.chunk.LevelChunk;
+            import net.minecraft.world.level.chunk.status.ChunkStatus;
+
+            import java.util.UUID;
+
+            public class TestMod extends Item {
+                public TestMod(Properties properties) {
+                    super(properties);
+                }
+
+                public void sample(GameTestHelper helper, ServerPlayer player, ChunkAccess chunk,
+                                   MobEffectInstance effect, ItemStack stack) {
+                    Advancement advancement = player.getServer().getAdvancements()
+                            .getAdvancement(ResourceLocation.parse("minecraft:end/root"));
+                    Advancement helperAdvancement = PlayerHelper.getAdvancement(player, ResourceLocation.parse("minecraft:story/root"));
+                    player.getAdvancements().award(advancement, "entered_end");
+                    boolean complete = chunk.getStatus().isOrAfter(ChunkStatus.FULL);
+                    Player mock = helper.makeMockSurvivalPlayer();
+                    ListTag ender = player.getEnderChestInventory().createTag();
+                    player.getEnderChestInventory().fromTag(ender);
+                    Tag savedEffect = effect.save(new CompoundTag());
+                    int efficiency = stack.getEnchantmentLevel(Enchantments.BLOCK_EFFICIENCY);
+                    stack.enchant(Enchantments.BLOCK_EFFICIENCY, 1);
+                    stack.getOrCreateTag().putLong("cooldown", 123L);
+                }
+
+                @Override
+                public boolean canApplyAtEnchantingTable(ItemStack stack, Enchantment enchantment) {
+                    return enchantment == Enchantments.BLOCK_EFFICIENCY;
+                }
+
+                static ServerPlayer connected(GameTestHelper helper) {
+                    ServerPlayer player = new ServerPlayer(
+                            helper.getLevel().getServer(),
+                            helper.getLevel(),
+                            new GameProfile(UUID.randomUUID(), "test-player")
+                    );
+                    Connection connection = new Connection(PacketFlow.SERVERBOUND);
+                    helper.getLevel().getServer().getPlayerList().placeNewPlayer(connection, player);
+                    return player;
+                }
+
+                static void blockEntityCopy(ServerLevel mirrorWorld, LevelChunk targetChunk, BlockPos pos,
+                                            CompoundTag copy, BlockEntity sourceBE) {
+                    BlockEntity targetBE = BlockEntity.loadStatic(pos, targetChunk.getBlockState(pos), copy);
+                    if (targetBE != null) {
+                        targetBE.load(copy);
+                        targetBE.load(sourceBE.saveWithoutMetadata());
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.advancements.AdvancementHolder;"))
+        assertTrue(transformed.contains("import net.minecraft.server.level.ClientInformation;"))
+        assertTrue(transformed.contains("import net.minecraft.server.network.CommonListenerCookie;"))
+        assertTrue(transformed.contains("import net.minecraft.world.level.GameType;"))
+        assertTrue(transformed.contains("AdvancementHolder advancement = player.getServer().getAdvancements()"))
+        assertTrue(transformed.contains(".get(ResourceLocation.parse(\"minecraft:end/root\"))"))
+        assertTrue(transformed.contains("Advancement helperAdvancement = PlayerHelper.getAdvancement(player, ResourceLocation.parse(\"minecraft:story/root\"));"))
+        assertTrue(transformed.contains("chunk.getPersistedStatus().isOrAfter(ChunkStatus.FULL)"))
+        assertTrue(transformed.contains("helper.makeMockPlayer(GameType.SURVIVAL)"))
+        assertTrue(transformed.contains("player.getEnderChestInventory().createTag(player.registryAccess())"))
+        assertTrue(transformed.contains("player.getEnderChestInventory().fromTag(ender, player.registryAccess())"))
+        assertTrue(transformed.contains("Tag savedEffect = effect.save();"))
+        assertTrue(transformed.contains("new GameProfile(UUID.randomUUID(), \"test-player\"), ClientInformation.createDefault())"))
+        assertTrue(transformed.contains("placeNewPlayer(connection, player, CommonListenerCookie.createInitial(player.getGameProfile(), false))"))
+        assertTrue(transformed.contains("BlockEntity.loadStatic(pos, targetChunk.getBlockState(pos), copy, mirrorWorld.registryAccess())"))
+        assertTrue(transformed.contains("targetBE.loadWithComponents(copy, targetBE.getLevel().registryAccess());"))
+        assertTrue(transformed.contains("targetBE.loadWithComponents(sourceBE.saveWithoutMetadata(targetBE.getLevel().registryAccess()), targetBE.getLevel().registryAccess());"))
+        assertTrue(transformed.contains("stack.getEnchantmentLevel(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(Enchantments.EFFICIENCY))"))
+        assertTrue(transformed.contains("stack.enchant(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(Enchantments.EFFICIENCY), 1)"))
+        assertTrue(transformed.contains("CustomData.update(net.minecraft.core.component.DataComponents.CUSTOM_DATA, stack, customDataTag -> customDataTag.putLong(\"cooldown\", 123L));"))
+        assertTrue(transformed.contains("public boolean supportsEnchantment(ItemStack stack, net.minecraft.core.Holder<Enchantment> enchantment)"))
+        assertTrue(transformed.contains("return enchantment.is(Enchantments.EFFICIENCY);"))
+    }
+
+    @Test
+    fun `legacy custom enchantments migrate to resource keys and holder lookups`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.minecraft.world.level.Level;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            final class InstantWorldMirror {
+                static final String MODID = "example";
+
+                void init(Object modEventBus) {
+                    ModEnchantments.ENCHANTMENTS.register(modEventBus);
+                }
+            }
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(
+                        BuiltInRegistries.ENCHANTMENT,
+                        InstantWorldMirror.MODID
+                );
+
+                public static final EnchantmentCategory MIRROR_CATEGORY = EnchantmentCategory.create(
+                        InstantWorldMirror.MODID + "_mirror",
+                        item -> true
+                );
+
+                public static final DeferredHolder<Enchantment, Enchantment> PERMANENCE = ENCHANTMENTS.register(
+                        "permanence",
+                        PermanentMirrorEnchantment::new
+                );
+
+                private ModEnchantments() {
+                }
+
+                public static boolean hasPermanence(Level level, ItemStack stack) {
+                    return stack.getEnchantmentLevel(PERMANENCE.get()) > 0;
+                }
+
+                public static void applyPermanence(Level level, ItemStack stack) {
+                    stack.enchant(PERMANENCE.get(), 1);
+                }
+
+                public static boolean isPermanence(Enchantment enchantment) {
+                    return enchantment == PERMANENCE.get();
+                }
+
+                private static class PermanentMirrorEnchantment extends Enchantment {
+                    private PermanentMirrorEnchantment() {
+                        super(Rarity.RARE, MIRROR_CATEGORY, new EquipmentSlot[]{EquipmentSlot.MAINHAND});
+                    }
+                }
+            }
+
+            final class Usage {
+                void use(ItemStack stack, MirrorItem mirror) {
+                    stack.getEnchantmentLevel(ModEnchantments.PERMANENCE.get());
+                    mirror.canApplyAtEnchantingTable(stack, ModEnchantments.PERMANENCE.get());
+                    new EnchantmentInstance(ModEnchantments.PERMANENCE.get(), 1);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(!transformed.contains("ENCHANTMENTS.register(modEventBus)"))
+        assertTrue(!transformed.contains("DeferredRegister<Enchantment> ENCHANTMENTS"))
+        assertTrue(!transformed.contains("EnchantmentCategory.create"))
+        assertTrue(!transformed.contains("extends Enchantment"))
+        assertTrue(transformed.contains("private static net.minecraft.core.Holder<Enchantment> holder(net.minecraft.world.level.Level level, net.minecraft.resources.ResourceKey<Enchantment> key)"))
+        assertTrue(transformed.contains("public static final net.minecraft.resources.ResourceKey<Enchantment> PERMANENCE"))
+        assertTrue(transformed.contains("public static final java.util.List<net.minecraft.resources.ResourceKey<Enchantment>> ENCHANTMENTS"))
+        assertTrue(transformed.contains("java.util.List.of(PERMANENCE)"))
+        assertTrue(transformed.contains("ResourceLocation.fromNamespaceAndPath(InstantWorldMirror.MODID, \"permanence\")"))
+        assertTrue(transformed.contains("stack.getEnchantmentLevel(holder(level, PERMANENCE))"))
+        assertTrue(transformed.contains("stack.enchant(holder(level, PERMANENCE), 1)"))
+        assertTrue(transformed.contains("public static boolean isPermanence(net.minecraft.core.Holder<Enchantment> enchantment)"))
+        assertTrue(transformed.contains("return enchantment.is(PERMANENCE);"))
+        assertTrue(transformed.contains("stack.getEnchantmentLevel(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(ModEnchantments.PERMANENCE))"))
+        assertTrue(transformed.contains("mirror.supportsEnchantment(stack, net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(ModEnchantments.PERMANENCE))"))
+        assertTrue(transformed.contains("new EnchantmentInstance(net.neoforged.neoforge.common.CommonHooks.resolveLookup(net.minecraft.core.registries.Registries.ENCHANTMENT).getOrThrow(ModEnchantments.PERMANENCE), 1)"))
+    }
+
+    @Test
+    fun `legacy top level enchantment registrations migrate with source declared register field`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        val registryFile = srcDir.resolve("ModEnchantments.java")
+        registryFile.writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENT = DeferredRegister.create(Registries.ENCHANTMENT, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> SPARK = ENCHANTMENT.register("spark", () -> new SparkEnchantment(Enchantment.Rarity.RARE));
+            }
+        """.trimIndent())
+        val enchantmentFile = srcDir.resolve("SparkEnchantment.java")
+        enchantmentFile.writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+
+            public class SparkEnchantment extends Enchantment {
+                public SparkEnchantment(Rarity rarity) {
+                    super(rarity, EnchantmentCategory.WEAPON, new EquipmentSlot[] { EquipmentSlot.MAINHAND });
+                }
+
+                @Override
+                public int getMaxLevel() {
+                    return 2;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(tempDir)
+
+        val registry = registryFile.readText()
+        val generated = tempDir.resolve("src/generated/resources/data/example/enchantment/spark.json")
+        assertTrue(result.changes.any { it.ruleId == "custom-enchantment-resourcekey-context" }, result.changes.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "text-custom-enchantment-data" }, result.changes.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "custom-enchantment-remove-top-level-subclass" }, result.changes.joinToString("\n"))
+        assertTrue(registry.contains("public static final net.minecraft.resources.ResourceKey<Enchantment> SPARK"), registry)
+        assertTrue(registry.contains("java.util.List.of(SPARK)"), registry)
+        assertFalse(registry.contains("DeferredRegister<Enchantment> ENCHANTMENT"), registry)
+        assertFalse(registry.contains("ENCHANTMENT.register"), registry)
+        assertTrue(generated.exists(), "data-driven enchantment JSON should be generated")
+        assertFalse(enchantmentFile.exists(), "migrated top-level Enchantment subclass should be removed when unreferenced")
+    }
+
+    @Test
+    fun `legacy private static enchantment subclass removal uses executable java structure`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.Enchantment;
+
+            public final class ModEnchantments {
+                private static final String DOC = "private static class Docs extends Enchantment { }";
+
+                public static boolean stillMigrates(ItemStack stack) {
+                    return stack.isEmpty();
+                }
+
+                // private static class CommentedEnchantment extends Enchantment { }
+                private static final class NestedEnchantment extends net.minecraft.world.item.enchantment.Enchantment {
+                    private NestedEnchantment() {
+                        super(Rarity.RARE, null, new EquipmentSlot[]{EquipmentSlot.MAINHAND});
+                    }
+
+                    boolean accepts(ItemStack stack) {
+                        if (stack.isEmpty()) {
+                            return false;
+                        }
+                        return "{ not a block }".length() > 0;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "custom-enchantment-remove-subclasses" }, result.changes.joinToString("\n"))
+        assertTrue(transformed.contains("public final class ModEnchantments"))
+        assertTrue(transformed.contains("public static boolean stillMigrates(ItemStack stack)"))
+        assertFalse(transformed.contains("private static final class NestedEnchantment"), transformed)
+        assertFalse(transformed.contains("private NestedEnchantment()"), transformed)
+        assertTrue(transformed.contains("private static final String DOC = \"private static class Docs extends Enchantment { }\";"))
+        assertTrue(transformed.contains("// private static class CommentedEnchantment extends Enchantment { }"))
+    }
+
+    @Test
+    fun `legacy custom enchantment registrations generate source derived data json and item tags`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModItems.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModItems {
+                public static final DeferredRegister<Item> ITEMS = DeferredRegister.create(ForgeRegistries.ITEMS, ExampleMod.MODID);
+                public static final DeferredHolder<Item, Item> BLOCK_AND_CHAIN = ITEMS.register("block_and_chain", () -> new ChainBlockItem());
+            }
+        """.trimIndent())
+        srcDir.resolve("ModEffects.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.effect.MobEffect;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModEffects {
+                public static final DeferredRegister<MobEffect> EFFECTS = DeferredRegister.create(ForgeRegistries.MOB_EFFECTS, ExampleMod.MODID);
+                public static final DeferredHolder<MobEffect, MobEffect> FROSTY = EFFECTS.register("frosty", () -> new FrostyEffect());
+            }
+        """.trimIndent())
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> FIRE_REACT = ENCHANTMENTS.register("fire_react", () -> new FireReactEnchantment(Enchantment.Rarity.UNCOMMON));
+                public static final DeferredHolder<Enchantment, Enchantment> CHILL_AURA = ENCHANTMENTS.register("chill_aura", () -> new ChillAuraEnchantment(Enchantment.Rarity.UNCOMMON));
+                public static final DeferredHolder<Enchantment, Enchantment> DESTRUCTION = ENCHANTMENTS.register("destruction", () -> new DestructionEnchantment(Enchantment.Rarity.RARE));
+                public static final DeferredHolder<Enchantment, Enchantment> DURABLE = ENCHANTMENTS.register("durable", () -> new DurableEnchantment(Enchantment.Rarity.COMMON));
+                public static final EnchantmentCategory BLOCK_AND_CHAIN = EnchantmentCategory.create("example_block_and_chain", item -> item instanceof ChainBlockItem);
+            }
+        """.trimIndent())
+        srcDir.resolve("LootOnlyEnchantment.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+
+            public class LootOnlyEnchantment extends Enchantment {
+                protected LootOnlyEnchantment(Rarity rarity, EnchantmentCategory category, EquipmentSlot[] slots) {
+                    super(rarity, category, slots);
+                }
+
+                @Override
+                public boolean isTradeable() {
+                    return false;
+                }
+
+                @Override
+                public boolean isTreasureOnly() {
+                    return true;
+                }
+
+                @Override
+                public boolean isDiscoverable() {
+                    return false;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FireReactEnchantment.java").writeText("""
+            package com.example;
+
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.ArmorItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.minecraft.world.item.enchantment.Enchantments;
+
+            public class FireReactEnchantment extends LootOnlyEnchantment {
+                public FireReactEnchantment(Rarity rarity) {
+                    super(rarity, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET});
+                }
+
+                @Override
+                public boolean canEnchant(ItemStack stack) {
+                    return stack.getItem() instanceof ArmorItem || super.canEnchant(stack);
+                }
+
+                @Override
+                public int getMinCost(int level) {
+                    return 5 + (level - 1) * 9;
+                }
+
+                @Override
+                public int getMaxCost(int level) {
+                    return this.getMinCost(level) + 15;
+                }
+
+                @Override
+                public int getMaxLevel() {
+                    return 3;
+                }
+
+                @Override
+                public void doPostHurt(LivingEntity user, Entity attacker, int level) {
+                    RandomSource random = user.getRandom();
+                    if (attacker != null && shouldHit(level, random, attacker)) {
+                        attacker.setSecondsOnFire(2 + (random.nextInt(level) * 3));
+                    }
+                }
+
+                public static boolean shouldHit(int level, RandomSource random, Entity attacker) {
+                    return level > 0 && random.nextFloat() < 0.15F * (float)level;
+                }
+
+                @Override
+                protected boolean checkCompatibility(Enchantment other) {
+                    return super.checkCompatibility(other) && other != ModEnchantments.CHILL_AURA.get() && other != Enchantments.THORNS;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ChillAuraEnchantment.java").writeText("""
+            package com.example;
+
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.ArmorItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.minecraft.world.item.enchantment.Enchantments;
+
+            public class ChillAuraEnchantment extends LootOnlyEnchantment {
+                public ChillAuraEnchantment(Rarity rarity) {
+                    super(rarity, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET});
+                }
+
+                @Override
+                public boolean canEnchant(ItemStack stack) {
+                    return stack.getItem() instanceof ArmorItem || super.canEnchant(stack);
+                }
+
+                @Override
+                public int getMinCost(int level) {
+                    return 5 + (level - 1) * 9;
+                }
+
+                @Override
+                public int getMaxCost(int level) {
+                    return this.getMinCost(level) + 15;
+                }
+
+                @Override
+                public int getMaxLevel() {
+                    return 3;
+                }
+
+                @Override
+                public void doPostHurt(LivingEntity user, Entity attacker, int level) {
+                    if (attacker instanceof LivingEntity entity) {
+                        doChillAuraEffect(entity, 200, level - 1, this.shouldHit(level, user.getRandom()));
+                    }
+                }
+
+                public static void doChillAuraEffect(LivingEntity victim, int duration, int amplifier, boolean shouldHit) {
+                    if (shouldHit) {
+                        victim.addEffect(new MobEffectInstance(ModEffects.FROSTY.get(), duration, amplifier));
+                    }
+                }
+
+                private boolean shouldHit(int level, RandomSource random) {
+                    return level > 0 && random.nextFloat() < 0.15F * level;
+                }
+
+                @Override
+                protected boolean checkCompatibility(Enchantment other) {
+                    return super.checkCompatibility(other) && other != ModEnchantments.FIRE_REACT.get() && other != Enchantments.THORNS;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("DestructionEnchantment.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.MobType;
+            import net.minecraft.world.item.ItemStack;
+
+            public class DestructionEnchantment extends LootOnlyEnchantment {
+                public DestructionEnchantment(Rarity rarity) {
+                    super(rarity, ModEnchantments.BLOCK_AND_CHAIN, new EquipmentSlot[]{EquipmentSlot.MAINHAND});
+                }
+
+                @Override
+                public int getMinCost(int level) {
+                    return 5 + (level - 1) * 9;
+                }
+
+                @Override
+                public int getMaxCost(int level) {
+                    return this.getMinCost(level) + 15;
+                }
+
+                @Override
+                public int getMaxLevel() {
+                    return 3;
+                }
+
+                @Override
+                public boolean canEnchant(ItemStack stack) {
+                    return stack.getItem() instanceof ChainBlockItem;
+                }
+
+                @Override
+                public float getDamageBonus(int level, MobType type, ItemStack item) {
+                    return -level * 1.5F;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("DurableEnchantment.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+
+            public class DurableEnchantment extends Enchantment {
+                public DurableEnchantment(Rarity rarity) {
+                    super(rarity, EnchantmentCategory.BREAKABLE, new EquipmentSlot[]{EquipmentSlot.MAINHAND});
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
+
+        val fireReact = tempDir.resolve("src/generated/resources/data/example/enchantment/fire_react.json").readText()
+        val chillAura = tempDir.resolve("src/generated/resources/data/example/enchantment/chill_aura.json").readText()
+        val destruction = tempDir.resolve("src/generated/resources/data/example/enchantment/destruction.json").readText()
+        val durable = tempDir.resolve("src/generated/resources/data/example/enchantment/durable.json").readText()
+        val blockAndChainTag = tempDir.resolve("src/generated/resources/data/example/tags/item/enchantable/block_and_chain.json").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "text-custom-enchantment-data" })
+        assertTrue(result.changes.any { it.ruleId == "text-custom-enchantment-item-tag" })
+        assertTrue(fireReact.contains(""""supported_items": "#minecraft:enchantable/armor""""))
+        assertTrue(fireReact.contains(""""type": "minecraft:ignite""""))
+        assertTrue(fireReact.contains(""""example:chill_aura""""))
+        assertTrue(fireReact.contains(""""minecraft:thorns""""))
+        assertTrue(chillAura.contains(""""type": "minecraft:apply_mob_effect""""))
+        assertTrue(chillAura.contains(""""to_apply": "example:frosty""""))
+        assertTrue(chillAura.contains(""""min_duration": 10.0"""))
+        assertTrue(destruction.contains(""""supported_items": "#example:enchantable/block_and_chain""""))
+        assertTrue(destruction.contains(""""slots": [
+    "hand"
+  ]"""))
+        assertTrue(destruction.contains(""""type": "minecraft:add""""))
+        assertTrue(destruction.contains(""""base": -1.5"""))
+        assertTrue(durable.contains(""""supported_items": "#minecraft:enchantable/durability""""))
+        assertTrue(durable.contains(""""slots": [
+    "mainhand"
+  ]"""))
+        assertTrue(blockAndChainTag.contains(""""example:block_and_chain""""))
+    }
+
+    @Test
+    fun `custom enchantment resource keys infer mod id expression from source`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.minecraft.world.level.Level;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            final class ExampleMod {
+                static final String MODID = "example";
+            }
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(
+                        BuiltInRegistries.ENCHANTMENT,
+                        ExampleMod.MODID
+                );
+                private static final EnchantmentCategory MAGIC = EnchantmentCategory.create(ExampleMod.MODID + "_magic", item -> true);
+                public static final DeferredHolder<Enchantment, Enchantment> FLAME = ENCHANTMENTS.register("flame", FlameEnchantment::new);
+
+                public static boolean hasFlame(Level level, ItemStack stack) {
+                    return stack.getEnchantmentLevel(FLAME.get()) > 0;
+                }
+
+                public static boolean isFlame(Enchantment enchantment) {
+                    return enchantment == FLAME.get();
+                }
+
+                private static class FlameEnchantment extends Enchantment {
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, \"flame\")"))
+        assertTrue(transformed.contains("stack.getEnchantmentLevel(holder(level, FLAME))"))
+        assertTrue(transformed.contains("public static boolean isFlame(net.minecraft.core.Holder<Enchantment> enchantment)"))
+        assertTrue(transformed.contains("return enchantment.is(FLAME);"))
+        assertFalse(transformed.contains("InstantWorldMirror.MODID"))
+        assertFalse(transformed.contains("DeferredHolder<Enchantment, Enchantment> FLAME"))
+    }
+
+    @Test
+    fun `custom enchantment data rejects unresolved qualified mod id expression`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            final class ExampleMod {
+                static final String MODID = "example";
+            }
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(
+                        BuiltInRegistries.ENCHANTMENT,
+                        MissingMod.MODID
+                );
+                public static final DeferredHolder<Enchantment, Enchantment> FLAME = ENCHANTMENTS.register("flame", FlameEnchantment::new);
+
+                private static class FlameEnchantment extends Enchantment {
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any {
+                it.contains("unresolved mod id expression 'MissingMod.MODID'")
+            },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/flame.json").exists())
+    }
+
+    @Test
+    fun `custom enchantment data does not infer mod id owner from java file names`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public static final String MODID = "example";
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(
+                        BuiltInRegistries.ENCHANTMENT,
+                        TestMod.MODID
+                );
+                public static final DeferredHolder<Enchantment, Enchantment> FLAME = ENCHANTMENTS.register("flame", FlameEnchantment::new);
+            }
+
+            class FlameEnchantment extends Enchantment {
+                public FlameEnchantment() {
+                    super(Rarity.COMMON, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.CHEST});
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any { it.contains("unresolved mod id expression 'TestMod.MODID'") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/flame.json").exists())
+    }
+
+    @Test
+    fun `custom enchantment data ignores mod ids declared only in text blocks`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ExampleDocs {
+                private static final String README = ${"\"\"\""}
+                    public static final String MODID = "example";
+                    ${"\"\"\""};
+            }
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(
+                        BuiltInRegistries.ENCHANTMENT,
+                        ExampleDocs.MODID
+                );
+                public static final DeferredHolder<Enchantment, Enchantment> FLAME = ENCHANTMENTS.register("flame", FlameEnchantment::new);
+
+                private static class FlameEnchantment extends Enchantment {
+                    private FlameEnchantment() {
+                        super(Rarity.COMMON, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.CHEST});
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any { it.contains("unresolved mod id expression 'ExampleDocs.MODID'") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/flame.json").exists())
+    }
+
+    @Test
+    fun `custom enchantment data resolves unqualified mod id from declaring java type`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModEnchantments {
+                public static final String MODID = "example";
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(
+                        BuiltInRegistries.ENCHANTMENT,
+                        MODID
+                );
+                public static final DeferredHolder<Enchantment, Enchantment> FLAME = ENCHANTMENTS.register("flame", FlameEnchantment::new);
+
+                private static class FlameEnchantment extends Enchantment {
+                    private FlameEnchantment() {
+                        super(Rarity.COMMON, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.CHEST});
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "text-custom-enchantment-data" })
+        assertTrue(tempDir.resolve("src/generated/resources/data/example/enchantment/flame.json").exists())
+    }
+
+    @Test
+    fun `custom enchantment data does not resolve bare mod id by global uniqueness`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public static final String MODID = "example";
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(
+                        BuiltInRegistries.ENCHANTMENT,
+                        MODID
+                );
+                public static final DeferredHolder<Enchantment, Enchantment> FLAME = ENCHANTMENTS.register("flame", FlameEnchantment::new);
+
+                private static class FlameEnchantment extends Enchantment {
+                    private FlameEnchantment() {
+                        super(Rarity.COMMON, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.CHEST});
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any { it.contains("unresolved mod id expression 'MODID'") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/flame.json").exists())
+    }
+
+    @Test
+    fun `custom enchantment data rejects registry reference tail fallback`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            final class ExampleMod {
+                static final String MODID = "example";
+            }
+
+            final class ModEffects {
+                public static final DeferredRegister<MobEffect> EFFECTS = DeferredRegister.create(ForgeRegistries.MOB_EFFECTS, ExampleMod.MODID);
+                public static final DeferredHolder<MobEffect, MobEffect> FROSTY = EFFECTS.register("frosty", FrostyEffect::new);
+            }
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> CHILL_AURA = ENCHANTMENTS.register("chill_aura", () -> new ChillAuraEnchantment(Enchantment.Rarity.UNCOMMON));
+            }
+
+            class FrostyEffect extends MobEffect {
+            }
+
+            class ChillAuraEnchantment extends Enchantment {
+                public ChillAuraEnchantment(Rarity rarity) {
+                    super(rarity, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET});
+                }
+
+                @Override
+                public void doPostHurt(LivingEntity user, Entity attacker, int level) {
+                    if (attacker instanceof LivingEntity entity) {
+                        doChillAuraEffect(entity, 200, level - 1, this.shouldHit(level, user.getRandom()));
+                    }
+                }
+
+                public static void doChillAuraEffect(LivingEntity victim, int duration, int amplifier, boolean shouldHit) {
+                    if (shouldHit) {
+                        victim.addEffect(new MobEffectInstance(MissingEffects.FROSTY.get(), duration, amplifier));
+                    }
+                }
+
+                private boolean shouldHit(int level, RandomSource random) {
+                    return level > 0 && random.nextFloat() < 0.15F * level;
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any { it.contains("mob effect reference 'MissingEffects.FROSTY' is unresolved") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/chill_aura.json").exists())
+    }
+
+    @Test
+    fun `custom enchantment data ignores post hurt helper calls in text blocks`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            final class ExampleMod {
+                static final String MODID = "example";
+            }
+
+            final class ModEffects {
+                public static final DeferredRegister<MobEffect> EFFECTS = DeferredRegister.create(ForgeRegistries.MOB_EFFECTS, ExampleMod.MODID);
+                public static final DeferredHolder<MobEffect, MobEffect> FROSTY = EFFECTS.register("frosty", FrostyEffect::new);
+            }
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> CHILL_AURA = ENCHANTMENTS.register("chill_aura", () -> new ChillAuraEnchantment(Enchantment.Rarity.UNCOMMON));
+            }
+
+            class FrostyEffect extends MobEffect {
+            }
+
+            class ChillAuraEnchantment extends Enchantment {
+                public ChillAuraEnchantment(Rarity rarity) {
+                    super(rarity, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET});
+                }
+
+                @Override
+                public void doPostHurt(LivingEntity user, Entity attacker, int level) {
+                    String docs = ${"\"\"\""}
+                        doChillAuraEffect(entity, 200, level - 1, this.shouldHit(level, user.getRandom()));
+                        ${"\"\"\""};
+                    if (attacker instanceof LivingEntity entity && this.shouldHit(level, user.getRandom())) {
+                        entity.setSecondsOnFire(4);
+                    }
+                }
+
+                public static void doChillAuraEffect(LivingEntity victim, int duration, int amplifier, boolean shouldHit) {
+                    if (shouldHit) {
+                        victim.addEffect(new MobEffectInstance(ModEffects.FROSTY.get(), duration, amplifier));
+                    }
+                }
+
+                private boolean shouldHit(int level, RandomSource random) {
+                    return level > 0 && random.nextFloat() < 0.15F * level;
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        val chillAura = tempDir.resolve("src/generated/resources/data/example/enchantment/chill_aura.json").readText()
+        assertTrue(chillAura.contains(""""type": "minecraft:ignite""""), chillAura)
+        assertFalse(chillAura.contains(""""type": "minecraft:apply_mob_effect""""), chillAura)
+        assertFalse(chillAura.contains(""""to_apply": "example:frosty""""), chillAura)
+    }
+
+    @Test
+    fun `custom enchantment data requires executable random chance evidence`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            final class ExampleMod {
+                static final String MODID = "example";
+            }
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> FIRE_REACT = ENCHANTMENTS.register("fire_react", () -> new FireReactEnchantment(Enchantment.Rarity.UNCOMMON));
+            }
+
+            class FireReactEnchantment extends Enchantment {
+                public FireReactEnchantment(Rarity rarity) {
+                    super(rarity, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET});
+                }
+
+                @Override
+                public void doPostHurt(LivingEntity user, Entity attacker, int level) {
+                    String docs = ${"\"\"\""}
+                        return level > 0 && random.nextFloat() < 0.15F * level;
+                        ${"\"\"\""};
+                    if (attacker instanceof LivingEntity entity) {
+                        entity.setSecondsOnFire(4);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any { it.contains("doPostHurt body has no supported effect shape") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/fire_react.json").exists())
+    }
+
+    @Test
+    fun `custom enchantment data rejects bare category references from other owners`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModItems.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.Item;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModItems {
+                public static final DeferredRegister<Item> ITEMS = DeferredRegister.create(ForgeRegistries.ITEMS, ExampleMod.MODID);
+                public static final DeferredHolder<Item, Item> BLOCK_AND_CHAIN = ITEMS.register("block_and_chain", () -> new ChainBlockItem());
+            }
+        """.trimIndent())
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> DESTRUCTION = ENCHANTMENTS.register("destruction", () -> new DestructionEnchantment(Enchantment.Rarity.RARE));
+                public static final EnchantmentCategory BLOCK_AND_CHAIN = EnchantmentCategory.create("example_block_and_chain", item -> item instanceof ChainBlockItem);
+            }
+        """.trimIndent())
+        srcDir.resolve("DestructionEnchantment.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+
+            public class DestructionEnchantment extends Enchantment {
+                public DestructionEnchantment(Rarity rarity) {
+                    super(rarity, BLOCK_AND_CHAIN, new EquipmentSlot[]{EquipmentSlot.MAINHAND});
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
+
+        assertTrue(
+            result.errors.any { it.contains("item support expression 'BLOCK_AND_CHAIN' is unresolved") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/destruction.json").exists())
+    }
+
+    @Test
+    fun `custom enchantment data rejects invisible supplier classes by simple name`() {
+        val exampleDir = tempDir.resolve("src/main/java/com/example")
+        val otherDir = tempDir.resolve("src/main/java/com/other")
+        exampleDir.createDirectories()
+        otherDir.createDirectories()
+        exampleDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        exampleDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> GHOST = ENCHANTMENTS.register("ghost", GhostEnchantment::new);
+            }
+        """.trimIndent())
+        otherDir.resolve("GhostEnchantment.java").writeText("""
+            package com.other;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+
+            public class GhostEnchantment extends Enchantment {
+                public GhostEnchantment() {
+                    super(Rarity.COMMON, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.CHEST});
+                }
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
+
+        assertTrue(
+            result.errors.any { it.contains("class reference 'GhostEnchantment' is unresolved") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/ghost.json").exists())
+    }
+
+    @Test
+    fun `custom enchantment data ignores supplier classes declared only in text blocks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENTS = DeferredRegister.create(ForgeRegistries.ENCHANTMENTS, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> GHOST = ENCHANTMENTS.register("ghost", GhostEnchantment::new);
+            }
+        """.trimIndent())
+        srcDir.resolve("Docs.java").writeText("""
+            package com.example;
+
+            public final class Docs {
+                private static final String README = ${"\"\"\""}
+                    import net.minecraft.world.entity.EquipmentSlot;
+                    import net.minecraft.world.item.enchantment.Enchantment;
+                    import net.minecraft.world.item.enchantment.EnchantmentCategory;
+
+                    public class GhostEnchantment extends Enchantment {
+                        public GhostEnchantment() {
+                            super(Rarity.COMMON, EnchantmentCategory.ARMOR, new EquipmentSlot[]{EquipmentSlot.CHEST});
+                        }
+                    }
+                    ${"\"\"\""};
+            }
+        """.trimIndent())
+
+        val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
+
+        assertTrue(
+            result.errors.any { it.contains("class reference 'GhostEnchantment' is unresolved") },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/ghost.json").exists())
+    }

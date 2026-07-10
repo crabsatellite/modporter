@@ -1,0 +1,1176 @@
+
+    @Test
+    fun `source defined project block tags get empty data pack definitions`() {
+        val projectDir = setupResourceProject()
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("resmod")
+            public class ExampleMod {
+                public static final String MODID = "resmod";
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleBlockTags.java").writeText("""
+            package com.example;
+
+            import net.minecraft.tags.TagKey;
+            import net.minecraft.world.level.block.Block;
+
+            public class ExampleBlockTags {
+                public static final TagKey<Block> MINEABLE_WITH_KNIFE = TagUtils.modBlockTag("resmod", "mineable_with_knife");
+                public static final TagKey<Block> EXTERNAL_HEAT = TagUtils.modBlockTag("othermod", "heat_sources");
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val generatedTag = projectDir.resolve("src/main/resources/data/resmod/tags/block/mineable_with_knife.json")
+        assertTrue(result.changes.any { it.ruleId == "res-source-defined-block-tag" })
+        assertTrue(generatedTag.exists(), "Project-owned source-defined block tag should be materialized")
+        assertTrue(generatedTag.readText().contains(""""values": []"""))
+        assertFalse(projectDir.resolve("src/main/resources/data/othermod/tags/block/heat_sources.json").exists())
+    }
+
+    @Test
+    fun `liquid block registrations get complete level blockstates from registry namespace`() {
+        val projectDir = setupResourceProject()
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("resmod")
+            public class ExampleMod {
+                public static final String MODID = "resmod";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModFluidBlocks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.LiquidBlock;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ModFluidBlocks {
+                public static final DeferredRegister<Block> BLOCKS = DeferredRegister.create(Registries.BLOCK, ExampleMod.MODID);
+                public static final DeferredRegister<Block> UNCLEAR_BLOCKS = DeferredRegister.create(Registries.BLOCK, UNKNOWN_MODID);
+
+                public static final Object MOLTEN_TEA = BLOCKS.register("molten_tea", () ->
+                    new LiquidBlock(null, BlockBehaviour.Properties.of()));
+                public static final Object RICE_WINE = BLOCKS.register("rice_wine", () ->
+                    new LiquidBlock(null, BlockBehaviour.Properties.of()));
+                public static final Object UNKNOWN = UNCLEAR_BLOCKS.register("should_not_exist", () ->
+                    new LiquidBlock(null, BlockBehaviour.Properties.of()));
+            }
+        """.trimIndent())
+        val assetsDir = projectDir.resolve("src/main/resources/assets/resmod")
+        assetsDir.resolve("blockstates").createDirectories()
+        assetsDir.resolve("models/block").createDirectories()
+        assetsDir.resolve("blockstates/molten_tea.json").writeText("""
+            {
+              "variants": {
+                "": {
+                  "model": "resmod:block/molten_tea"
+                }
+              }
+            }
+        """.trimIndent())
+        assetsDir.resolve("models/block/molten_tea.json").writeText("""
+            {
+              "textures": {
+                "particle": "resmod:block/molten_tea"
+              }
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val moltenTeaBlockstate = assetsDir.resolve("blockstates/molten_tea.json").readText()
+        val riceWineBlockstate = assetsDir.resolve("blockstates/rice_wine.json").readText()
+        val riceWineModel = assetsDir.resolve("models/block/rice_wine.json").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "res-liquid-blockstate-level-variants" })
+        assertTrue(result.changes.any { it.ruleId == "res-liquid-block-model" })
+        assertFalse(moltenTeaBlockstate.contains("\"\":"), "LiquidBlock empty variant should be replaced by level variants")
+        assertTrue(moltenTeaBlockstate.contains("\"level=0\""))
+        assertTrue(moltenTeaBlockstate.contains("\"level=15\""))
+        assertTrue(riceWineBlockstate.contains("\"model\": \"resmod:block/rice_wine\""))
+        assertTrue(riceWineBlockstate.contains("\"level=15\""))
+        assertTrue(riceWineModel.contains("\"particle\": \"minecraft:block/water_still\""))
+        assertFalse(assetsDir.resolve("blockstates/should_not_exist.json").exists())
+    }
+
+    @Test
+    fun `light block subclass registrations get complete level blockstates`() {
+        val projectDir = setupResourceProject()
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val blockDir = projectDir.resolve("src/main/java/com/example/block")
+        srcDir.createDirectories()
+        blockDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("resmod")
+            public class ExampleMod {
+                public static final String MODID = "resmod";
+            }
+        """.trimIndent())
+        blockDir.resolve("SunlightBlock.java").writeText("""
+            package com.example.block;
+
+            import net.minecraft.world.level.block.LightBlock;
+
+            public class SunlightBlock extends LightBlock {
+                public SunlightBlock(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ModBlocks.java").writeText("""
+            package com.example;
+
+            import com.example.block.*;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ModBlocks {
+                public static final DeferredRegister<Block> BLOCKS = DeferredRegister.create(Registries.BLOCK, ExampleMod.MODID);
+
+                public static final Object SUNLIGHT = BLOCKS.register("sunlight", () ->
+                    new SunlightBlock(BlockBehaviour.Properties.of().noOcclusion()));
+            }
+        """.trimIndent())
+        val assetsDir = projectDir.resolve("src/main/resources/assets/resmod")
+        assetsDir.createDirectories()
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val blockstate = assetsDir.resolve("blockstates/sunlight.json").readText()
+        assertTrue(result.changes.any { it.ruleId == "res-light-blockstate-level-variants" })
+        assertTrue(blockstate.contains("\"level=0\""))
+        assertTrue(blockstate.contains("\"level=15\""))
+        assertFalse(blockstate.contains("waterlogged"), "LightBlock level variants intentionally rely on vanilla partial matching for extra state properties")
+        assertTrue(blockstate.contains("\"model\": \"minecraft:block/light_00\""))
+        assertTrue(blockstate.contains("\"model\": \"minecraft:block/light_15\""))
+    }
+
+    @Test
+    fun `model texture grass references migrate to short grass`() {
+        val projectDir = setupResourceProject()
+        val modelDir = projectDir.resolve("src/generated/resources/assets/resmod/models/block")
+        modelDir.createDirectories()
+        modelDir.resolve("mossy_log.json").writeText("""
+            {
+              "parent": "minecraft:block/cube_all",
+              "textures": {
+                "all": "minecraft:block/grass"
+              }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val model = modelDir.resolve("mossy_log.json").readText()
+        assertTrue(
+            result.changes.any { it.ruleId == "res-legacy-resource-id-renames-121" },
+            "Legacy texture resource rename rule should be recorded"
+        )
+        assertTrue(model.contains(""""all": "minecraft:block/short_grass""""))
+        assertFalse(model.contains("minecraft:block/grass"))
+    }
+
+    @Test
+    fun `sound subtitles are added to english language file`() {
+        val projectDir = setupResourceProject()
+        val assetsDir = projectDir.resolve("src/main/resources/assets/resmod")
+        assetsDir.resolve("lang").createDirectories()
+        assetsDir.resolve("sounds.json").writeText("""
+            {
+              "taiko": {
+                "category": "block",
+                "subtitle": "resmod.sound.taiko",
+                "sounds": ["resmod:taiko_1"]
+              }
+            }
+        """.trimIndent())
+        assetsDir.resolve("lang/en_us.json").writeText("""
+            {
+              "item.resmod.existing": "Existing"
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val lang = assetsDir.resolve("lang/en_us.json").readText()
+        assertTrue(result.changes.any { it.ruleId == "res-sound-subtitle-lang" })
+        assertTrue(lang.contains(""""item.resmod.existing": "Existing""""))
+        assertTrue(lang.contains(""""resmod.sound.taiko": "Taiko""""))
+    }
+
+    @Test
+    fun `loot table looting enchant function is migrated to enchanted count increase`() {
+        val projectDir = setupResourceProject()
+        val lootDir = projectDir.resolve("src/main/resources/data/resmod/loot_tables/entities")
+        lootDir.createDirectories()
+        lootDir.resolve("deer.json").writeText("""
+            {
+              "type": "minecraft:entity",
+              "pools": [
+                {
+                  "rolls": 1.0,
+                  "entries": [
+                    {
+                      "type": "minecraft:item",
+                      "name": "minecraft:leather",
+                      "functions": [
+                        {
+                          "function": "minecraft:looting_enchant",
+                          "count": {
+                            "type": "minecraft:uniform",
+                            "min": 0.0,
+                            "max": 1.0
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val lootTable = projectDir.resolve("src/main/resources/data/resmod/loot_table/entities/deer.json").readText()
+        assertTrue(
+            result.changes.any { it.ruleId == "res-loot-looting-enchant-function" },
+            "Loot function migration rule should be recorded"
+        )
+        assertTrue(lootTable.contains(""""function": "minecraft:enchanted_count_increase""""))
+        assertTrue(lootTable.contains(""""enchantment": "minecraft:looting""""))
+        assertFalse(lootTable.contains("minecraft:looting_enchant"))
+    }
+
+    @Test
+    fun `loot table nested table entries and looting chance conditions use 1_21 schema`() {
+        val projectDir = setupResourceProject()
+        val lootDir = projectDir.resolve("src/generated/resources/data/resmod/loot_table/entities")
+        lootDir.createDirectories()
+        lootDir.resolve("troll.json").writeText("""
+            {
+              "type": "minecraft:entity",
+              "pools": [
+                {
+                  "rolls": 1.0,
+                  "conditions": [
+                    {
+                      "condition": "minecraft:random_chance_with_looting",
+                      "chance": 0.025,
+                      "looting_multiplier": 0.01
+                    }
+                  ],
+                  "entries": [
+                    {
+                      "type": "minecraft:loot_table",
+                      "name": "minecraft:entities/zombie",
+                      "weight": 2
+                    },
+                    {
+                      "type": "minecraft:item",
+                      "name": "minecraft:rotten_flesh"
+                    }
+                  ]
+                }
+              ]
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val lootTable = lootDir.resolve("troll.json").readText()
+        assertTrue(result.changes.any { it.ruleId == "res-loot-table-entry-name-to-value" })
+        assertTrue(result.changes.any { it.ruleId == "res-loot-random-chance-with-looting-121" })
+        assertTrue(lootTable.contains(""""type": "minecraft:loot_table""""))
+        assertTrue(lootTable.contains(""""value": "minecraft:entities/zombie""""))
+        assertTrue(lootTable.contains(""""name": "minecraft:rotten_flesh""""))
+        assertTrue(lootTable.contains(""""condition": "minecraft:random_chance_with_enchanted_bonus""""))
+        assertTrue(lootTable.contains(""""enchantment": "minecraft:looting""""))
+        assertTrue(lootTable.contains(""""unenchanted_chance": 0.025"""))
+        assertTrue(lootTable.contains(""""base": 0.035"""))
+        assertTrue(lootTable.contains(""""per_level_above_first": 0.01"""))
+        assertFalse(lootTable.contains("minecraft:random_chance_with_looting"))
+        assertFalse(lootTable.contains("looting_multiplier"))
+    }
+
+    @Test
+    fun `banner pattern item tags materialize data driven banner patterns`() {
+        val projectDir = setupResourceProject()
+        val tagDir = projectDir.resolve("src/generated/resources/data/resmod/tags/banner_pattern/pattern_item")
+        tagDir.createDirectories()
+        tagDir.resolve("naga.json").writeText("""
+            {
+              "values": [
+                "resmod:naga"
+              ]
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val bannerPattern = projectDir.resolve("src/generated/resources/data/resmod/banner_pattern/naga.json").readText()
+        assertTrue(result.changes.any { it.ruleId == "res-banner-pattern-data-resource" })
+        assertTrue(bannerPattern.contains(""""asset_id": "resmod:naga""""))
+        assertTrue(bannerPattern.contains(""""translation_key": "block.minecraft.banner.resmod.naga""""))
+    }
+
+    @Test
+    fun `common item tags migrate to c namespace in recipes and advancements`() {
+        val projectDir = setupResourceProject()
+        val recipeDir = projectDir.resolve("src/main/resources/data/resmod/recipes")
+        recipeDir.resolve("tagged.json").writeText("""
+            {"type":"minecraft:crafting_shapeless","ingredients":[{"tag":"forge:ingots/iron"}],"result":{"item":"resmod:item"}}
+        """.trimIndent())
+        val advancementDir = projectDir.resolve("src/main/resources/data/resmod/advancements")
+        advancementDir.resolve("tagged.json").writeText("""
+            {"criteria":{"has_iron":{"trigger":"minecraft:inventory_changed","conditions":{"items":[{"tag":"forge:ingots/iron"}]}}}}
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/main/resources/data/resmod/recipe/tagged.json").readText()
+        val advancement = projectDir.resolve("src/main/resources/data/resmod/advancement/tagged.json").readText()
+        assertTrue(recipe.contains(""""tag": "c:ingots/iron""""))
+        assertFalse(recipe.contains("forge:ingots/iron"))
+        assertFalse(recipe.contains("neoforge:ingots/iron"))
+        assertTrue(advancement.contains(""""items": "#c:ingots/iron""""))
+        assertFalse(advancement.contains("#forge:ingots/iron"))
+        assertFalse(advancement.contains("#neoforge:ingots/iron"))
+    }
+
+    @Test
+    fun `tag references migrate to c namespace in generated data`() {
+        val projectDir = setupResourceProject()
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        recipeDir.createDirectories()
+        recipeDir.resolve("table.json").writeText("""
+            {"type":"minecraft:crafting_shaped","key":{"L":{"tag":"forge:lumber"}},"result":{"item":"resmod:table"}}
+        """.trimIndent())
+        recipeDir.resolve("lantern.json").writeText("""
+            {"type":"minecraft:crafting_shaped","key":{"C":{"tag":"c:cobblestone"},"G":{"tag":"forge:glass"},"S":{"tag":"neoforge:stone"}},"result":{"item":"resmod:lantern"}}
+        """.trimIndent())
+        val advancementDir = projectDir.resolve("src/generated/resources/data/resmod/advancements")
+        advancementDir.createDirectories()
+        advancementDir.resolve("table.json").writeText("""
+            {"criteria":{"has_lumber":{"trigger":"minecraft:inventory_changed","conditions":{"items":[{"items":"#forge:lumber"}]}}}}
+        """.trimIndent())
+        advancementDir.resolve("lantern.json").writeText("""
+            {"criteria":{"has_cobblestone":{"trigger":"minecraft:inventory_changed","conditions":{"items":[{"items":"#c:cobblestone"},{"items":"#forge:glass"},{"items":"#neoforge:stone"}]}}}}
+        """.trimIndent())
+        val tagDir = projectDir.resolve("src/generated/resources/data/c/tags/items")
+        tagDir.createDirectories()
+        tagDir.resolve("lumber.json").writeText("""{"values":["#forge:lumber/sakura","#neoforge:lumber/maple"]}""")
+
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/generated/resources/data/resmod/recipe/table.json").readText()
+        val lanternRecipe = projectDir.resolve("src/generated/resources/data/resmod/recipe/lantern.json").readText()
+        val advancement = projectDir.resolve("src/generated/resources/data/resmod/advancement/table.json").readText()
+        val lanternAdvancement = projectDir.resolve("src/generated/resources/data/resmod/advancement/lantern.json").readText()
+        val tag = projectDir.resolve("src/generated/resources/data/c/tags/item/lumber.json").readText()
+        assertTrue(recipe.contains(""""tag": "c:lumber""""))
+        assertTrue(lanternRecipe.contains(""""tag": "c:cobblestones""""))
+        assertTrue(lanternRecipe.contains(""""tag": "c:glass_blocks""""))
+        assertTrue(lanternRecipe.contains(""""tag": "c:stones""""))
+        assertTrue(advancement.contains(""""items": "#c:lumber""""))
+        assertTrue(lanternAdvancement.contains(""""items": "#c:cobblestones""""))
+        assertTrue(lanternAdvancement.contains(""""items": "#c:glass_blocks""""))
+        assertTrue(lanternAdvancement.contains(""""items": "#c:stones""""))
+        assertTrue(tag.contains(""""#c:lumber/sakura""""))
+        assertTrue(tag.contains(""""#c:lumber/maple""""))
+        assertFalse(recipe.contains("forge:lumber"))
+        assertFalse(lanternRecipe.contains(""""tag": "c:cobblestone""""))
+        assertFalse(lanternRecipe.contains(""""tag": "c:glass""""))
+        assertFalse(lanternRecipe.contains(""""tag": "c:stone""""))
+        assertFalse(recipe.contains("neoforge:lumber"))
+        assertFalse(advancement.contains("#forge:lumber"))
+        assertFalse(lanternAdvancement.contains("#c:cobblestone\""))
+        assertFalse(lanternAdvancement.contains("#c:glass\""))
+        assertFalse(lanternAdvancement.contains("#c:stone\""))
+        assertFalse(tag.contains("#forge:"))
+        assertFalse(tag.contains("#neoforge:"))
+    }
+
+    @Test
+    fun `common gravel and sand tags migrate to 1_21 common tag paths`() {
+        val projectDir = setupResourceProject()
+        val tagDir = projectDir.resolve("src/generated/resources/data/resmod/tags/blocks/ore_magnet")
+        tagDir.createDirectories()
+        tagDir.resolve("safe_replace.json").writeText("""
+            {
+              "values": [
+                "#c:gravel",
+                "#c:sand",
+                "#forge:gravel",
+                "#forge:sand"
+              ]
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        val tag = projectDir.resolve("src/generated/resources/data/resmod/tags/block/ore_magnet/safe_replace.json").readText()
+        assertTrue(tag.contains(""""#c:gravels""""))
+        assertTrue(tag.contains(""""#c:sands""""))
+        assertFalse(tag.contains("#c:gravel\""))
+        assertFalse(tag.contains("#c:sand\""))
+        assertFalse(tag.contains("#forge:"))
+    }
+
+    @Test
+    fun `common leather string tags and mcfunction item nbt migrate to 1_21 syntax`() {
+        val projectDir = setupResourceProject()
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        val advancementDir = projectDir.resolve("src/generated/resources/data/resmod/advancements/recipes/tools")
+        val functionDir = projectDir.resolve("src/main/resources/data/resmod/functions")
+        recipeDir.createDirectories()
+        advancementDir.createDirectories()
+        functionDir.createDirectories()
+        recipeDir.resolve("gloves.json").writeText("""
+            {
+              "type": "minecraft:crafting_shaped",
+              "key": {
+                "#": {
+                  "tag": "forge:leather"
+                },
+                "S": {
+                  "tag": "c:string"
+                }
+              },
+              "pattern": [
+                "#S#"
+              ],
+              "result": "resmod:gloves"
+            }
+        """.trimIndent())
+        advancementDir.resolve("gloves.json").writeText("""
+            {
+              "criteria": {
+                "has_string": {
+                  "trigger": "minecraft:inventory_changed",
+                  "conditions": {
+                    "items": [
+                      {
+                        "items": "#c:string"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+        functionDir.resolve("suit_up.mcfunction").writeText("""
+            give @p resmod:hammer{Unbreakable:1,CustomFlag:1b}
+            execute at @p run fill ~-1 ~ ~-1 ~1 ~1 ~1 minecraft:air replace #forge:stone
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/generated/resources/data/resmod/recipe/gloves.json").readText()
+        val advancement = projectDir.resolve("src/generated/resources/data/resmod/advancement/recipes/tools/gloves.json").readText()
+        val function = projectDir.resolve("src/main/resources/data/resmod/function/suit_up.mcfunction").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "res-mcfunction-common-tag-reference" })
+        assertTrue(result.changes.any { it.ruleId == "res-mcfunction-itemstack-components" })
+        assertTrue(recipe.contains(""""tag": "c:leathers""""))
+        assertTrue(recipe.contains(""""tag": "c:strings""""))
+        assertTrue(advancement.contains(""""items": "#c:strings""""))
+        assertTrue(function.contains("resmod:hammer["))
+        assertTrue(function.contains("minecraft:unbreakable={}"))
+        assertTrue(function.contains("minecraft:custom_data={CustomFlag:1b}"))
+        assertTrue(function.contains("#c:stones"))
+        assertFalse(recipe.contains("forge:leather"))
+        assertFalse(recipe.contains("c:string\""))
+        assertFalse(advancement.contains("#c:string\""))
+        assertFalse(function.contains("{Unbreakable:1"))
+        assertFalse(function.contains("#forge:stone"))
+    }
+
+    @Test
+    fun `partial nbt recipe ingredients migrate to data component ingredients`() {
+        val projectDir = setupResourceProject()
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        recipeDir.createDirectories()
+        recipeDir.resolve("charged_staff.json").writeText("""
+            {
+              "type": "minecraft:crafting_shapeless",
+              "ingredients": [
+                [
+                  {
+                    "type": "forge:partial_nbt",
+                    "item": "minecraft:potion",
+                    "nbt": "{Potion:\"minecraft:strength\"}"
+                  },
+                  {
+                    "type": "forge:partial_nbt",
+                    "item": "minecraft:potion",
+                    "nbt": "{Potion:\"minecraft:long_strength\"}"
+                  }
+                ],
+                {
+                  "type": "forge:partial_nbt",
+                  "item": "resmod:charged_staff",
+                  "nbt": "{Damage:9}"
+                }
+              ],
+              "result": {
+                "item": "resmod:charged_staff"
+              }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/generated/resources/data/resmod/recipe/charged_staff.json").readText()
+        assertTrue(result.changes.any { it.ruleId == "res-recipe-partial-nbt-component-ingredient" })
+        assertTrue(recipe.contains(""""type": "neoforge:compound""""))
+        assertTrue(recipe.contains(""""type": "neoforge:components""""))
+        assertTrue(recipe.contains(""""minecraft:potion_contents": {"""))
+        assertTrue(recipe.contains(""""potion": "minecraft:strength""""))
+        assertTrue(recipe.contains(""""minecraft:damage": 9"""))
+        assertTrue(recipe.contains(""""items": "resmod:charged_staff""""))
+        assertFalse(recipe.contains("partial_nbt"))
+        assertFalse(recipe.contains(""""type": "neoforge:partial_nbt""""))
+        assertFalse(recipe.contains(""""type": "forge:partial_nbt""""))
+    }
+
+    @Test
+    fun `legacy nbt recipe ingredients migrate to data component ingredients`() {
+        val projectDir = setupResourceProject()
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        recipeDir.createDirectories()
+        recipeDir.resolve("halo.json").writeText("""
+            {
+              "type": "minecraft:crafting_shapeless",
+              "ingredients": [
+                {
+                  "type": "forge:nbt",
+                  "item": "resmod:divine_shard",
+                  "nbt": "{SMCShardChallenge:7}"
+                }
+              ],
+              "result": {
+                "item": "resmod:halo"
+              }
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/generated/resources/data/resmod/recipe/halo.json").readText()
+        assertTrue(result.changes.any { it.ruleId == "res-recipe-partial-nbt-component-ingredient" })
+        assertTrue(recipe.contains(""""type": "neoforge:components""""))
+        assertTrue(recipe.contains(""""items": "resmod:divine_shard""""))
+        assertTrue(recipe.contains(""""minecraft:custom_data": {"""))
+        assertTrue(recipe.contains(""""SMCShardChallenge": 7"""))
+        assertFalse(recipe.contains(""""type": "neoforge:nbt""""))
+        assertFalse(recipe.contains(""""type": "forge:nbt""""))
+    }
+
+    @Test
+    fun `damaged item repair recipes do not synthesize mod specific scepter serializers`() {
+        val projectDir = setupResourceProject()
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes/equipment")
+        val javaDir = projectDir.resolve("src/main/java/resmod/init")
+        recipeDir.createDirectories()
+        javaDir.createDirectories()
+        javaDir.resolve("ModRecipes.java").writeText("""
+            package resmod.init;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ModRecipes {
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS = DeferredRegister.create(Registries.RECIPE_SERIALIZER, "resmod");
+            }
+        """.trimIndent())
+        recipeDir.resolve("zombie_scepter.json").writeText("""
+            {
+              "type": "minecraft:crafting_shapeless",
+              "category": "equipment",
+              "ingredients": [
+                [
+                  {
+                    "type": "forge:partial_nbt",
+                    "item": "minecraft:potion",
+                    "nbt": "{Potion:\"minecraft:strength\"}"
+                  },
+                  {
+                    "type": "forge:partial_nbt",
+                    "item": "minecraft:potion",
+                    "nbt": "{Potion:\"minecraft:long_strength\"}"
+                  }
+                ],
+                {
+                  "type": "forge:partial_nbt",
+                  "item": "resmod:zombie_scepter",
+                  "nbt": "{Damage:9}"
+                },
+                {
+                  "item": "minecraft:rotten_flesh"
+                }
+              ],
+              "result": {
+                "item": "resmod:zombie_scepter"
+              }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/generated/resources/data/resmod/recipe/equipment/zombie_scepter.json").readText()
+        val generatedSerializer = projectDir.resolve("src/main/java/com/modporter/generated/resmod/recipe/ModPorterScepterRepairRecipe.java")
+        val registry = javaDir.resolve("ModRecipes.java").readText()
+        assertTrue(result.changes.any { it.ruleId == "res-recipe-partial-nbt-component-ingredient" })
+        assertFalse(result.changes.any { it.ruleId.contains("scepter") })
+        assertTrue(recipe.contains(""""type": "minecraft:crafting_shapeless""""))
+        assertTrue(recipe.contains(""""type": "neoforge:compound""""))
+        assertTrue(recipe.contains(""""type": "neoforge:components""""))
+        assertTrue(recipe.contains(""""item": "minecraft:rotten_flesh""""))
+        assertTrue(recipe.contains(""""result":"""))
+        assertFalse(recipe.contains("scepter_repair"))
+        assertFalse(generatedSerializer.exists())
+        assertFalse(registry.contains("ModPorterScepterRepairRecipe"))
+        assertFalse(registry.contains("scepter_repair"))
+        assertFalse(recipe.contains("partial_nbt"))
+    }
+
+    @Test
+    fun `uncrafting recipes use 1_21 input count with ingredient objects`() {
+        val projectDir = setupResourceProject()
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes/uncrafting")
+        recipeDir.createDirectories()
+        recipeDir.resolve("tipped_arrow.json").writeText("""
+            {
+              "type": "resmod:uncrafting",
+              "cost": 4,
+              "input": {
+                "count": 8,
+                "ingredient": {
+                  "item": "minecraft:tipped_arrow"
+                }
+              },
+              "key": {
+                "A": {
+                  "item": "minecraft:arrow"
+                }
+              },
+              "pattern": [
+                "AAA",
+                "A A",
+                "AAA"
+              ]
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/generated/resources/data/resmod/recipe/uncrafting/tipped_arrow.json").readText()
+        assertTrue(result.changes.any { it.ruleId == "res-uncrafting-recipe-input-count-121" })
+        assertTrue(recipe.contains(""""input": {"""))
+        assertTrue(recipe.contains(""""item": "minecraft:tipped_arrow""""))
+        assertTrue(recipe.contains(""""input_count": 8"""))
+        assertTrue(recipe.contains(""""A": {"""))
+        assertTrue(recipe.contains(""""item": "minecraft:arrow""""))
+        assertFalse(recipe.contains(""""ingredient":"""))
+    }
+
+    @Test
+    fun `single conditional advancement is unwrapped with top level neoforge conditions`() {
+        val projectDir = setupResourceProject()
+        val advancementDir = projectDir.resolve("src/generated/resources/data/resmod/advancements/recipes/decorations")
+        advancementDir.createDirectories()
+        advancementDir.resolve("conditional_table.json").writeText("""
+            {
+              "advancements": [
+                {
+                  "advancement": {
+                    "parent": "minecraft:recipes/root",
+                    "criteria": {
+                      "has_the_recipe": {
+                        "conditions": {
+                          "recipe": "resmod:conditional_table"
+                        },
+                        "trigger": "minecraft:recipe_unlocked"
+                      }
+                    },
+                    "rewards": {
+                      "recipes": [
+                        "resmod:conditional_table"
+                      ]
+                    }
+                  },
+                  "conditions": [
+                    {
+                      "type": "resmod:enabled"
+                    }
+                  ]
+                }
+              ]
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val advancement = projectDir.resolve("src/generated/resources/data/resmod/advancement/recipes/decorations/conditional_table.json").readText()
+        assertTrue(result.changes.any { it.ruleId == "res-advancement-unwrap-single-conditional" })
+        assertTrue(advancement.contains(""""neoforge:conditions": ["""))
+        assertTrue(advancement.contains(""""parent": "minecraft:recipes/root""""))
+        assertTrue(advancement.contains(""""conditions": {"""), "Criterion predicate conditions should stay vanilla")
+        assertFalse(advancement.contains(""""advancements":"""))
+        assertFalse(advancement.contains(""""advancement":"""))
+    }
+
+    @Test
+    fun `code awarded advancement uses impossible trigger and id icon`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/com/example")
+        javaDir.createDirectories()
+        javaDir.resolve("Awarder.java").writeText("""
+            package com.example;
+
+            class Awarder {
+                private static final String ADVANCEMENT_ID = "resmod:manual";
+
+                void award(Object player) {
+                    AdvancementHelper.tryAwardAdvancement(player, ADVANCEMENT_ID, "code_triggered");
+                }
+            }
+        """.trimIndent())
+
+        val advancementDir = projectDir.resolve("src/main/resources/data/resmod/advancements")
+        advancementDir.resolve("manual.json").writeText("""
+            {"id":"resmod:manual","display":{"icon":{"item":"resmod:item"}},"criteria":{"code_triggered":{"trigger":"resmod:manual"}}}
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        val advancement = projectDir.resolve("src/main/resources/data/resmod/advancement/manual.json").readText()
+        assertFalse(advancement.contains(""""id":"resmod:manual""""), "Top-level legacy id should be removed")
+        assertTrue(advancement.contains(""""icon":{"id":"resmod:item"}"""), "Advancement icon should use id")
+        assertTrue(advancement.contains(""""trigger": "minecraft:impossible""""), "Code-awarded criterion should use impossible trigger")
+        assertFalse(advancement.contains(""""trigger":"resmod:manual""""))
+    }
+
+    @Test
+    fun `code awarded advancement resolves qualified ids from declared class owner`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/com/example")
+        javaDir.createDirectories()
+        javaDir.resolve("Awarder.java").writeText("""
+            package com.example;
+
+            class Awarder {
+                private static final String ADVANCEMENT_ID = "resmod:qualified";
+
+                void award(Object player) {
+                    AdvancementHelper.tryAwardAdvancement(player, Awarder.ADVANCEMENT_ID, "code_triggered");
+                }
+            }
+        """.trimIndent())
+
+        val advancementDir = projectDir.resolve("src/main/resources/data/resmod/advancements")
+        advancementDir.resolve("qualified.json").writeText("""
+            {"display":{"icon":{"item":"resmod:item"}},"criteria":{"code_triggered":{"trigger":"resmod:qualified"}}}
+        """.trimIndent())
+
+        ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val advancement = projectDir.resolve("src/main/resources/data/resmod/advancement/qualified.json").readText()
+        assertTrue(advancement.contains(""""trigger": "minecraft:impossible""""), advancement)
+        assertFalse(advancement.contains(""""trigger":"resmod:qualified""""))
+    }
+
+    @Test
+    fun `code awarded advancement does not infer constant owner from file name`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/com/example")
+        javaDir.createDirectories()
+        javaDir.resolve("Awarder.java").writeText("""
+            package com.example;
+
+            static final String ADVANCEMENT_ID = "resmod:manual";
+
+            class Caller {
+                void award(Object player) {
+                    AdvancementHelper.tryAwardAdvancement(player, Awarder.ADVANCEMENT_ID, "code_triggered");
+                }
+            }
+        """.trimIndent())
+
+        val advancementDir = projectDir.resolve("src/main/resources/data/resmod/advancements")
+        advancementDir.resolve("manual.json").writeText("""
+            {"display":{"icon":{"item":"resmod:item"}},"criteria":{"code_triggered":{"trigger":"resmod:manual"}}}
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val advancement = projectDir.resolve("src/main/resources/data/resmod/advancement/manual.json").readText()
+        assertFalse(
+            result.changes.any { it.ruleId == "res-advancement-code-awarded-trigger" },
+            "Unsupported source shape must not be converted into code-awarded advancement evidence"
+        )
+        assertTrue(advancement.contains(""""trigger":"resmod:manual""""), advancement)
+        assertFalse(advancement.contains("minecraft:impossible"), advancement)
+    }
+
+    @Test
+    fun `code awarded advancement does not infer constant owner from previous type`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/com/example")
+        javaDir.createDirectories()
+        javaDir.resolve("Awarder.java").writeText("""
+            package com.example;
+
+            class Awarder {
+            }
+
+            static final String ADVANCEMENT_ID = "resmod:manual";
+
+            class Caller {
+                void award(Object player) {
+                    AdvancementHelper.tryAwardAdvancement(player, Awarder.ADVANCEMENT_ID, "code_triggered");
+                }
+            }
+        """.trimIndent())
+
+        val advancementDir = projectDir.resolve("src/main/resources/data/resmod/advancements")
+        advancementDir.resolve("manual.json").writeText("""
+            {"display":{"icon":{"item":"resmod:item"}},"criteria":{"code_triggered":{"trigger":"resmod:manual"}}}
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val advancement = projectDir.resolve("src/main/resources/data/resmod/advancement/manual.json").readText()
+        assertFalse(
+            result.changes.any { it.ruleId == "res-advancement-code-awarded-trigger" },
+            "Constants outside a Java type body must not be assigned to the preceding type"
+        )
+        assertTrue(advancement.contains(""""trigger":"resmod:manual""""), advancement)
+        assertFalse(advancement.contains("minecraft:impossible"), advancement)
+    }
+
+    @Test
+    fun `code awarded advancement does not resolve bare ids by global uniqueness`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/com/example")
+        javaDir.createDirectories()
+        javaDir.resolve("Awarder.java").writeText("""
+            package com.example;
+
+            class Awarder {
+                static final String ADVANCEMENT_ID = "resmod:manual";
+            }
+
+            class Caller {
+                void award(Object player) {
+                    AdvancementHelper.tryAwardAdvancement(player, ADVANCEMENT_ID, "code_triggered");
+                }
+            }
+        """.trimIndent())
+
+        val advancementDir = projectDir.resolve("src/main/resources/data/resmod/advancements")
+        advancementDir.resolve("manual.json").writeText("""
+            {"display":{"icon":{"item":"resmod:item"}},"criteria":{"code_triggered":{"trigger":"resmod:manual"}}}
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val advancement = projectDir.resolve("src/main/resources/data/resmod/advancement/manual.json").readText()
+        assertFalse(
+            result.changes.any { it.ruleId == "res-advancement-code-awarded-trigger" },
+            "Bare advancement ids must resolve from the call-site owner, not from globally unique constants"
+        )
+        assertTrue(advancement.contains(""""trigger":"resmod:manual""""), advancement)
+        assertFalse(advancement.contains("minecraft:impossible"), advancement)
+    }
+
+    @Test
+    fun `code awarded advancement ignores text block call examples`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/com/example")
+        javaDir.createDirectories()
+        javaDir.resolve("Awarder.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "class Awarder {",
+            "    private static final String ADVANCEMENT_ID = \"resmod:manual\";",
+            "",
+            "    String docs() {",
+            "        return \"\"\"",
+            "            AdvancementHelper.tryAwardAdvancement(player, ADVANCEMENT_ID, \"code_triggered\");",
+            "            \"\"\";",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+
+        val advancementDir = projectDir.resolve("src/main/resources/data/resmod/advancements")
+        advancementDir.resolve("manual.json").writeText("""
+            {"display":{"icon":{"item":"resmod:item"}},"criteria":{"code_triggered":{"trigger":"resmod:manual"}}}
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val advancement = projectDir.resolve("src/main/resources/data/resmod/advancement/manual.json").readText()
+        assertFalse(
+            result.changes.any { it.ruleId == "res-advancement-code-awarded-trigger" },
+            "Documentation examples must not be converted into code-awarded advancement evidence"
+        )
+        assertTrue(advancement.contains(""""trigger":"resmod:manual""""), advancement)
+        assertFalse(advancement.contains("minecraft:impossible"), advancement)
+    }
+
+    @Test
+    fun `forge item layers model loader is migrated without changing model structure`() {
+        val projectDir = setupResourceProject()
+        val modelDir = projectDir.resolve("src/main/resources/assets/resmod/models/item")
+        modelDir.createDirectories()
+        modelDir.resolve("layered.json").writeText("""
+            {
+              "loader": "forge:item_layers",
+              "parent": "minecraft:item/generated",
+              "textures": {
+                "layer0": "minecraft:item/bucket",
+                "layer1": "resmod:item/overlay"
+              },
+              "overrides": [
+                {
+                  "predicate": { "resmod:hot_steam": 1 },
+                  "model": "resmod:item/layered_with_smoke"
+                }
+              ]
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        val model = projectDir.resolve("src/main/resources/assets/resmod/models/item/layered.json").readText()
+        assertTrue(model.contains(""""loader": "neoforge:item_layers""""))
+        assertTrue(model.contains(""""overrides":"""), "Existing predicate override structure should be preserved")
+        assertTrue(model.contains(""""model": "resmod:item/layered_with_smoke""""))
+        assertFalse(model.contains(""""loader": "forge:item_layers""""))
+    }
+
+    @Test
+    fun `forge model extension metadata and loaders are migrated to neoforge namespace`() {
+        val projectDir = setupResourceProject()
+        val blockModelDir = projectDir.resolve("src/main/resources/assets/resmod/models/block")
+        val itemModelDir = projectDir.resolve("src/main/resources/assets/resmod/models/item")
+        blockModelDir.createDirectories()
+        itemModelDir.createDirectories()
+        blockModelDir.resolve("glowing_block.json").writeText("""
+            {
+              "loader": "forge:composite",
+              "children": {
+                "main": {
+                  "parent": "resmod:block/main",
+                  "elements": [
+                    {
+                      "faces": {
+                        "north": {
+                          "texture": "#all",
+                          "forge_data": {
+                            "block_light": 15,
+                            "sky_light": 15
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+        """.trimIndent())
+        itemModelDir.resolve("separate.json").writeText("""
+            {
+              "loader": "forge:separate_transforms",
+              "base": {
+                "parent": "minecraft:item/generated"
+              }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val blockModel = blockModelDir.resolve("glowing_block.json").readText()
+        val itemModel = itemModelDir.resolve("separate.json").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "res-model-extension-neoforge-namespace" })
+        assertTrue(blockModel.contains(""""loader": "neoforge:composite""""))
+        assertTrue(blockModel.contains(""""neoforge_data": {"""))
+        assertTrue(itemModel.contains(""""loader": "neoforge:separate_transforms""""))
+        assertFalse(blockModel.contains(""""forge_data""""))
+        assertFalse(blockModel.contains(""""forge:composite""""))
+        assertFalse(itemModel.contains(""""forge:separate_transforms""""))
+    }
+
+    @Test
+    fun `model texture references that target item models resolve to concrete textures`() {
+        val projectDir = setupResourceProject()
+        val itemModelDir = projectDir.resolve("src/main/resources/assets/resmod/models/item")
+        val itemTextureDir = projectDir.resolve("src/main/resources/assets/resmod/textures/item")
+        itemModelDir.createDirectories()
+        itemTextureDir.createDirectories()
+        itemModelDir.resolve("transforming_blade.json").writeText("""
+            {
+              "loader": "forge:separate_transforms",
+              "base": {
+                "parent": "resmod:item/transforming_blade_handheld"
+              },
+              "perspectives": {
+                "gui": {
+                  "parent": "resmod:item/transforming_blade_gui"
+                }
+              },
+              "textures": {
+                "layer0": "resmod:item/transforming_blade_gui"
+              }
+            }
+        """.trimIndent())
+        itemModelDir.resolve("transforming_blade_gui.json").writeText("""
+            {
+              "parent": "minecraft:item/generated",
+              "textures": {
+                "layer0": "resmod:item/transforming_blade"
+              }
+            }
+        """.trimIndent())
+        itemTextureDir.resolve("transforming_blade.png").writeText("png")
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val model = itemModelDir.resolve("transforming_blade.json").readText()
+        assertTrue(result.changes.any { it.ruleId == "res-model-texture-reference-model-target" })
+        assertTrue(model.contains(""""loader": "neoforge:separate_transforms""""))
+        assertTrue(model.contains(""""parent": "resmod:item/transforming_blade_gui""""))
+        assertTrue(model.contains(""""layer0": "resmod:item/transforming_blade""""))
+        assertFalse(model.contains(""""layer0": "resmod:item/transforming_blade_gui""""))
+    }
+
+    @Test
+    fun `registered item with texture gets missing generated model`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/com/example")
+        javaDir.createDirectories()
+        javaDir.resolve("ItemRegister.java").writeText("""
+            package com.example;
+
+            class ItemRegister {
+                static final Registry ITEMS = null;
+
+                static void register() {
+                    ITEMS.register("sample_item", () -> new Item(new Item.Properties()));
+                }
+            }
+        """.trimIndent())
+        val textureDir = projectDir.resolve("src/main/resources/assets/resmod/textures/item")
+        textureDir.createDirectories()
+        textureDir.resolve("sample_item.png").writeText("png")
+
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        val model = projectDir.resolve("src/main/resources/assets/resmod/models/item/sample_item.json").readText()
+        assertTrue(model.contains(""""parent": "minecraft:item/generated""""))
+        assertTrue(model.contains(""""layer0": "resmod:item/sample_item""""))
+    }
+
+    @Test
+    fun `registered item text block documentation does not generate missing model`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/com/example")
+        javaDir.createDirectories()
+        javaDir.resolve("ItemRegister.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "class ItemRegister {",
+            "    static void docs() {",
+            "        String example = \"\"\"",
+            "            ITEMS.register(\"sample_item\", () -> new Item(new Item.Properties()));",
+            "            \"\"\";",
+            "        if (example.isEmpty()) throw new IllegalStateException();",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+        val textureDir = projectDir.resolve("src/main/resources/assets/resmod/textures/item")
+        textureDir.createDirectories()
+        textureDir.resolve("sample_item.png").writeText("png")
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val model = projectDir.resolve("src/main/resources/assets/resmod/models/item/sample_item.json")
+        assertFalse(result.changes.any { it.ruleId == "res-create-missing-item-model" })
+        assertFalse(model.exists(), "Documentation-only item registration must not create a model")
+    }
+
+    @Test
+    fun `generated resources do not duplicate item models already in main resources`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/com/example")
+        javaDir.createDirectories()
+        javaDir.resolve("ItemRegister.java").writeText("""
+            package com.example;
+
+            class ItemRegister {
+                static final Registry ITEMS = null;
+
+                static void register() {
+                    ITEMS.register("sample_item", () -> new Item(new Item.Properties()));
+                }
+            }
+        """.trimIndent())
+        val mainModelDir = projectDir.resolve("src/main/resources/assets/resmod/models/item")
+        mainModelDir.createDirectories()
+        mainModelDir.resolve("sample_item.json").writeText("""{"parent":"minecraft:item/generated"}""")
+        val generatedTextureDir = projectDir.resolve("src/generated/resources/assets/resmod/textures/item")
+        generatedTextureDir.createDirectories()
+        generatedTextureDir.resolve("sample_item.png").writeText("png")
+
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        assertFalse(projectDir.resolve("src/generated/resources/assets/resmod/models/item/sample_item.json").exists())
+        assertTrue(mainModelDir.resolve("sample_item.json").exists())
+    }

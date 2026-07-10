@@ -1,0 +1,1173 @@
+package com.modporter.integration
+
+import com.modporter.core.pipeline.Pipeline
+import com.modporter.core.pipeline.PipelineResult
+import com.modporter.core.pipeline.Confidence
+import com.modporter.mapping.MappingDatabase
+import com.modporter.registry.PipelineOptions
+import com.modporter.registry.PipelineRegistry
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable
+import org.junit.jupiter.api.io.TempDir
+import java.io.File
+import java.awt.image.BufferedImage
+import javax.imageio.ImageIO
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardCopyOption
+import java.util.concurrent.TimeUnit
+import java.util.jar.JarEntry
+import java.util.jar.JarOutputStream
+import java.util.zip.ZipFile
+import kotlin.io.path.createDirectories
+import kotlin.io.path.exists
+import kotlin.io.path.isDirectory
+import kotlin.io.path.name
+import kotlin.io.path.readText
+import kotlin.io.path.writeText
+import kotlin.test.assertTrue
+
+/**
+ * Real-mod benchmark harness.
+ *
+ * The benchmark downloads/copies source mods into a temporary work area, ports them, records a
+ * report, and deletes the temporary sources/converted outputs by default.
+ *
+ * Optional gates:
+ *   MODPORTER_BENCHMARK_STRICT=true       fail if optional sources/providers are missing
+ *   MODPORTER_BENCHMARK_STRICT_RUNTIME=true
+ *                                           require hands-off compile plus server/client/world runtime gates
+ *   MODPORTER_BENCHMARK_HANDS_OFF=true    fail if medium/low-confidence changes remain
+ *   MODPORTER_BENCHMARK_COMPILE=true      run compileJava in converted projects
+ *   MODPORTER_BENCHMARK_RUNSERVER=true    run runServer, wait for ready, then terminate cleanly
+ *   MODPORTER_BENCHMARK_RUNGAMETESTSERVER=true
+ *                                           run runGameTestServer to exercise server lifecycle
+ *   MODPORTER_BENCHMARK_RUNCLIENT=true    run runClient until title-screen readiness markers
+ *   MODPORTER_BENCHMARK_RUNCLIENTWORLD=true
+ *                                           run runClientWorld and quick-load the smoke save
+ *   MODPORTER_BENCHMARK_LOG_CLEAN=true    fail runtime gates on non-allowlisted WARN lines
+ *   MODPORTER_BENCHMARK_KEEP_WORK=true    keep temporary sources/outputs for debugging
+ *   MODPORTER_BENCHMARK_CASES=a,b         run only the listed manifest ids
+ *   MODPORTER_BENCHMARK_PROGRESS_GRACE_SECONDS=75
+ *                                           after a progress marker, fail fast if final markers never arrive
+ *   MODPORTER_BENCHMARK_CLIENT_WORLD=path use a prepared vanilla save for runClientWorld
+ *   MODPORTER_BENCHMARK_MINECRAFT_SERVER_JAR=path
+ *                                           override the vanilla server jar used to generate the smoke save
+ *   MODPORTER_BENCHMARK_JAVA21=path       override the Java 21 executable for vanilla server generation
+ */
+class RealModBenchmarkTest {
+    private val readmeSnapshotStart = "<!-- MODPORTER:BENCHMARK-SNAPSHOT:START -->"
+    private val readmeSnapshotEnd = "<!-- MODPORTER:BENCHMARK-SNAPSHOT:END -->"
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "MODPORTER_REAL_MOD_TEST", matches = "true")
+    fun `real mod benchmark manifest`() {
+        val repoRoot = Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize()
+        val reportRoot = repoRoot.resolve("build/real-mod-benchmark").toAbsolutePath().normalize()
+        val tempRoot = reportRoot.resolve("tmp")
+        val sourceRoot = tempRoot.resolve("sources")
+        val workRoot = tempRoot.resolve("work")
+        val artifactRoot = tempRoot.resolve("artifacts")
+        val reportsDir = reportRoot.resolve("reports")
+
+        reportsDir.createDirectories()
+        deleteDirectory(reportRoot.resolve("work"), reportRoot) // legacy output from older benchmark versions
+        resetDirectory(tempRoot, reportRoot)
+        sourceRoot.createDirectories()
+        workRoot.createDirectories()
+        artifactRoot.createDirectories()
+
+        val options = BenchmarkOptions.fromEnvironment()
+        val allCases = loadCases(repoRoot.resolve("src/test/resources/benchmarks/real-mods.tsv"))
+        val cases = selectCases(
+            allCases,
+            options.caseIds
+        )
+        assertTrue(cases.isNotEmpty(), "Benchmark manifest should contain at least one case")
+
+        val outcomes = try {
+            val clientSmokeWorldFixture = if (options.runClientWorld) {
+                prepareClientSmokeWorldFixture(tempRoot, reportsDir, options)
+            } else {
+                ClientSmokeWorldFixture(null, CheckResult.notRun("MODPORTER_BENCHMARK_RUNCLIENTWORLD=false"))
+            }
+            cases.map { case ->
+                val publishArtifacts = cases.any { it.dependencies.contains(case.id) }
+                runCase(
+                    case,
+                    repoRoot,
+                    sourceRoot,
+                    workRoot,
+                    artifactRoot,
+                    reportsDir,
+                    options,
+                    publishArtifacts,
+                    clientSmokeWorldFixture
+                )
+            }
+        } finally {
+            if (!options.keepWork) {
+                deleteDirectory(tempRoot, reportRoot)
+            }
+        }
+
+        val reportPath = reportsDir.resolve(options.reportFileName())
+        reportPath.writeText(renderReport(outcomes, options))
+        val telemetryPath = reportsDir.resolve(options.telemetryFileName())
+        telemetryPath.writeText(renderTelemetry(outcomes, options))
+
+        println("Real mod benchmark report: $reportPath")
+        println("Real mod benchmark telemetry: $telemetryPath")
+
+        val failures = outcomes.filter { it.status == Status.FAIL || (options.strict && it.status == Status.SKIP) }
+        assertTrue(
+            failures.isEmpty(),
+            buildString {
+                appendLine("Real mod benchmark failures:")
+                failures.forEach { appendLine("- ${it.case.id}: ${it.note}") }
+                appendLine("Report: $reportPath")
+            }
+        )
+
+        if (updateReadmeBenchmarkSnapshot(repoRoot, allCases, outcomes, options)) {
+            println("README benchmark snapshot updated with resolved Git commit hashes")
+        }
+    }
+
+    @Test
+    fun `runtime progress gate terminates stalled client world without full timeout`(@TempDir tempDir: Path) {
+        val logFile = tempDir.resolve("client-world.log")
+        val outerTimeoutSeconds = 20L
+        val started = System.nanoTime()
+
+        val result = runRuntimeProcess(
+            stalledClientWorldCommand(tempDir),
+            tempDir,
+            logFile,
+            timeoutSeconds = outerTimeoutSeconds,
+            runtimeLogPolicy = RuntimeLogPolicy.clientWorld(failOnWarnings = false, progressGraceSeconds = 1)
+        )
+
+        val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
+        assertTrue(result.status == CheckStatus.FAIL, "Expected stalled client-world gate to fail")
+        assertTrue(
+            result.note.contains("progress gate 'client start' waited 1s"),
+            "Expected progress gate failure note, got: ${result.note}"
+        )
+        assertTrue(
+            elapsedSeconds < outerTimeoutSeconds,
+            "Progress gate should fail before the outer timeout; elapsed=${elapsedSeconds}s"
+        )
+    }
+
+    @Test
+    fun `gametest runtime gate terminates after required tests pass and shutdown starts`(@TempDir tempDir: Path) {
+        val logFile = tempDir.resolve("gametest-shutdown.log")
+        val outerTimeoutSeconds = 20L
+        val started = System.nanoTime()
+
+        val result = runRuntimeProcess(
+            stalledGameTestShutdownCommand(tempDir),
+            tempDir,
+            logFile,
+            timeoutSeconds = outerTimeoutSeconds,
+            runtimeLogPolicy = RuntimeLogPolicy.gameTestServer(failOnWarnings = false)
+        )
+
+        val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
+        assertTrue(result.status == CheckStatus.PASS, "Expected completed GameTest shutdown gate to pass: ${result.note}")
+        assertTrue(
+            elapsedSeconds < outerTimeoutSeconds,
+            "Completed GameTest shutdown gate should not wait for the outer timeout; elapsed=${elapsedSeconds}s"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows OpenAL invalid-name only during client shutdown`(@TempDir tempDir: Path) {
+        val earlyLog = tempDir.resolve("early-openal.log")
+        earlyLog.writeText("[10:23:15] [Sound engine/ERROR] [mojang/OpenAlUtil]: Stop: Invalid name parameter.\n")
+
+        val shutdownLog = tempDir.resolve("shutdown-openal.log")
+        shutdownLog.writeText("""
+            [10:23:14] [Render thread/INFO] [minecraft/Minecraft]: Stopping!
+            [10:23:15] [Sound engine/ERROR] [mojang/OpenAlUtil]: Stop: Invalid name parameter.
+        """.trimIndent() + "\n")
+
+        assertTrue(
+            auditRuntimeLog(earlyLog, failOnWarnings = false).findings.any { it.contains("fatal") },
+            "OpenAL invalid-name before client shutdown must remain fatal"
+        )
+        assertTrue(
+            auditRuntimeLog(shutdownLog, failOnWarnings = false).findings.isEmpty(),
+            "OpenAL invalid-name after Minecraft shutdown is benchmark harness noise"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows local connection closed only during client shutdown`(@TempDir tempDir: Path) {
+        val earlyLog = tempDir.resolve("early-closed-channel.log")
+        earlyLog.writeText("""
+            [10:08:22] [Netty Server IO #1/ERROR] [minecraft/Connection]: Exception caught in connection
+            java.nio.channels.ClosedChannelException: null
+        """.trimIndent() + "\n")
+
+        val shutdownLog = tempDir.resolve("shutdown-closed-channel.log")
+        shutdownLog.writeText("""
+            [10:08:22] [Render thread/INFO] [minecraft/Minecraft]: Stopping!
+            [10:08:22] [Netty Server IO #1/ERROR] [minecraft/Connection]: Exception caught in connection
+            java.nio.channels.ClosedChannelException: null
+        """.trimIndent() + "\n")
+
+        assertTrue(
+            auditRuntimeLog(earlyLog, failOnWarnings = false).findings.any { it.contains("fatal") },
+            "Connection errors before client shutdown must remain fatal"
+        )
+        assertTrue(
+            auditRuntimeLog(shutdownLog, failOnWarnings = false).findings.isEmpty(),
+            "Local ClosedChannelException after Minecraft shutdown is benchmark harness noise"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows Mojang profile lookup network timeout`(@TempDir tempDir: Path) {
+        val logFile = tempDir.resolve("profile-lookup.log")
+        logFile.writeText("""
+            [14:20:49] [Download-1/WARN] [mojang/YggdrasilMinecraftSessionService]: Couldn't look up profile properties for 380df991-f603-344c-a090-369bad2a924a
+            com.mojang.authlib.exceptions.MinecraftClientException: Failed to read from https://sessionserver.mojang.com/session/minecraft/profile/380df991f603344ca090369bad2a924a?unsigned=false due to Read timed out
+        """.trimIndent() + "\n")
+
+        assertTrue(
+            auditRuntimeLog(logFile, failOnWarnings = true).findings.isEmpty(),
+            "Profile lookup timeout is vanilla session-server network noise, not a mod migration signal"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows Mojang public key network timeout with evidence`(@TempDir tempDir: Path) {
+        val logFile = tempDir.resolve("public-key-timeout.log")
+        logFile.writeText("""
+            [16:19:19] [Yggdrasil Key Fetcher/ERROR] [mojang/YggdrasilServicesKeyInfo]: Failed to request yggdrasil public key
+            com.mojang.authlib.exceptions.MinecraftClientException: Failed to read from https://api.minecraftservices.com/publickeys due to Connect timed out
+            Caused by: java.net.SocketTimeoutException: Connect timed out
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true)
+
+        assertTrue(audit.findings.isEmpty(), "Public-key timeout is external Mojang network noise: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("https://api.minecraftservices.com/publickeys") },
+            "Expected explicit public-key endpoint evidence in allowlist trace, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows external dependency optional mixin warning only with project absence evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        val logFile = tempDir.resolve("external-mixin.log")
+        logFile.writeText("""
+            [05:05:53] [main/DEBUG] [mixin/]: Registering mixin config: quark_integrations.mixins.json source=SecureJarResource(quark)
+            [05:05:54] [main/WARN] [mixin/]: Error loading class: noobanidus/mods/lootr/common/impl/LootrServiceRegistry (java.lang.ClassNotFoundException: noobanidus.mods.lootr.common.impl.LootrServiceRegistry)
+            [05:05:54] [main/WARN] [mixin/]: @Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found quark_integrations.mixins.json:lootr.LootrServiceRegistryMixin from mod (unknown)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected external dependency mixin warning to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("config 'quark_integrations.mixins.json' was loaded from dependency 'quark'") },
+            "Expected machine evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps external mixin warning when project owns mixin config`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        val resources = projectDir.resolve("src/main/resources")
+        resources.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        resources.resolve("quark_integrations.mixins.json").writeText("{}\n")
+        val logFile = tempDir.resolve("owned-mixin.log")
+        logFile.writeText("""
+            [05:05:53] [main/DEBUG] [mixin/]: Registering mixin config: quark_integrations.mixins.json source=SecureJarResource(quark)
+            [05:05:54] [main/WARN] [mixin/]: @Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found quark_integrations.mixins.json:lootr.LootrServiceRegistryMixin from mod (unknown)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("@Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found") },
+            "Project-owned mixin config must keep warning fatal"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows external mixin warning with classpath config evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        val moddevDir = projectDir.resolve("build/moddev")
+        val dependencyJar = tempDir.resolve("quark.jar")
+        moddevDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        createJar(
+            dependencyJar,
+            mapOf(
+                "quark_integrations.mixins.json" to "{}",
+                "META-INF/neoforge.mods.toml" to """
+                    [[mods]]
+                    modId = "quark"
+                """.trimIndent()
+            )
+        )
+        moddevDir.resolve("gameTestServerLegacyClasspath.txt").writeText("$dependencyJar\n")
+        val logFile = tempDir.resolve("external-mixin-classpath.log")
+        logFile.writeText("""
+            [05:05:54] [main/WARN] [mixin/]: Error loading class: noobanidus/mods/lootr/common/impl/LootrServiceRegistry (java.lang.ClassNotFoundException: noobanidus.mods.lootr.common.impl.LootrServiceRegistry)
+            [05:05:54] [main/WARN] [mixin/]: @Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found quark_integrations.mixins.json:lootr.LootrServiceRegistryMixin from mod (unknown)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected classpath-proven external mixin warning to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("config 'quark_integrations.mixins.json' was found in external runtime jar for dependency 'quark'") },
+            "Expected classpath evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps external mixin warning when target source references missing class`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        val moddevDir = projectDir.resolve("build/moddev")
+        val javaDir = projectDir.resolve("src/main/java/example")
+        val dependencyJar = tempDir.resolve("quark.jar")
+        moddevDir.createDirectories()
+        javaDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        javaDir.resolve("Integration.java").writeText("""
+            package example;
+            class Integration {
+                String target = "noobanidus.mods.lootr.common.impl.LootrServiceRegistry";
+            }
+        """.trimIndent() + "\n")
+        createJar(
+            dependencyJar,
+            mapOf(
+                "quark_integrations.mixins.json" to "{}",
+                "META-INF/neoforge.mods.toml" to """
+                    [[mods]]
+                    modId = "quark"
+                """.trimIndent()
+            )
+        )
+        moddevDir.resolve("gameTestServerLegacyClasspath.txt").writeText("$dependencyJar\n")
+        val logFile = tempDir.resolve("external-mixin-owned-target.log")
+        logFile.writeText("""
+            [05:05:54] [main/WARN] [mixin/]: @Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found quark_integrations.mixins.json:lootr.LootrServiceRegistryMixin from mod (unknown)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("@Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found") },
+            "Project-owned target references must keep warning fatal"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows external mixin warning with loaded mod dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "maven.modrinth:quark:4.1-480"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("external-mixin-loaded-mod.log")
+        logFile.writeText("""
+            [05:05:50] [main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/]:
+                 Mod List:
+                    Quark 4.1-480 (quark)
+                    The Aether 0.0NONE (aether)
+            [05:05:54] [main/WARN] [mixin/]: @Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found quark_integrations.mixins.json:lootr.LootrServiceRegistryMixin from mod (unknown)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected loaded-mod dependency evidence to allow external mixin warning: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("runtime Mod List and active build dependency evidence") },
+            "Expected loaded-mod dependency evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps loaded mod mixin warning without active dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                // implementation "maven.modrinth:quark:4.1-480"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("external-mixin-loaded-mod-no-dep.log")
+        logFile.writeText("""
+            [05:05:50] [main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/]:
+                 Mod List:
+                    Quark 4.1-480 (quark)
+                    The Aether 0.0NONE (aether)
+            [05:05:54] [main/WARN] [mixin/]: @Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found quark_integrations.mixins.json:lootr.LootrServiceRegistryMixin from mod (unknown)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("@Mixin target noobanidus.mods.lootr.common.impl.LootrServiceRegistry was not found") },
+            "Loaded-mod name alone must not allowlist missing mixin target warnings"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows external dependency config correction with active dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "maven.modrinth:quark:4.1-480"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("external-config-correction.log")
+        logFile.writeText("""
+            [06:14:06] [modloading-worker-0/DEBUG] [ne.ne.fm.co.ConfigTracker/CONFIG]: Config file quark-common.toml for quark tracking
+            [06:14:06] [modloading-worker-0/WARN] [ne.ne.fm.co.ConfigTracker/CONFIG]: Configuration file ${projectDir.resolve("run/config/quark-common.toml")} is not correct. Correcting
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected external config correction to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("config 'quark-common.toml' is tracked for loaded external mod 'quark'") },
+            "Expected active dependency evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps target config correction warning`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "local:example:1.0"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("target-config-correction.log")
+        logFile.writeText("""
+            [06:14:06] [modloading-worker-0/DEBUG] [ne.ne.fm.co.ConfigTracker/CONFIG]: Config file example-common.toml for example tracking
+            [06:14:06] [modloading-worker-0/WARN] [ne.ne.fm.co.ConfigTracker/CONFIG]: Configuration file ${projectDir.resolve("run/config/example-common.toml")} is not correct. Correcting
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Configuration file") && it.contains("example-common.toml") },
+            "Target mod config corrections must remain fatal"
+        )
+    }
+
+    private fun createJar(jar: Path, entries: Map<String, String>) {
+        jar.parent?.createDirectories()
+        JarOutputStream(Files.newOutputStream(jar)).use { output ->
+            for ((name, content) in entries) {
+                output.putNextEntry(JarEntry(name))
+                output.write(content.toByteArray())
+                output.closeEntry()
+            }
+        }
+    }
+
+    @Test
+    fun `runtime log audit allows external dependency mob category warning only without source reference`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "maven.modrinth:quark:4.1-480"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("external-mob-category.log")
+        logFile.writeText("""
+            [05:05:50] [main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/]:
+                 Mod List:
+                    Quark 4.1-480 (quark)
+                    The Aether 0.0NONE (aether)
+            [05:06:10] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected quark:stoneling that was registered with CREATURE mob category but was added under MONSTER mob category for aether:skyroot_forest biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected external dependency mob warning to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("entity 'quark:stoneling' belongs to external dependency namespace 'quark'") },
+            "Expected machine evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps external mob category warning without dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        val logFile = tempDir.resolve("external-mob-category-no-evidence.log")
+        logFile.writeText("""
+            [05:06:10] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected quark:stoneling that was registered with CREATURE mob category but was added under MONSTER mob category for aether:skyroot_forest biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Detected quark:stoneling") },
+            "External dependency mob warnings need active dependency or runtime Mod List evidence"
+        )
+    }
+
+    @Test
+    fun `runtime log audit summarizes repeated allowed issues without hiding evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "maven.modrinth:external:1.0.0"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("repeated-external-mob-category.log")
+        logFile.writeText("""
+            [05:05:50] [main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/]:
+                 Mod List:
+                    External 1.0.0 (external)
+                    Example 0.0NONE (example)
+            [05:06:10] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected external:scout that was registered with CREATURE mob category but was added under MONSTER mob category for example:highlands biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
+            [05:06:11] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected external:burrower that was registered with CREATURE mob category but was added under MONSTER mob category for example:highlands biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
+            [05:06:12] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected external:scout that was registered with CREATURE mob category but was added under MONSTER mob category for example:grove biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
+            [05:06:13] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected external:scout that was registered with CREATURE mob category but was added under MONSTER mob category for example:thicket biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected repeated external dependency warnings to remain allowlisted")
+        assertTrue(
+            audit.allowedIssues.size == 2,
+            "Repeated warnings should be grouped by identical machine evidence, got: ${audit.allowedIssues}"
+        )
+        assertTrue(
+            audit.allowedIssues.any {
+                it.contains("3 occurrences") &&
+                    it.contains("entity 'external:scout' belongs to external dependency namespace 'external'")
+            },
+            "Expected repeated external entity evidence to be summarized with count, got: ${audit.allowedIssues}"
+        )
+        assertTrue(
+            audit.allowedIssues.any {
+                it.startsWith("line ") &&
+                    it.contains("entity 'external:burrower' belongs to external dependency namespace 'external'")
+            },
+            "Single warnings should retain their direct line evidence, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps external mob category warning when target source references entity`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        val javaDir = projectDir.resolve("src/main/java/example")
+        javaDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        javaDir.resolve("Integration.java").writeText("""
+            package example;
+
+            final class Integration {
+                static final String ENTITY = "quark:stoneling";
+            }
+        """.trimIndent())
+        val logFile = tempDir.resolve("referenced-mob-category.log")
+        logFile.writeText("""
+            [05:06:10] [Server thread/WARN] [ne.ne.ne.se.ServerLifecycleHooks/]: Detected quark:stoneling that was registered with CREATURE mob category but was added under MONSTER mob category for aether:skyroot_forest biome! Mobs should be added to biomes under the same mob category that the mob was registered as to prevent mob cap spawning issues.
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Detected quark:stoneling") },
+            "Target source references to the entity must keep warning fatal"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows external dependency creative tab duplicate warning with dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "maven.modrinth:quark:4.1-480"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("external-creative-duplicate.log")
+        logFile.writeText("""
+            [05:05:50] [main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/]:
+                 Mod List:
+                    Quark 4.1-480 (quark)
+                    The Aether 0.0NONE (aether)
+            [07:58:51] [Render thread/WARN] [me.je.li.pl.va.in.ItemStackListFactory/]: 52 duplicate items were found in 'Tools & Utilities' creative tab's: displayItems
+            This may indicate that these types of item need a subtype interpreter added to JEI:
+            [quark:seed_pouch, quark:pathfinders_quill]
+            [07:58:51] [Render thread/DEBUG] [zeta/]: minecraft:combat - 0/0/0 - 0/0
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected external dependency creative duplicate warning to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("duplicate item ids [quark:seed_pouch, quark:pathfinders_quill] belong to external dependency namespace(s) quark") },
+            "Expected machine evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps external creative tab duplicate warning when target source references item`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/aether")
+        val javaDir = projectDir.resolve("src/main/java/example")
+        javaDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=aether\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "maven.modrinth:quark:4.1-480"
+            }
+        """.trimIndent() + "\n")
+        javaDir.resolve("Integration.java").writeText("""
+            package example;
+
+            final class Integration {
+                static final String ITEM = "quark:seed_pouch";
+            }
+        """.trimIndent())
+        val logFile = tempDir.resolve("referenced-external-creative-duplicate.log")
+        logFile.writeText("""
+            [07:58:51] [Render thread/WARN] [me.je.li.pl.va.in.ItemStackListFactory/]: 52 duplicate items were found in 'Tools & Utilities' creative tab's: displayItems
+            [quark:seed_pouch, quark:pathfinders_quill]
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("duplicate items were found") },
+            "Target source references to the item must keep warning fatal"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allowlists source inherited creative tab duplicate only with source evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeSourceInheritedCreativeDuplicateEvidence(projectDir, includeSubtypeFix = false)
+        writeSourceInheritedCreativeDuplicateEvidence(sourceDir, includeSubtypeFix = false)
+        val logFile = tempDir.resolve("example-client-world.log")
+        logFile.writeText(sourceInheritedCreativeDuplicateLog())
+
+        assertTrue(projectHasCreativeDuplicateItemSourceShape(projectDir, "example:variant_tool"))
+        assertTrue(projectHasCreativeDuplicateItemSourceShape(sourceDir, "example:variant_tool"))
+        assertTrue(!projectRegistersJeiSubtypeForItem(projectDir, "example:variant_tool"))
+        assertTrue(detectBenchmarkModId(projectDir) == "example")
+        assertTrue(creativeTabDuplicateWarning(logFile.readText().lines(), 0)?.itemIds == listOf("example:variant_tool"))
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected source-inherited issue to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("input and converted sources duplicate creative-tab item id(s) example:variant_tool") },
+            "Expected allowlist evidence trace, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps source inherited creative tab duplicate warning without evidence`(@TempDir tempDir: Path) {
+        val logFile = tempDir.resolve("example-client-world.log")
+        logFile.writeText(sourceInheritedCreativeDuplicateLog())
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = tempDir.resolve("missing-project"))
+
+        assertTrue(
+            audit.findings.any { it.contains("duplicate items were found") },
+            "Expected missing evidence to keep warning fatal to the strict gate"
+        )
+    }
+
+    @Test
+    fun `runtime log audit rejects source inherited creative tab duplicate allowlist after subtype fix`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeSourceInheritedCreativeDuplicateEvidence(projectDir, includeSubtypeFix = true)
+        writeSourceInheritedCreativeDuplicateEvidence(sourceDir, includeSubtypeFix = false)
+        val logFile = tempDir.resolve("example-client-world.log")
+        logFile.writeText(sourceInheritedCreativeDuplicateLog())
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("duplicate items were found") },
+            "Expected subtype registration to invalidate the upstream-issue allowlist"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allowlists source inherited missing sound definition`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeMissingSoundEvidence(projectDir, includeMissingEventInSoundsJson = false)
+        writeMissingSoundEvidence(sourceDir, includeMissingEventInSoundsJson = false)
+        val logFile = tempDir.resolve("missing-sound-inherited.log")
+        logFile.writeText("""
+            [06:14:12] [Render thread/WARN] [minecraft/SoundEngine]: Missing sound for event: example:entity.sentry.ambient
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected source-inherited missing sound to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("input and converted sources declare sound event 'example:entity.sentry.ambient'") },
+            "Expected source-inheritance evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps missing sound warning when input resource defined it`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeMissingSoundEvidence(projectDir, includeMissingEventInSoundsJson = false)
+        writeMissingSoundEvidence(sourceDir, includeMissingEventInSoundsJson = true)
+        val logFile = tempDir.resolve("missing-sound-regression.log")
+        logFile.writeText("""
+            [06:14:12] [Render thread/WARN] [minecraft/SoundEngine]: Missing sound for event: example:entity.sentry.ambient
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Missing sound for event: example:entity.sentry.ambient") },
+            "Porter-lost sound definitions must remain fatal"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allowlists source inherited missing sound file`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeMissingSoundFileEvidence(projectDir, includeSoundFile = false)
+        writeMissingSoundFileEvidence(sourceDir, includeSoundFile = false)
+        val logFile = tempDir.resolve("missing-sound-file-inherited.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-3/WARN] [minecraft/SoundManager]: File example:sounds/entity/sentry/ambient.ogg does not exist, cannot add it to event example:entity.sentry.ambient
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected source-inherited missing sound file to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("declare sound file 'example:entity/sentry/ambient'") },
+            "Expected sound-file evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps missing sound file warning when input has file`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeMissingSoundFileEvidence(projectDir, includeSoundFile = false)
+        writeMissingSoundFileEvidence(sourceDir, includeSoundFile = true)
+        val logFile = tempDir.resolve("missing-sound-file-regression.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-3/WARN] [minecraft/SoundManager]: File example:sounds/entity/sentry/ambient.ogg does not exist, cannot add it to event example:entity.sentry.ambient
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("example:sounds/entity/sentry/ambient.ogg") },
+            "Porter-lost sound files must remain fatal"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allowlists source inherited missing item model`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeMissingModelEvidence(projectDir, includeModelFile = false)
+        writeMissingModelEvidence(sourceDir, includeModelFile = false)
+        val logFile = tempDir.resolve("missing-model-inherited.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-1/WARN] [minecraft/ModelBakery]: Unable to load model: 'example:item/descriptive_item' referenced from: example:item/descriptive_item: java.io.FileNotFoundException: example:models/item/descriptive_item.json
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected source-inherited missing model to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("both omit model 'assets/example/models/item/descriptive_item.json'") },
+            "Expected missing-model evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps missing item model warning when input has model`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeMissingModelEvidence(projectDir, includeModelFile = false)
+        writeMissingModelEvidence(sourceDir, includeModelFile = true)
+        val logFile = tempDir.resolve("missing-model-regression.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-1/WARN] [minecraft/ModelBakery]: Unable to load model: 'example:item/descriptive_item' referenced from: example:item/descriptive_item: java.io.FileNotFoundException: example:models/item/descriptive_item.json
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Unable to load model: 'example:item/descriptive_item'") },
+            "Porter-lost model files must remain fatal"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows external dependency missing model with active dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation "maven.modrinth:depmod:1.0.0"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("external-missing-model.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-1/WARN] [minecraft/ModelBakery]: Unable to load model: 'depmod:item/missing_widget' referenced from: depmod:item/missing_widget: java.io.FileNotFoundException: depmod:models/item/missing_widget.json
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected external dependency missing model to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("external dependency missing model warning") && it.contains("depmod") },
+            "Expected external dependency evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps external missing model without dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        val logFile = tempDir.resolve("external-missing-model-without-evidence.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-1/WARN] [minecraft/ModelBakery]: Unable to load model: 'depmod:item/missing_widget' referenced from: depmod:item/missing_widget: java.io.FileNotFoundException: depmod:models/item/missing_widget.json
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Unable to load model: 'depmod:item/missing_widget'") },
+            "External missing model warnings require active dependency evidence"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allows external dependency sound and logger warnings with dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/sakura")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=sakura\n")
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                runtimeOnly "curse.maven:patchouli-306770:6164575"
+                runtimeOnly "maven.modrinth:mysterious_mountain_lib:1.0.0"
+            }
+        """.trimIndent() + "\n")
+        val logFile = tempDir.resolve("external-dependency-sounds.log")
+        logFile.writeText("""
+            [05:05:50] [main/INFO] [ne.ne.fm.lo.mo.ModDiscoverer/]:
+                 Mod List:
+                    Patchouli 1.21-88 (patchouli)
+                    Mysterious Mountain Lib 1.0.0 (mysterious_mountain_lib)
+                    Sakura 0.0NONE (sakura)
+            [06:14:12] [Render thread/WARN] [patchouli/]: Could not locate JEI keybindings, lookups in books may not work
+            [06:14:13] [Worker-Main-3/WARN] [minecraft/SoundManager]: File mmlib:sounds/presented_by_zaia.ogg does not exist, cannot add it to event mysterious_mountain_lib:presented_by_zaia
+            [06:14:14] [Render thread/ERROR] [minecraft/SoundEngine]: Missing subtitle translation{key='mmlib.sound.presented_by_zaia', args=[]} for sound event: mysterious_mountain_lib:presented_by_zaia
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected external dependency warnings to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("Patchouli/JEI integration warning") && it.contains("patchouli") },
+            "Expected Patchouli owner evidence, got: ${audit.allowedIssues}"
+        )
+        assertTrue(
+            audit.allowedIssues.any { it.contains("external dependency missing sound file warning") && it.contains("mysterious_mountain_lib") },
+            "Expected external sound file evidence, got: ${audit.allowedIssues}"
+        )
+        assertTrue(
+            audit.allowedIssues.any { it.contains("external dependency missing subtitle warning") && it.contains("mysterious_mountain_lib") },
+            "Expected external subtitle evidence, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps external dependency sound and logger warnings without dependency evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/sakura")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=sakura\n")
+        val logFile = tempDir.resolve("external-dependency-sounds-no-evidence.log")
+        logFile.writeText("""
+            [06:14:12] [Render thread/WARN] [patchouli/]: Could not locate JEI keybindings, lookups in books may not work
+            [06:14:13] [Worker-Main-3/WARN] [minecraft/SoundManager]: File mmlib:sounds/presented_by_zaia.ogg does not exist, cannot add it to event mysterious_mountain_lib:presented_by_zaia
+            [06:14:14] [Render thread/ERROR] [minecraft/SoundEngine]: Missing subtitle translation{key='mmlib.sound.presented_by_zaia', args=[]} for sound event: mysterious_mountain_lib:presented_by_zaia
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Could not locate JEI keybindings") },
+            "Patchouli/JEI warning must not be allowed by static substring"
+        )
+        assertTrue(
+            audit.findings.any { it.contains("File mmlib:sounds/presented_by_zaia.ogg") },
+            "External missing sound file warning must not be allowed by static substring"
+        )
+        assertTrue(
+            audit.findings.any { it.contains("Missing subtitle translation") },
+            "External missing subtitle warning must not be allowed by static substring"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allowlists source inherited texture mip size`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeTextureMipEvidence(projectDir, width = 17, height = 17)
+        writeTextureMipEvidence(sourceDir, width = 17, height = 17)
+        val logFile = tempDir.resolve("texture-mip-inherited.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-1/WARN] [minecraft/SpriteLoader]: Texture example:block/fluids/odd_mip_overlay with size 17x17 limits mip level from 4 to 0
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected source-inherited texture mip warning to be allowlisted: ${audit.findings}")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("inherited size 17x17") },
+            "Expected texture-size evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allowlists source inherited slow deferred work`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeSourceInheritedDeferredWorkEvidence(
+            sourceDir,
+            forgePackage = "net.minecraftforge",
+            resourceLocationCall = "new ResourceLocation(\"example\", \"overworld\")"
+        )
+        writeSourceInheritedDeferredWorkEvidence(
+            projectDir,
+            forgePackage = "net.neoforged",
+            resourceLocationCall = "ResourceLocation.fromNamespaceAndPath(\"example\", \"overworld\")"
+        )
+        val logFile = tempDir.resolve("deferred-work-inherited.log")
+        logFile.writeText("""
+            [06:14:12] [Render thread/WARN] [ne.ne.fm.DeferredWorkQueue/LOADING]: Mod 'example' took 1.082 s to run a deferred task.
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected source-inherited slow deferred work warning to be allowlisted: $audit")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("source-inherited slow deferred work warning") },
+            "Expected deferred-work evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps slow deferred work warning without source evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        writeSourceInheritedDeferredWorkEvidence(
+            projectDir,
+            forgePackage = "net.neoforged",
+            resourceLocationCall = "ResourceLocation.fromNamespaceAndPath(\"example\", \"overworld\")"
+        )
+        val logFile = tempDir.resolve("deferred-work-no-source.log")
+        logFile.writeText("""
+            [06:14:12] [Render thread/WARN] [ne.ne.fm.DeferredWorkQueue/LOADING]: Mod 'example' took 1.082 s to run a deferred task.
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("took 1.082 s to run a deferred task") },
+            "Slow deferred work warnings require input source evidence"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps slow deferred work warning when setup fingerprints diverge`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeSourceInheritedDeferredWorkEvidence(
+            sourceDir,
+            forgePackage = "net.minecraftforge",
+            resourceLocationCall = "new ResourceLocation(\"example\", \"overworld\")",
+            extraDeferredCall = "DifferentRegistry.register();"
+        )
+        writeSourceInheritedDeferredWorkEvidence(
+            projectDir,
+            forgePackage = "net.neoforged",
+            resourceLocationCall = "ResourceLocation.fromNamespaceAndPath(\"example\", \"overworld\")"
+        )
+        val logFile = tempDir.resolve("deferred-work-diverged.log")
+        logFile.writeText("""
+            [06:14:12] [Render thread/WARN] [ne.ne.fm.DeferredWorkQueue/LOADING]: Mod 'example' took 1.082 s to run a deferred task.
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("took 1.082 s to run a deferred task") },
+            "Slow deferred work warnings require identical input and converted enqueueWork call fingerprints"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allowlists source inherited gametest server lag with source log evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeSourceInheritedServerLagEvidence(projectDir)
+        writeSourceInheritedServerLagEvidence(sourceDir)
+        val logFile = tempDir.resolve("gametest-server-lag.log")
+        logFile.writeText("""
+            [06:14:12] [Server thread/INFO] [example/]: Allocated dimension 0 for session 00000000-0000-0000-0000-000000000000
+            [06:14:12] [Server thread/INFO] [example/]: Recovering temporary mirror dimension 0 from saved cleanup marker
+            [06:14:12] [Server thread/INFO] [example/]: Re-queued cleanup for recovered temporary mirror dimension 0
+            [06:14:12] [Server thread/WARN] [minecraft/MinecraftServer]: Can't keep up! Is the server overloaded? Running 4627ms or 92 ticks behind
+            [06:14:13] [Server thread/INFO] [net.minecraft.gametest.framework.GameTestServer/]: All 36 required tests passed :)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected source-inherited GameTest lag warning to be allowlisted: $audit")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("source-inherited GameTest server lag warning") },
+            "Expected GameTest lag evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps gametest server lag without source log evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        writeSourceInheritedServerLagEvidence(projectDir)
+        val logFile = tempDir.resolve("gametest-server-lag-no-source.log")
+        logFile.writeText("""
+            [06:14:12] [Server thread/INFO] [example/]: Allocated dimension 0 for session 00000000-0000-0000-0000-000000000000
+            [06:14:12] [Server thread/INFO] [example/]: Recovering temporary mirror dimension 0 from saved cleanup marker
+            [06:14:12] [Server thread/INFO] [example/]: Re-queued cleanup for recovered temporary mirror dimension 0
+            [06:14:12] [Server thread/WARN] [minecraft/MinecraftServer]: Can't keep up! Is the server overloaded? Running 4627ms or 92 ticks behind
+            [06:14:13] [Server thread/INFO] [net.minecraft.gametest.framework.GameTestServer/]: All 36 required tests passed :)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Can't keep up") },
+            "GameTest lag warnings require input source log-template evidence"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps texture mip warning when input dimensions differ`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeTextureMipEvidence(projectDir, width = 17, height = 17)
+        writeTextureMipEvidence(sourceDir, width = 16, height = 16)
+        val logFile = tempDir.resolve("texture-mip-regression.log")
+        logFile.writeText("""
+            [06:14:12] [Worker-Main-1/WARN] [minecraft/SpriteLoader]: Texture example:block/fluids/odd_mip_overlay with size 17x17 limits mip level from 4 to 0
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Texture example:block/fluids/odd_mip_overlay") },
+            "Porter-changed texture dimensions must remain fatal"
+        )
+    }
+
+    @Test
+    fun `process scope matcher recognizes benchmark java command lines`(@TempDir tempDir: Path) {
+        val sakuraDir = tempDir.resolve("work/sakura").toAbsolutePath().normalize()
+        val hotbathDir = tempDir.resolve("work/hotbath").toAbsolutePath().normalize()
+        val commandLine = """
+            "C:\Program Files\Java\jdk-21\bin\java.exe"
+            -Dfml.modFolders=sakura%%$sakuraDir\build\classes\java\main;sakura%%$sakuraDir\build\resources\main
+            -cp $sakuraDir\build\moddev\artifacts\neoforge-21.1.219.jar
+            net.neoforged.devlaunch.Main
+        """.trimIndent()
+
+        assertTrue(processCommandMatchesScope(commandLine, sakuraDir))
+        assertTrue(!processCommandMatchesScope(commandLine, hotbathDir))
+    }
+
+    @Test
+    fun `benchmark gametest smoke harness is staged only when project has no gametests`(@TempDir tempDir: Path) {
+        val projectWithoutTests = tempDir.resolve("without-tests")
+        projectWithoutTests.createDirectories()
+        projectWithoutTests.resolve("gradle.properties").writeText("mod_id=resmod\n")
+
+        val issues = stageBenchmarkGameTestSmoke(projectWithoutTests)
+
+        assertTrue(issues.isEmpty(), "Expected smoke harness staging to succeed: $issues")
+        val stagedSmokeHarness = projectWithoutTests.resolve(
+            "src/main/java/com/modporter/generated/resmod/benchmark/ModPorterBenchmarkGameTests.java"
+        )
+        assertTrue(stagedSmokeHarness.exists())
+        assertTrue(!projectWithoutTests.resolve("src/main/java/com/modporter/benchmark/ModPorterBenchmarkGameTests.java").exists())
+        assertTrue(projectWithoutTests.resolve("src/main/resources/gameteststructures/modporter_benchmark_empty.snbt").exists())
+        assertTrue(
+            stagedSmokeHarness.readText().contains("package com.modporter.generated.resmod.benchmark;")
+        )
+        assertTrue(
+            stagedSmokeHarness.readText().contains("""@GameTestHolder("resmod")""")
+        )
+
+        val projectWithTests = tempDir.resolve("with-tests")
+        val existingTestDir = projectWithTests.resolve("src/main/java/com/example")
+        existingTestDir.createDirectories()
+        existingTestDir.resolve("ExistingGameTests.java").writeText("""
+            package com.example;
+
+            final class ExistingGameTests {
+                @GameTest(template = "empty")
+                static void existing(Object helper) {
+                }
+            }
+        """.trimIndent())
+
+        val existingIssues = stageBenchmarkGameTestSmoke(projectWithTests)
+
+        assertTrue(existingIssues.isEmpty(), "Expected existing GameTest detection to succeed: $existingIssues")
+        assertTrue(!projectWithTests.resolve("src/main/java/com/modporter/benchmark/ModPorterBenchmarkGameTests.java").exists())
+        assertTrue(!projectWithTests.resolve("src/main/java/com/modporter/generated/with_tests/benchmark/ModPorterBenchmarkGameTests.java").exists())
+    }

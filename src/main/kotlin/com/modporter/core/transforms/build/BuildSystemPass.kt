@@ -244,6 +244,12 @@ class BuildSystemPass(
         }
 
         try {
+            changes.addAll(migrateSameProjectStaticFieldReflection(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate same-project static field reflection: ${e.message}")
+        }
+
+        try {
             changes.addAll(migrateClientEventPackageTargets(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Failed to migrate client event package targets: ${e.message}")
@@ -806,6 +812,7 @@ class BuildSystemPass(
             ))
             content = prepareGameTestTaskPattern.replace(content, replacement)
         }
+        content = ensureGameTestDimensionDataPackTask(content, file.parent, changes, file)
 
         // 13. Remove reobfJar references and related comments
         content = content.replace(Regex("""^.*[Rr]eobf.*\n?""", RegexOption.MULTILINE), "")
@@ -966,6 +973,63 @@ tasks.register('sourceJar', Jar) {
             ruleId = "build-sourcejar-task"
         ))
         return content.substring(0, insertAt) + task + content.substring(insertAt)
+    }
+
+    private fun ensureGameTestDimensionDataPackTask(
+        content: String,
+        projectDir: Path,
+        changes: MutableList<Change>,
+        file: Path
+    ): String {
+        if (file.fileName.toString().endsWith(".kts")) return content
+        if (content.contains("modporter_gametest_dimensions")) return content
+        if (!projectHasGameTests(projectDir)) return content
+        if (!projectHasCustomDimensionResources(projectDir)) return content
+
+        val insert = "\n\n$GAMETEST_DIMENSION_DATAPACK_TASK\n"
+        changes.add(Change(
+            file = file,
+            line = content.lineNumberAt(content.length),
+            description = "Generate a GameTest-only datapack that adds modded dimensions to the flat test world preset",
+            before = "(missing GameTest dimension datapack task)",
+            after = "prepareGameTestServerRun creates run/world/datapacks/modporter_gametest_dimensions",
+            confidence = Confidence.HIGH,
+            ruleId = "build-gametest-dimension-flat-preset"
+        ))
+        return content.trimEnd() + insert
+    }
+
+    private fun projectHasGameTests(projectDir: Path): Boolean {
+        val srcDir = projectDir.resolve("src")
+        if (!srcDir.exists()) return false
+        Files.walk(srcDir).use { stream ->
+            return stream.anyMatch { path ->
+                path.isRegularFile() &&
+                    path.extension == "java" &&
+                    runCatching { path.readText().contains("@GameTest") }.getOrDefault(false)
+            }
+        }
+    }
+
+    private fun projectHasCustomDimensionResources(projectDir: Path): Boolean {
+        return listOf(
+            projectDir.resolve("src/main/resources/data"),
+            projectDir.resolve("src/generated/resources/data")
+        ).any { dataRoot ->
+            if (!dataRoot.exists()) {
+                false
+            } else {
+                Files.walk(dataRoot).use { stream ->
+                    stream.anyMatch { path -> isDimensionJsonResource(dataRoot, path) }
+                }
+            }
+        }
+    }
+
+    private fun isDimensionJsonResource(dataRoot: Path, path: Path): Boolean {
+        if (!path.isRegularFile() || path.extension != "json") return false
+        val parts = dataRoot.relativize(path).map { it.toString() }
+        return parts.size >= 3 && parts[1] == "dimension"
     }
 
     private fun transformSettingsGradle(
@@ -1396,6 +1460,280 @@ private static boolean hasNativePlayerVisibilityHook(Entity $entityParam) {
         val source: String,
         val isClientOnly: Boolean
     )
+
+    private data class ProjectJavaClass(
+        val path: Path,
+        val packageName: String,
+        val className: String,
+        val qualifiedName: String,
+        val source: String
+    )
+
+    private data class ProjectStaticFieldDeclaration(
+        val range: IntRange,
+        val indent: String,
+        val type: String
+    )
+
+    private data class FieldAccessorEnsureResult(
+        val source: String,
+        val added: Boolean
+    )
+
+    private fun migrateSameProjectStaticFieldReflection(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val classes = collectProjectJavaClasses(srcDir)
+        if (classes.isEmpty()) return emptyList()
+
+        val classesByQualifiedName = classes.associateBy { it.qualifiedName }
+        val sources = classes.associate { it.path to it.source }.toMutableMap()
+        val originalSources = sources.toMap()
+        val changes = mutableListOf<Change>()
+        val emittedAccessorChanges = mutableSetOf<Pair<Path, String>>()
+        val id = """[A-Za-z_$][\w$]*"""
+        val ownerReference = """[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*"""
+        val assignmentType = """[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?(?:\s*<[^;=]+?>)?(?:\s*\[\s*\])*"""
+        val reflectionPattern = Regex(
+            """(?s)\b(?:java\.lang\.reflect\.)?Field\s+($id)\s*=\s*($ownerReference)\s*\.class\s*\.getDeclaredField\s*\(\s*"($id)"\s*\)\s*;\s*\1\s*\.setAccessible\s*\(\s*true\s*\)\s*;\s*($assignmentType)\s+($id)\s*=\s*(?:\(\s*[^;]+?\)\s*)?\1\s*\.get\s*\(\s*null\s*\)\s*;"""
+        )
+
+        for (caller in classes) {
+            var callerSource = sources[caller.path] ?: continue
+            if (!callerSource.contains("getDeclaredField") || !callerSource.contains(".get(null)")) continue
+
+            var callerChanged = false
+            while (true) {
+                val masked = maskJavaCommentsAndTextBlocks(callerSource)
+                val match = reflectionPattern.find(masked) ?: break
+                val imports = javaSingleTypeImports(callerSource)
+                val wildcardImports = javaWildcardImports(callerSource)
+                val ownerReferenceText = callerSource.substring(match.groups[2]!!.range).trim()
+                val fieldName = callerSource.substring(match.groups[3]!!.range).trim()
+                val owner = resolveProjectJavaClassReference(
+                    ownerReferenceText,
+                    caller.packageName,
+                    imports,
+                    wildcardImports,
+                    classesByQualifiedName
+                ) ?: break
+                if (owner.path == caller.path) break
+
+                val currentOwnerSource = sources[owner.path] ?: break
+                val fieldDeclaration = findPrivateStaticFieldDeclaration(currentOwnerSource, fieldName) ?: break
+                val accessorName = sameProjectFieldAccessorName(fieldName)
+                val ensured = ensureSameProjectFieldAccessor(currentOwnerSource, fieldDeclaration, fieldName, accessorName)
+                    ?: break
+                sources[owner.path] = ensured.source
+                if (ensured.added && emittedAccessorChanges.add(owner.path to accessorName)) {
+                    changes.add(Change(
+                        file = owner.path,
+                        line = currentOwnerSource.lineNumberAt(fieldDeclaration.range.first),
+                        description = "Expose same-project private static field through explicit source accessor",
+                        before = "private static ${fieldDeclaration.type} $fieldName",
+                        after = "public static ${fieldDeclaration.type} $accessorName()",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-same-project-static-field-accessor"
+                    ))
+                }
+
+                val targetType = normalizeJavaTypeWhitespace(callerSource.substring(match.groups[4]!!.range))
+                val targetName = callerSource.substring(match.groups[5]!!.range).trim()
+                val directAssignment = "$targetType $targetName = $ownerReferenceText.$accessorName();"
+                callerSource = callerSource.replaceRange(match.range, directAssignment)
+                callerSource = unwrapReflectiveOperationTryBlocksContaining(callerSource, accessorName)
+                callerSource = removeJavaImportIfSimpleNameUnused(callerSource, "java.lang.reflect.Field")
+                callerSource = removeJavaImportIfSimpleNameUnused(callerSource, "java.lang.ReflectiveOperationException")
+                callerChanged = true
+                changes.add(Change(
+                    file = caller.path,
+                    line = callerSource.lineNumberAt(match.range.first.coerceAtMost(callerSource.length)),
+                    description = "Replace same-project static field reflection with explicit source accessor call",
+                    before = "$ownerReferenceText.class.getDeclaredField(\"$fieldName\")",
+                    after = "$ownerReferenceText.$accessorName()",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-same-project-static-field-reflection"
+                ))
+            }
+
+            if (callerChanged) {
+                sources[caller.path] = callerSource
+            }
+        }
+
+        if (!dryRun) {
+            for ((path, source) in sources) {
+                if (source != originalSources[path]) {
+                    path.writeText(source)
+                }
+            }
+        }
+        return changes
+    }
+
+    private fun collectProjectJavaClasses(srcDir: Path): List<ProjectJavaClass> {
+        val result = mutableListOf<ProjectJavaClass>()
+        java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val source = javaFile.readText()
+                val packageName = javaPackageName(source).orEmpty()
+                val className = javaFile.fileName.toString().removeSuffix(".java")
+                val qualifiedName = if (packageName.isBlank()) className else "$packageName.$className"
+                result.add(ProjectJavaClass(javaFile, packageName, className, qualifiedName, source))
+            }
+        return result
+    }
+
+    private fun javaSingleTypeImports(source: String): Map<String, String> =
+        Regex("""(?m)^\s*import\s+(?!static\b)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+            .findAll(source)
+            .associate { match ->
+                val qualifiedName = match.groupValues[1]
+                qualifiedName.substringAfterLast('.') to qualifiedName
+            }
+
+    private fun javaWildcardImports(source: String): Set<String> =
+        Regex("""(?m)^\s*import\s+(?!static\b)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.\*\s*;""")
+            .findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+
+    private fun resolveProjectJavaClassReference(
+        reference: String,
+        packageName: String,
+        imports: Map<String, String>,
+        wildcardImports: Set<String>,
+        classesByQualifiedName: Map<String, ProjectJavaClass>
+    ): ProjectJavaClass? {
+        val normalized = reference.replace(Regex("""\s+"""), "")
+        if (normalized.contains('.')) {
+            classesByQualifiedName[normalized]?.let { return it }
+        }
+        imports[normalized]?.let { imported ->
+            classesByQualifiedName[imported]?.let { return it }
+        }
+        val samePackageName = if (packageName.isBlank()) normalized else "$packageName.$normalized"
+        classesByQualifiedName[samePackageName]?.let { return it }
+        val wildcardCandidates = wildcardImports
+            .map { "$it.$normalized" }
+            .mapNotNull { classesByQualifiedName[it] }
+        return wildcardCandidates.singleOrNull()
+    }
+
+    private fun findPrivateStaticFieldDeclaration(source: String, fieldName: String): ProjectStaticFieldDeclaration? {
+        val masked = maskJavaCommentsAndLiterals(source)
+        val fieldPattern = Regex(
+            """(?m)^([ \t]*)private\s+((?:(?:static|final|volatile|transient)\s+)*)((?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)(?:\s*<[^;\r\n=]+>)?(?:\s*\[\s*\])*)\s+${Regex.escape(fieldName)}\s*(?:=[^;\r\n]*)?;"""
+        )
+        val match = fieldPattern.find(masked) ?: return null
+        if (!Regex("""\bstatic\b""").containsMatchIn(match.groupValues[2])) return null
+        return ProjectStaticFieldDeclaration(
+            range = match.range,
+            indent = match.groupValues[1],
+            type = normalizeJavaTypeWhitespace(source.substring(match.groups[3]!!.range))
+        )
+    }
+
+    private fun ensureSameProjectFieldAccessor(
+        source: String,
+        fieldDeclaration: ProjectStaticFieldDeclaration,
+        fieldName: String,
+        accessorName: String
+    ): FieldAccessorEnsureResult? {
+        val masked = maskJavaCommentsAndLiterals(source)
+        val existingName = Regex("""\b${Regex.escape(accessorName)}\s*\(""").containsMatchIn(masked)
+        val existingAccessor = Regex(
+            """\bpublic\s+static\s+[^;{}]+?\s+${Regex.escape(accessorName)}\s*\(\s*\)"""
+        ).containsMatchIn(masked)
+        if (existingName) {
+            return if (existingAccessor) FieldAccessorEnsureResult(source, added = false) else null
+        }
+
+        val method = """
+
+${fieldDeclaration.indent}public static ${fieldDeclaration.type} $accessorName() {
+${fieldDeclaration.indent}    return $fieldName;
+${fieldDeclaration.indent}}
+""".trimEnd()
+        val insertAt = fieldDeclaration.range.last + 1
+        return FieldAccessorEnsureResult(
+            source = source.substring(0, insertAt) + method + source.substring(insertAt),
+            added = true
+        )
+    }
+
+    private fun sameProjectFieldAccessorName(fieldName: String): String {
+        val capitalized = fieldName.take(1).uppercase() + fieldName.drop(1)
+        return "modporterAccess$capitalized"
+    }
+
+    private fun normalizeJavaTypeWhitespace(type: String): String =
+        type.trim()
+            .replace(Regex("""\s+"""), " ")
+            .replace(Regex("""\s*<\s*"""), "<")
+            .replace(Regex("""\s*,\s*"""), ", ")
+            .replace(Regex("""\s*>\s*"""), ">")
+            .replace(Regex("""\s*\[\s*]\s*"""), "[]")
+
+    private fun unwrapReflectiveOperationTryBlocksContaining(source: String, requiredToken: String): String {
+        val id = """[A-Za-z_$][\w$]*"""
+        var result = source
+        var searchStart = 0
+        while (searchStart < result.length) {
+            val masked = maskJavaCommentsAndTextBlocks(result)
+            val tryMatch = Regex("""(?m)^([ \t]*)try\s*\{""").find(masked, searchStart) ?: break
+            val tryOpen = masked.indexOf('{', tryMatch.range.first)
+            val tryClose = findMatchingBrace(result, tryOpen)
+            if (tryClose <= tryOpen) {
+                searchStart = tryMatch.range.last + 1
+                continue
+            }
+            val afterTry = result.substring(tryClose + 1)
+            val catchMatch = Regex(
+                """^\s*catch\s*\(\s*(?:java\.lang\.)?ReflectiveOperationException\s+$id\s*\)\s*\{"""
+            ).find(afterTry)
+            if (catchMatch == null) {
+                searchStart = tryClose + 1
+                continue
+            }
+            val catchOpen = result.indexOf('{', tryClose + 1 + catchMatch.range.first)
+            val catchClose = findMatchingBrace(result, catchOpen)
+            if (catchClose <= catchOpen) {
+                searchStart = tryClose + 1
+                continue
+            }
+            val tryBody = result.substring(tryOpen + 1, tryClose)
+            if (!tryBody.contains(requiredToken)) {
+                searchStart = tryClose + 1
+                continue
+            }
+            val replacement = unindentJavaBlockBody(tryBody, tryMatch.groupValues[1])
+            result = result.substring(0, tryMatch.range.first) + replacement + result.substring(catchClose + 1)
+            searchStart = tryMatch.range.first + replacement.length
+        }
+        return result
+    }
+
+    private fun unindentJavaBlockBody(body: String, targetIndent: String): String {
+        val trimmed = body.trim('\r', '\n')
+        if (trimmed.isBlank()) return ""
+        val lines = trimmed.split(Regex("""\r?\n"""))
+        val childIndent = lines
+            .filter { it.isNotBlank() }
+            .map { it.takeWhile { ch -> ch == ' ' || ch == '\t' } }
+            .filter { it.length > targetIndent.length && it.startsWith(targetIndent) }
+            .minByOrNull { it.length }
+        val unindented = lines.joinToString("\n") { line ->
+            if (childIndent != null && line.startsWith(childIndent)) {
+                targetIndent + line.substring(childIndent.length)
+            } else {
+                line
+            }
+        }
+        return "$unindented\n"
+    }
 
     private fun guardClientOnlyEventRegistrations(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
@@ -3550,10 +3888,34 @@ config="$configName"
                 "public net.minecraft.client.renderer.LevelRenderer skyBuffer"
             "public net.minecraft.client.renderer.LevelRenderer f_109473_" ->
                 "public net.minecraft.client.renderer.LevelRenderer darkBuffer"
+            "public net.minecraft.world.entity.projectile.FishingHook f_37089_" ->
+                "public net.minecraft.world.entity.projectile.FishingHook nibble"
+            "public net.minecraft.world.entity.projectile.FishingHook f_37094_" ->
+                "public net.minecraft.world.entity.projectile.FishingHook hookedIn"
+            "protected-f net.minecraft.world.entity.projectile.FishingHook f_37096_" ->
+                "protected-f net.minecraft.world.entity.projectile.FishingHook luck"
+            "protected-f net.minecraft.world.entity.projectile.FishingHook f_37097_" ->
+                "protected-f net.minecraft.world.entity.projectile.FishingHook lureSpeed"
+            "public net.minecraft.world.inventory.ItemCombinerMenu f_39769_" ->
+                "public net.minecraft.world.inventory.ItemCombinerMenu inputSlots"
+            "public net.minecraft.world.inventory.ItemCombinerMenu f_39770_" ->
+                "public net.minecraft.world.inventory.ItemCombinerMenu access"
+            "public net.minecraft.world.level.block.state.properties.IntegerProperty f_223001_" ->
+                "public net.minecraft.world.level.block.state.properties.IntegerProperty max"
             "public net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool f_210560_" ->
                 "public net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool templates"
             "public net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool f_210559_" ->
                 "public net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates"
+            "public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool f_210560_" ->
+                "public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool templates"
+            "public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool f_210559_" ->
+                "public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates"
+            "public net.minecraft.world.level.block.entity.BrushableBlockEntity f_276563_" ->
+                "public net.minecraft.world.level.block.entity.BrushableBlockEntity item"
+            "public net.minecraft.world.entity.item.PrimedTnt f_32072_" ->
+                "public net.minecraft.world.entity.item.PrimedTnt owner"
+            "public net.minecraft.world.level.block.SaplingBlock f_55975_" ->
+                "public net.minecraft.world.level.block.SaplingBlock treeGrower"
             "public net.minecraft.client.resources.model.ModelBakery f_119234_" ->
                 "public net.minecraft.client.resources.model.ModelBakery UNREFERENCED_TEXTURES"
             "public net.minecraft.world.level.levelgen.structure.pieces.StructurePiecesBuilder f_192778_" ->
@@ -3623,6 +3985,7 @@ config="$configName"
             entry.contains("net.minecraft.client.gui.screens.TitleScreen\$WarningLabel") ||
             entry.contains("net.minecraft.world.entity.LivingEntity getDeathSound()") ||
             entry.contains("net.minecraft.world.entity.decoration.HangingEntity setDirection(") ||
+            entry.contains("net.minecraft.world.entity.vehicle.Boat\$Type <init>(") ||
             entry.contains("net.neoforged.neoforge.client.event.EntityRenderersEvent\$AddLayers renderers") ||
             entry.contains("net.minecraft.client.renderer.WeatherEffectRenderer rainSoundTime") ||
             entry.contains("net.minecraft.village.PointOfInterestType func_221052_a(")
@@ -3637,8 +4000,11 @@ config="$configName"
         if (!srcDir.exists()) return emptySet()
 
         val entries = linkedSetOf<String>()
-        java.nio.file.Files.walk(srcDir)
+        val javaFiles = java.nio.file.Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
+            .toList()
+        val abstractArrowSubclassFiles = collectJavaFilesExtending(javaFiles, setOf("AbstractArrow", "net.minecraft.world.entity.projectile.AbstractArrow"))
+        javaFiles
             .forEach { javaFile ->
                 val source = javaFile.readText()
                 if (containsGoalSelectorAvailableGoalsAccess(source)) {
@@ -3659,7 +4025,8 @@ config="$configName"
                 if (containsAbstractArrowFieldAccess(source, "firedFromWeapon")) {
                     entries.add("public net.minecraft.world.entity.projectile.AbstractArrow firedFromWeapon")
                 }
-                if (containsAbstractArrowMethodCall(source, "setPierceLevel")) {
+                if (containsAbstractArrowMethodCall(source, "setPierceLevel") ||
+                    (javaFile in abstractArrowSubclassFiles && containsLocalJavaMethodCall(source, "setPierceLevel"))) {
                     entries.add("public net.minecraft.world.entity.projectile.AbstractArrow setPierceLevel(B)V")
                 }
                 if (containsCreativeModeInventorySelectedTabAccess(source)) {
@@ -3679,6 +4046,9 @@ config="$configName"
                 }
                 if (containsDefaultAttributesSuppliersAccess(source)) {
                     entries.add("public net.minecraft.world.entity.ai.attributes.DefaultAttributes SUPPLIERS")
+                }
+                if (containsServerPlayerInitMenuCall(source)) {
+                    entries.add("public net.minecraft.server.level.ServerPlayer initMenu(Lnet/minecraft/world/inventory/AbstractContainerMenu;)V")
                 }
             }
         return entries
@@ -3732,6 +4102,12 @@ config="$configName"
         )
     }
 
+    private fun containsLocalJavaMethodCall(source: String, methodName: String): Boolean {
+        val code = maskJavaCommentsAndLiterals(source)
+        return Regex("""(?:\bthis\s*\.\s*)?${Regex.escape(methodName)}\s*\(""")
+            .containsMatchIn(code)
+    }
+
     private fun containsCreativeModeInventorySelectedTabAccess(source: String): Boolean {
         return containsJavaStaticFieldAccess(
             source,
@@ -3764,6 +4140,19 @@ config="$configName"
             """(?:net\.minecraft\.world\.entity\.ai\.attributes\.)?DefaultAttributes""",
             "SUPPLIERS"
         )
+
+    private fun containsServerPlayerInitMenuCall(source: String): Boolean {
+        val code = maskJavaCommentsAndLiterals(source)
+        if (!code.contains(".initMenu(")) return false
+        if (containsTypedJavaMethodCall(
+                code,
+                """(?:net\.minecraft\.server\.level\.)?ServerPlayer""",
+                "initMenu"
+            )) {
+            return true
+        }
+        return Regex("""\b[A-Za-z_$][\w$]*\s*\.\s*player\s*\.\s*initMenu\s*\(""").containsMatchIn(code)
+    }
 
     private fun containsTypedJavaFieldAccess(source: String, typePattern: String, fieldName: String): Boolean {
         val code = maskJavaCommentsAndLiterals(source)
@@ -5621,6 +6010,18 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         val bodyProtection: String? = null
     )
 
+    private data class JavaInheritanceDeclaration(
+        val file: Path,
+        val packageName: String,
+        val className: String,
+        val parentType: String,
+        val imports: Map<String, String>,
+        val wildcardImports: Set<String>
+    ) {
+        val fqn: String
+            get() = if (packageName.isBlank()) className else "$packageName.$className"
+    }
+
     private data class CustomStatDeclaration(
         val fieldName: String,
         val modIdExpr: String,
@@ -6548,7 +6949,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         if (withoutLineComments.isEmpty()) return null
         val match = Regex("""(?s)^([A-Za-z_$][\w$]*)\s*\((.*)\)$""").find(withoutLineComments) ?: return null
         val args = splitTopLevel(match.groupValues[2], ',').map { it.trim() }
-        if (args.size == 7 && args[2].contains("EnumMap") && args[2].contains("ArmorItem.Type")) {
+        if ((args.size == 7 || args.size == 8) && args[2].contains("EnumMap") && args[2].contains("ArmorItem.Type")) {
             return parseEnumMapArmorMaterialConstant(match.groupValues[1], args)
         }
         if (args.size < 9) return null
@@ -6586,6 +6987,8 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         val protections = listOf("BOOTS", "LEGGINGS", "CHESTPLATE", "HELMET")
             .map { protectionsByType[it] ?: return null }
         val registryName = stripJavaString(args[0])
+        val knockbackResistance = if (args.size >= 8) args[6] else "0.0F"
+        val repairIngredient = if (args.size >= 8) args[7] else args[6]
         return LegacyArmorMaterialConstant(
             fieldName = fieldName,
             registryName = registryName,
@@ -6594,8 +6997,8 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
             enchantmentValue = args[3],
             equipSound = args[4],
             toughness = args[5],
-            knockbackResistance = "0.0F",
-            repairIngredient = args[6],
+            knockbackResistance = knockbackResistance,
+            repairIngredient = repairIngredient,
             bodyProtection = protectionsByType["BODY"] ?: protections[2]
         )
     }
@@ -6897,6 +7300,7 @@ public abstract class ModPorterAbstractTreeGrower extends TreeGrower {
         } else {
             rawSound
         }
+        val repairIngredient = armorMaterialRepairIngredientSupplier(constant.repairIngredient)
         return """
                 public static final DeferredHolder<ArmorMaterial, ArmorMaterial> ${constant.fieldName} =
                         registerWithTexture("${constant.registryName}", "${constant.textureName}",
@@ -6909,11 +7313,27 @@ public abstract class ModPorterAbstractTreeGrower extends TreeGrower {
                                 }),
                                 ${constant.enchantmentValue},
                                 $sound,
-                                ${constant.repairIngredient},
+                                $repairIngredient,
                                 ${constant.toughness},
                                 ${constant.knockbackResistance}
                         );
         """.trimIndent()
+    }
+
+    private fun armorMaterialRepairIngredientSupplier(expression: String): String {
+        val trimmed = expression.trim()
+        if (trimmed.startsWith("() ->") ||
+            trimmed.startsWith("Supplier.") ||
+            Regex("""[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\s*::""").containsMatchIn(trimmed)) {
+            return trimmed
+        }
+        return if (trimmed == "Ingredient.EMPTY" ||
+            trimmed.startsWith("Ingredient.of(") ||
+            trimmed.startsWith("net.minecraft.world.item.crafting.Ingredient.")) {
+            "() -> $trimmed"
+        } else {
+            trimmed
+        }
     }
 
     private fun rewriteLegacyArmorMaterialConsumers(
@@ -6922,6 +7342,7 @@ public abstract class ModPorterAbstractTreeGrower extends TreeGrower {
         dryRun: Boolean
     ): List<Change> {
         val changes = mutableListOf<Change>()
+        val armorItemConsumerFiles = collectArmorItemDerivedFiles(srcDir)
         java.nio.file.Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
@@ -6948,7 +7369,7 @@ public abstract class ModPorterAbstractTreeGrower extends TreeGrower {
                     }
                 }
 
-                if (modified.contains("extends ArmorItem")) {
+                if (javaFile in armorItemConsumerFiles) {
                     val before = modified
                     modified = modified.replace(
                         Regex("""\bArmorMaterial\s+([A-Za-z_$][\w$]*)"""),
@@ -6981,6 +7402,135 @@ public abstract class ModPorterAbstractTreeGrower extends TreeGrower {
                 }
             }
         return changes
+    }
+
+    private fun collectArmorItemDerivedFiles(srcDir: Path): Set<Path> {
+        if (!srcDir.exists()) return emptySet()
+        val declarations = java.nio.file.Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .flatMap { file -> parseJavaInheritanceDeclarations(file).stream() }
+            .toList()
+        if (declarations.isEmpty()) return emptySet()
+        val declarationsByFqn = declarations.associateBy { it.fqn }
+        val derived = linkedSetOf("net.minecraft.world.item.ArmorItem")
+
+        var changed: Boolean
+        do {
+            changed = false
+            for (declaration in declarations) {
+                if (declaration.fqn in derived) continue
+                val parentFqn = resolveJavaParentFqn(declaration, declarationsByFqn.keys)
+                if (parentFqn in derived) {
+                    derived += declaration.fqn
+                    changed = true
+                }
+            }
+        } while (changed)
+
+        return declarations
+            .filter { it.fqn in derived && it.fqn != "net.minecraft.world.item.ArmorItem" }
+            .map { it.file }
+            .toSet()
+    }
+
+    private fun collectJavaFilesExtending(javaFiles: List<Path>, baseTypes: Set<String>): Set<Path> {
+        val declarations = javaFiles.flatMap { file -> parseJavaInheritanceDeclarations(file) }
+        if (declarations.isEmpty()) return emptySet()
+        val declarationsByFqn = declarations.associateBy { it.fqn }
+        val derived = linkedSetOf<String>()
+        baseTypes.forEach { base ->
+            derived += base
+            derived += base.substringAfterLast('.')
+        }
+
+        var changed: Boolean
+        do {
+            changed = false
+            for (declaration in declarations) {
+                if (declaration.fqn in derived || declaration.className in derived) continue
+                val parentFqn = resolveJavaParentFqn(declaration, declarationsByFqn.keys)
+                if (parentFqn in derived || parentFqn.substringAfterLast('.') in derived) {
+                    derived += declaration.fqn
+                    derived += declaration.className
+                    changed = true
+                }
+            }
+        } while (changed)
+
+        return declarations
+            .filter { it.fqn in derived || it.className in derived }
+            .map { it.file }
+            .toSet()
+    }
+
+    private fun parseJavaInheritanceDeclarations(file: Path): List<JavaInheritanceDeclaration> {
+        val source = file.readText()
+        val packageName = Regex("""(?m)^package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?: ""
+        val imports = linkedMapOf<String, String>()
+        val wildcardImports = linkedSetOf<String>()
+        Regex("""(?m)^\s*import\s+(?!static\b)([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\.\*)?)\s*;""")
+            .findAll(source)
+            .forEach { match ->
+                val importName = match.groupValues[1]
+                if (importName.endsWith(".*")) {
+                    wildcardImports += importName.removeSuffix(".*")
+                } else {
+                    imports[importName.substringAfterLast('.')] = importName
+                }
+            }
+        val id = """[A-Za-z_$][\w$]*"""
+        return Regex("""(?m)\bclass\s+($id)(?:\s*<[^>{};]+>)?\s+extends\s+($id(?:\.$id)*)""")
+            .findAll(source)
+            .map { match ->
+                JavaInheritanceDeclaration(
+                    file = file,
+                    packageName = packageName,
+                    className = match.groupValues[1],
+                    parentType = match.groupValues[2],
+                    imports = imports,
+                    wildcardImports = wildcardImports
+                )
+            }
+            .toList()
+    }
+
+    private fun resolveJavaParentFqn(
+        declaration: JavaInheritanceDeclaration,
+        knownSourceTypes: Set<String>
+    ): String {
+        val rawParent = declaration.parentType.trim()
+        if (rawParent == "ArmorItem" &&
+            (declaration.imports["ArmorItem"] == "net.minecraft.world.item.ArmorItem" ||
+                "net.minecraft.world.item" in declaration.wildcardImports)) {
+            return "net.minecraft.world.item.ArmorItem"
+        }
+        if (rawParent.contains(".")) {
+            if (rawParent.startsWith("net.")) return rawParent
+            val firstSegment = rawParent.substringBefore('.')
+            declaration.imports[firstSegment]?.let { imported ->
+                return "$imported.${rawParent.substringAfter('.')}"
+            }
+            val samePackage = if (declaration.packageName.isBlank()) {
+                rawParent
+            } else {
+                "${declaration.packageName}.$rawParent"
+            }
+            if (samePackage in knownSourceTypes) return samePackage
+            return rawParent
+        }
+        declaration.imports[rawParent]?.let { return it }
+        val samePackage = if (declaration.packageName.isBlank()) {
+            rawParent
+        } else {
+            "${declaration.packageName}.$rawParent"
+        }
+        if (samePackage in knownSourceTypes) return samePackage
+        if (rawParent == "ArmorItem") return "net.minecraft.world.item.ArmorItem"
+        return rawParent
     }
 
     private fun rewriteLegacyArmorTextureOverride(content: String): String {
@@ -9015,6 +9565,91 @@ plugins {
 }
 
 rootProject.name = '%%PROJECT_NAME%%'
+""".trimIndent()
+
+        val GAMETEST_DIMENSION_DATAPACK_TASK = """
+tasks.matching { it.name == 'prepareGameTestServerRun' }.configureEach {
+    doLast {
+        def packRoot = file('run/world/datapacks/modporter_gametest_dimensions')
+        if (packRoot.exists()) {
+            packRoot.deleteDir()
+        }
+
+        def dimensionEntries = [:]
+        [file('src/main/resources/data'), file('src/generated/resources/data')].findAll { it.exists() }.each { dataRoot ->
+            dataRoot.eachDir { namespaceDir ->
+                def dimensionDir = new File(namespaceDir, 'dimension')
+                if (!dimensionDir.exists()) {
+                    return
+                }
+                dimensionDir.eachFileRecurse(groovy.io.FileType.FILES) { dimFile ->
+                    if (!dimFile.name.endsWith('.json')) {
+                        return
+                    }
+                    def relative = dimensionDir.toPath()
+                            .relativize(dimFile.toPath())
+                            .toString()
+                            .replace(File.separator, '/')
+                            .replaceFirst(/\.json${'$'}/, '')
+                    dimensionEntries["${'$'}{namespaceDir.name}:${'$'}relative"] = new groovy.json.JsonSlurper().parse(dimFile)
+                }
+            }
+        }
+        if (dimensionEntries.isEmpty()) {
+            return
+        }
+
+        def dimensions = [
+                'minecraft:overworld': [
+                        type: 'minecraft:overworld',
+                        generator: [
+                                type: 'minecraft:flat',
+                                settings: [
+                                        biome: 'minecraft:plains',
+                                        features: false,
+                                        lakes: false,
+                                        layers: [
+                                                [block: 'minecraft:bedrock', height: 1],
+                                                [block: 'minecraft:dirt', height: 2],
+                                                [block: 'minecraft:grass_block', height: 1]
+                                        ],
+                                        structure_overrides: [
+                                                'minecraft:strongholds',
+                                                'minecraft:villages'
+                                        ]
+                                ]
+                        ]
+                ],
+                'minecraft:the_end': [
+                        type: 'minecraft:the_end',
+                        generator: [
+                                type: 'minecraft:noise',
+                                biome_source: [type: 'minecraft:the_end'],
+                                settings: 'minecraft:end'
+                        ]
+                ],
+                'minecraft:the_nether': [
+                        type: 'minecraft:the_nether',
+                        generator: [
+                                type: 'minecraft:noise',
+                                biome_source: [type: 'minecraft:multi_noise', preset: 'minecraft:nether'],
+                                settings: 'minecraft:nether'
+                        ]
+                ]
+        ]
+        dimensions.putAll(dimensionEntries)
+
+        def presetFile = new File(packRoot, 'data/minecraft/worldgen/world_preset/flat.json')
+        presetFile.parentFile.mkdirs()
+        presetFile.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([dimensions: dimensions]))
+        new File(packRoot, 'pack.mcmeta').text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([
+                pack: [
+                        pack_format: 48,
+                        description: 'ModPorter GameTest custom dimensions'
+                ]
+        ]))
+    }
+}
 """.trimIndent()
 
         /**

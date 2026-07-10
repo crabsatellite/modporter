@@ -9747,10 +9747,16 @@ class MappingCompletenessTest {
                 itemEntries.contains("source = code") &&
                 resourceKeys.contains("val code = maskJavaComments(source)") &&
                 resourceKeys.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
-                resourceKeys.contains("executableCode.contains(\"DeferredRegister<Enchantment>\")") &&
+                resourceKeys.contains("executableCode.contains(\"DeferredRegister\")") &&
+                resourceKeys.contains("executableCode.contains(\"DeferredHolder\")") &&
+                resourceKeys.contains("executableCode.contains(\"Enchantment\")") &&
+                resourceKeys.contains("executableCode.contains(\".register(\")") &&
                 resourceKeys.contains("registerPattern.find(code)") &&
+                resourceKeys.contains("val registerField = registerMatch.groupValues[1]") &&
+                resourceKeys.contains("Regex.escape(registerField)") &&
                 resourceKeys.contains("entryPattern.findAll(code)") &&
                 resourceKeys.contains("val executableSegment = executableCode.substring(match.range.first, match.range.last + 1)") &&
+                resourceKeys.contains("executableSegment.contains(\"\$registerField.register(\")") &&
                 resourceKeys.contains("val replacements = mutableListOf(registerMatch.range to helper)") &&
                 resourceKeys.contains("replacements.sortedByDescending") &&
                 resourceKeys.contains("replaceExecutableRegex("),

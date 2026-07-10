@@ -1,0 +1,1165 @@
+package com.modporter.transforms
+
+import com.modporter.core.transforms.build.BuildSystemPass
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertTimeoutPreemptively
+import org.junit.jupiter.api.io.TempDir
+import java.time.Duration
+import java.nio.file.Files
+import java.nio.file.Path
+import kotlin.io.path.*
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+class BuildSystemTest {
+
+    @TempDir
+    lateinit var tempDir: Path
+
+    private val pass = BuildSystemPass()
+
+    @Test
+    fun `replaces ForgeGradle plugin with NeoForge ModDev`() {
+        val projectDir = tempDir.resolve("p1")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+        assertTrue(content.contains("net.neoforged.moddev"))
+        assertFalse(content.contains("net.minecraftforge.gradle"))
+    }
+
+    @Test
+    fun `old style buildscript migration ignores quoted delimiters`() {
+        val projectDir = tempDir.resolve("old-style-quoted-delimiters")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText(listOf(
+            "buildscript {",
+            "    ext.doubleQuoted = \"}\"",
+            "    ext.singleQuoted = '}'",
+            "    ext.tripleDouble = \"\"\"",
+            "        documentation } repositories { dependencies {",
+            "    \"\"\"",
+            "    ext.tripleSingle = '''",
+            "        more documentation } repositories { dependencies {",
+            "    '''",
+            "    // } line-comment delimiter noise",
+            "    /* } block-comment delimiter noise */",
+            "    repositories {",
+            "        maven { url 'https://maven.minecraftforge.net/' }",
+            "    }",
+            "    dependencies {",
+            "        classpath 'net.minecraftforge.gradle:ForgeGradle:6.0.+'",
+            "    }",
+            "}",
+            "",
+            "apply plugin: 'net.minecraftforge.gradle'",
+            "",
+            "dependencies {",
+            "    implementation \"example:library:1.0\"",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-remove-buildscript" })
+        assertTrue(content.contains("id 'net.neoforged.moddev' version '2.0.140'"), content)
+        assertTrue(content.contains("implementation \"example:library:1.0\""), content)
+        assertFalse(content.contains("buildscript"), content)
+        assertFalse(content.contains("ForgeGradle"), content)
+        assertFalse(content.contains("apply plugin: 'net.minecraftforge.gradle'"), content)
+        assertFalse(content.contains("documentation } repositories"), content)
+    }
+
+    @Test
+    fun `hybrid buildscript with existing plugins block merges ModDev into plugins block`() {
+        val projectDir = tempDir.resolve("hybrid-old-style")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            buildscript {
+                repositories {
+                    maven { url = 'https://maven.minecraftforge.net' }
+                    maven { url = 'https://repo.spongepowered.org/repository/maven-public/' }
+                    mavenCentral()
+                }
+                dependencies {
+                    classpath group: 'net.minecraftforge.gradle', name: 'ForgeGradle', version: '5.1.+'
+                    classpath 'org.parchmentmc:librarian:1.+'
+                    classpath 'org.spongepowered:mixingradle:0.7-SNAPSHOT'
+                }
+            }
+            // Only edit below this line, the above code adds and enables the necessary things for Forge to be setup.
+            plugins {
+                id 'eclipse'
+                id 'maven-publish'
+            }
+            apply plugin: 'net.minecraftforge.gradle'
+            apply plugin: 'org.parchmentmc.librarian.forgegradle'
+            apply plugin: 'org.spongepowered.mixin'
+
+            version = '1.0.0'
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+        val pluginsBlock = content.substring(content.indexOf("plugins {"), content.indexOf("}", content.indexOf("plugins {")) + 1)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-merge-plugins-block" })
+        assertTrue(pluginsBlock.contains("id 'net.neoforged.moddev' version '2.0.140'"), content)
+        assertTrue(pluginsBlock.contains("id 'java-library'"), content)
+        assertEquals(content.indexOf("plugins {"), content.lastIndexOf("plugins {"), content)
+        assertFalse(content.contains("buildscript"), content)
+        assertFalse(content.contains("apply plugin: 'net.minecraftforge.gradle'"), content)
+        assertFalse(content.contains("apply plugin: 'org.parchmentmc.librarian.forgegradle'"), content)
+        assertFalse(content.contains("apply plugin: 'org.spongepowered.mixin'"), content)
+        assertFalse(Regex("""(?m)^[ \t]*id\s*\(\s*["']net\.neoforged\.moddev["']\s*\)""").containsMatchIn(content), content)
+    }
+
+    @Test
+    fun `replaces Forge Maven repository URL`() {
+        val projectDir = tempDir.resolve("p2")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            repositories {
+                maven { url 'https://maven.minecraftforge.net/' }
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+        assertTrue(content.contains("maven.neoforged.net"))
+        assertFalse(content.contains("maven.minecraftforge.net"))
+    }
+
+    @Test
+    fun `adds content filter to Tamaized repository`() {
+        val projectDir = tempDir.resolve("p2-tamaized-filter")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            repositories {
+                maven {
+                    name 'Tama Maven'
+                    url "https://maven.tamaized.com/releases"
+                }
+                maven {
+                    name 'Curseforge Maven'
+                    url "https://www.cursemaven.com"
+                    content {
+                        includeGroup "curse.maven"
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-repository-content-filter" })
+        assertTrue(content.contains("includeGroup \"tamaized\""))
+        assertTrue(content.contains("includeGroup \"curse.maven\""))
+    }
+
+    @Test
+    fun `replaces Forge dependency with comment`() {
+        val projectDir = tempDir.resolve("p3")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                minecraft 'net.minecraftforge:forge:1.20.1-47.2.0'
+                minecraft "net.neoforged:forge:${'$'}{project.minecraft_version}-${'$'}{project.neo_version}"
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+        assertFalse(content.contains("net.minecraftforge:forge"))
+        assertFalse(content.contains("net.neoforged:forge"))
+        assertTrue(content.contains("neoForge"))
+    }
+
+    @Test
+    fun `replaces minecraft block with neoForge block`() {
+        val projectDir = tempDir.resolve("p4")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            minecraft {
+                mappings channel: 'official', version: '1.20.1'
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+        assertFalse(content.contains("minecraft {"))
+        assertTrue(content.contains("neoForge {"))
+        assertTrue(content.contains("parchment"))
+    }
+
+    @Test
+    fun `transforms settings gradle`() {
+        val projectDir = tempDir.resolve("p5")
+        projectDir.createDirectories()
+        projectDir.resolve("settings.gradle").writeText("""
+            pluginManagement {
+                repositories {
+                    maven { url = 'https://maven.minecraftforge.net/' }
+                }
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("settings.gradle").readText()
+        assertTrue(content.contains("maven.neoforged.net"))
+        assertFalse(content.contains("maven.minecraftforge.net"))
+    }
+
+    @Test
+    fun `transforms gradle properties`() {
+        val projectDir = tempDir.resolve("p6")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("""
+            base_minecraft_version=1.20
+            minecraft_version=1.20.1
+            forge_version=47.2.0
+            mod_id=testmod
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("gradle.properties").readText()
+        assertTrue(content.contains("base_minecraft_version=1.21"))
+        assertTrue(content.contains("minecraft_version=1.21.1"))
+        assertTrue(content.contains("neo_forge_version=21.1.230"))
+        assertFalse(Regex("""(?<!\w)forge_version\s*=""").containsMatchIn(content),
+            "Should not have standalone forge_version property")
+    }
+
+    @Test
+    fun `gradle properties mod id detection ignores text block documentation`() {
+        val projectDir = tempDir.resolve("p6-text-block-modid")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("""
+            minecraft_version=1.20.1
+            forge_version=47.2.0
+        """.trimIndent())
+        srcDir.resolve("ExampleMod.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "public final class ExampleMod {",
+            "    String docs() {",
+            "        return \"\"\"",
+            "            @Mod(\"examplemod\")",
+            "            public static final String MODID = \"examplemod\";",
+            "            \"\"\";",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("gradle.properties").readText()
+
+        assertFalse(content.contains("mod_id=examplemod"), content)
+        assertFalse(result.changes.any { it.ruleId == "build-props-mod-id" }, result.changes.toString())
+    }
+
+    @Test
+    fun `normalizes neoforge properties without double prefixing`() {
+        val projectDir = tempDir.resolve("neoforge-props")
+        projectDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("""
+            minecraft_version=1.20.1
+            neoforge_version=47.1.0
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("gradle.properties").readText()
+
+        assertTrue(content.contains("neo_forge_version=21.1.230"), content)
+        assertFalse(content.contains("neoneo_forge_version"), content)
+    }
+
+    @Test
+    fun `normalizes old minecraft version property references in build script`() {
+        val projectDir = tempDir.resolve("mc-version-build-props")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id("net.neoforged.moddev") version "2.0.140"
+            }
+
+            version = "${'$'}{mc_version}-${'$'}{mod_version}-neoforge"
+            dependencies {
+                implementation "example:dep:${'$'}{project.mc_version}"
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(content.contains("""version = "${'$'}{minecraft_version}-${'$'}{mod_version}-neoforge""""), content)
+        assertTrue(content.contains("""implementation "example:dep:${'$'}{project.minecraft_version}""""), content)
+        assertFalse(content.contains("mc_version"), content)
+    }
+
+    @Test
+    fun `updates known dependency version properties from mapping database`() {
+        val projectDir = tempDir.resolve("known-dependency-version-props")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            dependencies {
+                implementation fg.deobf("com.aetherteam.nitrogen:nitrogen_internals:${'$'}{project.nitrogen_version}")
+                implementation fg.deobf("com.aetherteam.cumulus:cumulus_menus:${'$'}{project.cumulus_version}")
+                implementation fg.deobf("com.github.glitchfiend:TerraBlender-forge:${'$'}{project.terrablender_version}")
+                compileOnly fg.deobf("top.theillusivec4.curios:curios-forge:${'$'}{project.curios_version}:api")
+            }
+        """.trimIndent())
+        projectDir.resolve("gradle.properties").writeText("""
+            minecraft_version=1.20.1
+            nitrogen_version=1.20.1-1.0.12-neoforge
+            cumulus_version=1.20.1-1.0.1-neoforge
+            curios_version=5.12.0+1.20.1
+            terrablender_version=1.20.1-3.0.1.7
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("gradle.properties").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-props-dependency-version" })
+        assertTrue(content.contains("nitrogen_version=1.21.1-1.1.25-neoforge"), content)
+        assertTrue(content.contains("cumulus_version=1.21.1-2.0.8-neoforge"), content)
+        assertTrue(content.contains("curios_version=9.2.3+1.21.1"), content)
+        assertTrue(content.contains("terrablender_version=1.21.1-4.1.0.8"), content)
+        assertFalse(content.contains("1.20.1-1.0.12-neoforge"), content)
+        assertFalse(content.contains("1.20.1-1.0.1-neoforge"), content)
+        assertFalse(content.contains("5.12.0+1.20.1"), content)
+        assertFalse(content.contains("1.20.1-3.0.1.7"), content)
+    }
+
+    @Test
+    fun `migrates coremod ASMAPI scripts to NeoForge package`() {
+        val projectDir = tempDir.resolve("coremod-asmapi")
+        val asmDir = projectDir.resolve("src/main/resources/META-INF/asm")
+        asmDir.createDirectories()
+        asmDir.resolve("seed.js").writeText("""
+            var ASM = Java.type('net.minecraftforge.coremod.api.ASMAPI');
+            var Opcodes = Java.type('org.objectweb.asm.Opcodes');
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val script = asmDir.resolve("seed.js").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-coremod-asmapi-neoforge" })
+        assertTrue(script.contains("net.neoforged.coremod.api.ASMAPI"))
+        assertFalse(script.contains("net.minecraftforge.coremod.api.ASMAPI"))
+    }
+
+    @Test
+    fun `registers animal spawn placement on mod bus`() {
+        val projectDir = tempDir.resolve("spawn-placement")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    EntityRegistry.ENTITY_TYPES.register(modEventBus);
+                    modEventBus.addListener(EntityRegistry::registerAttributes);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("EntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.MobCategory;
+            import net.neoforged.neoforge.event.entity.EntityAttributeCreationEvent;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class EntityRegistry {
+                public static final DeferredRegister<EntityType<?>> ENTITY_TYPES =
+                    DeferredRegister.create(Registries.ENTITY_TYPE, ExampleMod.MODID);
+
+                public static final DeferredHolder<EntityType<?>, EntityType<DeerEntity>> DEER = ENTITY_TYPES.register("deer",
+                    () -> EntityType.Builder.of(DeerEntity::new, MobCategory.CREATURE)
+                        .sized(0.9F, 0.95F).build("deer"));
+
+                public static void registerAttributes(EntityAttributeCreationEvent event) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("DeerEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.animal.Animal;
+            import net.minecraft.world.level.Level;
+
+            public class DeerEntity extends Animal {
+                public DeerEntity(EntityType<? extends DeerEntity> type, Level level) {
+                    super(type, level);
+                }
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+
+        val registry = srcDir.resolve("EntityRegistry.java").readText()
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+        assertTrue(registry.contains("import net.minecraft.world.entity.SpawnPlacementTypes;"))
+        assertTrue(registry.contains("import net.minecraft.world.level.levelgen.Heightmap;"))
+        assertTrue(registry.contains("import net.neoforged.neoforge.event.entity.RegisterSpawnPlacementsEvent;"))
+        assertTrue(registry.contains("public static void registerSpawnPlacements(RegisterSpawnPlacementsEvent event)"))
+        assertTrue(registry.contains("event.register(DEER.get(), SpawnPlacementTypes.ON_GROUND, Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, Animal::checkAnimalSpawnRules, RegisterSpawnPlacementsEvent.Operation.REPLACE);"))
+        assertTrue(mod.contains("modEventBus.addListener(com.example.EntityRegistry::registerSpawnPlacements);"))
+    }
+
+    @Test
+    fun `registers existing spawn placement method on arbitrary mod bus variable`() {
+        val projectDir = tempDir.resolve("spawn-placement-existing-method")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modbus = modContainer.getEventBus();
+                    EntityRegistry.ENTITY_TYPES.register(modbus);
+                    modbus.addListener(com.example.EntityRegistry::addEntityAttributes);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("EntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.entity.EntityType;
+            import net.neoforged.neoforge.event.entity.EntityAttributeCreationEvent;
+            import net.neoforged.neoforge.event.entity.RegisterSpawnPlacementsEvent;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class EntityRegistry {
+                public static final DeferredRegister<EntityType<?>> ENTITY_TYPES =
+                    DeferredRegister.create(Registries.ENTITY_TYPE, ExampleMod.MODID);
+
+                public static void addEntityAttributes(EntityAttributeCreationEvent event) {
+                }
+
+                public static void registerSpawnPlacements(RegisterSpawnPlacementsEvent event) {
+                }
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+        assertTrue(mod.contains("modbus.addListener(com.example.EntityRegistry::addEntityAttributes);"))
+        assertTrue(mod.contains("modbus.addListener(com.example.EntityRegistry::registerSpawnPlacements);"))
+    }
+
+    @Test
+    fun `registers spawn placement listener outside guarded client listener block`() {
+        val projectDir = tempDir.resolve("spawn-placement-client-guard")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val clientDir = projectDir.resolve("src/main/java/com/example/client")
+        srcDir.createDirectories()
+        clientDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.client.ClientRegistry;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    modEventBus.addListener(ClientRegistry::registerClientStuff);
+                    EntityRegistry.ENTITY_TYPES.register(modEventBus);
+                    modEventBus.addListener(EntityRegistry::registerAttributes);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("EntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.MobCategory;
+            import net.neoforged.neoforge.event.entity.EntityAttributeCreationEvent;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class EntityRegistry {
+                public static final DeferredRegister<EntityType<?>> ENTITY_TYPES =
+                    DeferredRegister.create(Registries.ENTITY_TYPE, ExampleMod.MODID);
+
+                public static final DeferredHolder<EntityType<?>, EntityType<DeerEntity>> DEER = ENTITY_TYPES.register("deer",
+                    () -> EntityType.Builder.of(DeerEntity::new, MobCategory.CREATURE)
+                        .sized(0.9F, 0.95F).build("deer"));
+
+                public static void registerAttributes(EntityAttributeCreationEvent event) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("DeerEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.animal.Animal;
+            import net.minecraft.world.level.Level;
+
+            public class DeerEntity extends Animal {
+                public DeerEntity(EntityType<? extends DeerEntity> type, Level level) {
+                    super(type, level);
+                }
+            }
+        """.trimIndent())
+        clientDir.resolve("ClientRegistry.java").writeText("""
+            package com.example.client;
+
+            import net.minecraft.client.Minecraft;
+
+            public class ClientRegistry {
+                public static void registerClientStuff(Object event) {
+                    Minecraft.getInstance();
+                }
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+        val guardIdx = mod.indexOf("if (net.neoforged.fml.loading.FMLLoader.getDist() == net.neoforged.api.distmarker.Dist.CLIENT)")
+        val spawnIdx = mod.indexOf("modEventBus.addListener(com.example.EntityRegistry::registerSpawnPlacements);")
+
+        assertTrue(guardIdx >= 0, mod)
+        assertTrue(spawnIdx >= 0, mod)
+        assertTrue(spawnIdx < guardIdx, mod)
+    }
+
+    @Test
+    fun `migrates structure template pool reflection fields to access transformers`() {
+        val projectDir = tempDir.resolve("structure-pool-reflection")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("VillageStructures.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool;
+            import net.neoforged.fml.util.ObfuscationReflectionHelper;
+            import java.lang.reflect.Field;
+
+            public class VillageStructures {
+                void add(StructureTemplatePool pool) throws Exception {
+                    Field templatesField = ObfuscationReflectionHelper.findField(
+                            StructureTemplatePool.class, "f_210560_"); // templates
+                    Field rawTemplatesField = ObfuscationReflectionHelper.findField(
+                            StructureTemplatePool.class, "f_210559_"); // rawTemplates
+                    Object templates = templatesField.get(pool);
+                    Object rawTemplates = rawTemplatesField.get(pool);
+                    templatesField.set(pool, templates);
+                    rawTemplatesField.set(pool, rawTemplates);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val content = srcDir.resolve("VillageStructures.java").readText()
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-structure-pool-at-direct-fields" })
+        assertTrue(content.contains("Object templates = pool.templates;"))
+        assertTrue(content.contains("Object rawTemplates = pool.rawTemplates;"))
+        assertTrue(content.contains("pool.templates = templates;"))
+        assertTrue(content.contains("pool.rawTemplates = rawTemplates;"))
+        assertTrue(at.contains("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool templates"))
+        assertTrue(at.contains("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates"))
+        assertFalse(content.contains("f_210560_"))
+        assertFalse(content.contains("f_210559_"))
+        assertFalse(content.contains("ObfuscationReflectionHelper"))
+        assertFalse(content.contains("getDeclaredField"))
+        assertFalse(content.contains("setAccessible"))
+    }
+
+    @Test
+    fun `structure pool reflection migration ignores comments strings and text blocks`() {
+        val projectDir = tempDir.resolve("structure-pool-reflection-docs")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("VillageStructures.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool;
+            import net.neoforged.fml.util.ObfuscationReflectionHelper;
+            import java.lang.reflect.Field;
+
+            public class VillageStructures {
+                String inline = "templatesField.get(pool) rawTemplatesField.set(pool, rawTemplates)";
+                String docs = ${"\"\"\""}
+                    Field templatesField = ObfuscationReflectionHelper.findField(StructureTemplatePool.class, "f_210560_");
+                    Object fake = templatesField.get(pool);
+                    rawTemplatesField.set(pool, rawTemplates);
+                    templatesField.setAccessible(true);
+                    ${"\"\"\""};
+
+                void add(StructureTemplatePool pool) throws Exception {
+                    // templatesField.get(pool);
+                    Field templatesField = ObfuscationReflectionHelper.findField(
+                            StructureTemplatePool.class, "f_210560_"); // templates
+                    Field rawTemplatesField = ObfuscationReflectionHelper.findField(
+                            StructureTemplatePool.class, "f_210559_"); // rawTemplates
+                    Object templates = templatesField.get(pool);
+                    Object rawTemplates = rawTemplatesField.get(pool);
+                    templatesField.set(pool, templates);
+                    rawTemplatesField.set(pool, rawTemplates);
+                    // rawTemplatesField.set(pool, rawTemplates);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val content = srcDir.resolve("VillageStructures.java").readText()
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-structure-pool-at-direct-fields" })
+        assertTrue(content.contains("Object templates = pool.templates;"), content)
+        assertTrue(content.contains("Object rawTemplates = pool.rawTemplates;"), content)
+        assertTrue(content.contains("pool.templates = templates;"), content)
+        assertTrue(content.contains("pool.rawTemplates = rawTemplates;"), content)
+        assertTrue(content.contains("String inline = \"templatesField.get(pool) rawTemplatesField.set(pool, rawTemplates)\";"), content)
+        assertTrue(content.contains("Object fake = templatesField.get(pool);"), content)
+        assertTrue(content.contains("rawTemplatesField.set(pool, rawTemplates);"), content)
+        assertTrue(content.contains("templatesField.setAccessible(true);"), content)
+        assertTrue(content.contains("// templatesField.get(pool);"), content)
+        assertTrue(content.contains("// rawTemplatesField.set(pool, rawTemplates);"), content)
+        assertTrue(at.contains("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool templates"))
+        assertTrue(at.contains("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates"))
+    }
+
+    @Test
+    fun `adds structure pool access transformers only for typed direct field access`() {
+        val projectDir = tempDir.resolve("structure-pool-direct-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PoolAccess.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool;
+
+            public class PoolAccess {
+                void patch(StructureTemplatePool pool) {
+                    Object templates = pool.templates;
+                    pool.rawTemplates = pool.rawTemplates;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool templates"), at)
+        assertTrue(at.contains("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates"), at)
+    }
+
+    @Test
+    fun `structure pool access transformer collection ignores comments and strings`() {
+        val projectDir = tempDir.resolve("structure-pool-comment-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("PoolNotes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool;
+
+            public class PoolNotes {
+                String note = "StructureTemplatePool pool.templates pool.rawTemplates";
+
+                void describe() {
+                    // StructureTemplatePool pool; pool.templates; pool.rawTemplates;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertFalse(atFile.exists())
+    }
+
+    @Test
+    fun `adds goal selector and server level access transformers only for typed member access`() {
+        val projectDir = tempDir.resolve("goal-lightning-direct-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ServerHooks.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.entity.ai.goal.GoalSelector;
+
+            public class ServerHooks {
+                void patch(GoalSelector selector, ServerLevel level, BlockPos origin) {
+                    selector.availableGoals.clear();
+                    level.findLightningTargetAround(origin);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.world.entity.ai.goal.GoalSelector availableGoals"), at)
+        assertTrue(
+            at.contains("public net.minecraft.server.level.ServerLevel findLightningTargetAround(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/BlockPos;"),
+            at
+        )
+    }
+
+    @Test
+    fun `goal selector and server level access transformer collection ignores comments and strings`() {
+        val projectDir = tempDir.resolve("goal-lightning-comment-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ServerNotes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.entity.ai.goal.GoalSelector;
+
+            public class ServerNotes {
+                String note = "GoalSelector selector; selector.availableGoals; ServerLevel level; level.findLightningTargetAround(origin);";
+
+                void describe() {
+                    // GoalSelector selector; selector.availableGoals.clear();
+                    // ServerLevel level; level.findLightningTargetAround(origin);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertFalse(atFile.exists())
+    }
+
+    @Test
+    fun `adds creative selected tab access transformer only for static field access`() {
+        val projectDir = tempDir.resolve("creative-selectedtab-direct-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CreativeDirectAccess.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
+            import net.minecraft.world.item.CreativeModeTab;
+
+            public class CreativeDirectAccess {
+                CreativeModeTab selected() {
+                    return CreativeModeInventoryScreen.selectedTab;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen selectedTab"), at)
+    }
+
+    @Test
+    fun `creative selected tab access transformer collection ignores comments and strings`() {
+        val projectDir = tempDir.resolve("creative-selectedtab-comment-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CreativeNotes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
+
+            public class CreativeNotes {
+                String note = "CreativeModeInventoryScreen.selectedTab";
+
+                void describe() {
+                    // CreativeModeInventoryScreen.selectedTab
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertFalse(atFile.exists())
+    }
+
+    @Test
+    fun `adds level renderer access transformers only for typed field access`() {
+        val projectDir = tempDir.resolve("level-renderer-direct-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RendererAccess.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.renderer.LevelRenderer;
+
+            public class RendererAccess {
+                void capture(LevelRenderer renderer) {
+                    Object sky = renderer.skyBuffer;
+                    Object dark = renderer.darkBuffer;
+                    int rain = renderer.rainSoundTime;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.client.renderer.LevelRenderer skyBuffer"), at)
+        assertTrue(at.contains("public net.minecraft.client.renderer.LevelRenderer darkBuffer"), at)
+        assertTrue(at.contains("public net.minecraft.client.renderer.LevelRenderer rainSoundTime"), at)
+    }
+
+    @Test
+    fun `level renderer access transformer collection ignores comments and strings`() {
+        val projectDir = tempDir.resolve("level-renderer-comment-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RendererNotes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.renderer.LevelRenderer;
+
+            public class RendererNotes {
+                String note = "LevelRenderer renderer; renderer.skyBuffer; renderer.darkBuffer; renderer.rainSoundTime;";
+
+                void describe() {
+                    // LevelRenderer renderer; renderer.skyBuffer; renderer.darkBuffer; renderer.rainSoundTime;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertFalse(atFile.exists())
+    }
+
+    @Test
+    fun `migrates pending block entity reflection field to access transformer`() {
+        val projectDir = tempDir.resolve("pending-be-reflection")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ChunkCleaner.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.chunk.LevelChunk;
+            import java.lang.reflect.Field;
+            import java.util.Map;
+
+            public class ChunkCleaner {
+                private static Field pendingBlockEntitiesField = null;
+                private static boolean pendingBEFieldInitialized = false;
+
+                private static void clearPendingBlockEntities(LevelChunk chunk) {
+                    try {
+                        if (!pendingBEFieldInitialized) {
+                            pendingBEFieldInitialized = true;
+                            for (java.lang.reflect.Field field : LevelChunk.class.getDeclaredFields()) {
+                                if (java.util.Map.class.isAssignableFrom(field.getType())) {
+                                    field.setAccessible(true);
+                                    Object testValue = field.get(chunk);
+                                    if (testValue instanceof java.util.Map<?, ?> testMap && !testMap.isEmpty()) {
+                                        Object firstKey = testMap.keySet().iterator().next();
+                                        if (firstKey instanceof BlockPos) {
+                                            pendingBlockEntitiesField = field;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (pendingBlockEntitiesField != null) {
+                            Object value = pendingBlockEntitiesField.get(chunk);
+                            if (value instanceof java.util.Map<?, ?> map && !map.isEmpty()) {
+                                int count = map.size();
+                                map.clear();
+                                if (count > 0) {
+                                    ExampleMod.LOGGER.debug("Cleared {} pending block entities from chunk", count);
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        ExampleMod.LOGGER.debug("Could not clear pending BEs via reflection: {}", e.getMessage());
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val content = srcDir.resolve("ChunkCleaner.java").readText()
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-levelchunk-pending-blockentities-at" })
+        assertTrue(content.contains("Map<BlockPos, CompoundTag> pendingBlockEntities = chunk.pendingBlockEntities;"))
+        assertTrue(content.contains("pendingBlockEntities.clear();"))
+        assertTrue(at.contains("public net.minecraft.world.level.chunk.ChunkAccess pendingBlockEntities"))
+        assertFalse(content.contains("java.lang.reflect"))
+        assertFalse(content.contains("Field "))
+        assertFalse(content.contains("getDeclaredFields"))
+        assertFalse(content.contains("setAccessible"))
+    }
+
+    @Test
+    fun `pending block entity reflection migration ignores comments strings and text blocks`() {
+        val projectDir = tempDir.resolve("pending-be-reflection-docs")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ChunkCleaner.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.chunk.LevelChunk;
+            import java.lang.reflect.Field;
+            import java.util.Map;
+
+            public class ChunkCleaner {
+                String note = "LevelChunk.class.getDeclaredFields() pendingBlockEntitiesField clearPendingBlockEntities";
+                String docs = ${"\"\"\""}
+                    private static Field pendingBlockEntitiesField = null;
+                    private static boolean pendingBEFieldInitialized = false;
+                    private static void clearPendingBlockEntities(LevelChunk chunk) {
+                        LevelChunk.class.getDeclaredFields();
+                    }
+                    ${"\"\"\""};
+
+                private static Field pendingBlockEntitiesField = null;
+                private static boolean pendingBEFieldInitialized = false;
+
+                private static void clearPendingBlockEntities(LevelChunk chunk) {
+                    // LevelChunk.class.getDeclaredFields();
+                    try {
+                        if (!pendingBEFieldInitialized) {
+                            pendingBEFieldInitialized = true;
+                            for (java.lang.reflect.Field field : LevelChunk.class.getDeclaredFields()) {
+                                if (java.util.Map.class.isAssignableFrom(field.getType())) {
+                                    field.setAccessible(true);
+                                    Object testValue = field.get(chunk);
+                                    if (testValue instanceof java.util.Map<?, ?> testMap && !testMap.isEmpty()) {
+                                        Object firstKey = testMap.keySet().iterator().next();
+                                        if (firstKey instanceof BlockPos) {
+                                            pendingBlockEntitiesField = field;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (pendingBlockEntitiesField != null) {
+                            Object value = pendingBlockEntitiesField.get(chunk);
+                            if (value instanceof java.util.Map<?, ?> map && !map.isEmpty()) {
+                                int count = map.size();
+                                map.clear();
+                                if (count > 0) {
+                                    ExampleMod.LOGGER.debug("Cleared {} pending block entities from chunk", count);
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        ExampleMod.LOGGER.debug("Could not clear pending BEs via reflection: {}", e.getMessage());
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val content = srcDir.resolve("ChunkCleaner.java").readText()
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-levelchunk-pending-blockentities-at" })
+        assertTrue(content.contains("Map<BlockPos, CompoundTag> pendingBlockEntities = chunk.pendingBlockEntities;"), content)
+        assertTrue(content.contains("String note = \"LevelChunk.class.getDeclaredFields() pendingBlockEntitiesField clearPendingBlockEntities\";"), content)
+        assertTrue(content.contains("private static Field pendingBlockEntitiesField = null;"), content)
+        assertTrue(content.contains("LevelChunk.class.getDeclaredFields();"), content)
+        assertTrue(at.contains("public net.minecraft.world.level.chunk.ChunkAccess pendingBlockEntities"))
+    }
+
+    @Test
+    fun `pending block entity reflection migration ignores documentation only`() {
+        val projectDir = tempDir.resolve("pending-be-reflection-docs-only")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ChunkNotes.java")
+        file.writeText("""
+            package com.example;
+
+            public class ChunkNotes {
+                String note = "LevelChunk.class.getDeclaredFields() pendingBlockEntitiesField clearPendingBlockEntities";
+                String docs = ${"\"\"\""}
+                    private static Field pendingBlockEntitiesField = null;
+                    private static void clearPendingBlockEntities(LevelChunk chunk) {
+                        LevelChunk.class.getDeclaredFields();
+                    }
+                    ${"\"\"\""};
+            }
+        """.trimIndent())
+        val before = file.readText()
+
+        val result = pass.apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-levelchunk-pending-blockentities-at" })
+        assertFalse(projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").exists())
+        assertEquals(before, file.readText())
+    }
+
+    @Test
+    fun `adds pending block entity access transformer only for typed chunk field access`() {
+        val projectDir = tempDir.resolve("pending-be-direct-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ChunkDirectAccess.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.chunk.LevelChunk;
+
+            public class ChunkDirectAccess {
+                void clear(LevelChunk chunk) {
+                    chunk.pendingBlockEntities.clear();
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.world.level.chunk.ChunkAccess pendingBlockEntities"), at)
+    }
+
+    @Test
+    fun `pending block entity access transformer collection ignores comments and strings`() {
+        val projectDir = tempDir.resolve("pending-be-comment-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ChunkNotes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.chunk.LevelChunk;
+
+            public class ChunkNotes {
+                String note = "LevelChunk chunk; chunk.pendingBlockEntities.clear();";
+
+                void describe() {
+                    // LevelChunk chunk; chunk.pendingBlockEntities.clear();
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val atFile = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg")
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertFalse(atFile.exists())
+    }
+
+    @Test
+    fun `migrates entity visibility method reflection to vanilla boss type check`() {
+        val projectDir = tempDir.resolve("entity-visibility-reflection")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BossVisibility.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.entity.Entity;
+            import java.lang.reflect.Method;
+
+            public class BossVisibility {
+                private static boolean hasNativePlayerVisibilityHook(Entity entity) {
+                    return declaresVisibilityHook(entity.getClass(), "startSeenByPlayer")
+                            || declaresVisibilityHook(entity.getClass(), "stopSeenByPlayer");
+                }
+
+                private static boolean declaresVisibilityHook(Class<?> entityClass, String methodName) {
+                    try {
+                        Method method = entityClass.getMethod(methodName, ServerPlayer.class);
+                        return method.getDeclaringClass() != Entity.class;
+                    } catch (ReflectiveOperationException e) {
+                        return true;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val content = srcDir.resolve("BossVisibility.java").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-entity-visibility-hook-no-reflection" })
+        assertTrue(content.contains("import net.minecraft.world.entity.boss.wither.WitherBoss;"), content)
+        assertTrue(content.contains("return entity instanceof WitherBoss;"), content)
+        assertFalse(content.contains("declaresVisibilityHook"))
+        assertFalse(content.contains("getMethod"))
+        assertFalse(content.contains("java.lang.reflect"))
+        assertFalse(content.contains("ServerPlayer"))
+    }

@@ -3425,6 +3425,54 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `migrates common projectile menu worldgen archaeology and tnt access transformers`() {
+        val projectDir = tempDir.resolve("common-at-members")
+        val atDir = projectDir.resolve("src/main/resources/META-INF")
+        atDir.createDirectories()
+        atDir.resolve("accesstransformer.cfg").writeText("""
+            public net.minecraft.world.entity.projectile.FishingHook f_37089_ # nibble
+            public net.minecraft.world.entity.projectile.FishingHook f_37094_ # hookedIn
+            public net.minecraft.world.inventory.ItemCombinerMenu f_39769_ # inputSlots
+            public net.minecraft.world.inventory.ItemCombinerMenu f_39770_ # access
+            protected-f net.minecraft.world.entity.projectile.FishingHook f_37096_ # luck
+            protected-f net.minecraft.world.entity.projectile.FishingHook f_37097_ # lureSpeed
+            public net.minecraft.world.level.block.state.properties.IntegerProperty f_223001_ # max
+            public net.minecraft.world.entity.vehicle.Boat${'$'}Type <init>(Ljava/lang/String;ILnet/minecraft/world/level/block/Block;Ljava/lang/String;)V # <init>
+            public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool f_210559_ # rawTemplates
+            public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool f_210560_ # templates
+            public net.minecraft.world.level.block.entity.BrushableBlockEntity f_276563_ # item
+            public net.minecraft.world.entity.item.PrimedTnt f_32072_ # owner
+            public net.minecraft.world.level.block.SaplingBlock f_55975_ # treeGrower
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = atDir.resolve("accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.world.entity.projectile.FishingHook nibble # nibble"), at)
+        assertTrue(at.contains("public net.minecraft.world.entity.projectile.FishingHook hookedIn # hookedIn"), at)
+        assertTrue(at.contains("public net.minecraft.world.inventory.ItemCombinerMenu inputSlots # inputSlots"), at)
+        assertTrue(at.contains("public net.minecraft.world.inventory.ItemCombinerMenu access # access"), at)
+        assertTrue(at.contains("protected-f net.minecraft.world.entity.projectile.FishingHook luck # luck"), at)
+        assertTrue(at.contains("protected-f net.minecraft.world.entity.projectile.FishingHook lureSpeed # lureSpeed"), at)
+        assertTrue(at.contains("public net.minecraft.world.level.block.state.properties.IntegerProperty max # max"), at)
+        assertTrue(at.contains("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool rawTemplates # rawTemplates"), at)
+        assertTrue(at.contains("public-f net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool templates # templates"), at)
+        assertTrue(at.contains("public net.minecraft.world.level.block.entity.BrushableBlockEntity item # item"), at)
+        assertTrue(at.contains("public net.minecraft.world.entity.item.PrimedTnt owner # owner"), at)
+        assertTrue(at.contains("public net.minecraft.world.level.block.SaplingBlock treeGrower # treeGrower"), at)
+        assertFalse(at.contains("Boat${'$'}Type <init>"), at)
+        assertFalse(at.contains("f_37089_"), at)
+        assertFalse(at.contains("f_39769_"), at)
+        assertFalse(at.contains("f_223001_"), at)
+        assertFalse(at.contains("f_210559_"), at)
+        assertFalse(at.contains("f_276563_"), at)
+        assertFalse(at.contains("f_32072_"), at)
+        assertFalse(at.contains("f_55975_"), at)
+    }
+
+    @Test
     fun `drops access transformers for removed 121 inner classes`() {
         val projectDir = tempDir.resolve("removed-inner-class-at")
         val atDir = projectDir.resolve("src/main/resources/META-INF")
@@ -3552,6 +3600,44 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `adds server player init menu access transformer when source calls protected menu initializer`() {
+        val projectDir = tempDir.resolve("server-player-init-menu-at")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.neoforged.moddev' version '2.0.107'
+            }
+        """.trimIndent())
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ServerMenuAccess.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.server.network.ServerGamePacketListenerImpl;
+
+            public class ServerMenuAccess {
+                public void direct(ServerPlayer player) {
+                    player.initMenu(player.inventoryMenu);
+                }
+
+                public void listener(ServerGamePacketListenerImpl listener) {
+                    listener.player.initMenu(listener.player.inventoryMenu);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        val build = projectDir.resolve("build.gradle").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.server.level.ServerPlayer initMenu(Lnet/minecraft/world/inventory/AbstractContainerMenu;)V"), at)
+        assertTrue(build.contains("accessTransformers"), build)
+    }
+
+    @Test
     fun `adds fired weapon arrow access transformer when migrated projectile source needs it`() {
         val projectDir = tempDir.resolve("projectile-fired-weapon-at")
         val srcDir = projectDir.resolve("src/main/java/com/example")
@@ -3610,6 +3696,39 @@ class BuildSystemTest {
         assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
         assertFalse(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
         assertFalse(atFile.exists())
+    }
+
+    @Test
+    fun `adds arrow pierce access transformer for subclass self calls`() {
+        val projectDir = tempDir.resolve("projectile-subclass-at")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.neoforged.moddev' version '2.0.107'
+            }
+        """.trimIndent())
+        srcDir.resolve("PiercingArrow.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.projectile.AbstractArrow;
+            import net.minecraft.world.level.Level;
+
+            public class PiercingArrow extends AbstractArrow {
+                public PiercingArrow(EntityType<? extends PiercingArrow> type, Level level) {
+                    super(type, level);
+                    this.setPierceLevel((byte) 1);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val at = projectDir.resolve("src/main/resources/META-INF/accesstransformer.cfg").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-access-transformer-entries-121" })
+        assertTrue(at.contains("public net.minecraft.world.entity.projectile.AbstractArrow setPierceLevel(B)V"), at)
     }
 
     @Test
@@ -4030,6 +4149,72 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `migrates same project static field reflection to explicit source accessor`() {
+        val projectDir = tempDir.resolve("same-project-field-reflection")
+        val ownerDir = projectDir.resolve("src/main/java/com/example/service")
+        val callerDir = projectDir.resolve("src/main/java/com/example/tests")
+        ownerDir.createDirectories()
+        callerDir.createDirectories()
+        ownerDir.resolve("OwnerService.java").writeText("""
+            package com.example.service;
+
+            import java.util.Map;
+            import java.util.concurrent.ConcurrentHashMap;
+
+            public class OwnerService {
+                private static final Map<Integer, Task> tasks = new ConcurrentHashMap<>();
+
+                public static class Task {
+                    public int size() {
+                        return 1;
+                    }
+                }
+            }
+        """.trimIndent())
+        callerDir.resolve("OwnerServiceTests.java").writeText("""
+            package com.example.tests;
+
+            import com.example.service.OwnerService;
+            import java.lang.reflect.Field;
+            import java.util.Map;
+
+            public class OwnerServiceTests {
+                @SuppressWarnings("unchecked")
+                private static OwnerService.Task task(int index) {
+                    try {
+                        Field field = OwnerService.class.getDeclaredField("tasks");
+                        field.setAccessible(true);
+                        Map<Integer, OwnerService.Task> tasks =
+                                (Map<Integer, OwnerService.Task>) field.get(null);
+                        OwnerService.Task task = tasks.get(index);
+                        if (task == null) {
+                            throw new IllegalStateException("missing task");
+                        }
+                        return task;
+                    } catch (ReflectiveOperationException e) {
+                        throw new IllegalStateException("cannot inspect task", e);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+
+        val owner = ownerDir.resolve("OwnerService.java").readText()
+        val caller = callerDir.resolve("OwnerServiceTests.java").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-same-project-static-field-accessor" })
+        assertTrue(result.changes.any { it.ruleId == "build-same-project-static-field-reflection" })
+        assertTrue(owner.contains("public static Map<Integer, Task> modporterAccessTasks()"), owner)
+        assertTrue(owner.contains("return tasks;"), owner)
+        assertTrue(caller.contains("Map<Integer, OwnerService.Task> tasks = OwnerService.modporterAccessTasks();"), caller)
+        assertFalse(caller.contains("java.lang.reflect"), caller)
+        assertFalse(caller.contains("getDeclaredField"), caller)
+        assertFalse(caller.contains("setAccessible"), caller)
+        assertFalse(caller.contains("ReflectiveOperationException"), caller)
+    }
+
+    @Test
     fun `removes standalone mixin dependencies bundled by NeoForge`() {
         val projectDir = tempDir.resolve("bundled-mixin-deps")
         projectDir.createDirectories()
@@ -4206,6 +4391,50 @@ class BuildSystemTest {
         assertEquals(2, result.changes.count { it.ruleId == "build-gametest-empty-structure" })
         assertTrue(projectDir.resolve("src/main/resources/gameteststructures/mirror_lifecycle_empty.snbt").exists())
         assertTrue(projectDir.resolve("src/main/resources/gameteststructures/empty_1x1.snbt").exists())
+    }
+
+    @Test
+    fun `adds gametest flat preset datapack for custom dimensions without shipping production preset`() {
+        val projectDir = tempDir.resolve("p11c")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val dimensionDir = projectDir.resolve("src/main/resources/data/examplemod/dimension")
+        srcDir.createDirectories()
+        dimensionDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleGameTests.java").writeText("""
+            package com.example;
+
+            import net.minecraft.gametest.framework.GameTest;
+
+            public final class ExampleGameTests {
+                @GameTest(template = "empty_1x1")
+                public static void customDimensionLoads() {
+                }
+            }
+        """.trimIndent())
+        dimensionDir.resolve("mirror_world_0.json").writeText("""
+            {
+              "type": "examplemod:mirror_world",
+              "generator": {
+                "type": "examplemod:mirror_chunk_generator",
+                "biome": "minecraft:plains"
+              }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-gametest-dimension-flat-preset" })
+        assertTrue(content.contains("run/world/datapacks/modporter_gametest_dimensions"), content)
+        assertTrue(content.contains("data/minecraft/worldgen/world_preset/flat.json"), content)
+        assertTrue(content.contains("src/main/resources/data"), content)
+        assertTrue(content.contains("src/generated/resources/data"), content)
+        assertFalse(projectDir.resolve("src/main/resources/data/minecraft/worldgen/world_preset/flat.json").exists())
     }
 
     @Test
@@ -4661,12 +4890,128 @@ class BuildSystemTest {
         assertFalse(material.contains("enum ExampleArmorMaterials implements ArmorMaterial"))
         assertTrue(material.contains("DeferredRegister.create(Registries.ARMOR_MATERIAL, TestMod.MODID)"))
         assertTrue(material.contains("Holder.direct(SoundEvents.WOOL_PLACE)"))
+        assertTrue(material.contains("() -> Ingredient.EMPTY"), material)
+        assertTrue(material.contains("() -> Ingredient.of(Items.PAPER)"), material)
+        assertFalse(material.contains("() -> () ->"), material)
         assertTrue(samurai.contains("Holder<ArmorMaterial> material"))
         assertTrue(samurai.contains("ExampleArmorMaterials.getTextureName(this.material)"))
         assertTrue(samurai.contains("ResourceLocation.fromNamespaceAndPath(TestMod.MODID"))
         assertTrue(kimono.contains("Holder<ArmorMaterial> material"))
         assertTrue(mod.contains("import com.example.item.ExampleArmorMaterials;"))
         assertTrue(mod.contains("ExampleArmorMaterials.ARMOR_MATERIALS.register(modEventBus);"))
+    }
+
+    @Test
+    fun `migrates legacy enum map armor material with knockback argument`() {
+        val projectDir = tempDir.resolve("p15-armor-enummap-knockback")
+        val itemDir = projectDir.resolve("src/main/java/com/example/item")
+        val modDir = projectDir.resolve("src/main/java/com/example")
+        itemDir.createDirectories()
+        modDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        modDir.resolve("TestMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(TestMod.MODID)
+            public class TestMod {
+                public static final String MODID = "example";
+
+                public TestMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                }
+            }
+        """.trimIndent())
+        itemDir.resolve("ArmorTier.java").writeText("""
+            package com.example.item;
+
+            import com.example.TestMod;
+            import net.minecraft.Util;
+            import net.minecraft.sounds.SoundEvent;
+            import net.minecraft.sounds.SoundEvents;
+            import net.minecraft.world.item.ArmorItem;
+            import net.minecraft.world.item.ArmorMaterial;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import java.util.EnumMap;
+
+            public enum ArmorTier implements ArmorMaterial {
+                CRYSTAL("crystal", 30, Util.make(new EnumMap<>(ArmorItem.Type.class), armor -> {
+                    armor.put(ArmorItem.Type.BOOTS, 3);
+                    armor.put(ArmorItem.Type.LEGGINGS, 6);
+                    armor.put(ArmorItem.Type.CHESTPLATE, 8);
+                    armor.put(ArmorItem.Type.HELMET, 3);
+                }), 18, SoundEvents.ARMOR_EQUIP_IRON, 2.0F, 0.25F, Ingredient.EMPTY);
+
+                private final String name;
+                private final int durabilityMultiplier;
+                private final EnumMap<ArmorItem.Type, Integer> protectionFunctionForType;
+                private final int enchantmentValue;
+                private final SoundEvent sound;
+                private final float toughness;
+                private final float knockbackResistance;
+                private final Ingredient repairIngredient;
+
+                ArmorTier(String name, int durability, EnumMap<ArmorItem.Type, Integer> protection, int enchantmentValue, SoundEvent sound, float toughness, float knockbackResistance, Ingredient repairIngredient) {
+                    this.name = name;
+                    this.durabilityMultiplier = durability;
+                    this.protectionFunctionForType = protection;
+                    this.enchantmentValue = enchantmentValue;
+                    this.sound = sound;
+                    this.toughness = toughness;
+                    this.knockbackResistance = knockbackResistance;
+                    this.repairIngredient = repairIngredient;
+                }
+
+                @Override
+                public String getName() {
+                    return TestMod.MODID + ":" + this.name;
+                }
+            }
+        """.trimIndent())
+        itemDir.resolve("BaseArmorItem.java").writeText("""
+            package com.example.item;
+
+            import net.minecraft.core.Holder;
+            import net.minecraft.world.item.ArmorItem;
+            import net.minecraft.world.item.ArmorMaterial;
+
+            public class BaseArmorItem extends ArmorItem {
+                public BaseArmorItem(Holder<ArmorMaterial> material, Type type, Properties properties) {
+                    super(material, type, properties);
+                }
+            }
+        """.trimIndent())
+        itemDir.resolve("CrystalArmorItem.java").writeText("""
+            package com.example.item;
+
+            import net.minecraft.world.item.ArmorMaterial;
+
+            public class CrystalArmorItem extends BaseArmorItem {
+                public CrystalArmorItem(ArmorMaterial material, Type type, Properties properties) {
+                    super(material, type, properties);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val material = itemDir.resolve("ArmorTier.java").readText()
+        val armorItem = itemDir.resolve("CrystalArmorItem.java").readText()
+        val mod = modDir.resolve("TestMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-legacy-armor-material-registry" })
+        assertTrue(material.contains("registerWithTexture(\"crystal\", \"crystal\""))
+        assertTrue(material.contains("() -> Ingredient.EMPTY"), material)
+        assertTrue(material.contains("0.25F"))
+        assertTrue(armorItem.contains("Holder<ArmorMaterial> material"))
+        assertTrue(armorItem.contains("extends BaseArmorItem"))
+        assertTrue(mod.contains("ArmorTier.ARMOR_MATERIALS.register(modEventBus);"))
     }
 
     @Test
@@ -5298,6 +5643,59 @@ class BuildSystemTest {
     }
 
     @Test
+    fun `resolves curse maven runtime integrations to clean target runtime coordinates`() {
+        val projectDir = tempDir.resolve("p19-curse-runtime-integrations")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            dependencies {
+                runtimeOnly fg.deobf("curse.maven:jei-238222:6600311")
+                runtimeOnly fg.deobf("curse.maven:farmers-delight-398521:6917255")
+                runtimeOnly "curse.maven:construction-wand-399558:4684054"
+                runtimeOnly "curse.maven:better-combat-by-daedelus-639842:7287334"
+                runtimeOnly "curse.maven:cloth-config-348521:5729105"
+                runtimeOnly "curse.maven:playeranimator-658587:4587214"
+                runtimeOnly "curse.maven:worldedit-225608:4586218"
+                runtimeOnly "curse.maven:world-preview-891429:5686690"
+                implementation "curse.maven:caelus-308989:5281700"
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(result.changes.any { it.ruleId == "build-remove-dep" })
+        assertTrue(content.contains("""compileOnly "mezz.jei:jei-1.21.1-common-api:19.21.2.313""""))
+        assertTrue(content.contains("""compileOnly "mezz.jei:jei-1.21.1-neoforge:19.21.2.313""""))
+        assertTrue(content.contains("""runtimeOnly "mezz.jei:jei-1.21.1-neoforge:19.21.2.313""""))
+        assertTrue(content.contains("""compileOnly "curse.maven:farmers-delight-398521:8083481""""))
+        assertTrue(content.contains("""runtimeOnly "curse.maven:farmers-delight-398521:8083481""""))
+        assertTrue(content.contains("""runtimeOnly "maven.modrinth:better-combat:2.3.2+1.21.1-neoforge""""))
+        assertTrue(content.contains("""runtimeOnly "maven.modrinth:cloth-config:15.0.140+neoforge""""))
+        assertTrue(content.contains("""runtimeOnly "maven.modrinth:playeranimator:2.0.4+1.21.1-forge""""))
+        assertTrue(content.contains("""runtimeOnly "maven.modrinth:worldedit:7.3.8""""))
+        assertTrue(content.contains("""compileOnly "curse.maven:caelus-308989:5694215""""))
+        assertTrue(content.contains("""runtimeOnly "curse.maven:caelus-308989:5694215""""))
+        assertTrue(content.contains("https://maven.blamejared.com"), content)
+        assertTrue(content.contains("https://api.modrinth.com/maven"), content)
+        assertTrue(content.contains("https://www.cursemaven.com"), content)
+        assertFalse(content.contains("curse.maven:construction-wand-399558"), content)
+        assertFalse(content.contains("curse.maven:world-preview-891429"), content)
+        assertFalse(content.contains("6600311"), content)
+        assertFalse(content.contains("6917255"), content)
+        assertFalse(content.contains("7287334"), content)
+        assertFalse(content.contains("5729105"), content)
+        assertFalse(content.contains("4587214"), content)
+        assertFalse(content.contains("4586218"), content)
+        assertFalse(content.contains("5281700"), content)
+        assertFalse(content.contains("fg.deobf"), content)
+    }
+
+    @Test
     fun `unresolved fg deobf wrappers are removed without dependency prefix allowlist`() {
         val projectDir = tempDir.resolve("p19-generic-fg-deobf")
         projectDir.createDirectories()
@@ -5462,6 +5860,39 @@ class BuildSystemTest {
         assertFalse(build.contains("TerraBlender-forge"), build)
         assertFalse(build.contains("curios-forge"), build)
         assertFalse(build.contains("fg.deobf"), build)
+    }
+
+    @Test
+    fun `resolves Curios CurseMaven coordinate to target NeoForge artifacts`() {
+        val projectDir = tempDir.resolve("p19-curios-cursemaven")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+
+            repositories {
+                maven {
+                    url "https://www.cursemaven.com"
+                    content { includeGroup "curse.maven" }
+                }
+            }
+
+            dependencies {
+                implementation "curse.maven:curios-309927:5843594"
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val build = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "build-resolve-dep" })
+        assertTrue(build.contains("""compileOnly "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1:api""""))
+        assertTrue(build.contains("""compileOnly "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1""""))
+        assertTrue(build.contains("""runtimeOnly "top.theillusivec4.curios:curios-neoforge:9.2.3+1.21.1""""))
+        assertTrue(build.contains("https://maven.theillusivec4.top/"), build)
+        assertFalse(build.contains("curse.maven:curios-309927"), build)
     }
 
     @Test

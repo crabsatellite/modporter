@@ -1,0 +1,551 @@
+
+    @Test
+    fun `registered item without matching texture does not guess model texture from class names`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/com/example")
+        javaDir.createDirectories()
+        javaDir.resolve("ItemRegister.java").writeText("""
+            package com.example;
+
+            class ItemRegister {
+                static final Registry ITEMS = null;
+
+                static void register() {
+                    ITEMS.register("descriptive_item", () -> new DescriptiveItem(new Item.Properties()));
+                }
+            }
+        """.trimIndent())
+        val textureDir = projectDir.resolve("src/main/resources/assets/resmod/textures/item")
+        textureDir.createDirectories()
+        textureDir.resolve("bath_herb.png").writeText("png")
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val model = projectDir.resolve("src/main/resources/assets/resmod/models/item/descriptive_item.json")
+        assertFalse(result.changes.any { it.ruleId == "res-create-missing-item-model" })
+        assertFalse(model.exists(), "Item model generation must not map arbitrary nonmatching textures by item or class names")
+    }
+
+    @Test
+    fun `item textures are resized to mipmap compatible dimensions`() {
+        val projectDir = setupResourceProject()
+        val textureDir = projectDir.resolve("src/main/resources/assets/resmod/textures/item")
+        textureDir.createDirectories()
+        val texture = textureDir.resolve("odd_sized.png")
+        ImageIO.write(BufferedImage(18, 18, BufferedImage.TYPE_INT_ARGB), "png", texture.toFile())
+
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        val resized = ImageIO.read(texture.toFile())
+        assertEquals(32, resized.width)
+        assertEquals(32, resized.height)
+    }
+
+    @Test
+    fun `updates pack format`() {
+        val projectDir = setupResourceProject()
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        val packMcmeta = projectDir.resolve("src/main/resources/pack.mcmeta").readText()
+        assertTrue(packMcmeta.contains("\"pack_format\": 48") || packMcmeta.contains("\"pack_format\":48"),
+            "Pack format should be updated to 48 (data pack format)")
+        assertTrue(packMcmeta.contains("supported_formats"), "Should include supported_formats range")
+    }
+
+    @Test
+    fun `generated worldgen provider value min max object is flattened`() {
+        val projectDir = tempDir.resolve("worldgenmod")
+        val feature = projectDir.resolve(
+            "src/generated/resources/data/sakura/worldgen/configured_feature/bamboo_column.json"
+        )
+        feature.parent.createDirectories()
+        feature.writeText("""
+            {
+              "type": "minecraft:bamboo",
+              "config": {
+                "height": {
+                  "type": "minecraft:biased_to_bottom",
+                  "value": {
+                    "max_inclusive": 18,
+                    "min_inclusive": 9
+                  }
+                }
+              }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val migrated = feature.readText()
+        assertTrue(
+            result.changes.any { it.ruleId == "res-worldgen-provider-value-flatten" },
+            "Worldgen provider flatten rule should be recorded"
+        )
+        assertTrue(migrated.contains(""""type": "minecraft:biased_to_bottom""""))
+        assertTrue(migrated.contains(""""max_inclusive": 18"""))
+        assertTrue(migrated.contains(""""min_inclusive": 9"""))
+        assertFalse(migrated.contains(""""value": {"""), "1.21.1 provider min/max fields should not remain nested")
+    }
+
+    @Test
+    fun `generated dimension type spawn light provider value object is flattened`() {
+        val projectDir = tempDir.resolve("dimensiontypemod")
+        val dimensionType = projectDir.resolve(
+            "src/generated/resources/data/resmod/dimension_type/example_type.json"
+        )
+        dimensionType.parent.createDirectories()
+        dimensionType.writeText("""
+            {
+              "monster_spawn_light_level": {
+                "type": "minecraft:uniform",
+                "value": {
+                  "max_inclusive": 7,
+                  "min_inclusive": 0
+                }
+              }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val migrated = dimensionType.readText()
+        assertTrue(result.changes.any { it.ruleId == "res-worldgen-provider-value-flatten" })
+        assertTrue(migrated.contains(""""type": "minecraft:uniform""""))
+        assertTrue(migrated.contains(""""max_inclusive": 7"""))
+        assertTrue(migrated.contains(""""min_inclusive": 0"""))
+        assertFalse(migrated.contains(""""value": {"""))
+    }
+
+    @Test
+    fun `generated no structure placement modifier value object is flattened`() {
+        val projectDir = tempDir.resolve("placementmod")
+        val placedFeature = projectDir.resolve(
+            "src/generated/resources/data/resmod/worldgen/placed_feature/big_mushroom.json"
+        )
+        placedFeature.parent.createDirectories()
+        placedFeature.writeText("""
+            {
+              "feature": "resmod:mushroom/big_mushroom",
+              "placement": [
+                {
+                  "type": "resmod:no_structure",
+                  "value": {
+                    "additional_clearance": 0,
+                    "occupies_surface": true,
+                    "occupies_underground": false
+                  }
+                }
+              ]
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val migrated = placedFeature.readText()
+        assertTrue(result.changes.any { it.ruleId == "res-no-structure-placement-flatten" })
+        assertTrue(migrated.contains(""""type": "resmod:no_structure""""))
+        assertTrue(migrated.contains(""""additional_clearance": 0"""))
+        assertTrue(migrated.contains(""""occupies_surface": true"""))
+        assertTrue(migrated.contains(""""occupies_underground": false"""))
+        assertTrue(migrated.contains(""""occupies_vegetation": false"""))
+        assertTrue(migrated.contains(""""structures_allowed": ["""))
+        assertFalse(migrated.contains(""""value": {"""))
+    }
+
+    @Test
+    fun `legacy Nitrogen fuel menu textures generate 1_21 sprites from source pixels`() {
+        val projectDir = tempDir.resolve("nitrogenfuel")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val textureDir = projectDir.resolve("src/main/resources/assets/example/textures/gui/menu")
+        srcDir.createDirectories()
+        textureDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleFuelCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleFuelCategory extends AbstractFuelCategory {
+                public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "textures/gui/menu/altar.png");
+            }
+        """.trimIndent())
+
+        val source = BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB)
+        source.setRGB(176, 0, 0xFF112233.toInt())
+        source.setRGB(189, 13, 0xFF445566.toInt())
+        source.setRGB(56, 35, 0xFF778899.toInt())
+        source.setRGB(69, 48, 0xFF99AABB.toInt())
+        ImageIO.write(source, "png", textureDir.resolve("altar.png").toFile())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val icon = ImageIO.read(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_icon.png").toFile())
+        val background = ImageIO.read(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_background.png").toFile())
+        assertTrue(result.changes.any { it.ruleId == "res-nitrogen-fuel-icon-sprite" })
+        assertTrue(result.changes.any { it.ruleId == "res-nitrogen-fuel-background-sprite" })
+        assertEquals(14, icon.width)
+        assertEquals(14, icon.height)
+        assertEquals(0xFF112233.toInt(), icon.getRGB(0, 0))
+        assertEquals(0xFF445566.toInt(), icon.getRGB(13, 13))
+        assertEquals(14, background.width)
+        assertEquals(14, background.height)
+        assertEquals(0xFF778899.toInt(), background.getRGB(0, 0))
+        assertEquals(0xFF99AABB.toInt(), background.getRGB(13, 13))
+    }
+
+    @Test
+    fun `legacy Nitrogen fuel sprite generation resolves texture across resource roots once`() {
+        val projectDir = tempDir.resolve("nitrogenfuel-multi-root")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val mainTextureDir = projectDir.resolve("src/main/resources/assets/example/textures/gui/menu")
+        val generatedAssetsDir = projectDir.resolve("src/generated/resources/assets/example")
+        srcDir.createDirectories()
+        mainTextureDir.createDirectories()
+        generatedAssetsDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleFuelCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.rei.categories.fuel.AbstractFuelCategory;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleFuelCategory {
+                public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "textures/gui/menu/altar.png");
+
+                void register(Object registry, Object recipeType) {
+                    registry.add(new AbstractFuelCategory(recipeType, TEXTURE) {});
+                }
+            }
+        """.trimIndent())
+
+        val source = BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB)
+        source.setRGB(176, 0, 0xFF0A1B2C.toInt())
+        source.setRGB(56, 35, 0xFF3D4E5F.toInt())
+        ImageIO.write(source, "png", mainTextureDir.resolve("altar.png").toFile())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), "Expected the main resource texture to satisfy all roots: ${result.errors}")
+        assertTrue(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_icon.png").exists())
+        assertTrue(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_background.png").exists())
+        assertFalse(projectDir.resolve("src/generated/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_icon.png").exists())
+        assertFalse(projectDir.resolve("src/generated/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_background.png").exists())
+        assertEquals(1, result.changes.count { it.ruleId == "res-nitrogen-fuel-icon-sprite" })
+        assertEquals(1, result.changes.count { it.ruleId == "res-nitrogen-fuel-background-sprite" })
+    }
+
+    @Test
+    fun `legacy Nitrogen fuel sprite generation rejects unresolved qualified namespace constants`() {
+        val projectDir = tempDir.resolve("nitrogenfuel-unresolved")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val textureDir = projectDir.resolve("src/main/resources/assets/example/textures/gui/menu")
+        srcDir.createDirectories()
+        textureDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleFuelCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleFuelCategory extends AbstractFuelCategory {
+                public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath(MissingMod.MODID, "textures/gui/menu/altar.png");
+            }
+        """.trimIndent())
+
+        val source = BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB)
+        ImageIO.write(source, "png", textureDir.resolve("altar.png").toFile())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Cannot resolve Nitrogen fuel texture namespace expression 'MissingMod.MODID'")
+            },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(result.changes.any { it.ruleId == "res-nitrogen-fuel-icon-sprite" })
+        assertFalse(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_icon.png").exists())
+    }
+
+    @Test
+    fun `legacy Nitrogen fuel sprite generation rejects bare namespace constants from other owners`() {
+        val projectDir = tempDir.resolve("nitrogenfuel-global-bare-namespace")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val textureDir = projectDir.resolve("src/main/resources/assets/example/textures/gui/menu")
+        srcDir.createDirectories()
+        textureDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleFuelCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleFuelCategory extends AbstractFuelCategory {
+                public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath(MODID, "textures/gui/menu/altar.png");
+            }
+        """.trimIndent())
+
+        val source = BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB)
+        ImageIO.write(source, "png", textureDir.resolve("altar.png").toFile())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Cannot resolve Nitrogen fuel texture namespace expression 'MODID'")
+            },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(result.changes.any { it.ruleId == "res-nitrogen-fuel-icon-sprite" })
+        assertFalse(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_icon.png").exists())
+    }
+
+    @Test
+    fun `legacy Nitrogen fuel sprite generation ignores text block namespace constants`() {
+        val projectDir = tempDir.resolve("nitrogenfuel-text-block-namespace")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val textureDir = projectDir.resolve("src/main/resources/assets/example/textures/gui/menu")
+        srcDir.createDirectories()
+        textureDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "public class ExampleMod {",
+            "    public String docs() {",
+            "        return \"\"\"",
+            "            public static final String MODID = \"example\";",
+            "            \"\"\";",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+        srcDir.resolve("ExampleFuelCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleFuelCategory extends AbstractFuelCategory {
+                public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "textures/gui/menu/altar.png");
+            }
+        """.trimIndent())
+
+        val source = BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB)
+        ImageIO.write(source, "png", textureDir.resolve("altar.png").toFile())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Cannot resolve Nitrogen fuel texture namespace expression 'ExampleMod.MODID'")
+            },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(result.changes.any { it.ruleId == "res-nitrogen-fuel-icon-sprite" })
+        assertFalse(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_icon.png").exists())
+    }
+
+    @Test
+    fun `legacy Nitrogen fuel sprite generation rejects placeholder sprite stems`() {
+        val projectDir = tempDir.resolve("nitrogenfuel-placeholder-stem")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val textureDir = projectDir.resolve("src/main/resources/assets/example/textures/gui/menu")
+        srcDir.createDirectories()
+        textureDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleFuelCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleFuelCategory extends AbstractFuelCategory {
+                public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "textures/gui/menu/---.png");
+            }
+        """.trimIndent())
+
+        val source = BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB)
+        ImageIO.write(source, "png", textureDir.resolve("---.png").toFile())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any {
+                it.contains("Cannot derive Nitrogen fuel sprite name from legacy texture path textures/gui/menu/---.png")
+            },
+            result.errors.joinToString("\n")
+        )
+        assertFalse(result.changes.any { it.ruleId == "res-nitrogen-fuel-icon-sprite" })
+        assertFalse(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_fuel_icon.png").exists())
+    }
+
+    @Test
+    fun `legacy Nitrogen fuel sprite generation ignores comments and strings without API type use`() {
+        val projectDir = tempDir.resolve("nitrogenfuel-comment-markers")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val textureDir = projectDir.resolve("src/main/resources/assets/example/textures/gui/menu")
+        srcDir.createDirectories()
+        textureDir.createDirectories()
+        srcDir.resolve("ExampleNotes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleNotes {
+                String note = "import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory; class Fake extends AbstractFuelCategory {}";
+                // import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory;
+                // public class FakeFuelCategory extends AbstractFuelCategory {
+                //   public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath("example", "textures/gui/menu/altar.png");
+                // }
+            }
+        """.trimIndent())
+
+        val source = BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB)
+        ImageIO.write(source, "png", textureDir.resolve("altar.png").toFile())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId.startsWith("res-nitrogen-fuel-") })
+        assertFalse(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_icon.png").exists())
+    }
+
+    @Test
+    fun `legacy Nitrogen fuel sprite generation ignores commented texture fields in real API classes`() {
+        val projectDir = tempDir.resolve("nitrogenfuel-comment-texture")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val textureDir = projectDir.resolve("src/main/resources/assets/example/textures/gui/menu")
+        srcDir.createDirectories()
+        textureDir.createDirectories()
+        srcDir.resolve("ExampleFuelCategory.java").writeText("""
+            package com.example;
+
+            import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory;
+            import net.minecraft.resources.ResourceLocation;
+
+            public class ExampleFuelCategory extends AbstractFuelCategory {
+                // public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath("example", "textures/gui/menu/altar.png");
+            }
+        """.trimIndent())
+
+        val source = BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB)
+        ImageIO.write(source, "png", textureDir.resolve("altar.png").toFile())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId.startsWith("res-nitrogen-fuel-") })
+        assertFalse(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_icon.png").exists())
+    }
+
+    @Test
+    fun `legacy Nitrogen fuel sprite generation ignores text block texture fields in real API classes`() {
+        val projectDir = tempDir.resolve("nitrogenfuel-text-block-texture")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val textureDir = projectDir.resolve("src/main/resources/assets/example/textures/gui/menu")
+        srcDir.createDirectories()
+        textureDir.createDirectories()
+        srcDir.resolve("ExampleFuelCategory.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "import com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory;",
+            "import net.minecraft.resources.ResourceLocation;",
+            "",
+            "public class ExampleFuelCategory extends AbstractFuelCategory {",
+            "    public String docs() {",
+            "        return \"\"\"",
+            "            public static final ResourceLocation TEXTURE = ResourceLocation.fromNamespaceAndPath(\"example\", \"textures/gui/menu/altar.png\");",
+            "            \"\"\";",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+
+        val source = BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB)
+        ImageIO.write(source, "png", textureDir.resolve("altar.png").toFile())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId.startsWith("res-nitrogen-fuel-") })
+        assertFalse(projectDir.resolve("src/main/resources/assets/example/textures/gui/sprites/modporter/nitrogen_fuel_altar_icon.png").exists())
+    }
+
+    @Test
+    fun `dry run does not rename folders`() {
+        val projectDir = setupResourceProject()
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).analyze(projectDir)
+
+        // Old folders should still exist
+        val dataDir = projectDir.resolve("src/main/resources/data/resmod")
+        assertTrue(dataDir.resolve("tags/items").exists(), "Dry run should not rename folders")
+        assertTrue(dataDir.resolve("recipes").exists(), "Dry run should not rename folders")
+
+        // But changes should be reported
+        assertTrue(result.changeCount > 0, "Dry run should report changes")
+    }
+
+    @Test
+    fun `handles project without resources dir`() {
+        val projectDir = tempDir.resolve("nores")
+        projectDir.createDirectories()
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        assertEquals(0, result.changeCount, "No resources = no changes")
+        assertTrue(result.errors.isEmpty())
+    }
+
+    @Test
+    fun `handles generated resources dir`() {
+        val projectDir = tempDir.resolve("genmod")
+        val genDir = projectDir.resolve("src/generated/resources/data/genmod")
+        genDir.resolve("tags/items").createDirectories()
+        genDir.resolve("tags/items/gen_tag.json").writeText("""{"values":[]}""")
+
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        assertTrue(genDir.resolve("tags/item").exists(), "Should also rename in generated resources")
+    }
+}

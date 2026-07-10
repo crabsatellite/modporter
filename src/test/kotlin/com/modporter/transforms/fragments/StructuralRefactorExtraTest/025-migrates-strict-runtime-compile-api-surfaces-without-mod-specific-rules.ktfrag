@@ -1,0 +1,1200 @@
+
+    @Test
+    fun `migrates strict runtime compile API surfaces without mod-specific rules`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("StrictSurfaces.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.util.RandomSource;
+            import net.minecraft.world.DifficultyInstance;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.entity.ai.attributes.Attributes;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.item.enchantment.Enchantments;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.ServerLevelAccessor;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.block.state.properties.BooleanProperty;
+            import net.minecraft.world.level.block.state.properties.IntegerProperty;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+
+            public class StrictSurfaces extends Mob {
+                private static final BooleanProperty ACTIVE = BooleanProperty.create("active");
+                private static final IntegerProperty LAYERS = IntegerProperty.create("layers", 1, 8);
+
+                protected StrictSurfaces(EntityType<? extends Mob> type, Level level) {
+                    super(type, level);
+                }
+
+                @Override
+                protected void populateDefaultEquipmentSlots(ServerLevelAccessor accessor, RandomSource random, DifficultyInstance difficulty) {
+                    this.setItemSlot(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
+                }
+
+                public void spawn(ServerLevelAccessor accessor, DifficultyInstance difficulty) {
+                    this.populateDefaultEquipmentSlots(accessor, accessor.getRandom(), difficulty);
+                    this.populateDefaultEquipmentEnchantments(accessor.getRandom(), difficulty);
+                }
+
+                @Override
+                public float getStepHeight() {
+                    return 2.0F;
+                }
+
+                public void bounds(EntityType<?> type, double x, double y, double z, ServerLevel level) {
+                    level.noCollision(type.getAABB(x, y, z));
+                }
+
+                public int silk(ServerLevel level, ItemStack stack) {
+                    return EnchantmentHelper.getTagEnchantmentLevel(Enchantments.SILK_TOUCH, stack)
+                        + EnchantmentHelper.getTagEnchantmentLevel(Enchantments.BLOCK_FORTUNE, stack);
+                }
+
+                public int customSilk(ItemStack stack) {
+                    return EnchantmentHelper.getTagEnchantmentLevel(ExampleEnchantments.DESTRUCTION.get(), stack);
+                }
+
+                public boolean frost(LivingEntity living) {
+                    return EnchantmentHelper.hasFrostWalker(living);
+                }
+
+                @Override
+                public boolean doHurtTarget(Entity entity) {
+                    float f = (float) this.getAttributeValue(Attributes.ATTACK_DAMAGE);
+                    float f1 = (float) this.getAttributeValue(Attributes.ATTACK_KNOCKBACK);
+                    if (entity instanceof LivingEntity living) {
+                        f += EnchantmentHelper.getDamageBonus(this.getMainHandItem(), living.getMobType());
+                        f1 += (float) EnchantmentHelper.getKnockbackBonus(this);
+                    }
+
+                    int i = EnchantmentHelper.getFireAspect(this);
+                    if (i > 0) {
+                        entity.igniteForSeconds(i * 4);
+                    }
+
+                    boolean flag = entity.hurt(this.damageSources().mobAttack(this), f);
+                    if (flag) {
+                        if (f1 > 0.0F && entity instanceof LivingEntity living) {
+                            living.knockback(f1 * 0.5F, net.minecraft.util.Mth.sin(this.getYRot() * net.minecraft.util.Mth.DEG_TO_RAD), -net.minecraft.util.Mth.cos(this.getYRot() * net.minecraft.util.Mth.DEG_TO_RAD));
+                            this.setDeltaMovement(this.getDeltaMovement().multiply(0.6D, 1.0D, 0.6D));
+                        }
+
+                        if (entity instanceof Player player) {
+                            this.maybeDisableShield(player, this.getMainHandItem(), player.isUsingItem() ? player.getUseItem() : ItemStack.EMPTY);
+                        }
+
+                        this.doEnchantDamageEffects(this, entity);
+                        this.setLastHurtMob(entity);
+                    }
+
+                    return flag;
+                }
+
+                public void caps(Level level, BlockPos blockPos, Entity entity, Direction side) {
+                    BlockEntity blockEntity = level.getBlockEntity(blockPos);
+                    if (blockEntity != null) {
+                        java.util.List<IItemHandler> handlers = new java.util.ArrayList<>();
+                        blockEntity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handlers::add);
+                    }
+                    entity.getCapability(Capabilities.ItemHandler.BLOCK, side).ifPresent(handler -> handler.getSlots());
+                }
+
+                public boolean legacyStateGetter(BlockState state, BlockState snowOnState) {
+                    return state.get(ACTIVE) && snowOnState.get(LAYERS) > 0;
+                }
+
+                public boolean canEat(ItemStack stack) {
+                    return stack.getItem().has(net.minecraft.core.component.DataComponents.FOOD);
+                }
+
+                public ItemStack banner(ItemStack bannerStack) {
+                    bannerStack.hideTooltipPart(ItemStack.TooltipPart.ADDITIONAL);
+                    return bannerStack;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyAnimalFood.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.entity.AgeableMob;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.ai.goal.TemptGoal;
+            import net.minecraft.world.entity.animal.Animal;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.level.Level;
+
+            public class LegacyAnimalFood extends Animal {
+                public LegacyAnimalFood(EntityType<? extends LegacyAnimalFood> type, Level level) {
+                    super(type, level);
+                }
+
+                @Override
+                protected void registerGoals() {
+                    this.goalSelector.addGoal(1, new TemptGoal(this, 1.0D, Ingredient.of(Items.WHEAT), false));
+                }
+
+                @Override
+                public LegacyAnimalFood getBreedOffspring(ServerLevel level, AgeableMob mate) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyTamableFood.java").writeText("""
+            package com.example;
+
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.InteractionResult;
+            import net.minecraft.world.entity.AgeableMob;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.TamableAnimal;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.phys.Vec3;
+
+            public class LegacyTamableFood extends TamableAnimal {
+                public LegacyTamableFood(EntityType<? extends LegacyTamableFood> type, Level level) {
+                    super(type, level);
+                }
+
+                @Override
+                public AgeableMob getBreedOffspring(ServerLevel level, AgeableMob mate) {
+                    return null;
+                }
+
+                @Override
+                public InteractionResult interactAt(Player player, Vec3 vec3, InteractionHand hand) {
+                    if (this.getOwner() != null && this.getOwner().is(player) && player.getMainHandItem().is(Items.ROTTEN_FLESH)) {
+                        return InteractionResult.SUCCESS;
+                    }
+                    return super.interactAt(player, vec3, hand);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SpawnBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class SpawnBlock extends Block {
+                public SpawnBlock(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public boolean isValidSpawn(BlockState state, BlockGetter getter, BlockPos pos, EntityType<?> entityType) {
+                    return false;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("NamedContainerBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.inventory.AbstractContainerMenu;
+            import net.minecraft.world.inventory.InventoryMenu;
+            import net.minecraft.world.level.block.entity.FurnaceBlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class NamedContainerBlockEntity extends FurnaceBlockEntity {
+                public NamedContainerBlockEntity(BlockPos pos, BlockState state) {
+                    super(pos, state);
+                }
+
+                @Override
+                protected Component getDefaultName() {
+                    return Component.literal("demo");
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TreasureChestBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.block.AbstractChestBlock;
+            import net.minecraft.world.level.block.EntityBlock;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+            import java.util.function.Supplier;
+
+            public class TreasureChestBlock extends AbstractChestBlock<TreasureChestBlockEntity> implements EntityBlock {
+                public TreasureChestBlock(Properties properties, Supplier<BlockEntityType<? extends TreasureChestBlockEntity>> blockEntityTypeSupplier) {
+                    super(properties, blockEntityTypeSupplier);
+                }
+
+                @Override
+                public BlockEntity newBlockEntity(BlockPos pos, BlockState state) {
+                    return new TreasureChestBlockEntity(pos, state);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyCapabilityHandler.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.neoforged.neoforge.common.util.INBTSerializable;
+
+            public class LegacyCapabilityHandler implements INBTSerializable<CompoundTag> {
+                @Override
+                public CompoundTag serializeNBT() {
+                    return new CompoundTag();
+                }
+
+                @Override
+                public void deserializeNBT(CompoundTag tag) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("PlainFurnaceBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.block.entity.FurnaceBlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class PlainFurnaceBlockEntity extends FurnaceBlockEntity {
+                public PlainFurnaceBlockEntity(BlockPos pos, BlockState state) {
+                    super(pos, state);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyMushroomBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.MushroomBlock;
+
+            public class LegacyMushroomBlock extends MushroomBlock {
+                public LegacyMushroomBlock(Properties properties) {
+                    super(properties, ModFeatures.BIG_MUSHROOM);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyWallSignBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.level.block.WallSignBlock;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.minecraft.world.level.block.state.properties.WoodType;
+
+            public class LegacyWallSignBlock extends WallSignBlock {
+                public static final com.mojang.serialization.MapCodec<LegacyWallSignBlock> CODEC = com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec(instance -> instance.group(
+                        WoodType.CODEC.fieldOf("type").forGetter(LegacyWallSignBlock::getType),
+                        propertiesCodec()
+                    ).apply(instance, (type, properties) -> new LegacyWallSignBlock(properties, type)));
+
+                @Override
+                public com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.WallSignBlock> codec() {
+                    return CODEC;
+                }
+
+                public LegacyWallSignBlock(Properties properties, WoodType type) {
+                    super(type, properties);
+                }
+
+                @Override
+                public BlockEntity newBlockEntity(BlockPos pos, BlockState state) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("PaintingCodecSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import java.util.Optional;
+
+            public record PaintingCodecSurface(String path, Optional<Parallax> parallax) {
+                public static final MapCodec<PaintingCodecSurface> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                    Codec.STRING.fieldOf("path").forGetter(PaintingCodecSurface::path),
+                    Parallax.CODEC.optionalFieldOf("parallax").forGetter(PaintingCodecSurface::parallax)
+                ).apply(instance, PaintingCodecSurface::new));
+
+                public record Parallax(float multiplier) {
+                    public static final MapCodec<Parallax> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                        Codec.FLOAT.fieldOf("multiplier").forGetter(Parallax::multiplier)
+                    ).apply(instance, Parallax::new));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyRegistrySurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.Registry;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+            import net.neoforged.neoforge.registries.RegistryBuilder;
+            import java.util.Optional;
+            import java.util.function.Supplier;
+
+            public record LegacyRegistrySurface(ResourceLocation texture) {
+                public static final ResourceKey<Registry<LegacyRegistrySurface>> SURFACE_KEY = ResourceKey.createRegistryKey(ResourceLocation.fromNamespaceAndPath("example", "surface"));
+                public static final DeferredRegister<LegacyRegistrySurface> SURFACES = DeferredRegister.create(SURFACE_KEY, "example");
+                public static final Supplier<Registry<LegacyRegistrySurface>> REGISTRY = SURFACES.makeRegistry(() -> new RegistryBuilder<LegacyRegistrySurface>().hasTags());
+
+                public static LegacyRegistrySurface random(int index) {
+                    return LegacyRegistrySurface.REGISTRY.get().getValues().toArray(LegacyRegistrySurface[]::new)[index % LegacyRegistrySurface.REGISTRY.get().getValues().size()];
+                }
+
+                public static int count() {
+                    return REGISTRY.get().getValues().size();
+                }
+
+                public static Optional<LegacyRegistrySurface> byId(String id) {
+                    return Optional.ofNullable(REGISTRY.get().getValue(ResourceLocation.parse(id)));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ClientRenderingSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.systems.RenderSystem;
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+            import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import com.mojang.blaze3d.vertex.Tesselator;
+            import com.mojang.blaze3d.vertex.VertexFormat;
+            import net.minecraft.client.Minecraft;
+            import net.neoforged.neoforge.client.event.RenderHighlightEvent;
+            import net.neoforged.neoforge.client.event.RenderLevelStageEvent;
+            import net.neoforged.neoforge.client.event.ViewportEvent;
+
+            public class ClientRenderingSurface {
+                public void render(Minecraft minecraft, double x, double y, double z, int u, int v) {
+                    PoseStack stack = RenderSystem.getModelViewStack();
+                    float partialTick = minecraft.getPartialTick();
+                    float frameTime = minecraft.getFrameTime();
+                    float deltaFrame = minecraft.getDeltaFrameTime();
+                    BufferBuilder bufferbuilder = Tesselator.getInstance().begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.PARTICLE);
+                    bufferbuilder.vertex(x, y, z).setUv(0.0F, partialTick).color(1.0F, 1.0F, 1.0F, partialTick).setLight(u, v);
+                    BufferUploader.drawWithShader(buffer.buildOrThrow());
+                }
+
+                public void level(RenderLevelStageEvent event) {
+                    double partialTick = event.getPartialTick();
+                }
+
+                public void highlight(RenderHighlightEvent.Block event) {
+                    double partialTick = event.getPartialTick();
+                }
+
+                public void fog(ViewportEvent.ComputeFogColor event) {
+                    double partialTick = event.getPartialTick();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("PackedColorModel.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import net.minecraft.client.model.Model;
+            import net.minecraft.client.model.geom.ModelPart;
+
+            public class PackedColorModel extends Model {
+                private final ModelPart root;
+
+                public PackedColorModel(ModelPart root) {
+                    super(null);
+                    this.root = root;
+                }
+
+                public void renderToBuffer(PoseStack stack, VertexConsumer consumer, int light, int overlay, int color) {
+                    this.root.render(stack, consumer, light, overlay, red, green, blue, alpha);
+                    super.renderToBuffer(stack, consumer, light, overlay, FastColor.ARGB32.colorFromFloat(scale, red, green, blue));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ShortPackedColorModel.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import net.minecraft.client.model.Model;
+            import net.minecraft.client.model.geom.ModelPart;
+
+            public class ShortPackedColorModel extends Model {
+                private final ModelPart root;
+
+                public ShortPackedColorModel(ModelPart root) {
+                    super(null);
+                    this.root = root;
+                }
+
+                public void renderToBuffer(PoseStack stack, VertexConsumer consumer, int light, int overlay, int color) {
+                    this.root.render(stack, consumer, light, overlay, r, g, b, a);
+                    super.renderToBuffer(stack, consumer, light, overlay, FastColor.ARGB32.colorFromFloat(0.6F, r, g, b));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TrailingPackedColorModel.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import net.minecraft.client.model.geom.ModelPart;
+
+            public class TrailingPackedColorModel {
+                private final ModelPart root;
+                private final ModelPart detail;
+
+                public TrailingPackedColorModel(ModelPart root, ModelPart detail) {
+                    this.root = root;
+                    this.detail = detail;
+                }
+
+                public void renderToBuffer(PoseStack stack, VertexConsumer consumer, int light, int overlay, float red, float green, float blue, float alpha, boolean renderDetail) {
+                    this.root.render(stack, consumer, light, overlay, color);
+                    if (renderDetail) {
+                        this.detail.render(stack, consumer, light, overlay, color);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ItemRendererSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.renderer.MultiBufferSource;
+            import net.minecraft.client.renderer.texture.OverlayTexture;
+            import net.minecraft.client.resources.model.BakedModel;
+            import net.minecraft.world.item.ItemDisplayContext;
+            import net.minecraft.world.item.ItemStack;
+
+            public class ItemRendererSurface {
+                public void render(ItemStack stack, ItemDisplayContext context, PoseStack poseStack, MultiBufferSource.BufferSource bufferSource, BakedModel model) {
+                    Minecraft.getInstance().getItemRenderer().render(stack, ItemDisplayContext.GUI, false, poseStack, bufferSource, 15728880, OverlayTexture.NO_OVERLAY, model.applyTransform(context, poseStack, false));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("EmptyUnsidedHandlerBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.neoforged.neoforge.items.IItemHandler;
+            import net.neoforged.neoforge.items.wrapper.EmptyItemHandler;
+
+            public class EmptyUnsidedHandlerBlockEntity {
+                @Override
+                protected IItemHandler createUnSidedHandler() {
+                    return EmptyItemHandler.INSTANCE;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyHangingEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
+            import net.minecraft.world.entity.decoration.HangingEntity;
+            import net.minecraft.world.phys.Vec3;
+
+            public class LegacyHangingEntity extends HangingEntity {
+                @Override
+                public int getWidth() {
+                    return 32;
+                }
+
+                @Override
+                public int getHeight() {
+                    return 16;
+                }
+
+                @Override
+                public void lerpTo(double x, double y, double z, float yaw, float pitch, int steps, boolean teleport) {
+                    this.setPos(x, y, z);
+                }
+
+                @Override
+                public Vec3 trackingPosition() {
+                    return Vec3.atLowerCornerOf(this.pos);
+                }
+
+                public void refresh() {
+                    this.recalculateBoundingBox();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SpriteVertexSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+            import org.joml.Matrix4f;
+
+            public class SpriteVertexSurface {
+                // float docU = sprite.getU(1.0D);
+                // float docV = sprite.getV(width * (double) 2);
+                private static final String DOC_U = "sprite.getU(1.0D)";
+                private static final String DOC_V = "sprite.getV(width * (double) 2)";
+
+                void render(VertexConsumer vertex, Matrix4f matrix4f, TextureAtlasSprite sprite, float x, float y, float z, double width) {
+                    float u = sprite.getU(width * (double) 2);
+                    float v = sprite.getV(1.0D);
+                    vertex.vertex(matrix4f, x, y, z).color(255, 255, 255, 255);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("GuiLayerSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.gui.Gui;
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.client.event.RegisterGuiLayersEvent;
+            import net.neoforged.neoforge.client.gui.overlay.VanillaGuiOverlay;
+
+            @EventBusSubscriber(modid = ExampleMod.ID)
+            public class GuiLayerSurface {
+                public static void registerOverlays(RegisterGuiLayersEvent event) {
+                    event.registerAbove(VanillaGuiOverlay.CROSSHAIR.id(), "indicator", (gui, graphics, partialTick, screenWidth, screenHeight) -> {
+                        if (gui.shouldDrawSurvivalElements()) {
+                            render(graphics, gui, partialTick, screenWidth, screenHeight);
+                        }
+                    });
+                }
+
+                private static void render(GuiGraphics graphics, Gui gui, float partialTick, int screenWidth, int screenHeight) {
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("PoseNormalSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import org.joml.Matrix3f;
+            import org.joml.Matrix4f;
+
+            public class PoseNormalSurface {
+                public void render(PoseStack stack, VertexConsumer vertex) {
+                    PoseStack.Pose pose = stack.last();
+                    Matrix4f matrix = pose.pose();
+                    Matrix3f normal = pose.normal();
+                    emit(vertex, matrix, normal, 15);
+                    vertex.addVertex(matrix, 0.0F, 0.0F, 0.0F).setNormal(normal, 0.0F, 1.0F, 0.0F);
+                    vertex.addVertex(matrix, 0.0F, 1.0F, 0.0F).normal(pose.normal(), 0.0F, 1.0F, 0.0F);
+                }
+
+                private static void emit(VertexConsumer vertex, Matrix4f matrix, Matrix3f normal, int light) {
+                    vertex.addVertex(matrix, 1.0F, 0.0F, 0.0F).setLight(light).setNormal(normal, 0.0F, 1.0F, 0.0F);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CollectionModelRenderSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import java.util.List;
+            import net.minecraft.client.model.geom.ModelPart;
+            import net.minecraft.util.FastColor;
+
+            public class CollectionModelRenderSurface {
+                private final List<ModelPart> parts;
+                private final ModelPart[] segments;
+
+                public CollectionModelRenderSurface(List<ModelPart> parts, ModelPart[] segments) {
+                    this.parts = parts;
+                    this.segments = segments;
+                }
+
+                public void render(PoseStack stack, VertexConsumer builder, int light, int overlay, int dyeRgb, float red, float green, float blue, float scale, float alpha) {
+                    this.parts.forEach((renderer) -> renderer.render(stack, builder, light, overlay, red, green, blue, scale));
+                    this.segments[0].render(stack, builder, light, overlay, FastColor.ARGB32.red(dyeRgb) / 255.0F, FastColor.ARGB32.green(dyeRgb) / 255.0F, FastColor.ARGB32.blue(dyeRgb) / 255.0F, alpha);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LossyCompoundSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.model.geom.ModelPart;
+
+            public class LossyCompoundSurface {
+                private float glowIntensity;
+                private float rangle;
+                private int damageTaken;
+                private final ModelPart arm;
+
+                public LossyCompoundSurface(ModelPart arm) {
+                    this.arm = arm;
+                }
+
+                public void tick(float amount, double rotation) {
+                    this.glowIntensity += 0.05;
+                    this.rangle += rotation;
+                    this.damageTaken += amount;
+                    this.arm.xRot += Math.PI * 1.25;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ModelEventSurface.java").writeText("""
+            package com.example;
+
+            import java.util.List;
+            import java.util.Map;
+            import net.minecraft.client.resources.model.BakedModel;
+            import net.minecraft.client.resources.model.ModelResourceLocation;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.client.event.ModelEvent;
+
+            @EventBusSubscriber(modid = ExampleMod.ID)
+            public class ModelEventSurface {
+                public static void loaders(ModelEvent.RegisterGeometryLoaders event) {
+                    event.register("example_loader", ExampleLoader.INSTANCE);
+                }
+
+                public static void bake(ModelEvent.ModifyBakingResult event) {
+                    List<Map.Entry<ResourceLocation, BakedModel>> models = event.getModels().entrySet().stream()
+                            .filter(entry -> entry.getKey().getNamespace().equals(ExampleMod.ID) && entry.getKey().getPath().contains("leaves")).toList();
+                    for (Map.Entry<ResourceLocation, BakedModel> entry : event.getModels().entrySet()) {
+                        if (entry.getKey().getNamespace().equals(ExampleMod.ID)) {
+                            models.add(entry);
+                        }
+                    }
+                    models.forEach(entry -> event.getModels().put(entry.getKey(), new WrappedModel(entry.getValue())));
+                }
+
+                public static void additional(ModelEvent.RegisterAdditional event) {
+                    event.register(ExampleMod.prefix("block/surface"));
+                    event.register(new ModelResourceLocation(ExampleMod.prefix("item/surface"), "inventory"));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TesselatorHelperSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+            import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+            import com.mojang.blaze3d.vertex.Tesselator;
+            import com.mojang.blaze3d.vertex.VertexFormat;
+
+            public class TesselatorHelperSurface {
+                private TesselatorHelperSurface shader;
+
+                public final void invokeThenEndTesselator(Runnable execBind) {
+                    invokeThenClear(execBind, () -> Tesselator.getInstance().end());
+                }
+
+                public final void invokeThenEndTesselator() {
+                    invokeThenClear(() -> Tesselator.getInstance().end());
+                }
+
+                public final void invokeThenEndTesselator(int seed, float x, float y, float z) {
+                    invokeThenClear(seed, x, y, z, () -> Tesselator.getInstance().end());
+                }
+
+                public void render(float x, float y, float z) {
+                    BufferBuilder buffer = Tesselator.getInstance().getBuilder();
+                    buffer = Tesselator.getInstance().begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
+                    buffer.vertex(x, y, z).color(1.0F, 1.0F, 1.0F, 1.0F);
+                    shader.invokeThenEndTesselator(1, x, y, z);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TesselatorVariableSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.BufferBuilder;
+            import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+            import com.mojang.blaze3d.vertex.MeshData;
+            import com.mojang.blaze3d.vertex.Tesselator;
+            import com.mojang.blaze3d.vertex.VertexFormat;
+
+            public class TesselatorVariableSurface {
+                private MeshData build() {
+                    Tesselator tessellator = Tesselator.getInstance();
+                    BufferBuilder builder = tessellator.getBuilder();
+                    builder = Tesselator.getInstance().begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION);
+                    tessellator.end();
+                    return builder.end();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ColorRecord.java").writeText("""
+            package com.example;
+
+            public record ColorRecord(int r, int g, int b) {
+                public static final com.mojang.serialization.MapCodec<ColorRecord> CODEC =
+                        com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec(instance -> instance.group(
+                                com.mojang.serialization.Codec.INT.fieldOf("r").forGetter(value -> value.r),
+                                com.mojang.serialization.Codec.INT.fieldOf("g").forGetter(value -> value.g),
+                                com.mojang.serialization.Codec.INT.fieldOf("b").forGetter(value -> value.b)
+                        ).apply(instance, ColorRecord::new));
+            }
+        """.trimIndent())
+        srcDir.resolve("RecordComponentConsumer.java").writeText("""
+            package com.example;
+
+            public class RecordComponentConsumer {
+                public int color(ColorRecord data) {
+                    return data.r + data.g + data.b;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RendererSetupSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import net.minecraft.client.model.EntityModel;
+            import net.minecraft.client.renderer.MultiBufferSource;
+            import net.minecraft.client.renderer.entity.MobRenderer;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public class RendererSetupSurface<T extends LivingEntity, M extends EntityModel<T>> extends MobRenderer<T, M> {
+                @Override
+                protected void setupRotations(T entity, PoseStack stack, float ageInTicks, float rotationYaw, float partialTicks) {
+                    super.setupRotations(entity, stack, ageInTicks, rotationYaw, partialTicks);
+                }
+
+                public void bridge(T entity, PoseStack stack, MultiBufferSource buffer, int packedLight, float ageInTicks, float rotationYaw, float partialTicks) {
+                    this.setupRotations(entity, stack, ageInTicks, rotationYaw, partialTicks);
+                    renderColoredCutoutModel(this.getModel(), getTextureLocation(entity), stack, buffer, packedLight, entity, 1.0F, 0.5F, 0.25F);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CommandSourceStackSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.commands.CommandSourceStack;
+
+            public class CommandSourceStackSurface {
+                public void run(CommandSourceStack source) {
+                    source.level().getSeed();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ItemStackSerializationSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            public abstract class ItemStackSerializationSurface extends Entity {
+                private ItemStack stack;
+
+                protected ItemStackSerializationSurface(EntityType<?> type, Level level) {
+                    super(type, level);
+                }
+
+                protected void readAdditionalSaveData(CompoundTag tag) {
+                    this.stack = ItemStack.parseOptional(player.registryAccess(), tag.getCompound("Stack"));
+                }
+
+                protected void addAdditionalSaveData(CompoundTag tag) {
+                    tag.put("Stack", this.stack.save());
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("MeleeAttackGoalSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.Mob;
+            import net.minecraft.world.entity.ai.goal.MeleeAttackGoal;
+
+            public class MeleeAttackGoalSurface extends MeleeAttackGoal {
+                public MeleeAttackGoalSurface(Mob mob) {
+                    super(mob, 1.0D, false);
+                }
+
+                @Override
+                protected void checkAndPerformAttack(LivingEntity target, double distance) {
+                    super.checkAndPerformAttack(target, Math.min(distance, 1.0D));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ApiBridgeSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import com.mojang.serialization.Codec;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.cauldron.CauldronInteraction;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.neoforged.neoforge.common.Tags;
+
+            import java.util.List;
+
+            public class ApiBridgeSurface {
+                public static final Codec<List<ResourceLocation>> IDS = ResourceLocation.CODEC.codec().listOf();
+
+                public void pose(PoseStack modelView, PoseStack source) {
+                    modelView.mulPoseMatrix(source.last().pose());
+                }
+
+                public void load(Level level, BlockPos pos, CompoundTag tag) {
+                    BlockEntity blockentity = level.getBlockEntity(pos);
+                    if (blockentity != null) {
+                        blockentity.load(tag);
+                    }
+                }
+
+                public boolean ranged(ItemStack stack) {
+                    return stack.is(Tags.Items.TOOLS_BOWS) || stack.is(Tags.Items.TOOLS_CROSSBOWS) || stack.is(Tags.Items.TOOLS_FISHING_RODS);
+                }
+
+                public void cauldron() {
+                    CauldronInteraction.WATER.put(Items.LEATHER_HELMET, CauldronInteraction.DYED_ITEM);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("DistExecutorSurface.java").writeText("""
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.DistExecutor;
+
+            public class DistExecutorSurface {
+                public void init() {
+                    DistExecutor.safeRunWhenOn(Dist.CLIENT, () -> ClientHooks::init);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("CraftingBoundarySurface.java").writeText("""
+            package com.example;
+
+            import java.util.ArrayList;
+            import java.util.List;
+            import java.util.stream.Collectors;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.inventory.AbstractContainerMenu;
+            import net.minecraft.world.inventory.CraftingContainer;
+            import net.minecraft.world.inventory.ResultContainer;
+            import net.minecraft.world.inventory.TransientCraftingContainer;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.CraftingRecipe;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.item.crafting.ShapedRecipe;
+            import net.minecraft.world.level.GameRules;
+            import net.minecraft.world.level.Level;
+
+            public class CraftingBoundarySurface extends AbstractContainerMenu {
+                public final CraftingContainer assemblyMatrix = new TransientCraftingContainer(this, 3, 3);
+                private final CraftingContainer combineMatrix = new TransientCraftingContainer(this, 3, 3);
+                private final ResultContainer result = new ResultContainer();
+                private final Level level;
+                private final Player player;
+                private int recipeInCycle;
+
+                protected CraftingBoundarySurface(Level level, Player player) {
+                    super(null, 0);
+                    this.level = level;
+                    this.player = player;
+                    this.chooseRecipe(this.combineMatrix);
+                }
+
+                private static Recipe<?>[] getRecipesFor(ItemStack inputStack, Level world) {
+                    List<Recipe<?>> recipes = new ArrayList<>();
+                    for (Recipe<?> recipe : world.getRecipeManager().getRecipes()) {
+                        if (recipe instanceof CraftingRecipe &&
+                                !recipe.getResultItem(world.registryAccess()).isEmpty() &&
+                                ExampleConfig.disabledRecipes.contains(recipe.getId().toString())) {
+                            recipes.add(recipe);
+                        }
+                    }
+                    for (ExampleRecipe exampleRecipe : world.getRecipeManager().getAllRecipesFor(ExampleRecipes.EXAMPLE_TYPE.get())) {
+                        if (exampleRecipe.accepts(inputStack)) recipes.add(exampleRecipe);
+                    }
+                    return recipes.toArray(new Recipe<?>[0]);
+                }
+
+                private static boolean isRecipeSupported(Recipe<?> recipe) {
+                    return recipe instanceof ShapedRecipe;
+                }
+
+                private static CraftingRecipe[] getRecipesFor(CraftingContainer matrix, Level world) {
+                    return world.getRecipeManager().getRecipesFor(RecipeType.CRAFTING, matrix, world).toArray(new CraftingRecipe[0]);
+                }
+
+                private void chooseRecipe(CraftingContainer inventory) {
+                    CraftingRecipe[] recipes = getRecipesFor(inventory, this.level);
+                    CraftingRecipe recipe = recipes[Math.floorMod(this.recipeInCycle, recipes.length)];
+                    if (recipe != null && !recipe.isSpecial() && (!this.level.getGameRules().getBoolean(GameRules.RULE_LIMITED_CRAFTING) || ((ServerPlayer) this.player).getRecipeBook().contains(recipe))) {
+                        this.result.setRecipeUsed(recipe);
+                        this.result.setItem(0, recipe.assemble(inventory, this.level.registryAccess()));
+                    }
+                }
+
+                public List<CraftingRecipe> visibleRecipes(RecipeManager manager) {
+                    List<CraftingRecipe> recipes = manager.getAllRecipesFor(RecipeType.CRAFTING);
+                    recipes = recipes.stream().filter(recipe ->
+                            !recipe.getResultItem(this.level.registryAccess()).isEmpty() &&
+                                    ExampleConfig.disabledRecipes.contains(recipe.getId().toString()))
+                            .collect(Collectors.toList());
+                    recipes.addAll(manager.getAllRecipesFor(ExampleRecipes.EXAMPLE_TYPE.get()));
+                    return new ArrayList<>(manager.getAllRecipesFor(ExampleRecipes.EXAMPLE_TYPE.get()));
+                }
+
+                @Override
+                public boolean stillValid(Player player) {
+                    return true;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BlockStateRegistryRecipe.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.Blocks;
+            import net.minecraft.world.level.block.state.BlockState;
+            import org.jetbrains.annotations.Nullable;
+
+            public record BlockStateRegistryRecipe(ResourceLocation recipeID, BlockState input, BlockState result) implements Recipe<Container> {
+                @Override
+                public boolean matches(Container container, Level level) { return true; }
+
+                @Override
+                public ItemStack assemble(Container container, HolderLookup.Provider access) { return ItemStack.EMPTY; }
+
+                @Override
+                public boolean canCraftInDimensions(int width, int height) { return true; }
+
+                @Override
+                public ItemStack getResultItem(HolderLookup.Provider access) { return ItemStack.EMPTY; }
+
+                @Override
+                public ResourceLocation getId() { return this.recipeID; }
+
+                @Override
+                public RecipeSerializer<?> getSerializer() { return ExampleRecipes.BLOCK_STATE_SERIALIZER.get(); }
+
+                @Override
+                public RecipeType<?> getType() { return ExampleRecipes.BLOCK_STATE_RECIPE.get(); }
+
+                public static class Serializer implements RecipeSerializer<BlockStateRegistryRecipe> {
+                    @Override
+                    public BlockStateRegistryRecipe fromJson(ResourceLocation id, JsonObject object) {
+                        Block input = BuiltInRegistries.BLOCK.get(ResourceLocation.tryParse(GsonHelper.getAsString(object, "from")));
+                        Block output = BuiltInRegistries.BLOCK.get(ResourceLocation.tryParse(GsonHelper.getAsString(object, "to")));
+                        if (input != null && output != null) {
+                            return new BlockStateRegistryRecipe(id, input.defaultBlockState(), output.defaultBlockState());
+                        }
+                        return new BlockStateRegistryRecipe(id, Blocks.AIR.defaultBlockState(), Blocks.AIR.defaultBlockState());
+                    }
+
+                    @Nullable
+                    @Override
+                    public BlockStateRegistryRecipe fromNetwork(ResourceLocation id, FriendlyByteBuf buffer) {
+                        Block input = buffer.readRegistryIdUnsafe(BuiltInRegistries.BLOCK);
+                        Block output = buffer.readRegistryIdUnsafe(BuiltInRegistries.BLOCK);
+                        return new BlockStateRegistryRecipe(id, input.defaultBlockState(), output.defaultBlockState());
+                    }
+
+                    @Override
+                    public void toNetwork(FriendlyByteBuf buffer, BlockStateRegistryRecipe recipe) {
+                        buffer.writeRegistryIdUnsafe(BuiltInRegistries.BLOCK, recipe.input().getBlock());
+                        buffer.writeRegistryIdUnsafe(BuiltInRegistries.BLOCK, recipe.result().getBlock());
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("EntityRegistryRecipe.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+            import org.jetbrains.annotations.Nullable;
+
+            public record EntityRegistryRecipe(ResourceLocation recipeID, EntityType<?> input, EntityType<?> result, boolean isReversible) implements Recipe<Container> {
+                @Override
+                public boolean matches(Container container, Level level) { return true; }
+
+                @Override
+                public ItemStack assemble(Container container, HolderLookup.Provider access) { return ItemStack.EMPTY; }
+
+                @Override
+                public boolean canCraftInDimensions(int width, int height) { return true; }
+
+                @Override
+                public ItemStack getResultItem(HolderLookup.Provider access) { return ItemStack.EMPTY; }
+
+                @Override
+                public ResourceLocation getId() { return this.recipeID; }
+
+                @Override
+                public RecipeSerializer<?> getSerializer() { return ExampleRecipes.ENTITY_SERIALIZER.get(); }
+
+                @Override
+                public RecipeType<?> getType() { return ExampleRecipes.ENTITY_RECIPE.get(); }
+
+                public static class Serializer implements RecipeSerializer<EntityRegistryRecipe> {
+                    @Override
+                    public EntityRegistryRecipe fromJson(ResourceLocation id, JsonObject object) {
+                        EntityType<?> input = BuiltInRegistries.ENTITY_TYPE.get(ResourceLocation.tryParse(GsonHelper.getAsString(object, "from")));
+                        EntityType<?> output = BuiltInRegistries.ENTITY_TYPE.get(ResourceLocation.tryParse(GsonHelper.getAsString(object, "to")));
+                        boolean reversible = GsonHelper.getAsBoolean(object, "reversible");
+                        return new EntityRegistryRecipe(id, input, output, reversible);
+                    }
+
+                    @Nullable
+                    @Override
+                    public EntityRegistryRecipe fromNetwork(ResourceLocation id, FriendlyByteBuf buffer) {
+                        EntityType<?> input = buffer.readRegistryIdUnsafe(BuiltInRegistries.ENTITY_TYPE);
+                        EntityType<?> output = buffer.readRegistryIdUnsafe(BuiltInRegistries.ENTITY_TYPE);
+                        boolean reversible = buffer.readBoolean();
+                        return new EntityRegistryRecipe(id, input, output, reversible);
+                    }
+
+                    @Override
+                    public void toNetwork(FriendlyByteBuf buffer, EntityRegistryRecipe recipe) {
+                        buffer.writeRegistryIdUnsafe(BuiltInRegistries.ENTITY_TYPE, recipe.input());
+                        buffer.writeRegistryIdUnsafe(BuiltInRegistries.ENTITY_TYPE, recipe.result());
+                        buffer.writeBoolean(recipe.isReversible());
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("LegacyShapedRecordRecipe.java").writeText("""
+            package com.example;
+
+            import com.google.common.collect.Maps;
+            import com.google.common.collect.Sets;
+            import com.google.gson.JsonArray;
+            import com.google.gson.JsonElement;
+            import com.google.gson.JsonObject;
+            import com.google.gson.JsonSyntaxException;
+            import java.util.Arrays;
+            import java.util.Map;
+            import java.util.Set;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.util.GsonHelper;
+            import net.minecraft.world.inventory.CraftingContainer;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.crafting.CraftingBookCategory;
+            import net.minecraft.world.item.crafting.CraftingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.item.crafting.ShapedRecipe;
+            import net.minecraft.world.level.Level;
+            import org.jetbrains.annotations.Nullable;
+
+            public record LegacyShapedRecordRecipe(ResourceLocation recipeID, int cost, int width, int height, Ingredient input, int count, NonNullList<Ingredient> resultItems) implements CraftingRecipe {
+                @Override
+                public boolean matches(CraftingContainer container, Level level) { return false; }
+
+                @Override
+                public ItemStack assemble(CraftingContainer container, HolderLookup.Provider access) { return ItemStack.EMPTY; }
+
+                @Override
+                public ItemStack getResultItem(HolderLookup.Provider access) { return new ItemStack(Items.AIR, this.count); }
+
+                @Override
+                public boolean canCraftInDimensions(int width, int height) { return width >= this.width && height >= this.height; }
+
+                public boolean isItemStackAnIngredient(ItemStack stack) {
+                    return Arrays.stream(this.input().getItems()).anyMatch(i -> stack.is(i.getItem()) && stack.getCount() >= this.count());
+                }
+
+                @Override
+                public ResourceLocation getId() { return this.recipeID; }
+
+                @Override
+                public RecipeSerializer<?> getSerializer() { return ExampleRecipes.LEGACY_SHAPED_SERIALIZER.get(); }
+
+                @Override
+                public RecipeType<?> getType() { return ExampleRecipes.LEGACY_SHAPED_RECIPE.get(); }
+
+                @Override
+                public CraftingBookCategory category() { return CraftingBookCategory.MISC; }
+
+                @Override
+                public NonNullList<Ingredient> getIngredients() { return this.resultItems(); }
+
+                public static class Serializer implements RecipeSerializer<LegacyShapedRecordRecipe> {
+                    @Override
+                    public LegacyShapedRecordRecipe fromJson(ResourceLocation id, JsonObject json) { return null; }
+
+                    @Nullable
+                    @Override
+                    public LegacyShapedRecordRecipe fromNetwork(ResourceLocation id, FriendlyByteBuf buffer) { return null; }
+
+                    @Override
+                    public void toNetwork(FriendlyByteBuf buffer, LegacyShapedRecordRecipe recipe) {}
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RenderArrayColorSurface.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import net.minecraft.client.model.EntityModel;
+            import net.minecraft.client.renderer.texture.OverlayTexture;
+            import net.minecraft.world.entity.Entity;
+
+            public class RenderArrayColorSurface {
+                private EntityModel<Entity> model;
+                private float[] necklaceColors = new float[]{1.0F, 0.0F, 0.0F};
+
+                public void render(PoseStack stack, VertexConsumer vertexConsumer, int light) {
+                    this.model.renderToBuffer(stack, vertexConsumer, light, OverlayTexture.NO_OVERLAY, this.necklaceColors[0], this.necklaceColors[1], this.necklaceColors[2], 1.0F);
+                }
+            }

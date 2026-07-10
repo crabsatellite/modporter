@@ -235,7 +235,7 @@ class ResourceMigrationPass(
 
             val assetsDir = resourceDir.resolve("assets")
             if (assetsDir.exists() && !dryRun) {
-                transformAssetJsonFiles(assetsDir, changes, errors)
+                transformAssetJsonFiles(assetsDir, resourceDirs, changes, errors)
                 fillMissingSoundSubtitleTranslations(assetsDir, changes, errors)
                 generateMissingItemModels(projectDir, resourceDir, changes, errors)
                 normalizeItemTextureMipDimensions(assetsDir, changes, errors)
@@ -260,6 +260,7 @@ class ResourceMigrationPass(
 
         if (!dryRun) {
             generateMissingLiquidBlockAssets(projectDir, resourceDirs, changes, errors)
+            generateMissingLightBlockAssets(projectDir, resourceDirs, changes, errors)
             generateLegacyNitrogenFuelSprites(projectDir, resourceDirs, changes, errors)
         }
 
@@ -895,6 +896,187 @@ class ResourceMigrationPass(
 """.trimIndent() + "\n"
 
     private data class RegisteredLiquidBlock(val namespace: String, val path: String)
+
+    private fun generateMissingLightBlockAssets(
+        projectDir: Path,
+        resourceDirs: List<Path>,
+        changes: MutableList<Change>,
+        errors: MutableList<String>
+    ) {
+        if (resourceDirs.isEmpty()) return
+        try {
+            val lightBlocks = collectRegisteredLightBlocks(projectDir)
+            if (lightBlocks.isEmpty()) return
+
+            val targetRoot = resourceDirs.firstOrNull { it.resolve("assets").exists() } ?: resourceDirs.first()
+            for (block in lightBlocks) {
+                val blockstateRelative = "assets/${block.namespace}/blockstates/${block.path}.json"
+                val existingBlockstate = resourceDirs
+                    .map { it.resolve(blockstateRelative) }
+                    .firstOrNull { it.exists() }
+                val blockstateFile = existingBlockstate ?: targetRoot.resolve(blockstateRelative)
+                if (existingBlockstate == null) {
+                    blockstateFile.parent.createDirectories()
+                    blockstateFile.writeText(lightBlockStateJson())
+                    changes.add(Change(
+                        file = blockstateFile,
+                        line = 0,
+                        description = "Create LightBlock blockstate level variants for '${block.namespace}:${block.path}'",
+                        before = "(missing blockstate)",
+                        after = blockstateRelative,
+                        confidence = Confidence.HIGH,
+                        ruleId = "res-light-blockstate-level-variants"
+                    ))
+                } else {
+                    val original = blockstateFile.readText()
+                    val migrated = addLightBlockStateLevelVariants(original)
+                    if (migrated != null && migrated != original) {
+                        blockstateFile.writeText(migrated)
+                        changes.add(Change(
+                            file = blockstateFile,
+                            line = 0,
+                            description = "Complete LightBlock blockstate level variants for '${block.namespace}:${block.path}'",
+                            before = "missing level variants",
+                            after = "level=0..15",
+                            confidence = Confidence.HIGH,
+                            ruleId = "res-light-blockstate-level-variants"
+                        ))
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            errors.add("Failed to generate LightBlock asset resources: ${e.message}")
+        }
+    }
+
+    private fun collectRegisteredLightBlocks(projectDir: Path): Set<RegisteredLightBlock> {
+        val javaSources = collectJavaSourceInfos(projectDir)
+        if (javaSources.isEmpty()) return emptySet()
+        val modIds = detectJavaModIds(javaSources.map { it.file to it.content })
+        if (modIds.isEmpty()) return emptySet()
+        val sourceIndex = JavaSourceIndex(javaSources)
+
+        val blocks = linkedSetOf<RegisteredLightBlock>()
+        val deferredRegisterPattern = Regex(
+            """\b([A-Za-z_$][\w$]*)\s*=\s*(?:(?:[A-Za-z_$][\w$]*\.)*)DeferredRegister\.create\s*\("""
+        )
+        val registerPattern = Regex(
+            """\b([A-Za-z_$][\w$]*)\.register\s*\(\s*"([a-z0-9_./-]+)"\s*,\s*(?:(?:\(\)\s*->\s*new\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?))|([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)::new)"""
+        )
+
+        for (source in javaSources) {
+            if (!source.executableCode.contains("DeferredRegister") ||
+                !source.executableCode.contains(".register(")) {
+                continue
+            }
+            val blockRegistries = linkedMapOf<String, String>()
+            for (match in deferredRegisterPattern.findAll(source.code)) {
+                val openParen = source.code.indexOf('(', match.range.first)
+                val closeParen = findMatchingJavaParen(source.code, openParen)
+                if (openParen < 0 || closeParen < 0) continue
+                val executableSegment = source.executableCode.substring(match.range.first, closeParen + 1)
+                if (!executableSegment.contains("DeferredRegister") ||
+                    !executableSegment.contains("create") ||
+                    !executableSegment.contains("BLOCK")) {
+                    continue
+                }
+                val args = splitTopLevelJavaArguments(source.code.substring(openParen + 1, closeParen))
+                if (args.size < 2 || !isBlockRegistryArgument(args[0])) continue
+                val namespace = resolveModIdExpression(
+                    args[1],
+                    modIds,
+                    source.code,
+                    match.range.first,
+                    source.packageName
+                ) ?: continue
+                blockRegistries[match.groupValues[1]] = namespace
+            }
+            if (blockRegistries.isEmpty()) continue
+
+            for (match in registerPattern.findAll(source.code)) {
+                val namespace = blockRegistries[match.groupValues[1]] ?: continue
+                val executableSegment = source.executableCode.substring(match.range.first, match.range.last + 1)
+                if (!executableSegment.contains(".register(") ||
+                    (!executableSegment.contains("new") && !executableSegment.contains("::new"))) {
+                    continue
+                }
+                val factoryType = match.groupValues[3].ifBlank { match.groupValues[4] }
+                if (!javaTypeExtendsLightBlock(factoryType, source, sourceIndex)) continue
+                blocks += RegisteredLightBlock(namespace, match.groupValues[2].trim('/'))
+            }
+        }
+        return blocks
+    }
+
+    private fun javaTypeExtendsLightBlock(
+        reference: String,
+        context: JavaSourceInfo,
+        index: JavaSourceIndex,
+        visited: Set<String> = emptySet()
+    ): Boolean {
+        val clean = sanitizeJavaTypeReference(reference)
+        if (isVanillaLightBlockReference(clean, context, index)) return true
+        val source = resolveJavaTypeReference(clean, context, index) ?: return false
+        if (source.fqName in visited) return false
+        val classBlock = extractJavaClassBlock(source.executableCode, source.simpleName) ?: return false
+        val superclass = directSuperclassReference(classBlock, source.simpleName) ?: return false
+        return javaTypeExtendsLightBlock(superclass, source, index, visited + source.fqName)
+    }
+
+    private fun isVanillaLightBlockReference(
+        reference: String,
+        context: JavaSourceInfo,
+        index: JavaSourceIndex
+    ): Boolean {
+        val clean = sanitizeJavaTypeReference(reference)
+        if (clean == "net.minecraft.world.level.block.LightBlock") return true
+        if (clean != "LightBlock") return false
+        if (resolveJavaTypeReference(clean, context, index) != null) return false
+        return context.imports[clean] == "net.minecraft.world.level.block.LightBlock" ||
+            "net.minecraft.world.level.block" in context.wildcardImports
+    }
+
+    private fun addLightBlockStateLevelVariants(content: String): String? {
+        val root = parseResourceJson(content) as? JsonObject ?: return null
+        val variants = root["variants"] as? JsonObject ?: return null
+        val entries = linkedMapOf<String, JsonElement>()
+        var changed = false
+        for ((key, value) in variants) {
+            if (key.isBlank()) {
+                changed = true
+            } else {
+                entries[key] = value
+            }
+        }
+        for (level in 0..15) {
+            val levelKey = "level=$level"
+            if (entries[levelKey] == null) {
+                entries[levelKey] = lightBlockVariant(level)
+                changed = true
+            }
+        }
+        if (!changed) return content
+
+        val migrated = linkedMapOf<String, JsonElement>()
+        for ((key, value) in root) {
+            migrated[key] = if (key == "variants") JsonObject(entries) else value
+        }
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), JsonObject(migrated)) + "\n"
+    }
+
+    private fun lightBlockStateJson(): String {
+        val variants = linkedMapOf<String, JsonElement>()
+        for (level in 0..15) {
+            variants["level=$level"] = lightBlockVariant(level)
+        }
+        val root = JsonObject(mapOf("variants" to JsonObject(variants)))
+        return RESOURCE_JSON.encodeToString(JsonElement.serializer(), root) + "\n"
+    }
+
+    private fun lightBlockVariant(level: Int): JsonObject =
+        JsonObject(mapOf("model" to JsonPrimitive("minecraft:block/light_${level.toString().padStart(2, '0')}")))
+
+    private data class RegisteredLightBlock(val namespace: String, val path: String)
 
     private fun migrateBannerPatternDataResources(
         dataDir: Path,
@@ -1549,15 +1731,19 @@ class ResourceMigrationPass(
                         ))
                     }
 
-                    if (isRecipeFile && content.contains("partial_nbt")) {
+                    if (isRecipeFile && (
+                        content.contains("partial_nbt") ||
+                            content.contains("\"forge:nbt\"") ||
+                            content.contains("\"neoforge:nbt\"")
+                    )) {
                         val newContent = migratePartialNbtIngredients(content)
                         if (newContent != content) {
                             content = newContent
                             modified = true
                             changes.add(Change(
                                 file = file, line = 0,
-                                description = "Recipe ingredient: partial NBT -> NeoForge data component ingredient",
-                                before = "\"type\": \"forge:partial_nbt\"",
+                                description = "Recipe ingredient: legacy NBT -> NeoForge data component ingredient",
+                                before = "\"type\": \"forge:partial_nbt\" or \"forge:nbt\"",
                                 after = "\"type\": \"neoforge:components\"",
                                 confidence = Confidence.HIGH,
                                 ruleId = "res-recipe-partial-nbt-component-ingredient"
@@ -2771,7 +2957,7 @@ class ResourceMigrationPass(
             ?.takeIf { it.isString }
             ?.content
             ?: return null
-        if (type != "forge:partial_nbt" && type != "neoforge:partial_nbt") return null
+        if (type !in setOf("forge:partial_nbt", "neoforge:partial_nbt", "forge:nbt", "neoforge:nbt")) return null
 
         val item = (element["item"] as? JsonPrimitive)
             ?.takeIf { it.isString }
@@ -3693,7 +3879,12 @@ class ResourceMigrationPass(
 
     private data class JsonElementMigration(val element: JsonElement, val changed: Boolean)
 
-    private fun transformAssetJsonFiles(assetsDir: Path, changes: MutableList<Change>, errors: MutableList<String>) {
+    private fun transformAssetJsonFiles(
+        assetsDir: Path,
+        resourceRoots: List<Path>,
+        changes: MutableList<Change>,
+        errors: MutableList<String>
+    ) {
         Files.walk(assetsDir)
             .filter { it.toString().endsWith(".json") && Files.isRegularFile(it) }
             .forEach { file ->
@@ -3701,6 +3892,7 @@ class ResourceMigrationPass(
                     val content = file.readText()
                     var newContent = content
                     val applied = mutableListOf<Pair<String, String>>()
+                    val textureRewrites = mutableListOf<Pair<String, String>>()
                     for ((from, to) in MODEL_EXTENSION_RENAMES_121) {
                         if (newContent.contains(from)) {
                             newContent = newContent.replace(from, to)
@@ -3711,6 +3903,17 @@ class ResourceMigrationPass(
                     val resourceIdsChanged = resourceIdContent != newContent
                     if (resourceIdsChanged) {
                         newContent = resourceIdContent
+                    }
+                    val textureReferenceContent = migrateModelTextureReferencesThatPointToModels(
+                        file = file,
+                        assetsDir = assetsDir,
+                        resourceRoots = resourceRoots,
+                        content = newContent,
+                        rewrites = textureRewrites
+                    )
+                    val textureReferencesChanged = textureReferenceContent != newContent
+                    if (textureReferencesChanged) {
+                        newContent = textureReferenceContent
                     }
                     if (newContent != content) {
                         file.writeText(newContent)
@@ -3734,12 +3937,180 @@ class ResourceMigrationPass(
                                 ruleId = "res-legacy-resource-id-renames-121"
                             ))
                         }
+                        if (textureReferencesChanged) {
+                            changes.add(Change(
+                                file = file, line = 0,
+                                description = "Resolve model texture references that point to model files",
+                                before = textureRewrites.joinToString(", ") { it.first },
+                                after = textureRewrites.joinToString(", ") { it.second },
+                                confidence = Confidence.HIGH,
+                                ruleId = "res-model-texture-reference-model-target"
+                            ))
+                        }
                     }
                 } catch (e: Exception) {
                     errors.add("Failed to transform asset ${file.fileName}: ${e.message}")
                 }
             }
     }
+
+    private fun migrateModelTextureReferencesThatPointToModels(
+        file: Path,
+        assetsDir: Path,
+        resourceRoots: List<Path>,
+        content: String,
+        rewrites: MutableList<Pair<String, String>>
+    ): String {
+        val normalizedPath = file.toString().replace('\\', '/')
+        if (!normalizedPath.contains("/models/") || !content.contains("\"textures\"")) return content
+        val namespace = assetNamespaceForFile(assetsDir, file) ?: return content
+        val root = parseResourceJson(content) ?: return content
+        val migration = migrateModelTextureReferences(root, namespace, resourceRoots, rewrites)
+        return if (migration.changed) {
+            RESOURCE_JSON.encodeToString(JsonElement.serializer(), migration.element) + "\n"
+        } else {
+            content
+        }
+    }
+
+    private fun migrateModelTextureReferences(
+        element: JsonElement,
+        defaultNamespace: String,
+        resourceRoots: List<Path>,
+        rewrites: MutableList<Pair<String, String>>
+    ): JsonElementMigration {
+        return when (element) {
+            is JsonObject -> {
+                var changed = false
+                val entries = linkedMapOf<String, JsonElement>()
+                for ((key, value) in element) {
+                    if (key == "textures" && value is JsonObject) {
+                        val textureEntries = linkedMapOf<String, JsonElement>()
+                        var textureChanged = false
+                        for ((textureKey, textureValue) in value) {
+                            val primitive = textureValue as? JsonPrimitive
+                            val reference = primitive
+                                ?.takeIf { it.isString }
+                                ?.content
+                            val replacement = reference
+                                ?.takeUnless { it.startsWith("#") }
+                                ?.let {
+                                    resolveTextureReferenceThatTargetsModel(
+                                        reference = it,
+                                        defaultNamespace = defaultNamespace,
+                                        textureKey = textureKey,
+                                        resourceRoots = resourceRoots,
+                                        visitedModels = linkedSetOf()
+                                    )
+                                }
+                            if (replacement != null && replacement != reference) {
+                                textureEntries[textureKey] = JsonPrimitive(replacement)
+                                rewrites.add(reference to replacement)
+                                textureChanged = true
+                            } else {
+                                textureEntries[textureKey] = textureValue
+                            }
+                        }
+                        entries[key] = if (textureChanged) JsonObject(textureEntries) else value
+                        changed = changed || textureChanged
+                    } else {
+                        val child = migrateModelTextureReferences(value, defaultNamespace, resourceRoots, rewrites)
+                        entries[key] = child.element
+                        changed = changed || child.changed
+                    }
+                }
+                JsonElementMigration(JsonObject(entries), changed)
+            }
+            is JsonArray -> {
+                var changed = false
+                val values = element.map { child ->
+                    val migrated = migrateModelTextureReferences(child, defaultNamespace, resourceRoots, rewrites)
+                    changed = changed || migrated.changed
+                    migrated.element
+                }
+                JsonElementMigration(JsonArray(values), changed)
+            }
+            else -> JsonElementMigration(element, changed = false)
+        }
+    }
+
+    private fun resolveTextureReferenceThatTargetsModel(
+        reference: String,
+        defaultNamespace: String,
+        textureKey: String,
+        resourceRoots: List<Path>,
+        visitedModels: MutableSet<String>
+    ): String? {
+        val ref = parseResourceReference(reference, defaultNamespace) ?: return null
+        if (resourceExists(resourceRoots, ref.namespace, "textures/${ref.path}.png")) return null
+        val modelFile = findResourceFile(resourceRoots, ref.namespace, "models/${ref.path}.json") ?: return null
+        val modelId = "${ref.namespace}:${ref.path}"
+        if (!visitedModels.add(modelId)) return null
+        val model = parseResourceJson(modelFile.readText()) as? JsonObject ?: return null
+        val textureValue = resolvedModelTextureValue(model["textures"] as? JsonObject, textureKey) ?: return null
+        val textureRef = parseResourceReference(textureValue, ref.namespace) ?: return null
+        if (resourceExists(resourceRoots, textureRef.namespace, "textures/${textureRef.path}.png") ||
+            textureRef.namespace == "minecraft"
+        ) {
+            return "${textureRef.namespace}:${textureRef.path}"
+        }
+        return resolveTextureReferenceThatTargetsModel(
+            reference = textureValue,
+            defaultNamespace = ref.namespace,
+            textureKey = textureKey,
+            resourceRoots = resourceRoots,
+            visitedModels = visitedModels
+        )
+    }
+
+    private fun resolvedModelTextureValue(textures: JsonObject?, preferredKey: String): String? {
+        if (textures == null) return null
+        val candidateKeys = (listOf(preferredKey, "layer0", "particle") + textures.keys).distinct()
+        for (key in candidateKeys) {
+            val value = resolveTextureAlias(textures, key, linkedSetOf())
+            if (value != null) return value
+        }
+        return null
+    }
+
+    private fun resolveTextureAlias(textures: JsonObject, key: String, visitedKeys: MutableSet<String>): String? {
+        if (!visitedKeys.add(key)) return null
+        val value = (textures[key] as? JsonPrimitive)
+            ?.takeIf { it.isString }
+            ?.content
+            ?: return null
+        return if (value.startsWith("#")) {
+            resolveTextureAlias(textures, value.removePrefix("#"), visitedKeys)
+        } else {
+            value
+        }
+    }
+
+    private fun assetNamespaceForFile(assetsDir: Path, file: Path): String? {
+        val relative = assetsDir.relativize(file)
+        return if (relative.nameCount > 0) relative.getName(0).toString() else null
+    }
+
+    private data class ResourceReference(val namespace: String, val path: String)
+
+    private fun parseResourceReference(value: String, defaultNamespace: String): ResourceReference? {
+        if (value.isBlank() || value.startsWith("#")) return null
+        val parts = value.split(':', limit = 2)
+        val namespace = if (parts.size == 2) parts[0] else defaultNamespace
+        val path = if (parts.size == 2) parts[1] else parts[0]
+        if (namespace.isBlank() || path.isBlank()) return null
+        if (path.contains("..") || path.startsWith("/") || path.endsWith("/")) return null
+        return ResourceReference(namespace, path)
+    }
+
+    private fun resourceExists(resourceRoots: List<Path>, namespace: String, relativePath: String): Boolean =
+        findResourceFile(resourceRoots, namespace, relativePath) != null
+
+    private fun findResourceFile(resourceRoots: List<Path>, namespace: String, relativePath: String): Path? =
+        resourceRoots
+            .asSequence()
+            .map { it.resolve("assets").resolve(namespace).resolve(relativePath) }
+            .firstOrNull { it.exists() }
 
     private fun fillMissingSoundSubtitleTranslations(
         assetsDir: Path,

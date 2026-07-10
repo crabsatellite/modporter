@@ -1,0 +1,1188 @@
+package com.modporter.mapping
+
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.Test
+import java.nio.file.Files
+import java.nio.file.Path
+import kotlin.io.path.extension
+import kotlin.io.path.invariantSeparatorsPathString
+import kotlin.io.path.readText
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+/**
+ * Tests to verify the mapping database is complete and internally consistent.
+ */
+class MappingCompletenessTest {
+
+    @Test
+    fun `all text replacements have unique IDs`() {
+        val db = MappingDatabase.loadDefault()
+        val ids = db.getTextReplacements().map { it.id }
+        val duplicates = ids.groupBy { it }.filter { it.value.size > 1 }.keys
+
+        assertTrue(duplicates.isEmpty(),
+            "Found duplicate text replacement IDs: $duplicates")
+    }
+
+    @Test
+    fun `all text replacements have non-empty patterns and replacements`() {
+        val db = MappingDatabase.loadDefault()
+        db.getTextReplacements().forEach { rule ->
+            assertTrue(rule.pattern.isNotBlank(), "Rule ${rule.id} has empty pattern")
+            // Replacement can be empty for removal rules (e.g., removing deprecated API usage)
+            assertTrue(rule.description.isNotBlank(), "Rule ${rule.id} has empty description")
+        }
+    }
+
+    @Test
+    fun `text replacements do not generate placeholder comments`() {
+        val db = MappingDatabase.loadDefault()
+        val forbidden = listOf("TODO", "[forge2neo]", "/*", "//")
+        val offenders = db.getTextReplacements().filter { rule ->
+            forbidden.any { marker -> rule.replacement.contains(marker) }
+        }.map { it.id }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Text replacements must perform real migrations or removals, not emit placeholder comments: $offenders"
+        )
+    }
+
+    @Test
+    fun `text replacements do not carry disabled noop or uncertainty rules`() {
+        val db = MappingDatabase.loadDefault()
+        val forbiddenDescriptions = listOf(
+            "disabled rule" to Regex("""^\s*Disabled:""", RegexOption.IGNORE_CASE),
+            "uncertain rule" to Regex("""\bmay\s+need\b""", RegexOption.IGNORE_CASE)
+        )
+        val offenders = db.getTextReplacements().flatMap { rule ->
+            buildList {
+                if (rule.pattern == "(?!)") {
+                    add("${rule.id} has inert no-op pattern")
+                }
+                forbiddenDescriptions
+                    .filter { (_, pattern) -> pattern.containsMatchIn(rule.description) }
+                    .forEach { (label, _) -> add("${rule.id} has $label description") }
+            }
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Text replacements must be executable migrations/removals, not disabled placeholders or uncertainty notes: $offenders"
+        )
+    }
+
+    @Test
+    fun `text replacement regexes do not emulate java block parsing`() {
+        val db = MappingDatabase.loadDefault()
+        val offenders = db.getTextReplacements()
+            .filter { rule ->
+                rule.isRegex &&
+                    rule.pattern.contains("[^{}]") &&
+                    rule.pattern.contains("\\{") &&
+                    rule.pattern.contains("\\}")
+            }
+            .map { it.id }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Text replacements must not parse nested Java blocks with regex; use executable-source scanners: $offenders"
+        )
+    }
+
+    @Test
+    fun `auto pipeline detection does not fall back to registered defaults`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val registrySource = projectRoot
+            .resolve("src/main/kotlin/com/modporter/registry/PipelineRegistry.kt")
+            .readText()
+        val cliSource = projectRoot
+            .resolve("src/main/kotlin/com/modporter/cli/Main.kt")
+            .readText()
+        val offenders = listOf(
+            "empty Java source defaults to first registered pipeline" to registrySource.contains("pipelines.values.firstOrNull()"),
+            "auto resolver falls back to forge2neo" to Regex("""PipelineRegistry\.detect\(projectDir\)\s*\?:\s*PipelineRegistry\.get\("forge2neo"\)""")
+                .containsMatchIn(cliSource)
+        )
+            .filter { (_, present) -> present }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Auto pipeline detection must fail closed without source evidence instead of selecting a default pipeline: $offenders"
+        )
+    }
+
+    @Test
+    fun `text replacements do not migrate register event string ids without source structure`() {
+        val db = MappingDatabase.loadDefault()
+        val offenders = db.getTextReplacements()
+            .filter { rule ->
+                rule.pattern.contains("registry") &&
+                    rule.pattern.contains("register") &&
+                    (rule.pattern.contains("\"") || rule.replacement.contains("ResourceLocation.parse"))
+            }
+            .map { it.id }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "RegisterEvent string-id migration needs source-derived mod id structure and must not be a text replacement: $offenders"
+        )
+    }
+
+    @Test
+    fun `text replacements do not rewrite untyped getTag calls`() {
+        val db = MappingDatabase.loadDefault()
+        val offenders = db.getTextReplacements()
+            .filter { rule -> rule.pattern == ".getTag()" || rule.pattern.contains("""\.getTag\(\)""") }
+            .map { it.id }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Bare getTag() replacements are not type-safe; use structural ItemStack rules instead: $offenders"
+        )
+    }
+
+    @Test
+    fun `no text replacement pattern equals its replacement`() {
+        val db = MappingDatabase.loadDefault()
+        db.getTextReplacements().forEach { rule ->
+            assertTrue(rule.pattern != rule.replacement,
+                "Rule ${rule.id} has pattern equal to replacement: ${rule.pattern}")
+        }
+    }
+
+    @Test
+    fun `dependency mappings do not depend on local machine paths`() {
+        val text = javaClass.getResourceAsStream("/mappings/forge2neo/neoforge-deps.json")
+            ?.bufferedReader()
+            ?.readText()
+            ?: error("neoforge-deps.json missing")
+
+        val forbidden = listOf(
+            "E:/",
+            "E:\\",
+            "files('",
+            "files(\"",
+            "local NeoForge",
+            "local HotBath",
+            "sibling jar"
+        )
+        val offenders = forbidden.filter { text.contains(it, ignoreCase = true) }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Dependency mappings must use reproducible public coordinates or explicit unavailable status, not local paths: $offenders"
+        )
+    }
+
+    @Test
+    fun `dependency mappings use supported status semantics`() {
+        val text = javaClass.getResourceAsStream("/mappings/forge2neo/neoforge-deps.json")
+            ?.bufferedReader()
+            ?.readText()
+            ?: error("neoforge-deps.json missing")
+        val dependencies = Json.parseToJsonElement(text).jsonObject.getValue("dependencies").jsonArray
+        val supported = setOf(
+            "available",
+            "unavailable",
+            "check_online",
+            "compile_only_compat",
+            "replacement",
+            "runtime_absent",
+            "remove"
+        )
+
+        val offenders = dependencies.flatMap { element ->
+            val dep = element.jsonObject
+            val prefix = dep.getValue("forgePrefix").jsonPrimitive.content
+            val status = dep["status"]?.jsonPrimitive?.content ?: "unavailable"
+            val coords = dep["neoforgeCoords"]?.jsonArray.orEmpty()
+            val notes = dep["notes"]?.jsonPrimitive?.content.orEmpty()
+            buildList {
+                if (status !in supported) {
+                    add("$prefix has unsupported status $status")
+                }
+                if (status == "available" && coords.isEmpty()) {
+                    add("$prefix is available without NeoForge coordinates")
+                }
+                if (status == "compile_only_compat") {
+                    if (coords.isEmpty()) {
+                        add("$prefix is compile_only_compat without compatibility coordinates")
+                    }
+                    val nonCompileOnly = coords.map { it.jsonObject }
+                        .filter { it["config"]?.jsonPrimitive?.content != "compileOnly" }
+                    if (nonCompileOnly.isNotEmpty()) {
+                        add("$prefix compile_only_compat must declare only compileOnly coordinates")
+                    }
+                    if (!notes.contains("compile-only", ignoreCase = true)) {
+                        add("$prefix compile_only_compat notes must state compile-only scope")
+                    }
+                }
+                if (status == "replacement") {
+                    if (coords.isEmpty()) {
+                        add("$prefix is replacement without replacement coordinates")
+                    }
+                    if (dep["replacementFor"]?.jsonPrimitive?.content != prefix) {
+                        add("$prefix replacement must declare replacementFor equal to forgePrefix")
+                    }
+                    if (dep["replacementPolicy"]?.jsonPrimitive?.content.isNullOrBlank()) {
+                        add("$prefix replacement must declare replacementPolicy")
+                    }
+                }
+                if (status == "runtime_absent") {
+                    if (coords.isNotEmpty()) {
+                        add("$prefix is runtime_absent but still declares NeoForge coordinates")
+                    }
+                    val removeConfigurations = dep["removeConfigurations"]?.jsonArray.orEmpty()
+                        .map { it.jsonPrimitive.content }
+                    if (removeConfigurations != listOf("runtimeOnly")) {
+                        add("$prefix runtime_absent must be scoped exactly to runtimeOnly removal")
+                    }
+                    if (!notes.contains("no declared NeoForge 1.21.1 runtime coordinate")) {
+                        add("$prefix runtime_absent notes must explain the missing target runtime coordinate")
+                    }
+                }
+                if (status == "remove" && coords.isNotEmpty()) {
+                    add("$prefix is remove but still declares NeoForge coordinates")
+                }
+                if (status == "remove" && notes.isBlank()) {
+                    add("$prefix is remove without evidence notes")
+                }
+                val versionProperties = dep["versionProperties"]?.jsonArray.orEmpty()
+                versionProperties.forEach { versionElement ->
+                    val versionProperty = versionElement.jsonObject
+                    val name = versionProperty["name"]?.jsonPrimitive?.content.orEmpty()
+                    val value = versionProperty["value"]?.jsonPrimitive?.content.orEmpty()
+                    if (!Regex("""[A-Za-z_][A-Za-z0-9_.-]*""").matches(name)) {
+                        add("$prefix has invalid version property name $name")
+                    }
+                    if (value.isBlank()) {
+                        add("$prefix has blank target version property $name")
+                    }
+                    if (Regex("""\b1\.20(?:\.1)?\b""").containsMatchIn(value)) {
+                        add("$prefix leaves target version property $name on old Minecraft line: $value")
+                    }
+                }
+            }
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Dependency mappings must express supported automated resolution semantics: $offenders"
+        )
+    }
+
+    @Test
+    fun `dependency mappings classify non equivalent artifacts explicitly`() {
+        val text = javaClass.getResourceAsStream("/mappings/forge2neo/neoforge-deps.json")
+            ?.bufferedReader()
+            ?.readText()
+            ?: error("neoforge-deps.json missing")
+        val dependencies = Json.parseToJsonElement(text).jsonObject.getValue("dependencies").jsonArray
+
+        val offenders = dependencies.flatMap { element ->
+            val dep = element.jsonObject
+            val prefix = dep.getValue("forgePrefix").jsonPrimitive.content
+            val prefixGroup = prefix.substringBefore(':')
+            val prefixArtifact = prefix.substringAfter(':', "")
+            val hasArtifactPrefix = ':' in prefix
+            val status = dep["status"]?.jsonPrimitive?.content ?: "unavailable"
+            dep["neoforgeCoords"]?.jsonArray.orEmpty().flatMap { coordElement ->
+                val coordObject = coordElement.jsonObject
+                val coord = coordObject.getValue("coord").jsonPrimitive.content
+                val config = coordObject["config"]?.jsonPrimitive?.content ?: "implementation"
+                val role = coordObject["role"]?.jsonPrimitive?.content
+                val parts = coord.split(":")
+                val targetGroup = parts.getOrNull(0).orEmpty()
+                val targetArtifact = parts.getOrNull(1).orEmpty()
+                val targetVersion = parts.getOrNull(2).orEmpty()
+                buildList {
+                    val sameArtifactFamily = if (hasArtifactPrefix) {
+                        targetGroup == prefixGroup &&
+                            (targetArtifact == prefixArtifact || targetArtifact.startsWith("$prefixArtifact-"))
+                    } else {
+                        targetGroup == prefix || targetGroup.startsWith("$prefix.")
+                    }
+                    val supportCoordinate = role == "compile-support" && config == "compileOnly"
+                    if (!sameArtifactFamily &&
+                        !supportCoordinate &&
+                        status in setOf("available") &&
+                        status !in setOf("compile_only_compat", "replacement")) {
+                        add("$prefix maps to non-equivalent artifact $coord without explicit compatibility/replacement status")
+                    }
+                    if (role == "compile-support" && config != "compileOnly") {
+                        add("$prefix support coordinate $coord must be compileOnly")
+                    }
+                    if (Regex("""\b1\.20(?:\.\d+)?\b""").containsMatchIn(targetVersion) && status != "replacement") {
+                        add("$prefix maps to old-Minecraft coordinate $coord without replacement status")
+                    }
+                }
+            }
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Dependency mappings must make compatibility shims and replacement artifacts explicit: $offenders"
+        )
+    }
+
+    @Test
+    fun `dependency mapping notes describe artifacts not benchmark upstream ports`() {
+        val text = javaClass.getResourceAsStream("/mappings/forge2neo/neoforge-deps.json")
+            ?.bufferedReader()
+            ?.readText()
+            ?: error("neoforge-deps.json missing")
+        val dependencies = Json.parseToJsonElement(text).jsonObject.getValue("dependencies").jsonArray
+        val forbidden = listOf(
+            "upstream port citation" to Regex("""\bupstream\b""", RegexOption.IGNORE_CASE),
+            "benchmark citation" to Regex("""\bbenchmark\b""", RegexOption.IGNORE_CASE)
+        )
+
+        val offenders = dependencies.flatMapIndexed { index, element ->
+            val dependency = element.jsonObject
+            val dependencyId = dependency["forgePrefix"]?.jsonPrimitive?.content ?: "dependency[$index]"
+            val notes = buildList {
+                dependency["notes"]?.jsonPrimitive?.content?.let { note ->
+                    add("notes" to note)
+                }
+                dependency["versionProperties"]?.jsonArray?.forEach { versionElement ->
+                    val versionProperty = versionElement.jsonObject
+                    val name = versionProperty["name"]?.jsonPrimitive?.content.orEmpty()
+                    versionProperty["notes"]?.jsonPrimitive?.content?.let { note ->
+                        add("versionProperties[$name].notes" to note)
+                    }
+                }
+            }
+            notes.flatMap { (field, note) ->
+                forbidden
+                    .filter { (_, pattern) -> pattern.containsMatchIn(note) }
+                    .map { (label, _) -> "$dependencyId $field contains $label" }
+            }
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Dependency mappings must cite source/target artifacts, not benchmark upstream ports: $offenders"
+        )
+    }
+
+    @Test
+    fun `default production migration code has no mod specific rule remnants`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val scannedRoots = listOf(
+            projectRoot.resolve("src/main/kotlin"),
+            projectRoot.resolve("src/main/resources/mappings/forge2neo")
+        )
+        val excludedFiles = setOf(
+            "src/main/resources/mappings/forge2neo/neoforge-deps.json"
+        )
+        val forbidden = listOf(
+            "twilightforest",
+            "TwilightForest",
+            "build-twilight",
+            "res-twilight",
+            "struct-twilight",
+            "TFCave",
+            "TFDamageTypes",
+            "TFItems",
+            "TFBlocks",
+            "TFAdvancements",
+            "ACEffectRegistry",
+            "ModEffects.NOURISHMENT",
+            "ModEffects.COMFORT",
+            "Sakura",
+            "sakura",
+            "HotBath",
+            "hotbath",
+            "Farmers Delight",
+            "farmersdelight",
+            "descriptive_item",
+            "DescriptiveItem",
+            "bath_herb",
+            "ConstructionWand",
+            "constructionwand",
+            "glass_sword",
+            "scepter_repair",
+            "ModPorterScepterRepairRecipe",
+            "_scepter",
+            "FermenterRecipe",
+            "DistillerRecipe"
+        )
+
+        val offenders = scannedRoots
+            .filter { Files.exists(it) }
+            .flatMap { root ->
+                Files.walk(root).use { stream ->
+                    stream
+                        .filter { Files.isRegularFile(it) }
+                        .filter { it.extension in setOf("kt", "json", "toml", "properties") }
+                        .filter { file ->
+                            val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                            relative !in excludedFiles
+                        }
+                        .toList()
+                }
+            }
+            .flatMap { file ->
+                val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                val text = file.readText()
+                forbidden
+                    .filter { marker -> text.contains(marker) }
+                    .map { marker -> "$relative contains $marker" }
+            }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Default migration code must use source-shape/API rules, not mod-specific rules: $offenders"
+        )
+    }
+
+    @Test
+    fun `third party API migration markers are declared API surfaces`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val apiSurfaceFile = projectRoot.resolve("src/main/resources/mappings/forge2neo/api-surfaces.json")
+        data class ApiSurface(
+            val id: String,
+            val markers: List<String>,
+            val ruleIdPrefixes: List<String>,
+            val allowedFiles: Set<String>
+        )
+
+        val surfaces = Json.parseToJsonElement(apiSurfaceFile.readText()).jsonArray.map { element ->
+            val json = element.jsonObject
+            val id = json.getValue("id").jsonPrimitive.content
+            val markers = listOf("packagePrefixes", "coordinatePrefixes", "resourceTypeIds", "ruleIdPrefixes")
+                .flatMap { key ->
+                    json[key]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
+                }
+            ApiSurface(
+                id = id,
+                markers = markers,
+                ruleIdPrefixes = json["ruleIdPrefixes"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty(),
+                allowedFiles = json["allowedFiles"]?.jsonArray?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
+            )
+        }
+        val malformed = surfaces
+            .filter { surface -> surface.id.isBlank() || surface.markers.isEmpty() || surface.allowedFiles.isEmpty() }
+            .map { surface -> surface.id.ifBlank { "<blank>" } }
+
+        assertTrue(malformed.isEmpty(), "API surfaces must have ids, markers, and allowed files: $malformed")
+
+        val scannedRoots = listOf(
+            projectRoot.resolve("src/main/kotlin"),
+            projectRoot.resolve("src/main/resources/mappings/forge2neo")
+        )
+        val excludedFiles = setOf(
+            "src/main/resources/mappings/forge2neo/api-surfaces.json",
+            "src/main/resources/mappings/forge2neo/neoforge-deps.json"
+        )
+        val declaredThirdPartyRoots = surfaces
+            .flatMap { it.markers }
+            .distinct()
+        val undeclaredThirdPartySentinels = listOf(
+            "alexsmobs.",
+            "alexscaves.",
+            "farmersdelight:",
+            "twilightforest.",
+            "twilightforest:",
+            "team-twilight:",
+            "vazkii.patchouli"
+        )
+
+        val productionFiles = scannedRoots
+            .filter { Files.exists(it) }
+            .flatMap { root ->
+                Files.walk(root).use { stream ->
+                    stream
+                        .filter { Files.isRegularFile(it) }
+                        .filter { it.extension in setOf("kt", "json", "toml", "properties") }
+                        .filter { file ->
+                            val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                            relative !in excludedFiles
+                        }
+                        .toList()
+                }
+            }
+        val productionRelativeFiles = productionFiles
+            .map { file -> projectRoot.relativize(file).invariantSeparatorsPathString }
+            .toSet()
+        val allowedFileOffenders = surfaces.flatMap { surface ->
+            surface.allowedFiles
+                .filter { allowed -> allowed !in productionRelativeFiles }
+                .map { allowed -> "${surface.id} allows non-production file $allowed" }
+        }
+
+        fun surfacesDeclaring(root: String): List<ApiSurface> =
+            surfaces.filter { surface ->
+                surface.markers.any { marker -> root.startsWith(marker) || marker.startsWith(root) }
+            }
+
+        val undeclaredRootOffenders = productionFiles
+            .flatMap { file ->
+                val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                val text = file.readText()
+                undeclaredThirdPartySentinels
+                    .filter { root -> text.contains(root) && surfacesDeclaring(root).isEmpty() }
+                    .map { root -> "$relative contains undeclared third-party API marker $root" }
+            }
+
+        val markerScopeOffenders = productionFiles
+            .flatMap { file ->
+                val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                val text = file.readText()
+                surfaces.flatMap { surface ->
+                    surface.markers
+                        .filter { marker -> text.contains(marker) && relative !in surface.allowedFiles }
+                        .map { marker ->
+                            "$relative contains ${surface.id} marker $marker outside declared API-surface files"
+                        }
+                }
+            }
+
+        val ruleIdPrefixes = surfaces.flatMap { surface ->
+            surface.ruleIdPrefixes.map { prefix -> prefix to surface }
+        }
+        val undeclaredThirdPartyRuleIdTokens = undeclaredThirdPartySentinels
+            .map { root ->
+                root.trimEnd('.', ':')
+                    .substringAfterLast('.')
+                    .substringAfterLast(':')
+                    .lowercase()
+                    .replace('_', '-')
+            }
+            .filter { token -> token.any { it.isLetter() } }
+            .distinct()
+
+        val ruleIdOffenders = productionFiles
+            .flatMap { file ->
+                val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                Regex(""""([^"]+)"""")
+                    .findAll(file.readText())
+                    .map { it.groupValues[1] }
+                    .flatMap { ruleId ->
+                        val declaringSurfaces = ruleIdPrefixes
+                            .filter { (prefix, _) -> ruleId.startsWith(prefix) }
+                            .map { (_, surface) -> surface }
+                        when {
+                            declaringSurfaces.isNotEmpty() &&
+                                declaringSurfaces.none { surface -> relative in surface.allowedFiles } ->
+                                listOf("$relative contains third-party API rule id $ruleId outside declared API-surface files")
+                            declaringSurfaces.isEmpty() && undeclaredThirdPartyRuleIdTokens.any { token ->
+                                ruleId.startsWith("$token-") ||
+                                    ruleId.contains("-$token-") ||
+                                    ruleId.contains("-$token")
+                            } ->
+                                listOf("$relative contains undeclared third-party API rule id $ruleId")
+                            else -> emptyList()
+                        }
+                    }
+                    .toList()
+            }
+
+        val duplicateMarkerOffenders = surfaces
+            .flatMap { surface -> surface.markers.map { marker -> marker to surface.id } }
+            .groupBy({ it.first }, { it.second })
+            .filterValues { ids -> ids.distinct().size > 1 }
+            .map { (marker, ids) -> "API surface marker $marker is declared by multiple surfaces ${ids.distinct()}" }
+
+        val ambiguousMarkerOffenders = declaredThirdPartyRoots
+            .map { marker -> marker to surfacesDeclaring(marker).map { it.id }.distinct() }
+            .filter { (_, ids) -> ids.size > 1 }
+            .map { (marker, ids) -> "API surface marker $marker has ambiguous ownership $ids" }
+
+        val offenders = allowedFileOffenders +
+            undeclaredRootOffenders +
+            markerScopeOffenders +
+            ruleIdOffenders +
+            duplicateMarkerOffenders +
+            ambiguousMarkerOffenders
+        assertTrue(
+            offenders.isEmpty(),
+            "Third-party API migrations must stay inside declared API surfaces, not ad hoc mod-specific rules: $offenders"
+        )
+    }
+
+    @Test
+    fun `nitrogen fuel migrations use typed API shape evidence`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val structuralSource = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val resourceSource = projectRoot
+            .resolve("src/main/kotlin/com/modporter/resources/ResourceMigrator.kt")
+            .readText()
+
+        fun functionBody(source: String, startMarker: String, endMarker: String): String {
+            val start = source.indexOf(startMarker)
+            assertTrue(start >= 0, "$startMarker is missing")
+            val end = source.indexOf(endMarker, start + 1).let { if (it < 0) source.length else it }
+            return source.substring(start, end)
+        }
+
+        val structuralBody = functionBody(
+            structuralSource,
+            "private fun migrateNitrogenFuelCategorySource",
+            "private fun collectNitrogenFuelTextureFields"
+        )
+        val resourceBody = functionBody(
+            resourceSource,
+            "private fun collectNitrogenFuelSpriteSpecs",
+            "private fun collectJavaStringConstants"
+        )
+        val forbiddenMarkers = listOf(
+            """source.contains("com.aetherteam.nitrogen.integration.")""",
+            """source.contains("categories.fuel.AbstractFuelCategory")""",
+            """result.contains("com.aetherteam.nitrogen.integration.jei.categories.fuel.AbstractFuelCategory")""",
+            """result.contains("com.aetherteam.nitrogen.integration.rei.categories.fuel.AbstractFuelCategory")""",
+            """result.contains("new AbstractFuelCategory(")""",
+            """result.contains("getTexture()")""",
+            """textureFields.first()"""
+        )
+        val offenders = listOf(
+            "structural" to structuralBody,
+            "resource" to resourceBody
+        ).flatMap { (label, body) ->
+            forbiddenMarkers
+                .filter { marker -> body.contains(marker) }
+                .map { marker -> "$label Nitrogen fuel migration uses broad marker $marker" }
+        }
+
+        assertTrue(
+            structuralBody.contains("containsNitrogenFuelCategoryApiUse(source, \"jei\")") &&
+                structuralBody.contains("containsNitrogenFuelCategoryApiUse(source, \"rei\")") &&
+                structuralBody.contains("containsNitrogenFuelGetTextureOverride(result)") &&
+                structuralBody.contains("containsNitrogenFuelCategoryConstructorCall(result)") &&
+                structuralBody.contains("nitrogenFuelTextureFieldReturnedByGetTexture(result, textureFields)") &&
+                structuralSource.contains("private fun nitrogenFuelTextureFieldReturnedByGetTexture") &&
+                structuralSource.contains("javaMethodText(maskJavaCommentsAndLiterals(source), \"getTexture\")") &&
+                structuralSource.contains("returnedFields.singleOrNull()") &&
+                structuralSource.contains("maskJavaComments(source)") &&
+                structuralSource.contains("maskJavaCommentsAndLiterals(source)"),
+            "Structural Nitrogen fuel migration must use typed API-shape evidence and comment masking"
+        )
+        assertTrue(
+            resourceBody.contains("commentMaskedSources") &&
+                resourceBody.contains("val executableMaskedSources = sourceTexts.mapValues") &&
+                resourceBody.contains("containsNitrogenFuelCategoryApiUse(source)") &&
+                resourceBody.contains("val executableSource = executableMaskedSources.getValue(javaFile)") &&
+                resourceBody.contains("val executableSegment = executableSource.substring(match.range.first, match.range.last + 1)") &&
+                resourceBody.contains("executableSegment.contains(\"ResourceLocation\")") &&
+                resourceBody.contains("executableSegment.contains(\"fromNamespaceAndPath\")") &&
+                resourceBody.contains("executableSegment.contains(\"new ResourceLocation\")") &&
+                resourceSource.contains("maskJavaComments(source)") &&
+                resourceSource.contains("maskJavaCommentsAndLiterals(source)"),
+            "Resource Nitrogen fuel sprite migration must use typed API-shape evidence and executable texture declarations"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Nitrogen fuel migrations must not infer API ownership from broad file markers: $offenders"
+        )
+    }
+
+    @Test
+    fun `nitrogen sync call migration does not borrow owner entity ids for receiver calls`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun rewriteNitrogenSyncCalls")
+        assertTrue(start >= 0, "rewriteNitrogenSyncCalls is missing")
+        val end = source.indexOf("private fun stripDimensionAccessor", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "receiver owner elvis fallback" to "receiverEntityId ?: ownerEntityId",
+            "unknown direction owner fallback" to Regex("""else\s*->\s*(?:receiverEntityId|ownerEntityId)""")
+        )
+        val offenders = forbidden
+            .filter { (_, marker) ->
+                when (marker) {
+                    is String -> body.contains(marker)
+                    is Regex -> marker.containsMatchIn(body)
+                    else -> false
+                }
+            }
+            .map { (label, _) -> "Nitrogen sync migration contains $label" }
+
+        assertTrue(
+            body.contains("nitrogenSyncIdExpression(args, receiverName, ownerEntityId, receiverEntityId)") &&
+                body.contains("direction.contains(\"Direction.CLIENT\")") &&
+                body.contains("nitrogenCallSiteEntityId(receiverName, ownerEntityId, receiverEntityId)") &&
+                body.contains("receiverName.isNotBlank() && receiverName != \"this\"") &&
+                body.contains("return receiverEntityId") &&
+                body.contains("return ownerEntityId") &&
+                body.contains("else -> null"),
+            "Nitrogen sync migration must bind entity ids to the actual call receiver and fail closed for unknown directions"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Nitrogen sync migration must not fall back from unresolved receiver owners to the enclosing owner: $offenders"
+        )
+    }
+
+    @Test
+    fun `nitrogen sync receiver owner accessors use Java visible FQN resolution`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun javaNonStaticWildcardImports")
+        assertTrue(start >= 0, "javaNonStaticWildcardImports is missing")
+        val end = source.indexOf("private fun rewriteNitrogenSyncCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val receiverStart = body.indexOf("private fun inferNitrogenReceiverOwnerEntityIds")
+        assertTrue(receiverStart >= 0, "inferNitrogenReceiverOwnerEntityIds is missing")
+        val receiverBody = body.substring(receiverStart)
+        val forbidden = listOf(
+            "simple name accessor map" to "typeName to accessors.single()",
+            "simple name receiver type alternation" to "val typeAlternation = ownerAccessors.keys"
+        )
+        val offenders = forbidden
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "Nitrogen sync receiver owner resolution contains $label" }
+            .plus(
+                if (Regex("""findAll\(source\)""").containsMatchIn(receiverBody)) {
+                    listOf("Nitrogen sync receiver owner resolution contains raw source receiver scan")
+                } else {
+                    emptyList()
+                }
+            )
+
+        assertTrue(
+            body.contains("val fqn = if (packageName.isBlank()) typeName else \"\$packageName.\$typeName\"") &&
+                body.contains("val knownTypes = ownerAccessors.keys") &&
+                body.contains("javaNonStaticWildcardImports(code)") &&
+                body.contains("resolveKnownJavaTypeReference(rawType, packageName, imports, wildcardImports, knownTypes)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(text)") &&
+                body.contains("return candidates.filter { it in knownTypes }.distinct().singleOrNull()"),
+            "Nitrogen sync receiver owner resolution must bind accessors by Java-visible FQN, not project-global simple names"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Nitrogen sync receiver owner resolution must not use simple-name or raw-source fallback matching: $offenders"
+        )
+    }
+
+    @Test
+    fun `nitrogen synchable detection requires resolved API owners`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun hasNitrogenAttachmentSyncPacketMethod")
+        assertTrue(start >= 0, "hasNitrogenAttachmentSyncPacketMethod is missing")
+        val end = source.indexOf("private fun extractJavaTopLevelSuperTypes", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "raw INBTSynchable source marker" to """source.contains("INBTSynchable")""",
+            "simple-name INBTSynchable fallback" to """substringAfterLast('.') == "INBTSynchable"""",
+            "unbounded supertype resolver in synchable closure" to "resolveJavaTypeReference(superType, type.packageName, type.imports)"
+        )
+        val offenders = forbidden
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "Nitrogen synchable detection contains $label" }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("extractJavaTopLevelSuperTypes(executableCode)") &&
+                body.contains("resolveKnownJavaTypeReference(superType, packageName, imports, wildcardImports, nitrogenSynchableTypes)") &&
+                body.contains("wildcardImports = javaNonStaticWildcardImports(code)") &&
+                body.contains("resolveKnownJavaTypeReference(") &&
+                body.contains("resolved in synchableTypes"),
+            "Nitrogen synchable detection must resolve Java-visible API owners instead of trusting simple names or raw markers"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Nitrogen synchable detection must not infer API identity from local simple names: $offenders"
+        )
+    }
+
+    @Test
+    fun `nitrogen attachment suppliers require resolved neoforge attachment type`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun collectNitrogenAttachmentSuppliers")
+        assertTrue(start >= 0, "collectNitrogenAttachmentSuppliers is missing")
+        val end = source.indexOf("private fun ensureNitrogenSyncPacketAttachmentGetter", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "raw AttachmentType marker" to """source.contains("AttachmentType<")""",
+            "raw source supplier scan" to Regex("""findAll\(source\)"""),
+            "unresolved attachment supplier add" to Regex("""fun\s+addSupplier\s*\(\s*typeName:\s*String,\s*fieldName:\s*String""")
+        )
+        val offenders = forbidden
+            .filter { (_, marker) ->
+                when (marker) {
+                    is String -> body.contains(marker)
+                    is Regex -> marker.containsMatchIn(body)
+                    else -> false
+                }
+            }
+            .map { (label, _) -> "Nitrogen attachment supplier collection contains $label" }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("if (!executableCode.contains(\"AttachmentType<\")) continue") &&
+                body.contains("val wildcardImports = javaNonStaticWildcardImports(code)") &&
+                body.contains("fun addSupplier(attachmentTypeRef: String, typeName: String, fieldName: String)") &&
+                body.contains("isNeoForgeAttachmentTypeReference(attachmentTypeRef, packageName, imports, wildcardImports)") &&
+                body.contains(".findAll(executableCode)") &&
+                source.contains("private fun isNeoForgeAttachmentTypeReference("),
+            "Nitrogen attachment supplier collection must prove AttachmentType resolves to NeoForge API"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Nitrogen attachment supplier collection must not trust raw source or unqualified AttachmentType names: $offenders"
+        )
+    }
+
+    @Test
+    fun `backpack container API migration binds inventory wrapper to slot constructor`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateQuarkBackpackInventoryWrappers")
+        assertTrue(start >= 0, "migrateQuarkBackpackInventoryWrappers is missing")
+        val end = source.indexOf("private fun hasNitrogenAttachmentSyncPacketMethod", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "file-level BackpackSlot guard" to """original.contains("new BackpackSlot(")""",
+            "file-level BackpackSlot negated guard" to """!original.contains("new BackpackSlot(")""",
+            "raw InventoryIIH import prefilter" to """original.contains("org.violetmoon.quark.base.util.InventoryIIH")""",
+            "raw wrapper declaration prefilter" to "wrapperDeclaration.containsMatchIn(original)",
+            "raw BackpackSlot consumer scan" to ".containsMatchIn(original)",
+            "raw source wrapper replacement" to "wrapperDeclaration.replace(original)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> "backpack container migration contains $label" }
+
+        assertTrue(
+            body.contains("Regex.escape(wrapperName)") &&
+                body.contains("BackpackSlot") &&
+                body.contains("backpackSlotConsumesWrapper") &&
+                body.contains("val executableCode = maskJavaCommentsAndLiterals(original)") &&
+                body.contains("wrapperDeclaration.findAll(executableCode)") &&
+                body.contains("containsMatchIn(executableCode)") &&
+                body.contains("modified.substring(0, range.first)"),
+            "Backpack container migration must prove the declared wrapper variable is passed to BackpackSlot"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Backpack container migration must use variable-level constructor evidence, not whole-file BackpackSlot presence: $offenders"
+        )
+    }
+
+    @Test
+    fun `production kotlin sources do not contain TODO placeholder or reflection fallback debt`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val allowedReflectionMigrator = "src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt"
+        val forbidden = listOf(
+            "TODO" to Regex("""\bTODO\b"""),
+            "FIXME" to Regex("""\bFIXME\b"""),
+            "Class.forName" to Regex("""\bClass\.forName\s*\("""),
+            "getDeclaredField" to Regex("""\bgetDeclaredField\s*\("""),
+            "getDeclaredMethod" to Regex("""\bgetDeclaredMethod\s*\("""),
+            "getDeclaredConstructor" to Regex("""\bgetDeclaredConstructor\s*\("""),
+            "getMethod" to Regex("""\.getMethod\s*\("""),
+            "setAccessible" to Regex("""\bsetAccessible\s*\(""")
+        )
+
+        val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) && it.extension == "kt" }
+                .flatMap { file ->
+                    val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                    val text = file.readText()
+                    forbidden
+                        .filter { (marker, pattern) ->
+                            pattern.containsMatchIn(text) &&
+                                !(relative == allowedReflectionMigrator && marker in setOf("getDeclaredField", "getDeclaredMethod", "getDeclaredConstructor", "getMethod", "setAccessible", "Class.forName"))
+                        }
+                        .map { (marker, _) -> "$relative contains $marker" }
+                        .stream()
+                }
+                .toList()
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Production Kotlin sources must not carry TODO placeholders or reflection fallbacks: $offenders"
+        )
+    }
+
+    @Test
+    fun `old dependency wrapper normalization is coordinate agnostic`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val start = source.indexOf("private fun normalizeOldDependencyWrappers")
+        assertTrue(start >= 0, "normalizeOldDependencyWrappers is missing")
+        val end = source.indexOf("private data class LegacyTreeGrower", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val forbidden = listOf(
+            "known dependency prefix list" to "allDepPrefixes",
+            "filtered dependency prefix list" to "depPrefixes",
+            "JEI coordinate prefix" to "mezz.jei:",
+            "Botania coordinate prefix" to "vazkii.botania",
+            "Create coordinate prefix" to "com.simibubi.create",
+            "CurseMaven coordinate prefix" to "curse.maven:",
+            "prefix-gated wrapper rewrite" to "depPrefixes.any"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("""blockText.contains("fg.deobf")""") &&
+                body.contains("fg\\.deobf") &&
+                body.contains("removeFgDeobfWrapper"),
+            "Old dependency wrappers must be detected by Gradle wrapper shape, not artifact coordinates"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "Old dependency wrapper normalization must not depend on known artifact prefixes: $forbidden"
+        )
+    }
+
+    @Test
+    fun `legacy tree grower migration preserves subclass override logic`() {
+        val source = Path.of("")
+            .toAbsolutePath()
+            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .readText()
+        val forbidden = listOf(
+            "dead helper source generator" to "legacyTreeGrowerHelperSource",
+            "flattening TreeGrower expression helper" to "treeGrowerExpression",
+            "first return expression fallback" to "returnExpressions.firstOrNull()",
+            "collected unused return expressions" to "val returnExpressions: List<String>"
+        )
+            .filter { (_, marker) -> source.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            source.contains("migrateLegacyTreeGrowerSubclass") &&
+                source.contains("ModPorterAbstractTreeGrower") &&
+                source.contains("public-f net.minecraft.world.level.block.grower.TreeGrower"),
+            "Legacy tree grower migration must keep subclass overrides through a generated TreeGrower compatibility base"
+        )
+        assertTrue(
+            forbidden.isEmpty(),
+            "Legacy tree grower migration must not collapse override semantics into a first-return TreeGrower constant: $forbidden"
+        )
+    }
+
+    @Test
+    fun `production cleanup rules do not depend on legacy forge2neo comment markers`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val forbidden = listOf(
+            "legacy forge2neo comment marker" to "[forge2neo]",
+            "split TODO regex bypass" to "T(?:ODO)"
+        )
+
+        val offenders = Files.walk(projectRoot.resolve("src/main/kotlin")).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) && it.extension == "kt" }
+                .flatMap { file ->
+                    val relative = projectRoot.relativize(file).invariantSeparatorsPathString
+                    val text = file.readText()
+                    forbidden
+                        .filter { (_, marker) -> text.contains(marker) }
+                        .map { (label, _) -> "$relative contains $label" }
+                        .stream()
+                }
+                .toList()
+        }
+
+        assertTrue(
+            offenders.isEmpty(),
+            "Production cleanup must be structural and must not depend on legacy tool comment markers: $offenders"
+        )
+    }
+
+    @Test
+    fun `structural migrations do not synthesize placeholder names for unclear source structure`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val forbiddenMarkers = listOf(
+            """ifBlank { "CUSTOM" }""",
+            """ifBlank { "custom" }""",
+            "?: \"output\""
+        )
+        val offenders = forbiddenMarkers
+            .filter { marker -> source.contains(marker) }
+
+        assertTrue(
+            source.contains("private fun enumExtensionNamePart(value: String): String?") &&
+                source.contains("private fun prefixedEnumExtensionName(modId: String, legacyName: String): String?") &&
+                source.contains("private fun legacyRaritySerializedName(modId: String, legacyName: String): String?") &&
+                source.contains("private fun enumExtensionNameParameter(modId: String, legacyName: String): String?"),
+            "Enum extension naming helpers must fail closed when source literals cannot be normalized"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Production structural migrations must not invent placeholder enum/resource/provider names: $offenders"
+        )
+    }
+
+    @Test
+    fun `bucket pickup call site migration requires scoped receiver evidence before nullable player`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateLegacyBucketPickupCallSites")
+        assertTrue(start >= 0, "migrateLegacyBucketPickupCallSites is missing")
+        val end = source.indexOf("private fun migratedItemUseDurationCall", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "missing enclosing method falls back to null player" to "lastOrNull() ?: return \"null\"",
+            "out-of-scope method falls back to null player" to "if (closeBrace <= offset) return \"null\"",
+            "direct migration guesses nearest player expression" to "nearestPlayerExpressionBeforeOffset",
+            "direct migration uses whole-file executable type evidence" to "bucketPickupReceiverHasTypeEvidence(executableCode, receiver)"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+                body.contains("private fun bucketPickupPlayerArgumentForEnclosingMethod(source: String, offset: Int): String?") &&
+                body.contains("javaMethodRangesIncludingDefault(source).firstOrNull { offset in it.range } ?: return null") &&
+                body.contains("val paramsText = javaMethodParameterText(method.header) ?: return null") &&
+                body.contains("if (playerArgument != null) return playerArgument") &&
+                body.contains("return \"null\"") &&
+                body.contains("val playerArgument = bucketPickupPlayerArgumentForEnclosingMethod(result, tokenIndex)") &&
+                body.contains("bucketPickupReceiverHasTypeEvidence(result, receiver, tokenIndex)") &&
+                body.contains("private fun bucketPickupReceiverHasTypeEvidence(source: String, receiver: String, offset: Int): Boolean") &&
+                body.contains("receiverHasMethodScopedTypeEvidence(source, receiver, offset, \"BucketPickup\")"),
+            "BucketPickup call-site migration may use nullable null only after the call is inside a parsed Java method and the receiver has method-scoped BucketPickup evidence"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "BucketPickup call-site migration must not use nearest-player or whole-file fallback evidence: $offenders"
+        )
+    }
+
+    @Test
+    fun `bucket fluid helper migration uses executable source`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateBucketItemCanBlockContainFluidSource")
+        assertTrue(start >= 0, "migrateBucketItemCanBlockContainFluidSource is missing")
+        val end = source.indexOf("private fun migrateUnboundLevelRegistryAccessCalls", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw canPlaceLiquid rewrite" to Regex("""rewriteJavaCall\(body,\s*"canPlaceLiquid""""),
+            "raw canBlockContainFluid rewrite" to Regex("""rewriteJavaCall\(body,\s*"canBlockContainFluid""""),
+            "raw unqualified token scan" to Regex("""result\.indexOf\(token,\s*cursor\)"""),
+            "raw unqualified paren matching" to Regex("""findMatchingParen\(result,\s*openParen\)"""),
+            "raw helper method scan" to Regex("""helperPattern\.findAll\(result\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("collectJavaClassDeclarations(executableCode)") &&
+                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
+                body.contains("helperPattern.findAll(executableResult)") &&
+                body.contains("rewriteExecutableJavaCall(body, \"canPlaceLiquid\")") &&
+                body.contains("rewriteExecutableJavaCall(body, \"canBlockContainFluid\")") &&
+                body.contains("executableCode.indexOf(token, cursor)") &&
+                body.contains("findMatchingParen(executableCode, openParen)"),
+            "Bucket fluid helper migration must locate helpers and calls in executable Java, not comments or strings"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Bucket fluid helper migration must not rewrite commented examples: $offenders"
+        )
+    }
+
+    @Test
+    fun `bucket fluid access migration uses executable source`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun migrateBucketItemFluidAccessSource")
+        assertTrue(start >= 0, "migrateBucketItemFluidAccessSource is missing")
+        val end = source.indexOf("private fun migrateItemStackHoverNameSource", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "raw getFluid replacement" to Regex("""\.replace\("this\.getFluid\(\)",\s*"this\.content"\)"""),
+            "raw FluidStack variable scan" to Regex("""\.findAll\(result\)""")
+        )
+            .filter { (_, pattern) -> pattern.containsMatchIn(body) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
+                body.contains("executableCode.contains(\"extends BucketItem\")") &&
+                body.contains("replaceExecutableJavaRegex(result, Regex") &&
+                body.contains(".findAll(executableCode)"),
+            "Bucket fluid access migration must locate getFluid usages and FluidStack variables in executable Java"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "Bucket fluid access migration must not rewrite comments or strings: $offenders"
+        )
+    }
+
+    @Test
+    fun `level summary nullable migration uses enclosing method structure`() {
+        val projectRoot = Path.of("").toAbsolutePath()
+        val source = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
+            .readText()
+        val start = source.indexOf("private fun isNullableLevelSummaryMethod")
+        assertTrue(start >= 0, "isNullableLevelSummaryMethod is missing")
+        val end = source.indexOf("private fun migrateLegacyBindingCurseChecks", start + 1).let {
+            if (it < 0) source.length else it
+        }
+        val body = source.substring(start, end)
+        val offenders = listOf(
+            "file-prefix method scan" to "source.substring(0, offset)",
+            "last previous method fallback" to "lastOrNull()"
+        )
+            .filter { (_, marker) -> body.contains(marker) }
+            .map { (label, _) -> label }
+
+        assertTrue(
+            body.contains("javaMethodRanges(source).firstOrNull { offset in it.range }") &&
+                body.contains("LevelSummary") &&
+                body.contains("@Nullable"),
+            "LevelSummary nullable migration must inspect the enclosing Java method, not a previous method in the file"
+        )
+        assertTrue(
+            offenders.isEmpty(),
+            "LevelSummary nullable migration must not use file-prefix or previous-method fallback: $offenders"
+        )
+    }

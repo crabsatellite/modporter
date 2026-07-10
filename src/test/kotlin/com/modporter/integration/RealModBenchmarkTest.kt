@@ -166,6 +166,28 @@ class RealModBenchmarkTest {
     }
 
     @Test
+    fun `gametest runtime gate terminates after required tests pass and shutdown starts`(@TempDir tempDir: Path) {
+        val logFile = tempDir.resolve("gametest-shutdown.log")
+        val outerTimeoutSeconds = 20L
+        val started = System.nanoTime()
+
+        val result = runRuntimeProcess(
+            stalledGameTestShutdownCommand(tempDir),
+            tempDir,
+            logFile,
+            timeoutSeconds = outerTimeoutSeconds,
+            runtimeLogPolicy = RuntimeLogPolicy.gameTestServer(failOnWarnings = false)
+        )
+
+        val elapsedSeconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started)
+        assertTrue(result.status == CheckStatus.PASS, "Expected completed GameTest shutdown gate to pass: ${result.note}")
+        assertTrue(
+            elapsedSeconds < outerTimeoutSeconds,
+            "Completed GameTest shutdown gate should not wait for the outer timeout; elapsed=${elapsedSeconds}s"
+        )
+    }
+
+    @Test
     fun `runtime log audit allows OpenAL invalid-name only during client shutdown`(@TempDir tempDir: Path) {
         val earlyLog = tempDir.resolve("early-openal.log")
         earlyLog.writeText("[10:23:15] [Sound engine/ERROR] [mojang/OpenAlUtil]: Stop: Invalid name parameter.\n")
@@ -1026,6 +1048,51 @@ class RealModBenchmarkTest {
         assertTrue(
             audit.findings.any { it.contains("took 1.082 s to run a deferred task") },
             "Slow deferred work warnings require identical input and converted enqueueWork call fingerprints"
+        )
+    }
+
+    @Test
+    fun `runtime log audit allowlists source inherited gametest server lag with source log evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        val sourceDir = tempDir.resolve("sources/example")
+        writeSourceInheritedServerLagEvidence(projectDir)
+        writeSourceInheritedServerLagEvidence(sourceDir)
+        val logFile = tempDir.resolve("gametest-server-lag.log")
+        logFile.writeText("""
+            [06:14:12] [Server thread/INFO] [example/]: Allocated dimension 0 for session 00000000-0000-0000-0000-000000000000
+            [06:14:12] [Server thread/INFO] [example/]: Recovering temporary mirror dimension 0 from saved cleanup marker
+            [06:14:12] [Server thread/INFO] [example/]: Re-queued cleanup for recovered temporary mirror dimension 0
+            [06:14:12] [Server thread/WARN] [minecraft/MinecraftServer]: Can't keep up! Is the server overloaded? Running 4627ms or 92 ticks behind
+            [06:14:13] [Server thread/INFO] [net.minecraft.gametest.framework.GameTestServer/]: All 36 required tests passed :)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir, inputSourceDir = sourceDir)
+
+        assertTrue(audit.findings.isEmpty(), "Expected source-inherited GameTest lag warning to be allowlisted: $audit")
+        assertTrue(
+            audit.allowedIssues.any { it.contains("source-inherited GameTest server lag warning") },
+            "Expected GameTest lag evidence in allowed issues, got: ${audit.allowedIssues}"
+        )
+    }
+
+    @Test
+    fun `runtime log audit keeps gametest server lag without source log evidence`(@TempDir tempDir: Path) {
+        val projectDir = tempDir.resolve("work/example")
+        writeSourceInheritedServerLagEvidence(projectDir)
+        val logFile = tempDir.resolve("gametest-server-lag-no-source.log")
+        logFile.writeText("""
+            [06:14:12] [Server thread/INFO] [example/]: Allocated dimension 0 for session 00000000-0000-0000-0000-000000000000
+            [06:14:12] [Server thread/INFO] [example/]: Recovering temporary mirror dimension 0 from saved cleanup marker
+            [06:14:12] [Server thread/INFO] [example/]: Re-queued cleanup for recovered temporary mirror dimension 0
+            [06:14:12] [Server thread/WARN] [minecraft/MinecraftServer]: Can't keep up! Is the server overloaded? Running 4627ms or 92 ticks behind
+            [06:14:13] [Server thread/INFO] [net.minecraft.gametest.framework.GameTestServer/]: All 36 required tests passed :)
+        """.trimIndent() + "\n")
+
+        val audit = auditRuntimeLog(logFile, failOnWarnings = true, projectDir = projectDir)
+
+        assertTrue(
+            audit.findings.any { it.contains("Can't keep up") },
+            "GameTest lag warnings require input source log-template evidence"
         )
     }
 
@@ -2231,6 +2298,13 @@ class RealModBenchmarkTest {
                 progressReachedAt = now
             }
 
+            if (ready && terminateRequestedAt == null && runtimeLogPolicy.terminateAfterShutdownChecks &&
+                runtimeLogPolicy.shutdown(logFile)
+            ) {
+                terminateProcessTree(process, forcibly = false)
+                terminateRequestedAt = now
+            }
+
             val progressAt = progressReachedAt
             val progressGrace = runtimeLogPolicy.progressGraceSeconds
             if (!ready && !progressTimeoutTriggered && progressAt != null && progressGrace != null &&
@@ -2350,6 +2424,32 @@ class RealModBenchmarkTest {
             listOf("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.toString())
         } else {
             val script = tempDir.resolve("stall-client-world.sh")
+            script.writeText(
+                "#!/bin/sh\n" +
+                    lines.joinToString("\n") { "printf '%s\\n' '$it'" } +
+                    "\nsleep 20\n"
+            )
+            listOf("sh", script.toString())
+        }
+    }
+
+    private fun stalledGameTestShutdownCommand(tempDir: Path): List<String> {
+        val lines = listOf(
+            "[06:14:13] [Server thread/INFO] [net.minecraft.gametest.framework.GameTestServer/]: All 36 required tests passed :)",
+            "[06:14:13] [Server thread/INFO] [minecraft/MinecraftServer]: Stopping server"
+        )
+        val isWindows = System.getProperty("os.name").lowercase().contains("win")
+        return if (isWindows) {
+            val script = tempDir.resolve("stall-gametest-shutdown.ps1")
+            script.writeText(
+                lines.joinToString(System.lineSeparator()) { "Write-Output '$it'" } +
+                    System.lineSeparator() +
+                    "Start-Sleep -Seconds 20" +
+                    System.lineSeparator()
+            )
+            listOf("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script.toString())
+        } else {
+            val script = tempDir.resolve("stall-gametest-shutdown.sh")
             script.writeText(
                 "#!/bin/sh\n" +
                     lines.joinToString("\n") { "printf '%s\\n' '$it'" } +
@@ -2551,6 +2651,30 @@ class RealModBenchmarkTest {
                         MultiblockRegistry.registerMultiblocks();
                         $extraDeferredCall
                     });
+                }
+            }
+        """.trimIndent() + "\n")
+    }
+
+    private fun writeSourceInheritedServerLagEvidence(projectDir: Path) {
+        val javaDir = projectDir.resolve("src/main/java/example")
+        javaDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        javaDir.resolve("ExampleMirrorCleanup.java").writeText("""
+            package example;
+
+            public final class ExampleMirrorCleanup {
+                private static final Logger LOGGER = new Logger();
+
+                public void cleanup() {
+                    LOGGER.info("Allocated dimension {} for session {}");
+                    LOGGER.info("Recovering temporary mirror dimension {} from saved cleanup marker");
+                    LOGGER.info("Re-queued cleanup for recovered temporary mirror dimension {}");
+                }
+
+                private static final class Logger {
+                    void info(String message) {
+                    }
                 }
             }
         """.trimIndent() + "\n")
@@ -3385,6 +3509,9 @@ class RealModBenchmarkTest {
         sourceInheritedSlowDeferredWorkEvidence(lines[index], evidenceCache)?.let {
             return "source-inherited slow deferred work warning ($it)"
         }
+        sourceInheritedGameTestServerLagEvidence(lines, index, evidenceCache)?.let {
+            return "source-inherited GameTest server lag warning ($it)"
+        }
         return null
     }
 
@@ -3884,6 +4011,55 @@ class RealModBenchmarkTest {
     private data class DeferredWorkFingerprint(
         val calls: Set<String>
     )
+
+    private fun sourceInheritedGameTestServerLagEvidence(
+        lines: List<String>,
+        index: Int,
+        evidenceCache: RuntimeLogEvidenceCache
+    ): String? {
+        val line = lines[index]
+        if (!line.contains("[minecraft/MinecraftServer]: Can't keep up!")) return null
+        if (lines.none { Regex("""GameTestServer.*All \d+ required tests passed""").containsMatchIn(it) }) {
+            return null
+        }
+        val project = evidenceCache.projectDir ?: return null
+        val sourceDir = evidenceCache.inputSourceDir ?: benchmarkInputSourceDir(project) ?: return null
+
+        val commonTemplates = runtimeLogTemplates(project).intersect(runtimeLogTemplates(sourceDir))
+        if (commonTemplates.isEmpty()) return null
+        val windowStart = (index - 64).coerceAtLeast(0)
+        val windowEnd = (index + 16).coerceAtMost(lines.size)
+        val evidenceWindow = lines.subList(windowStart, windowEnd)
+        val matched = commonTemplates
+            .filter { template -> runtimeTemplateMatchesAnyLine(template, evidenceWindow) }
+            .distinct()
+            .sorted()
+        if (matched.size < 3) return null
+        return "GameTest passed and input/converted sources share ${matched.size} runtime log template(s) around the lag: " +
+            matched.take(4).joinToString(", ")
+    }
+
+    private fun runtimeLogTemplates(projectDir: Path): Set<String> {
+        if (!projectDir.exists()) return emptySet()
+        val loggerCallPattern = Regex("""\b(?:LOGGER|logger|LogManager\.getLogger\([^)]*\))\.(?:info|warn)\s*\(\s*"((?:\\"|[^"])*)"""")
+        return javaAndKotlinSourceFiles(projectDir)
+            .asSequence()
+            .flatMap { file ->
+                val active = activeCode(file.readText())
+                loggerCallPattern.findAll(active).map { match ->
+                    match.groupValues[1]
+                        .replace("\\\"", "\"")
+                        .trim()
+                }
+            }
+            .filter { it.length >= 16 && it.contains("{}") }
+            .toSet()
+    }
+
+    private fun runtimeTemplateMatchesAnyLine(template: String, lines: List<String>): Boolean {
+        val regex = Regex(template.split("{}").joinToString(""".+?""") { Regex.escape(it) })
+        return lines.any { line -> regex.containsMatchIn(line) }
+    }
 
     private fun externalDependencyCreativeTabDuplicateEvidence(
         lines: List<String>,
@@ -4913,6 +5089,7 @@ class RealModBenchmarkTest {
         val shutdownChecks: List<RuntimeMarkerCheck> = emptyList(),
         val stopCommand: String? = null,
         val terminateAfterReady: Boolean = false,
+        val terminateAfterShutdownChecks: Boolean = false,
         val requireZeroExit: Boolean = true,
         val failOnWarnings: Boolean = false,
         val progressChecks: List<RuntimeMarkerCheck> = emptyList(),
@@ -4923,6 +5100,9 @@ class RealModBenchmarkTest {
 
         fun progress(logFile: Path): Boolean =
             progressChecks.isNotEmpty() && missingChecks(logFile, progressChecks).isEmpty()
+
+        fun shutdown(logFile: Path): Boolean =
+            shutdownChecks.isNotEmpty() && missingShutdownChecks(logFile).isEmpty()
 
         fun missingReadyChecks(logFile: Path): List<String> =
             missingChecks(logFile, readyChecks)
@@ -4972,6 +5152,8 @@ class RealModBenchmarkTest {
                     shutdownChecks = listOf(
                         RuntimeMarkerCheck("server stopped", listOf(Regex("""Stopping server|BUILD SUCCESSFUL""")))
                     ),
+                    terminateAfterShutdownChecks = true,
+                    requireZeroExit = false,
                     failOnWarnings = failOnWarnings
                 )
 

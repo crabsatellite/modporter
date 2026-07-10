@@ -180,6 +180,29 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `vanilla options screen imports migrate to options package`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraft.client.gui.screens.OptionsScreen;
+
+            public class TestMod {
+                net.minecraft.client.gui.screens.OptionsScreen screen;
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("import net.minecraft.client.gui.screens.options.OptionsScreen;"), transformed)
+        assertTrue(transformed.contains("net.minecraft.client.gui.screens.options.OptionsScreen screen;"), transformed)
+        assertFalse(transformed.contains("net.minecraft.client.gui.screens.OptionsScreen"), transformed)
+    }
+
+    @Test
     fun `network direction checks are not replaced with constant placeholders`() {
         val projectDir = createTestFile("""
             package com.example;
@@ -205,6 +228,28 @@ class TextReplacementTest {
         assertTrue(transformed.contains("ctx.get().getDirection().getReceptionSide().isClient()"))
         assertFalse(transformed.contains("true /*"))
         assertFalse(transformed.contains("direction check"))
+    }
+
+    @Test
+    fun `business state get calls are not rewritten as blockstate property reads`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            public class TestMod {
+                void render(MirrorConfigState state, MirrorKind kind) {
+                    Object value = state.get(kind);
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        pass.apply(projectDir)
+
+        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
+
+        assertTrue(transformed.contains("state.get(kind)"), transformed)
+        assertFalse(transformed.contains("state.getValue(kind)"), transformed)
     }
 
     @Test
@@ -1295,6 +1340,68 @@ class TextReplacementTest {
     }
 
     @Test
+    fun `legacy top level enchantment registrations migrate with source declared register field`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        val registryFile = srcDir.resolve("ModEnchantments.java")
+        registryFile.writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModEnchantments {
+                public static final DeferredRegister<Enchantment> ENCHANTMENT = DeferredRegister.create(Registries.ENCHANTMENT, ExampleMod.MODID);
+                public static final DeferredHolder<Enchantment, Enchantment> SPARK = ENCHANTMENT.register("spark", () -> new SparkEnchantment(Enchantment.Rarity.RARE));
+            }
+        """.trimIndent())
+        val enchantmentFile = srcDir.resolve("SparkEnchantment.java")
+        enchantmentFile.writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+
+            public class SparkEnchantment extends Enchantment {
+                public SparkEnchantment(Rarity rarity) {
+                    super(rarity, EnchantmentCategory.WEAPON, new EquipmentSlot[] { EquipmentSlot.MAINHAND });
+                }
+
+                @Override
+                public int getMaxLevel() {
+                    return 2;
+                }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(tempDir)
+
+        val registry = registryFile.readText()
+        val generated = tempDir.resolve("src/generated/resources/data/example/enchantment/spark.json")
+        assertTrue(result.changes.any { it.ruleId == "custom-enchantment-resourcekey-context" }, result.changes.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "text-custom-enchantment-data" }, result.changes.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "custom-enchantment-remove-top-level-subclass" }, result.changes.joinToString("\n"))
+        assertTrue(registry.contains("public static final net.minecraft.resources.ResourceKey<Enchantment> SPARK"), registry)
+        assertTrue(registry.contains("java.util.List.of(SPARK)"), registry)
+        assertFalse(registry.contains("DeferredRegister<Enchantment> ENCHANTMENT"), registry)
+        assertFalse(registry.contains("ENCHANTMENT.register"), registry)
+        assertTrue(generated.exists(), "data-driven enchantment JSON should be generated")
+        assertFalse(enchantmentFile.exists(), "migrated top-level Enchantment subclass should be removed when unreferenced")
+    }
+
+    @Test
     fun `legacy private static enchantment subclass removal uses executable java structure`() {
         val projectDir = createTestFile("""
             package com.example;
@@ -1389,6 +1496,7 @@ class TextReplacementTest {
                 public static final DeferredHolder<Enchantment, Enchantment> FIRE_REACT = ENCHANTMENTS.register("fire_react", () -> new FireReactEnchantment(Enchantment.Rarity.UNCOMMON));
                 public static final DeferredHolder<Enchantment, Enchantment> CHILL_AURA = ENCHANTMENTS.register("chill_aura", () -> new ChillAuraEnchantment(Enchantment.Rarity.UNCOMMON));
                 public static final DeferredHolder<Enchantment, Enchantment> DESTRUCTION = ENCHANTMENTS.register("destruction", () -> new DestructionEnchantment(Enchantment.Rarity.RARE));
+                public static final DeferredHolder<Enchantment, Enchantment> DURABLE = ENCHANTMENTS.register("durable", () -> new DurableEnchantment(Enchantment.Rarity.COMMON));
                 public static final EnchantmentCategory BLOCK_AND_CHAIN = EnchantmentCategory.create("example_block_and_chain", item -> item instanceof ChainBlockItem);
             }
         """.trimIndent())
@@ -1576,12 +1684,26 @@ class TextReplacementTest {
                 }
             }
         """.trimIndent())
+        srcDir.resolve("DurableEnchantment.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.item.enchantment.Enchantment;
+            import net.minecraft.world.item.enchantment.EnchantmentCategory;
+
+            public class DurableEnchantment extends Enchantment {
+                public DurableEnchantment(Rarity rarity) {
+                    super(rarity, EnchantmentCategory.BREAKABLE, new EquipmentSlot[]{EquipmentSlot.MAINHAND});
+                }
+            }
+        """.trimIndent())
 
         val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
 
         val fireReact = tempDir.resolve("src/generated/resources/data/example/enchantment/fire_react.json").readText()
         val chillAura = tempDir.resolve("src/generated/resources/data/example/enchantment/chill_aura.json").readText()
         val destruction = tempDir.resolve("src/generated/resources/data/example/enchantment/destruction.json").readText()
+        val durable = tempDir.resolve("src/generated/resources/data/example/enchantment/durable.json").readText()
         val blockAndChainTag = tempDir.resolve("src/generated/resources/data/example/tags/item/enchantable/block_and_chain.json").readText()
 
         assertTrue(result.changes.any { it.ruleId == "text-custom-enchantment-data" })
@@ -1599,6 +1721,10 @@ class TextReplacementTest {
   ]"""))
         assertTrue(destruction.contains(""""type": "minecraft:add""""))
         assertTrue(destruction.contains(""""base": -1.5"""))
+        assertTrue(durable.contains(""""supported_items": "#minecraft:enchantable/durability""""))
+        assertTrue(durable.contains(""""slots": [
+    "mainhand"
+  ]"""))
         assertTrue(blockAndChainTag.contains(""""example:block_and_chain""""))
     }
 

@@ -1,0 +1,200 @@
+
+    @Test
+    fun `does not exclude legacy criterion triggers and payload registrars with missing packet classes`() {
+        val projectDir = tempDir.resolve("p20")
+        val advancementDir = projectDir.resolve("src/main/java/com/example/advancements")
+        val networkDir = projectDir.resolve("src/main/java/com/example/network")
+        advancementDir.createDirectories()
+        networkDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        advancementDir.resolve("AdvancementTrigger.java").writeText("""
+            package com.example.advancements;
+
+            import net.minecraft.advancements.CriterionTrigger;
+            import net.minecraft.advancements.CriterionTriggerInstance;
+            import net.minecraft.advancements.critereon.SerializationContext;
+
+            public class AdvancementTrigger implements CriterionTrigger<AdvancementTrigger.Instance> {
+                public static class Instance implements CriterionTriggerInstance {
+                }
+            }
+        """.trimIndent())
+        networkDir.resolve("ModNetwork.java").writeText("""
+            package com.example.network;
+
+            import net.neoforged.neoforge.network.registration.PayloadRegistrar;
+
+            public class ModNetwork {
+                public static void register(PayloadRegistrar registrar) {
+                    registrar.playToClient(MissingPacket.TYPE, MissingPacket.STREAM_CODEC, MissingPacket::handle);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "build-exclude-integrations" })
+        assertFalse(content.contains("exclude 'com/example/advancements/AdvancementTrigger.java'"))
+        assertFalse(content.contains("exclude 'com/example/network/ModNetwork.java'"))
+    }
+
+    @Test
+    fun `does not exclude codec based criterion triggers`() {
+        val projectDir = tempDir.resolve("p20b")
+        val advancementDir = projectDir.resolve("src/main/java/com/example/advancements")
+        advancementDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        advancementDir.resolve("AdvancementTrigger.java").writeText("""
+            package com.example.advancements;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.advancements.CriterionTrigger;
+            import net.minecraft.advancements.CriterionTriggerInstance;
+            import net.minecraft.advancements.critereon.CriterionValidator;
+            import net.minecraft.server.PlayerAdvancements;
+
+            public class AdvancementTrigger implements CriterionTrigger<AdvancementTrigger.Instance> {
+                public void addPlayerListener(PlayerAdvancements playerAdvancements, CriterionTrigger.Listener<Instance> listener) {}
+                public void removePlayerListener(PlayerAdvancements playerAdvancements, CriterionTrigger.Listener<Instance> listener) {}
+                public void removePlayerListeners(PlayerAdvancements playerAdvancements) {}
+                public Codec<Instance> codec() { return Codec.unit(new Instance()); }
+
+                public static class Instance implements CriterionTriggerInstance {
+                    public void validate(CriterionValidator validator) {}
+                }
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertFalse(content.contains("exclude 'com/example/advancements/AdvancementTrigger.java'"))
+    }
+
+    @Test
+    fun `cleans duplicate override annotations after chained rewrites`() {
+        val projectDir = tempDir.resolve("p21")
+        val blockDir = projectDir.resolve("src/main/java/com/example/block")
+        blockDir.createDirectories()
+        blockDir.resolve("TaikoBlock.java").writeText("""
+            package com.example.block;
+
+            public class TaikoBlock {
+                @Override
+                @SuppressWarnings("deprecation")
+                @Override
+                protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hit) {
+                    return InteractionResult.SUCCESS;
+                }
+
+                @Override
+                @Deprecated
+                @Override
+                protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hit, int variant) {
+                    return InteractionResult.SUCCESS;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = blockDir.resolve("TaikoBlock.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-cleanup-duplicate-override" })
+        assertFalse(Regex("""@Override\s*\r?\n\s*@SuppressWarnings\("deprecation"\)\s*\r?\n\s*@Override""").containsMatchIn(content))
+        assertFalse(Regex("""@Override\s*\r?\n\s*@Deprecated\s*\r?\n\s*@Override""").containsMatchIn(content))
+        assertTrue(Regex("""@SuppressWarnings\("deprecation"\)\s*\r?\n\s*@Override""").containsMatchIn(content))
+        assertTrue(Regex("""@Deprecated\s*\r?\n\s*@Override""").containsMatchIn(content))
+    }
+
+    @Test
+    fun `does not repair commented cleanup artifacts with synthetic returns`() {
+        val projectDir = tempDir.resolve("p22")
+        val rootDir = projectDir.resolve("src/main/java/cn/mcmod/sakura")
+        val fluidDir = rootDir.resolve("fluid")
+        val noodleDir = rootDir.resolve("block/noodles")
+        val decoratorDir = rootDir.resolve("level/tree/decorator")
+        val particleDir = rootDir.resolve("particle")
+        fluidDir.createDirectories()
+        noodleDir.createDirectories()
+        decoratorDir.createDirectories()
+        particleDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            sourceSets {
+                main {
+                    java {
+                        exclude 'cn/mcmod/sakura/item/FoodRegistry.java'
+                    }
+                }
+            }
+        """.trimIndent())
+        fluidDir.resolve("BucketItemRegistry.java").writeText("""
+            package cn.mcmod.sakura.fluid;
+
+            public class BucketItemRegistry {
+                public static final Object ITEMS = new Object();
+            }
+        """.trimIndent())
+        rootDir.resolve("SakuraMod.java").writeText("""
+            package cn.mcmod.sakura;
+
+            // [forge2neo] import cn.mcmod.sakura.fluid.BucketItemRegistry; // excluded
+
+            public class SakuraMod {
+                public void register(Object modEventBus) {
+                    BucketItemRegistry.ITEMS.toString();
+                }
+            }
+        """.trimIndent())
+        noodleDir.resolve("BlockPasta.java").writeText("""
+            package cn.mcmod.sakura.block.noodles;
+
+            import net.minecraft.world.item.ItemStack;
+
+            public class BlockPasta {
+                public ItemStack getNoodle() {
+                    // [forge2neo] return new ItemStack(FoodRegistry.FOOD.get()); // excluded: FoodRegistry unavailable
+                }
+            }
+        """.trimIndent())
+        decoratorDir.resolve("ChestnutBurrDecorator.java").writeText("""
+            package cn.mcmod.sakura.level.tree.decorator;
+
+            public class ChestnutBurrDecorator {
+                protected TreeDecoratorType<?> type() {
+                    // [forge2neo] return SakuraFeatureRegistry.CHESTNUT_BURR_DECORATOR.get(); // excluded: SakuraFeatureRegistry unavailable
+                }
+            }
+        """.trimIndent())
+        particleDir.resolve("ShowerParticle.java").writeText("""
+            package cn.mcmod.sakura.particle;
+
+            public class ShowerParticle {
+                public ParticleRenderType getRenderType() {
+                    // [forge2neo] return ClientConfig.enableTranslucentParticles // excluded: ClientConfig unavailable
+                        ? ParticleRenderType.PARTICLE_SHEET_TRANSLUCENT
+                        : ParticleRenderType.PARTICLE_SHEET_OPAQUE;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val pastaContent = noodleDir.resolve("BlockPasta.java").readText()
+        val decoratorContent = decoratorDir.resolve("ChestnutBurrDecorator.java").readText()
+        val particleContent = particleDir.resolve("ShowerParticle.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "build-repair-post-cleanup-artifacts" })
+        assertFalse(result.changes.any { it.ruleId == "build-cleanup-excluded-refs" })
+        assertFalse(pastaContent.contains("return ItemStack.EMPTY;"))
+        assertFalse(decoratorContent.contains("return null;"))
+        assertFalse(particleContent.contains("return null;"))
+    }
+}

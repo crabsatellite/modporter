@@ -1295,6 +1295,64 @@ class ResourceMigrationTest {
     }
 
     @Test
+    fun `light block subclass registrations get complete level blockstates`() {
+        val projectDir = setupResourceProject()
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val blockDir = projectDir.resolve("src/main/java/com/example/block")
+        srcDir.createDirectories()
+        blockDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("resmod")
+            public class ExampleMod {
+                public static final String MODID = "resmod";
+            }
+        """.trimIndent())
+        blockDir.resolve("SunlightBlock.java").writeText("""
+            package com.example.block;
+
+            import net.minecraft.world.level.block.LightBlock;
+
+            public class SunlightBlock extends LightBlock {
+                public SunlightBlock(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ModBlocks.java").writeText("""
+            package com.example;
+
+            import com.example.block.*;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ModBlocks {
+                public static final DeferredRegister<Block> BLOCKS = DeferredRegister.create(Registries.BLOCK, ExampleMod.MODID);
+
+                public static final Object SUNLIGHT = BLOCKS.register("sunlight", () ->
+                    new SunlightBlock(BlockBehaviour.Properties.of().noOcclusion()));
+            }
+        """.trimIndent())
+        val assetsDir = projectDir.resolve("src/main/resources/assets/resmod")
+        assetsDir.createDirectories()
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val blockstate = assetsDir.resolve("blockstates/sunlight.json").readText()
+        assertTrue(result.changes.any { it.ruleId == "res-light-blockstate-level-variants" })
+        assertTrue(blockstate.contains("\"level=0\""))
+        assertTrue(blockstate.contains("\"level=15\""))
+        assertFalse(blockstate.contains("waterlogged"), "LightBlock level variants intentionally rely on vanilla partial matching for extra state properties")
+        assertTrue(blockstate.contains("\"model\": \"minecraft:block/light_00\""))
+        assertTrue(blockstate.contains("\"model\": \"minecraft:block/light_15\""))
+    }
+
+    @Test
     fun `model texture grass references migrate to short grass`() {
         val projectDir = setupResourceProject()
         val modelDir = projectDir.resolve("src/generated/resources/assets/resmod/models/block")
@@ -1690,6 +1748,39 @@ class ResourceMigrationTest {
         assertFalse(recipe.contains("partial_nbt"))
         assertFalse(recipe.contains(""""type": "neoforge:partial_nbt""""))
         assertFalse(recipe.contains(""""type": "forge:partial_nbt""""))
+    }
+
+    @Test
+    fun `legacy nbt recipe ingredients migrate to data component ingredients`() {
+        val projectDir = setupResourceProject()
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        recipeDir.createDirectories()
+        recipeDir.resolve("halo.json").writeText("""
+            {
+              "type": "minecraft:crafting_shapeless",
+              "ingredients": [
+                {
+                  "type": "forge:nbt",
+                  "item": "resmod:divine_shard",
+                  "nbt": "{SMCShardChallenge:7}"
+                }
+              ],
+              "result": {
+                "item": "resmod:halo"
+              }
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/generated/resources/data/resmod/recipe/halo.json").readText()
+        assertTrue(result.changes.any { it.ruleId == "res-recipe-partial-nbt-component-ingredient" })
+        assertTrue(recipe.contains(""""type": "neoforge:components""""))
+        assertTrue(recipe.contains(""""items": "resmod:divine_shard""""))
+        assertTrue(recipe.contains(""""minecraft:custom_data": {"""))
+        assertTrue(recipe.contains(""""SMCShardChallenge": 7"""))
+        assertFalse(recipe.contains(""""type": "neoforge:nbt""""))
+        assertFalse(recipe.contains(""""type": "forge:nbt""""))
     }
 
     @Test
@@ -2135,6 +2226,50 @@ class ResourceMigrationTest {
         assertFalse(blockModel.contains(""""forge_data""""))
         assertFalse(blockModel.contains(""""forge:composite""""))
         assertFalse(itemModel.contains(""""forge:separate_transforms""""))
+    }
+
+    @Test
+    fun `model texture references that target item models resolve to concrete textures`() {
+        val projectDir = setupResourceProject()
+        val itemModelDir = projectDir.resolve("src/main/resources/assets/resmod/models/item")
+        val itemTextureDir = projectDir.resolve("src/main/resources/assets/resmod/textures/item")
+        itemModelDir.createDirectories()
+        itemTextureDir.createDirectories()
+        itemModelDir.resolve("transforming_blade.json").writeText("""
+            {
+              "loader": "forge:separate_transforms",
+              "base": {
+                "parent": "resmod:item/transforming_blade_handheld"
+              },
+              "perspectives": {
+                "gui": {
+                  "parent": "resmod:item/transforming_blade_gui"
+                }
+              },
+              "textures": {
+                "layer0": "resmod:item/transforming_blade_gui"
+              }
+            }
+        """.trimIndent())
+        itemModelDir.resolve("transforming_blade_gui.json").writeText("""
+            {
+              "parent": "minecraft:item/generated",
+              "textures": {
+                "layer0": "resmod:item/transforming_blade"
+              }
+            }
+        """.trimIndent())
+        itemTextureDir.resolve("transforming_blade.png").writeText("png")
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val model = itemModelDir.resolve("transforming_blade.json").readText()
+        assertTrue(result.changes.any { it.ruleId == "res-model-texture-reference-model-target" })
+        assertTrue(model.contains(""""loader": "neoforge:separate_transforms""""))
+        assertTrue(model.contains(""""parent": "resmod:item/transforming_blade_gui""""))
+        assertTrue(model.contains(""""layer0": "resmod:item/transforming_blade""""))
+        assertFalse(model.contains(""""layer0": "resmod:item/transforming_blade_gui""""))
     }
 
     @Test

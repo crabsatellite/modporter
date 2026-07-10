@@ -1,0 +1,521 @@
+
+    @Test
+    fun `migrates panorama renderer signatures only with explicit screen context`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val mixinDir = srcDir.resolve("mixin")
+        srcDir.createDirectories()
+        mixinDir.createDirectories()
+        srcDir.resolve("TitleScreenBehavior.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.systems.RenderSystem;
+            import net.minecraft.Util;
+            import net.minecraft.client.gui.GuiGraphics;
+            import net.minecraft.client.gui.screens.TitleScreen;
+            import net.minecraft.client.renderer.PanoramaRenderer;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.util.Mth;
+
+            public interface TitleScreenBehavior {
+                default float handleFading(GuiGraphics guiGraphics, TitleScreen titleScreen, PanoramaRenderer panorama, ResourceLocation panoramaOverlay, float partialTicks) {
+                    float fadeAmount = (float) (Util.getMillis() - 1L) / 1000.0F;
+                    panorama.render(partialTicks, Mth.clamp(fadeAmount, 0.0F, 1.0F));
+                    RenderSystem.enableBlend();
+                    guiGraphics.blit(panoramaOverlay, 0, 0, titleScreen.width, titleScreen.height, 0.0F, 0.0F, 16, 128, 16, 128);
+                    return Mth.clamp(fadeAmount - 1.0F, 0.0F, 1.0F);
+                }
+            }
+        """.trimIndent())
+        mixinDir.resolve("PanoramaRendererMixin.java").writeText("""
+            package com.example.mixin;
+
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.renderer.PanoramaRenderer;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.injection.At;
+            import org.spongepowered.asm.mixin.injection.Inject;
+            import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+            @Mixin(PanoramaRenderer.class)
+            public class PanoramaRendererMixin {
+                @Inject(at = @At(value = "HEAD"), method = {"render(FF)V"}, cancellable = true)
+                public void render(float deltaTick, float alpha, CallbackInfo ci) {
+                    if (Minecraft.getInstance().level != null) {
+                        ci.cancel();
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("NoScreenPanorama.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.renderer.PanoramaRenderer;
+
+            public class NoScreenPanorama {
+                void draw(PanoramaRenderer panorama, float partialTicks, float alpha) {
+                    panorama.render(partialTicks, alpha);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val behavior = srcDir.resolve("TitleScreenBehavior.java").readText()
+        val mixin = mixinDir.resolve("PanoramaRendererMixin.java").readText()
+        val noScreen = srcDir.resolve("NoScreenPanorama.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(behavior.contains("panorama.render(guiGraphics, titleScreen.width, titleScreen.height, partialTicks, Mth.clamp(fadeAmount, 0.0F, 1.0F));"), behavior)
+        assertFalse(behavior.contains("panorama.render(partialTicks"), behavior)
+        assertTrue(mixin.contains("import net.minecraft.client.gui.GuiGraphics;"), mixin)
+        assertTrue(mixin.contains("method = {\"render(Lnet/minecraft/client/gui/GuiGraphics;IIFF)V\"}"), mixin)
+        assertTrue(mixin.contains("public void render(GuiGraphics guiGraphics, int width, int height, float deltaTick, float alpha, CallbackInfo ci)"), mixin)
+        assertTrue(noScreen.contains("panorama.render(partialTicks, alpha);"), noScreen)
+    }
+
+    @Test
+    fun `migrates armor trim rendering to item component without dropping trim model logic`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("GloveRenderer.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.PoseStack;
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import net.minecraft.client.renderer.MultiBufferSource;
+            import net.minecraft.client.renderer.Sheets;
+            import net.minecraft.client.renderer.texture.TextureAtlasSprite;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.ArmorMaterial;
+            import net.minecraft.world.item.armortrim.ArmorTrim;
+
+            public class GloveRenderer {
+                private final Atlas armorTrimAtlas = new Atlas();
+                private final GloveModel finalTrimModel = new GloveModel();
+
+                public void render(LivingEntity livingEntity, ItemStack stack, MultiBufferSource buffer, PoseStack poseStack, int packedLight, ArmorMaterial material) {
+                    ArmorTrim.getTrim(livingEntity.level().registryAccess(), stack).ifPresent((trim) -> {
+                        TextureAtlasSprite textureAtlasSprite = this.armorTrimAtlas.getSprite(trim.outerTexture(material));
+                        VertexConsumer trimConsumer = textureAtlasSprite.wrap(buffer.getBuffer(Sheets.armorTrimsSheet()));
+                        this.finalTrimModel.renderToBuffer(poseStack, trimConsumer, packedLight);
+                    });
+                }
+
+                static class Atlas {
+                    TextureAtlasSprite getSprite(Object location) { return null; }
+                }
+
+                static class GloveModel {
+                    void renderToBuffer(PoseStack poseStack, VertexConsumer consumer, int light) {}
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val renderer = srcDir.resolve("GloveRenderer.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(renderer.contains("import net.minecraft.core.component.DataComponents;"), renderer)
+        assertFalse(renderer.contains("import net.minecraft.world.item.armortrim.ArmorTrim;"), renderer)
+        assertTrue(renderer.contains("java.util.Optional.ofNullable(stack.get(DataComponents.TRIM)).ifPresent((trim) -> {"), renderer)
+        assertTrue(renderer.contains("Sheets.armorTrimsSheet(trim.pattern().value().decal())"), renderer)
+        assertTrue(renderer.contains("this.finalTrimModel.renderToBuffer(poseStack, trimConsumer, packedLight);"), renderer)
+        assertFalse(renderer.contains("ArmorTrim.getTrim"), renderer)
+    }
+
+    @Test
+    fun `migrates armor material fields to holders with value accessors`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("MaterialAccessoryItem.java").writeText("""
+            package com.example;
+
+            import net.minecraft.sounds.SoundEvent;
+            import net.minecraft.world.item.ArmorMaterial;
+            import net.minecraft.world.item.ItemStack;
+
+            public class MaterialAccessoryItem {
+                protected final ArmorMaterial material;
+
+                public MaterialAccessoryItem(ArmorMaterial material) {
+                    this.material = material;
+                }
+
+                public int getEnchantmentValue() {
+                    return this.material.getEnchantmentValue();
+                }
+
+                public boolean isValidRepairItem(ItemStack stack) {
+                    return this.material.getRepairIngredient().test(stack);
+                }
+
+                public SoundEvent equipSound() {
+                    return this.material.getEquipSound();
+                }
+
+                public String textureName() {
+                    return this.material.getName();
+                }
+
+                public ArmorMaterial getMaterial() {
+                    return this.material;
+                }
+
+                public String getterTextureName() {
+                    return this.getMaterial().getName();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val item = srcDir.resolve("MaterialAccessoryItem.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(item.contains("import net.minecraft.core.Holder;"), item)
+        assertTrue(item.contains("protected final Holder<ArmorMaterial> material;"), item)
+        assertTrue(item.contains("public MaterialAccessoryItem(Holder<ArmorMaterial> material)"), item)
+        assertTrue(item.contains("return this.material.value().enchantmentValue();"), item)
+        assertTrue(item.contains("return this.material.value().repairIngredient().get().test(stack);"), item)
+        assertTrue(item.contains("return this.material.value().equipSound().value();"), item)
+        assertTrue(item.contains("return this.material.unwrapKey().orElseThrow().location().getPath();"), item)
+        assertTrue(item.contains("public Holder<ArmorMaterial> getMaterial()"), item)
+        assertTrue(item.contains("return this.getMaterial().unwrapKey().orElseThrow().location().getPath();"), item)
+        assertFalse(item.contains("material.getEnchantmentValue()"), item)
+        assertFalse(item.contains("material.getRepairIngredient()"), item)
+        assertFalse(item.contains("material.getName()"), item)
+    }
+
+    @Test
+    fun `migrates CustomData of legacy stack tags to existing custom data components`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CustomDataCopy.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.component.DataComponents;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.component.CustomData;
+
+            public class CustomDataCopy {
+                public void copy(ItemStack source, ItemStack target) {
+                    if (source.has(DataComponents.CUSTOM_DATA)) {
+                        target.set(DataComponents.CUSTOM_DATA, CustomData.of(source.getTag()));
+                    }
+                }
+
+                public void copySlot(SlotResult slotResult, ItemStack target) {
+                    if (slotResult.stack().has(DataComponents.CUSTOM_DATA)) {
+                        target.set(DataComponents.CUSTOM_DATA, CustomData.of(slotResult.stack().getTag()));
+                    }
+                }
+
+                public void copyLegacySlot(SlotResult slotResult, ItemStack target) {
+                    target.setTag(slotResult.stack().getTag());
+                }
+
+                public void copyExternalSlot(top.theillusivec4.curios.api.SlotResult curiosSlotResult, ItemStack target) {
+                    if (curiosSlotResult.stack().has(DataComponents.CUSTOM_DATA)) {
+                        target.set(DataComponents.CUSTOM_DATA, CustomData.of(curiosSlotResult.stack().getTag()));
+                    }
+                }
+
+                public void projectHelper(Object player, CompoundTag tag) {
+                    DataUtil.setTag(player, "custom", tag);
+                }
+
+                interface SlotResult {
+                    ItemStack stack();
+                }
+
+                static class DataUtil {
+                    static void setTag(Object player, String key, CompoundTag value) {
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("CustomDataCopy.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(migrated.contains("target.set(DataComponents.CUSTOM_DATA, source.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
+        assertTrue(migrated.contains("target.set(DataComponents.CUSTOM_DATA, curiosSlotResult.stack().getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
+        assertTrue(migrated.contains("target.set(net.minecraft.core.component.DataComponents.CUSTOM_DATA, slotResult.stack().getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
+        assertTrue(migrated.contains("target.set(DataComponents.CUSTOM_DATA, slotResult.stack().getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY));"), migrated)
+        assertFalse(migrated.contains("CustomData.of(source.getTag())"), migrated)
+        assertFalse(migrated.contains("CustomData.of(slotResult.stack().getTag())"), migrated)
+        assertFalse(migrated.contains("CustomData.of(curiosSlotResult.stack().getTag())"), migrated)
+        assertFalse(migrated.contains("setTag(slotResult.stack().getTag())"), migrated)
+        assertTrue(migrated.contains("DataUtil.setTag(player, \"custom\", tag);"), migrated)
+    }
+
+    @Test
+    fun `migrates legacy armor foil buffer calls without dropping glint condition`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AccessoryRenderer.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import net.minecraft.client.renderer.MultiBufferSource;
+            import net.minecraft.client.renderer.RenderType;
+            import net.minecraft.client.renderer.entity.ItemRenderer;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.ItemStack;
+
+            public class AccessoryRenderer {
+                public VertexConsumer legacy(MultiBufferSource buffer, ResourceLocation texture, ItemStack stack) {
+                    return ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), false, stack.isEnchanted());
+                }
+
+                public VertexConsumer alreadyMigrated(MultiBufferSource buffer, RenderType renderType) {
+                    return ItemRenderer.getArmorFoilBuffer(buffer, renderType, false);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val renderer = srcDir.resolve("AccessoryRenderer.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(renderer.contains("ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), stack.isEnchanted())"), renderer)
+        assertTrue(renderer.contains("ItemRenderer.getArmorFoilBuffer(buffer, renderType, false)"), renderer)
+        assertFalse(renderer.contains("false, stack.isEnchanted()"), renderer)
+    }
+
+    @Test
+    fun `armor foil buffer migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AccessoryRendererDocs.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import net.minecraft.client.renderer.MultiBufferSource;
+            import net.minecraft.client.renderer.RenderType;
+            import net.minecraft.client.renderer.entity.ItemRenderer;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.ItemStack;
+
+            public class AccessoryRendererDocs {
+                // ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), false, stack.isEnchanted());
+                private static final String DOC = "ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), false, stack.isEnchanted());";
+
+                public VertexConsumer legacy(MultiBufferSource buffer, ResourceLocation texture, ItemStack stack) {
+                    return ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), false, stack.isEnchanted());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val renderer = srcDir.resolve("AccessoryRendererDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(renderer.contains("return ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), stack.isEnchanted());"), renderer)
+        assertTrue(renderer.contains("// ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), false, stack.isEnchanted());"), renderer)
+        assertTrue(renderer.contains("""private static final String DOC = "ItemRenderer.getArmorFoilBuffer(buffer, RenderType.entityTranslucent(texture), false, stack.isEnchanted());";"""), renderer)
+    }
+
+    @Test
+    fun `migrates removed game profile display name component helper`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("WhitelistCommand.java").writeText("""
+            package com.example;
+
+            import com.mojang.authlib.GameProfile;
+            import net.minecraft.commands.CommandSourceStack;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.network.chat.ComponentUtils;
+
+            public class WhitelistCommand {
+                // ComponentUtils.getDisplayName(documentedProfile);
+                private static final String DOC = "ComponentUtils.getDisplayName(profile)";
+
+                public void add(CommandSourceStack source, GameProfile gameProfile) {
+                    source.sendSuccess(() -> Component.translatable("commands.example.add.success", ComponentUtils.getDisplayName(gameProfile)), true);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val command = srcDir.resolve("WhitelistCommand.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(command.contains("Component.translatable(\"commands.example.add.success\", Component.literal(gameProfile.getName()))"), command)
+        assertFalse(command.contains("import net.minecraft.network.chat.ComponentUtils;"), command)
+        assertFalse(command.contains("ComponentUtils.getDisplayName(gameProfile)), true);"), command)
+        assertTrue(command.contains("ComponentUtils.getDisplayName(documentedProfile);"), command)
+        assertTrue(command.contains("""private static final String DOC = "ComponentUtils.getDisplayName(profile)";"""), command)
+    }
+
+    @Test
+    fun `command source stack level migration uses executable scoped variable evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("CommandDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.commands.CommandSourceStack;
+
+            public class CommandDocs {
+                private static final String DOC = "source.level().getSeed()";
+
+                /*
+                 CommandSourceStack fakeSource;
+                 fakeSource.level().getSeed();
+                 */
+
+                public CommandDocs(CommandSourceStack constructorSource) {
+                    constructorSource
+                        .level()
+                        .getSeed();
+                }
+
+                public void run(CommandSourceStack source) {
+                    source
+                        .level()
+                        .getSeed();
+                }
+
+                public void unrelated(Object source) {
+                    source.level();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val command = srcDir.resolve("CommandDocs.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(command.contains("constructorSource.getLevel()\n            .getSeed();"), command)
+        assertTrue(command.contains("source.getLevel()\n            .getSeed();"), command)
+        assertTrue(command.contains("""private static final String DOC = "source.level().getSeed()";"""), command)
+        assertTrue(command.contains("fakeSource.level().getSeed();"), command)
+        assertTrue(command.contains("public void unrelated(Object source) {\n        source.level();"), command)
+    }
+
+    @Test
+    fun `legacy entity step height override migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("StepHeightEntity.java").writeText("""
+            package com.example;
+
+            public class StepHeightEntity {
+                private static final String DOC = "public float getStepHeight()";
+
+                /*
+                 public float getStepHeight() {
+                     return 1.0F;
+                 }
+                 */
+
+                public float getStepHeight() {
+                    return 2.0F;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val entity = srcDir.resolve("StepHeightEntity.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(entity.contains("public float maxUpStep()"), entity)
+        assertTrue(entity.contains("""private static final String DOC = "public float getStepHeight()";"""), entity)
+        assertTrue(
+            Regex("""/\*\s*public float getStepHeight\(\)\s*\{\s*return 1\.0F;""", RegexOption.DOT_MATCHES_ALL)
+                .containsMatchIn(entity),
+            entity
+        )
+    }
+
+    @Test
+    fun `legacy entity type AABB migration ignores comments strings and wrong arity`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AabbEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+
+            public class AabbEntity {
+                private static final String DOC = "type.getAABB(x, y, z)";
+
+                /*
+                 type.getAABB(x, y, z);
+                 */
+
+                public boolean collides(EntityType<?> type, double x, double y, double z) {
+                    return level.noCollision(type
+                        .getAABB(x, y, z));
+                }
+
+                public Object unsupported(EntityType<?> type, double x, double y) {
+                    return type.getAABB(x, y);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val entity = srcDir.resolve("AabbEntity.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(entity.contains("type.getDimensions().makeBoundingBox(x, y, z)"), entity)
+        assertTrue(entity.contains("""private static final String DOC = "type.getAABB(x, y, z)";"""), entity)
+        assertTrue(
+            Regex("""/\*\s*type\.getAABB\(x, y, z\);""", RegexOption.DOT_MATCHES_ALL).containsMatchIn(entity),
+            entity
+        )
+        assertTrue(entity.contains("return type.getAABB(x, y);"), entity)
+    }
+
+    @Test
+    fun `legacy block valid spawn migration uses executable method and constructor evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("SpawnDocsBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.level.BlockGetter;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class SpawnDocsBlock extends Block {
+                private static final String DOC = "isValidSpawn(BlockState state, BlockGetter getter, BlockPos pos, EntityType<?> entityType)";
+
+                /*
+                 super(fakeProperties);
+                 public boolean isValidSpawn(BlockState fakeState, BlockGetter fakeGetter, BlockPos fakePos, EntityType<?> fakeType) {
+                     return true;
+                 }
+                 */
+
+                public SpawnDocsBlock(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public boolean isValidSpawn(BlockState state, BlockGetter getter, BlockPos pos, EntityType<?> entityType) {
+                    return state.isAir() && getter != null;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("SpawnDocsBlock.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
+        assertTrue(
+            block.contains("super(properties.isValidSpawn((state, getter, pos, entityType) -> state.isAir() && getter != null));"),
+            block
+        )
+        assertFalse(block.contains("public boolean isValidSpawn(BlockState state"), block)
+        assertFalse(block.contains("import net.minecraft.world.entity.EntityType;"), block)
+        assertTrue(block.contains("public boolean isValidSpawn(BlockState fakeState"), block)
+        assertTrue(block.contains("""private static final String DOC = "isValidSpawn(BlockState state, BlockGetter getter, BlockPos pos, EntityType<?> entityType)";"""), block)
+        assertFalse(block.contains("fakeProperties.isValidSpawn"), block)
+    }

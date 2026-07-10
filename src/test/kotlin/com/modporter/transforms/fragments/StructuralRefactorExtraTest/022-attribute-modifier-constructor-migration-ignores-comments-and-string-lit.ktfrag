@@ -1,0 +1,770 @@
+
+    @Test
+    fun `attribute modifier constructor migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+            }
+        """.trimIndent())
+        val docs = srcDir.resolve("AttributeModifierDocs.java")
+        docs.writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class AttributeModifierDocs {
+                /*
+                static final AttributeModifier ACTIVE = new AttributeModifier("Active Boost", 1.0D, AttributeModifier.Operation.ADD_VALUE);
+                void update(Object oldId) {
+                    AttributeModifier speed = new AttributeModifier(oldId, "Segment Count Speed Boost", 0.1D, AttributeModifier.Operation.ADD_VALUE);
+                }
+                */
+                private static final String DOC = "new AttributeModifier(\"Active Boost\", 1.0D, AttributeModifier.Operation.ADD_VALUE)";
+
+                public AttributeModifier keep(AttributeModifier input) {
+                    return input;
+                }
+            }
+        """.trimIndent())
+        val original = docs.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = docs.readText()
+
+        assertEquals(original, migrated)
+        assertEquals(0, result.changeCount)
+        assertFalse(migrated.contains("ResourceLocation.fromNamespaceAndPath"), migrated)
+        assertFalse(migrated.contains("active_boost"), migrated)
+        assertFalse(migrated.contains("segment_count_speed_boost"), migrated)
+    }
+
+    @Test
+    fun `attribute modifier namespace ignores commented mod access`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AttributeShapes.java").writeText("""
+            package com.example;
+
+            import java.util.UUID;
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+
+            public class AttributeShapes {
+                // ExampleMod.MOD_ID documents the intended namespace in old notes.
+                private static final String DOC = "OtherMod.MOD_ID";
+                static final UUID REACH_MODIFIER = UUID.fromString("00000000-0000-0000-0000-000000000001");
+
+                void update(AttributeInstance instance) {
+                    instance.removeModifier(REACH_MODIFIER);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("AttributeShapes.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, result.changes.joinToString("\n"))
+        assertFalse(transformed.contains("ResourceLocation.fromNamespaceAndPath"), transformed)
+        assertTrue(transformed.contains("// ExampleMod.MOD_ID documents the intended namespace in old notes."), transformed)
+        assertTrue(transformed.contains("static final UUID REACH_MODIFIER = UUID.fromString"), transformed)
+        assertTrue(transformed.contains("instance.removeModifier(REACH_MODIFIER);"), transformed)
+    }
+
+    @Test
+    fun `attribute modifier namespace uses declared mod type not java file name`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("Bootstrap.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            class ExampleMod {
+                public static final String MOD_ID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("AttributeShapes.java").writeText("""
+            package com.example;
+
+            import java.util.UUID;
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class AttributeShapes {
+                static final UUID REACH_MODIFIER = UUID.fromString("00000000-0000-0000-0000-000000000001");
+
+                void update(AttributeInstance instance) {
+                    UUID oldId = REACH_MODIFIER;
+                    instance.removeModifier(oldId);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("AttributeShapes.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, \"reach_modifier\")"), transformed)
+        assertFalse(transformed.contains("Bootstrap.MOD_ID"), transformed)
+    }
+
+    @Test
+    fun `attribute modifier namespace binds mod id constant to annotated owner`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("Bootstrap.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            class BootstrapHelper {
+                public static final String MOD_ID = "wrong";
+            }
+
+            @Mod(ExampleMod.MOD_ID)
+            class ExampleMod {
+                public static final String MOD_ID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("AttributeShapes.java").writeText("""
+            package com.example;
+
+            import java.util.UUID;
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class AttributeShapes {
+                static final UUID REACH_MODIFIER = UUID.fromString("00000000-0000-0000-0000-000000000001");
+
+                void update(AttributeInstance instance) {
+                    UUID oldId = REACH_MODIFIER;
+                    instance.removeModifier(oldId);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("AttributeShapes.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, \"reach_modifier\")"), transformed)
+        assertFalse(transformed.contains("BootstrapHelper.MOD_ID"), transformed)
+        assertFalse(transformed.contains("\"wrong\""), transformed)
+    }
+
+    @Test
+    fun `attribute modifier namespace does not use metadata fallback when multiple mods exist`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        tempDir.resolve("gradle.properties").writeText("mod_id=metadata_mod\n")
+        srcDir.resolve("FirstMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(FirstMod.MOD_ID)
+            public class FirstMod {
+                public static final String MOD_ID = "firstmod";
+            }
+        """.trimIndent())
+        srcDir.resolve("SecondMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(SecondMod.MOD_ID)
+            public class SecondMod {
+                public static final String MOD_ID = "secondmod";
+            }
+        """.trimIndent())
+        srcDir.resolve("AttributeShapes.java").writeText("""
+            package com.example;
+
+            import java.util.UUID;
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class AttributeShapes {
+                static final UUID REACH_MODIFIER = UUID.fromString("00000000-0000-0000-0000-000000000001");
+
+                void update(AttributeInstance instance) {
+                    UUID oldId = REACH_MODIFIER;
+                    instance.removeModifier(oldId);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("AttributeShapes.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, result.changes.joinToString("\n"))
+        assertTrue(transformed.contains("static final UUID REACH_MODIFIER = UUID.fromString"), transformed)
+        assertTrue(transformed.contains("instance.removeModifier(oldId);"), transformed)
+        assertFalse(transformed.contains("ResourceLocation.fromNamespaceAndPath"), transformed)
+        assertFalse(transformed.contains("\"metadata_mod\""), transformed)
+        assertFalse(transformed.contains("FirstMod.MOD_ID"), transformed)
+        assertFalse(transformed.contains("SecondMod.MOD_ID"), transformed)
+    }
+
+    @Test
+    fun `does not synthesize attribute modifier namespace from package name`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AttributeShapes.java").writeText("""
+            package com.example;
+
+            import java.util.UUID;
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class AttributeShapes {
+                static final UUID REACH_MODIFIER = UUID.fromString("00000000-0000-0000-0000-000000000001");
+                static final AttributeModifier ACTIVE = new AttributeModifier("Active Boost", 1.0D, AttributeModifier.Operation.ADD_VALUE);
+
+                void update(AttributeInstance instance) {
+                    instance.removeModifier(REACH_MODIFIER);
+                    if (!instance.hasModifier(ACTIVE)) {
+                        instance.addTransientModifier(ACTIVE);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("AttributeShapes.java").readText()
+
+        assertTrue(!transformed.contains("fromNamespaceAndPath(\"com\""), transformed)
+        assertTrue(transformed.contains("static final UUID REACH_MODIFIER = UUID.fromString"), transformed)
+        assertTrue(transformed.contains("new AttributeModifier(\"Active Boost\", 1.0D, AttributeModifier.Operation.ADD_VALUE)"), transformed)
+    }
+
+    @Test
+    fun `migrates attribute modifier method expressions only when return type is known`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        tempDir.resolve("gradle.properties").writeText("mod_id=example\n")
+        srcDir.resolve("RideSupport.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public interface RideSupport {
+                AttributeModifier STEP = new AttributeModifier("Step Height", 0.4D, AttributeModifier.Operation.ADD_VALUE);
+
+                default <T extends Object & RideSupport> void update(AttributeInstance instance, T vehicle) {
+                    if (instance.hasModifier(vehicle.getStepHeightModifier())) {
+                        instance.removeModifier(vehicle.getStepHeightModifier());
+                    }
+                }
+
+                default AttributeModifier getStepHeightModifier() {
+                    return STEP;
+                }
+
+                default void unrelated(Object vehicle) {
+                    String ignored = String.valueOf(vehicle);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("RideAnimal.java").writeText("""
+            package com.example;
+
+            public class RideAnimal implements RideSupport {
+            }
+        """.trimIndent())
+        srcDir.resolve("RidePacket.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+
+            public class RidePacket {
+                void sync(Object entity, AttributeInstance instance) {
+                    if (entity instanceof RideAnimal rideAnimal && instance.hasModifier(rideAnimal.getStepHeightModifier())) {
+                        instance.removeModifier(rideAnimal.getStepHeightModifier());
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Cape.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class Cape {
+                void tick(AttributeInstance instance) {
+                    if (!instance.hasModifier(this.getCapeModifier())) {
+                        instance.addTransientModifier(this.getCapeModifier());
+                    }
+                    instance.removeModifier(this.getCapeModifier());
+                    instance.hasModifier(unknown.getCapeModifier());
+                }
+
+                public AttributeModifier getCapeModifier() {
+                    return new AttributeModifier("Cape Boost", 0.5D, AttributeModifier.Operation.ADD_VALUE);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("PlayerCapability.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public interface PlayerCapability {
+                static LazyOptional<PlayerCapability> get(Player player) {
+                    return LazyOptional.empty();
+                }
+
+                AttributeModifier getLifeModifier();
+            }
+        """.trimIndent())
+        srcDir.resolve("CommandSurface.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class CommandSurface {
+                void apply(Player player, AttributeInstance attribute) {
+                    PlayerCapability.get(player).ifPresent(capability -> {
+                        double amount = capability.getLifeModifier().getAmount();
+                        boolean additive = capability.getLifeModifier().getOperation() == AttributeModifier.Operation.ADD_VALUE;
+                        attribute.removeModifier(capability.getLifeModifier());
+                    });
+                }
+
+                void damage(DamageEvent event) {
+                    float amount = event.getAmount();
+                }
+
+                void armor(ItemStack stack, ArmorItem armorItem) {
+                    double value = stack.getAttributeModifiers(armorItem.getEquipmentSlot()).get(Attributes.ARMOR).stream().mapToDouble((attributeModifier) -> attributeModifier.getAmount() / 15).sum();
+                }
+
+                void weapon(ItemStack stack) {
+                    if (!stack.isEmpty() && !stack.getAttributeModifiers(EquipmentSlot.MAINHAND).isEmpty() && stack.getAttributeModifiers(EquipmentSlot.MAINHAND).containsKey(Attributes.ATTACK_DAMAGE) && !stack.getAttributeModifiers(EquipmentSlot.MAINHAND).get(Attributes.ATTACK_DAMAGE).isEmpty()) {
+                        double value = stack.getAttributeModifiers(EquipmentSlot.MAINHAND).get(Attributes.ATTACK_DAMAGE).stream().mapToDouble(AttributeModifier::getAmount).sum();
+                    }
+                }
+            }
+
+            class DamageEvent {
+                float getAmount() {
+                    return 1.0F;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val rideSupport = srcDir.resolve("RideSupport.java").readText()
+        val ridePacket = srcDir.resolve("RidePacket.java").readText()
+        val cape = srcDir.resolve("Cape.java").readText()
+        val commandSurface = srcDir.resolve("CommandSurface.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(rideSupport.contains("instance.hasModifier(vehicle.getStepHeightModifier().id())"), rideSupport)
+        assertTrue(rideSupport.contains("instance.removeModifier(vehicle.getStepHeightModifier().id())"), rideSupport)
+        assertTrue(ridePacket.contains("instance.hasModifier(rideAnimal.getStepHeightModifier().id())"), ridePacket)
+        assertTrue(ridePacket.contains("instance.removeModifier(rideAnimal.getStepHeightModifier().id())"), ridePacket)
+        assertTrue(cape.contains("instance.hasModifier(this.getCapeModifier().id())"), cape)
+        assertTrue(cape.contains("instance.removeModifier(this.getCapeModifier().id())"), cape)
+        assertTrue(cape.contains("instance.hasModifier(unknown.getCapeModifier())"), cape)
+        assertTrue(commandSurface.contains("attribute.removeModifier(capability.getLifeModifier().id())"), commandSurface)
+        assertTrue(commandSurface.contains("double amount = capability.getLifeModifier().amount();"), commandSurface)
+        assertTrue(commandSurface.contains("boolean additive = capability.getLifeModifier().operation() == AttributeModifier.Operation.ADD_VALUE;"), commandSurface)
+        assertTrue(commandSurface.contains("float amount = event.getAmount();"), commandSurface)
+        assertTrue(commandSurface.contains("stack.getAttributeModifiers().modifiers().stream().filter(modporterAttributeModifierEntry -> modporterAttributeModifierEntry.slot().test(armorItem.getEquipmentSlot()) && modporterAttributeModifierEntry.attribute().equals(Attributes.ARMOR)).map(modporterAttributeModifierEntry -> modporterAttributeModifierEntry.modifier()).mapToDouble((attributeModifier) -> attributeModifier.amount() / 15).sum()"), commandSurface)
+        assertTrue(commandSurface.contains("stack.getAttributeModifiers().modifiers().stream().filter(modporterAttributeModifierEntry -> modporterAttributeModifierEntry.slot().test(EquipmentSlot.MAINHAND)).findAny().isEmpty()"), commandSurface)
+        assertTrue(commandSurface.contains("stack.getAttributeModifiers().modifiers().stream().filter(modporterAttributeModifierEntry -> modporterAttributeModifierEntry.slot().test(EquipmentSlot.MAINHAND) && modporterAttributeModifierEntry.attribute().equals(Attributes.ATTACK_DAMAGE)).findAny().isPresent()"), commandSurface)
+        assertTrue(commandSurface.contains("AttributeModifier::amount"), commandSurface)
+        assertTrue(!commandSurface.contains("getAttributeModifiers(EquipmentSlot"), commandSurface)
+    }
+
+    @Test
+    fun `migrates cross file attribute modifier id constants without touching non attribute ids`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModifierIds.java").writeText("""
+            package com.example;
+
+            import java.util.UUID;
+
+            public class ModifierIds {
+                public static final UUID REACH_MODIFIER = UUID.fromString("00000000-0000-0000-0000-000000000001");
+                public static final UUID TEMP_MODIFIER_UUID = UUID.fromString("00000000-0000-0000-0000-000000000002");
+            }
+        """.trimIndent())
+        srcDir.resolve("ModifierUse.java").writeText("""
+            package com.example;
+
+            import java.util.UUID;
+            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class ModifierUse {
+                void update(AttributeInstance attackRange) {
+                    UUID uuidForOppositeHand = ModifierIds.REACH_MODIFIER;
+                    AttributeModifier giantModifier = attackRange.getModifier(uuidForOppositeHand);
+                    if (giantModifier != null) {
+                        attackRange.removeModifier(giantModifier);
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TemperatureUse.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.player.Player;
+
+            public class TemperatureUse {
+                void apply(Player player) {
+                    TemperatureUtil.addTemperatureModifier(player, 1.0D, ModifierIds.TEMP_MODIFIER_UUID);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val ids = srcDir.resolve("ModifierIds.java").readText()
+        val use = srcDir.resolve("ModifierUse.java").readText()
+        val temperature = srcDir.resolve("TemperatureUse.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(ids.contains("public static final net.minecraft.resources.ResourceLocation REACH_MODIFIER = net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, \"reach_modifier\")"))
+        assertTrue(ids.contains("public static final UUID TEMP_MODIFIER_UUID = UUID.fromString"))
+        assertTrue(use.contains("net.minecraft.resources.ResourceLocation uuidForOppositeHand = ModifierIds.REACH_MODIFIER;"))
+        assertTrue(use.contains("attackRange.getModifier(uuidForOppositeHand)"))
+        assertTrue(use.contains("attackRange.removeModifier(giantModifier.id())"))
+        assertTrue(temperature.contains("TemperatureUtil.addTemperatureModifier(player, 1.0D, ModifierIds.TEMP_MODIFIER_UUID)"))
+        assertTrue(!ids.contains("fromNamespaceAndPath(\"com\""), ids)
+        assertTrue(!temperature.contains("ResourceLocation"))
+    }
+
+    @Test
+    fun `migrates methods and maps receiving attribute modifier ids without touching ordinary UUID state`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("Mount.java").writeText("""
+            package com.example;
+
+            import java.util.HashMap;
+            import java.util.UUID;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class Mount {
+                private static final HashMap<UUID, ResourceLocation> ID_TEXTURE_MAP = new HashMap<>();
+                private static final HashMap<UUID, String> PLAYER_NAMES = new HashMap<>();
+
+                public static void registerJumpOverlayTextureOverride(UUID attributeId, ResourceLocation location) {
+                    ID_TEXTURE_MAP.put(attributeId, location);
+                }
+
+                public static void registerJumpOverlayTextureOverride(AttributeModifier attribute, ResourceLocation location) {
+                    registerJumpOverlayTextureOverride(attribute.getId(), location);
+                }
+
+                public ResourceLocation getOverlayTexture(UUID attributeId) {
+                    ResourceLocation location = ID_TEXTURE_MAP.get(attributeId);
+                    return location == null ? ResourceLocation.fromNamespaceAndPath("example", "default") : location;
+                }
+
+                public String getPlayerName(UUID playerId) {
+                    return PLAYER_NAMES.get(playerId);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("Overlay.java").writeText("""
+            package com.example;
+
+            import java.util.Set;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+
+            public class Overlay {
+                ResourceLocation texture(Mount mount, Set<AttributeModifier> modifiers) {
+                    for (AttributeModifier modifier : modifiers) {
+                        return mount.getOverlayTexture(modifier.getId());
+                    }
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val mount = srcDir.resolve("Mount.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(mount.contains("private static final HashMap<ResourceLocation, ResourceLocation> ID_TEXTURE_MAP = new HashMap<>();"), mount)
+        assertTrue(mount.contains("public static void registerJumpOverlayTextureOverride(ResourceLocation attributeId, ResourceLocation location)"), mount)
+        assertTrue(mount.contains("public ResourceLocation getOverlayTexture(ResourceLocation attributeId)"), mount)
+        assertTrue(mount.contains("registerJumpOverlayTextureOverride(attribute.id(), location);"), mount)
+        assertTrue(mount.contains("private static final HashMap<UUID, String> PLAYER_NAMES = new HashMap<>();"), mount)
+        assertTrue(mount.contains("public String getPlayerName(UUID playerId)"), mount)
+    }
+
+    @Test
+    fun `migrates additional vanilla 1_21 entity item recipe and particle API shapes`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("AdditionalVanillaShapes.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.particles.ParticleTypes;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.SimpleContainer;
+            import net.minecraft.world.entity.EntityDimensions;
+            import net.minecraft.world.entity.EquipmentSlot;
+            import net.minecraft.world.entity.LivingEntity;
+            import net.minecraft.world.entity.Pose;
+            import net.minecraft.world.entity.monster.Monster;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.entity.projectile.LargeFireball;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.gameevent.GameEvent;
+
+            public class AdditionalVanillaShapes extends Monster {
+                void shatter(ItemStack stack, LivingEntity attacker) {
+                    stack.hurtAndBreak(stack.getMaxDamage() + 1, attacker, (user) -> {
+                        user.level().playSound(null, attacker.getX(), attacker.getY(), attacker.getZ(), null, attacker.getSoundSource(), 1F, 0.5F);
+                        user.onEquippedItemBroken(InteractionHand.MAIN_HAND);
+                        user.gameEvent(GameEvent.ITEM_INTERACT_FINISH);
+                    });
+                }
+
+                void armor(ItemStack stack, Player player) {
+                    stack.hurtAndBreak(Math.min(player.tickCount, 3), player, user -> user.onEquippedItemBroken(stack.getEquipmentSlot() != null ? stack.getEquipmentSlot() : EquipmentSlot.HEAD));
+                }
+
+                Object smelt(ItemStack stack, Level level) {
+                    return level.getRecipeManager().getRecipeFor(RecipeType.SMELTING, new SimpleContainer(stack), level)
+                            .map(recipe -> recipe.getResultItem(level.registryAccess()))
+                            .orElse(stack);
+                }
+
+                @Override
+                public EntityDimensions getDimensions(Pose pose) {
+                    return super.getDimensions(pose).scale(2.0F);
+                }
+
+                @Override
+                public ResourceLocation getDefaultLootTable() {
+                    return this.getType().getDefaultLootTable();
+                }
+
+                void fire(Level level, LivingEntity shooter, double d2, double d3, double d4) {
+                    LargeFireball fireball = new LargeFireball(level, shooter, d2, d3, d4, 1);
+                }
+
+                void particles(ParticlePacket packet, double tx, double ty, double tz, float red, float green, float blue) {
+                    packet.queueParticle(ParticleTypes.ENTITY_EFFECT, false, tx, ty, tz, red, green, blue);
+                }
+            }
+
+            interface ParticlePacket {
+                void queueParticle(Object particle, boolean force, double x, double y, double z, double dx, double dy, double dz);
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("AdditionalVanillaShapes.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(transformed.contains("if (attacker.level() instanceof ServerLevel serverLevel)"))
+        assertTrue(transformed.contains("stack.hurtAndBreak(stack.getMaxDamage() + 1, serverLevel, attacker, brokenItem ->"))
+        assertTrue(transformed.contains("attacker.onEquippedItemBroken(brokenItem, EquipmentSlot.MAINHAND);"))
+        assertTrue(transformed.contains("attacker.gameEvent(GameEvent.ITEM_INTERACT_FINISH);"))
+        assertTrue(transformed.contains("stack.hurtAndBreak(Math.min(player.tickCount, 3), player, stack.getEquipmentSlot() != null ? stack.getEquipmentSlot() : EquipmentSlot.HEAD);"))
+        assertTrue(transformed.contains("new SingleRecipeInput(stack)"))
+        assertTrue(transformed.contains(".map(recipe -> recipe.value().getResultItem(level.registryAccess()))"))
+        assertTrue(!transformed.contains("new SimpleContainer(stack)"))
+        assertTrue(!transformed.contains("import net.minecraft.world.SimpleContainer;"))
+        assertTrue(transformed.contains("public EntityDimensions getDefaultDimensions(Pose pose)"))
+        assertTrue(transformed.contains("super.getDefaultDimensions(pose).scale(2.0F)"))
+        assertTrue(transformed.contains("public ResourceKey<LootTable> getDefaultLootTable()"))
+        assertTrue(transformed.contains("new LargeFireball(level, shooter, new Vec3(d2, d3, d4).normalize(), 1)"))
+        assertTrue(transformed.contains("ColorParticleOption.create(ParticleTypes.ENTITY_EFFECT, red, green, blue), false, tx, ty, tz, 0.0D, 0.0D, 0.0D"))
+        assertTrue(!transformed.contains("public EntityDimensions getDimensions(Pose pose)"))
+    }
+
+    @Test
+    fun `migrates saddle and dimensions overrides through custom entity parents`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("MountBase.java").writeText("""
+            package com.example;
+
+            import javax.annotation.Nullable;
+            import net.minecraft.sounds.SoundSource;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.Saddleable;
+            import net.minecraft.world.entity.animal.Animal;
+            import net.minecraft.world.level.Level;
+
+            public abstract class MountBase extends Animal implements Saddleable {
+                protected MountBase(EntityType<? extends Animal> type, Level level) {
+                    super(type, level);
+                }
+
+                @Override
+                public void equipSaddle(@Nullable SoundSource soundCategory) {
+                    this.setSaddled(true);
+                    if (soundCategory != null) {
+                        this.level().playSound(null, this, null, soundCategory, 0.5F, 1.0F);
+                    }
+                }
+
+                abstract void setSaddled(boolean value);
+            }
+        """.trimIndent())
+        srcDir.resolve("WingedMount.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.entity.EntityDimensions;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.Pose;
+            import net.minecraft.world.entity.animal.Animal;
+            import net.minecraft.world.level.Level;
+
+            public class WingedMount extends MountBase {
+                public WingedMount(EntityType<? extends Animal> type, Level level) {
+                    super(type, level);
+                }
+
+                @Override
+                public EntityDimensions getDimensions(Pose pose) {
+                    EntityDimensions dimensions = super.getDimensions(pose);
+                    return this.isBaby() ? dimensions.scale(1.0F, 0.5F) : dimensions;
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("TrigShape.java").writeText("""
+            package com.example;
+
+            import net.minecraft.util.Mth;
+
+            public class TrigShape {
+                void splash(double angle, double radius) {
+                    double x = Mth.sin(angle) * radius;
+                    double z = Mth.cos(angle) * radius;
+                }
+
+                void straighten(float angle, double force) {
+                    double x = Mth.sin((float) angle) * force;
+                    double z = Mth.cos((float) angle) * force;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val mountBase = srcDir.resolve("MountBase.java").readText()
+        val wingedMount = srcDir.resolve("WingedMount.java").readText()
+        val trigShape = srcDir.resolve("TrigShape.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(mountBase.contains("import net.minecraft.world.item.ItemStack;"), mountBase)
+        assertTrue(mountBase.contains("public void equipSaddle(ItemStack stack, @Nullable SoundSource soundCategory)"), mountBase)
+        assertFalse(mountBase.contains("public void equipSaddle(@Nullable SoundSource soundCategory)"), mountBase)
+        assertTrue(wingedMount.contains("public EntityDimensions getDefaultDimensions(Pose pose)"), wingedMount)
+        assertTrue(wingedMount.contains("EntityDimensions dimensions = super.getDefaultDimensions(pose);"), wingedMount)
+        assertFalse(wingedMount.contains("public EntityDimensions getDimensions(Pose pose)"), wingedMount)
+        assertTrue(trigShape.contains("double x = Mth.sin((float) angle) * radius;"), trigShape)
+        assertTrue(trigShape.contains("double z = Mth.cos((float) angle) * radius;"), trigShape)
+        assertTrue(trigShape.contains("double x = Mth.sin(angle) * force;"), trigShape)
+        assertTrue(trigShape.contains("double z = Mth.cos(angle) * force;"), trigShape)
+        assertFalse(trigShape.contains("Mth.sin((float) angle) * force"), trigShape)
+    }
+
+    @Test
+    fun `saddleable equip saddle signature migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("DocumentedMount.java").writeText("""
+            package com.example;
+
+            import net.minecraft.sounds.SoundSource;
+
+            public class DocumentedMount {
+                private static final String DOC = "public void equipSaddle(SoundSource soundCategory)";
+
+                /*
+                public void equipSaddle(SoundSource soundCategory) {
+                    play(soundCategory);
+                }
+                */
+
+                public void keep(SoundSource soundCategory) {
+                    play(soundCategory);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val mount = srcDir.resolve("DocumentedMount.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(mount.contains("private static final String DOC = \"public void equipSaddle(SoundSource soundCategory)\";"), mount)
+        assertTrue(mount.contains("public void equipSaddle(SoundSource soundCategory)"), mount)
+        assertFalse(mount.contains("equipSaddle(ItemStack stack"), mount)
+        assertFalse(mount.contains("import net.minecraft.world.item.ItemStack;"), mount)
+    }
+
+    @Test
+    fun `Mth trigonometry float argument migration ignores comments and strings`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("TrigDocs.java").writeText("""
+            package com.example;
+
+            import net.minecraft.util.Mth;
+
+            public class TrigDocs {
+                private static final String DOC = "Mth.sin(angle) Mth.cos((float) partial)";
+
+                /*
+                void docs(double angle, float partial) {
+                    double x = Mth.sin(angle);
+                    double z = Mth.cos((float) partial);
+                }
+                */
+
+                void real(double angle, float partial) {
+                    double x = Mth.sin(angle);
+                    double z = Mth.cos((float) partial);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val trig = srcDir.resolve("TrigDocs.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(trig.contains("""private static final String DOC = "Mth.sin(angle) Mth.cos((float) partial)";"""), trig)
+        assertTrue(trig.contains("double x = Mth.sin((float) angle);"), trig)
+        assertTrue(trig.contains("double z = Mth.cos(partial);"), trig)
+        assertTrue(
+            Regex("""/\*\s*void docs\(double angle, float partial\)\s*\{\s*double x = Mth\.sin\(angle\);\s*double z = Mth\.cos\(\(float\) partial\);""", RegexOption.DOT_MATCHES_ALL)
+                .containsMatchIn(trig),
+            trig
+        )
+    }

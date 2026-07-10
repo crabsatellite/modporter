@@ -1,0 +1,1185 @@
+package com.modporter.integration
+
+import com.modporter.mapping.MappingDatabase
+import com.modporter.resources.ResourceMigrationPass
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.awt.image.BufferedImage
+import java.nio.file.Path
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+import javax.imageio.ImageIO
+import kotlin.io.path.*
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+class ResourceMigrationTest {
+
+    @TempDir
+    lateinit var tempDir: Path
+
+    private fun setupResourceProject(name: String = "resmod"): Path {
+        val projectDir = tempDir.resolve(name)
+        val resourceDir = projectDir.resolve("src/main/resources")
+
+        // mods.toml
+        resourceDir.resolve("META-INF").createDirectories()
+        resourceDir.resolve("META-INF/mods.toml").writeText("""
+            modLoader="javafml"
+            loaderVersion="[47,)"
+            [[mods]]
+            modId="resmod"
+            [[dependencies.resmod]]
+            modId="forge"
+            mandatory=true
+            versionRange="[47,)"
+        """.trimIndent())
+
+        // Data folders with plural names
+        val dataDir = resourceDir.resolve("data/resmod")
+        dataDir.resolve("tags/blocks").createDirectories()
+        dataDir.resolve("tags/items").createDirectories()
+        dataDir.resolve("tags/entity_types").createDirectories()
+        dataDir.resolve("recipes").createDirectories()
+        dataDir.resolve("loot_tables/blocks").createDirectories()
+        dataDir.resolve("advancements").createDirectories()
+
+        // Sample files in those directories
+        dataDir.resolve("tags/items/my_tag.json").writeText("""{"values":["resmod:item"]}""")
+        dataDir.resolve("recipes/my_recipe.json").writeText("""{"type":"minecraft:crafting_shaped"}""")
+        dataDir.resolve("loot_tables/blocks/my_block.json").writeText("""{"type":"minecraft:block"}""")
+        dataDir.resolve("advancements/root.json").writeText("""{"criteria":{}}""")
+
+        // pack.mcmeta
+        resourceDir.resolve("pack.mcmeta").writeText("""{"pack":{"pack_format":15,"description":"Test"}}""")
+
+        return projectDir
+    }
+
+    private fun writeResultEntryCodecRecipeSources(projectDir: Path) {
+        val javaDir = projectDir.resolve("src/main/java/resmod")
+        javaDir.createDirectories()
+        javaDir.resolve("ModRecipeSerializers.java").writeText("""
+            package resmod;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModRecipeSerializers {
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS = DeferredRegister.create(Registries.RECIPE_SERIALIZER, "resmod");
+                public static final DeferredHolder<RecipeSerializer<?>, CuttingRecipe.Serializer> CUTTING = RECIPE_SERIALIZERS.register("cutting", CuttingRecipe.Serializer::new);
+            }
+        """.trimIndent())
+        javaDir.resolve("CuttingRecipe.java").writeText("""
+            package resmod;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public final class CuttingRecipe {
+                public static final class ResultEntry {
+                    public static final Codec<ResultEntry> CODEC = RecordCodecBuilder.create(instance -> instance.group(
+                        ItemStack.CODEC.fieldOf("item").forGetter(entry -> null)
+                    ).apply(instance, item -> null));
+                }
+
+                public static final class Serializer implements RecipeSerializer<CuttingRecipe> {
+                    private static final MapCodec<CuttingRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                        ResultEntry.CODEC.listOf().fieldOf("result").forGetter(recipe -> null)
+                    ).apply(instance, result -> null));
+                }
+            }
+        """.trimIndent())
+    }
+
+    private fun writeJarWithEntry(jar: Path, entryName: String, content: String) {
+        jar.parent.createDirectories()
+        ZipOutputStream(jar.outputStream()).use { zip ->
+            zip.putNextEntry(ZipEntry(entryName))
+            zip.write(content.toByteArray(Charsets.UTF_8))
+            zip.closeEntry()
+        }
+    }
+
+    @Test
+    fun `renames mods toml to neoforge mods toml`() {
+        val projectDir = setupResourceProject()
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        val neoToml = projectDir.resolve("src/main/resources/META-INF/neoforge.mods.toml")
+        val oldToml = projectDir.resolve("src/main/resources/META-INF/mods.toml")
+
+        assertTrue(neoToml.exists(), "neoforge.mods.toml should exist")
+        assertFalse(oldToml.exists(), "Old mods.toml should be removed")
+    }
+
+    @Test
+    fun `updates mods toml content`() {
+        val projectDir = setupResourceProject()
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        val content = projectDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").readText()
+        assertTrue(content.contains("neoforge"), "Should reference neoforge instead of forge")
+    }
+
+    @Test
+    fun `tool credit is opt in and does not mention a fixed target version`() {
+        val projectDir = setupResourceProject()
+        val db = MappingDatabase.loadDefault()
+
+        ResourceMigrationPass(db).apply(projectDir)
+        val defaultContent = projectDir.resolve("src/main/resources/META-INF/neoforge.mods.toml").readText()
+        assertFalse(defaultContent.contains("Ported with ModPorter"), "Tool credit should not be added by default")
+
+        val creditedProject = setupResourceProject("credited-opt-in")
+        ResourceMigrationPass(db, addToolCredit = true).apply(creditedProject)
+        val creditedContent = creditedProject.resolve("src/main/resources/META-INF/neoforge.mods.toml").readText()
+
+        assertTrue(creditedContent.contains("credits=\"Ported with ModPorter: https://github.com/crabsatellite/modporter\""), creditedContent)
+        assertFalse(creditedContent.contains("Ported with ModPorter to NeoForge 1.21.1"), creditedContent)
+    }
+
+    @Test
+    fun `tool credit appends to existing credits without changing authors`() {
+        val projectDir = tempDir.resolve("creditedmod")
+        val metaInf = projectDir.resolve("src/main/resources/META-INF")
+        metaInf.createDirectories()
+        metaInf.resolve("mods.toml").writeText("""
+            modLoader="javafml"
+            loaderVersion="[47,)"
+            [[mods]]
+            modId="creditedmod"
+            displayName="Credited Mod"
+            credits="Original helpers"
+            authors="Original Author"
+            description='''Example'''
+        """.trimIndent())
+
+        ResourceMigrationPass(MappingDatabase.loadDefault(), addToolCredit = true).apply(projectDir)
+
+        val content = metaInf.resolve("neoforge.mods.toml").readText()
+        assertTrue(content.contains("credits=\"Original helpers; Ported with ModPorter: https://github.com/crabsatellite/modporter\""), content)
+        assertTrue(content.contains("authors=\"Original Author\""), content)
+    }
+
+    @Test
+    fun `custom enchantment resource keys require source derived data json`() {
+        val projectDir = tempDir.resolve("missing-enchantment-data")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+
+            public final class ModEnchantments {
+                public static final net.minecraft.resources.ResourceKey<Enchantment> FIRE_REACT =
+                        net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,
+                                net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "fire_react"));
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+        val generated = projectDir.resolve("src/generated/resources/data/example/enchantment/fire_react.json")
+
+        assertTrue(result.errors.any { it.contains("Missing source-derived data-driven custom enchantment JSON") })
+        assertTrue(result.changes.any { it.ruleId == "res-custom-enchantment-data" })
+        assertFalse(generated.exists(), "Resource migration must not create default custom enchantment JSON")
+    }
+
+    @Test
+    fun `custom enchantment resource keys resolve bare mod ids from call site owner`() {
+        val projectDir = tempDir.resolve("owner-local-enchantment-modid")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+
+            public final class ModEnchantments {
+                public static final String MODID = "example";
+                public static final net.minecraft.resources.ResourceKey<Enchantment> FIRE_REACT =
+                        net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,
+                                net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(MODID, "fire_react"));
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertTrue(
+            result.errors.any { it.contains("Missing source-derived data-driven custom enchantment JSON for 'example:fire_react'") },
+            result.errors.joinToString("\n")
+        )
+        assertTrue(result.changes.any { it.ruleId == "res-custom-enchantment-data" })
+    }
+
+    @Test
+    fun `custom enchantment resource keys do not resolve bare mod ids by global uniqueness`() {
+        val projectDir = tempDir.resolve("global-bare-enchantment-modid")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+
+            public final class ModEnchantments {
+                public static final net.minecraft.resources.ResourceKey<Enchantment> FIRE_REACT =
+                        net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,
+                                net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(MODID, "fire_react"));
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertFalse(
+            result.changes.any { it.ruleId == "res-custom-enchantment-data" },
+            "Bare mod ids must resolve from the call-site owner, not from globally unique constants"
+        )
+        assertFalse(
+            result.errors.any { it.contains("Missing source-derived data-driven custom enchantment JSON") },
+            result.errors.joinToString("\n")
+        )
+    }
+
+    @Test
+    fun `custom enchantment resource keys do not infer mod id owner from java file names`() {
+        val projectDir = tempDir.resolve("ambiguous-enchantment-modid")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public static final String MODID = "example";
+        """.trimIndent())
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+
+            public final class ModEnchantments {
+                public static final net.minecraft.resources.ResourceKey<Enchantment> QUALIFIED =
+                        net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,
+                                net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "qualified"));
+                public static final net.minecraft.resources.ResourceKey<Enchantment> SIMPLE =
+                        net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,
+                                net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(MODID, "simple"));
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertFalse(
+            result.changes.any { it.ruleId == "res-custom-enchantment-data" },
+            "Unsupported mod id constant ownership must not produce custom enchantment data requirements"
+        )
+        assertFalse(
+            result.errors.any { it.contains("Missing source-derived data-driven custom enchantment JSON") },
+            result.errors.joinToString("\n")
+        )
+    }
+
+    @Test
+    fun `custom enchantment resource keys ignore text block mod id constants`() {
+        val projectDir = tempDir.resolve("text-block-enchantment-modid")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "public final class ExampleMod {",
+            "    String docs() {",
+            "        return \"\"\"",
+            "            public final class ExampleMod {",
+            "            public static final String MODID = \"example\";",
+            "            public static final net.minecraft.resources.ResourceKey<net.minecraft.world.item.enchantment.Enchantment> DOC_KEY =",
+            "                    net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,",
+            "                            net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(MODID, \"doc_key\"));",
+            "            }",
+            "            \"\"\";",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+        srcDir.resolve("ModEnchantments.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.enchantment.Enchantment;
+
+            public final class ModEnchantments {
+                public static final net.minecraft.resources.ResourceKey<Enchantment> FIRE_REACT =
+                        net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,
+                                net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "fire_react"));
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertFalse(
+            result.changes.any { it.ruleId == "res-custom-enchantment-data" },
+            "Text block MODID examples must not resolve custom enchantment resource namespaces"
+        )
+        assertFalse(
+            result.errors.any { it.contains("Missing source-derived data-driven custom enchantment JSON") },
+            result.errors.joinToString("\n")
+        )
+    }
+
+    @Test
+    fun `custom enchantment resource keys ignore text block key examples`() {
+        val projectDir = tempDir.resolve("text-block-enchantment-key")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            public final class ExampleMod {
+                public static final String MODID = "example";
+            }
+        """.trimIndent())
+        srcDir.resolve("ModEnchantments.java").writeText(listOf(
+            "package com.example;",
+            "",
+            "import net.minecraft.world.item.enchantment.Enchantment;",
+            "",
+            "public final class ModEnchantments {",
+            "    String docs() {",
+            "        return \"\"\"",
+            "            public static final net.minecraft.resources.ResourceKey<Enchantment> FIRE_REACT =",
+            "                    net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,",
+            "                            net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, \"fire_react\"));",
+            "            \"\"\";",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        assertFalse(
+            result.changes.any { it.ruleId == "res-custom-enchantment-data" },
+            "Text block ResourceKey examples must not produce custom enchantment data requirements"
+        )
+        assertFalse(
+            result.errors.any { it.contains("Missing source-derived data-driven custom enchantment JSON") },
+            result.errors.joinToString("\n")
+        )
+    }
+
+    @Test
+    fun `renames data folders`() {
+        val projectDir = setupResourceProject()
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        val dataDir = projectDir.resolve("src/main/resources/data/resmod")
+
+        // New singular folders should exist
+        assertTrue(dataDir.resolve("tags/item").exists(), "tags/items -> tags/item")
+        assertTrue(dataDir.resolve("tags/block").exists(), "tags/blocks -> tags/block")
+        assertTrue(dataDir.resolve("recipe").exists(), "recipes -> recipe")
+        assertTrue(dataDir.resolve("loot_table").exists(), "loot_tables -> loot_table")
+        assertTrue(dataDir.resolve("advancement").exists(), "advancements -> advancement")
+    }
+
+    @Test
+    fun `preserves files during folder rename`() {
+        val projectDir = setupResourceProject()
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        val dataDir = projectDir.resolve("src/main/resources/data/resmod")
+
+        // Files should be preserved in renamed folders
+        assertTrue(dataDir.resolve("tags/item/my_tag.json").exists(), "Tag file should be preserved")
+        assertTrue(dataDir.resolve("recipe/my_recipe.json").exists(), "Recipe file should be preserved")
+    }
+
+    @Test
+    fun `folder rename merges plural tags into existing singular tags`() {
+        val projectDir = setupResourceProject()
+        val dataDir = projectDir.resolve("src/main/resources/data/resmod")
+        dataDir.resolve("tags/item/enchantable").createDirectories()
+        dataDir.resolve("tags/item/enchantable/tool.json").writeText("""{"values":["resmod:tool"]}""")
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        assertTrue(result.changes.any { it.ruleId == "res-folder-rename" })
+        assertTrue(dataDir.resolve("tags/item/my_tag.json").exists(), "Plural item tag should be merged")
+        assertTrue(dataDir.resolve("tags/item/enchantable/tool.json").exists(), "Existing singular tag should remain")
+        assertFalse(dataDir.resolve("tags/items").exists(), "Old plural item tag directory should be removed")
+    }
+
+    @Test
+    fun `common tool tag file paths migrate to 1_21 singular paths`() {
+        val projectDir = setupResourceProject()
+        val dataDir = projectDir.resolve("src/generated/resources/data/c")
+        dataDir.resolve("tags/items/tools").createDirectories()
+        dataDir.resolve("tags/items/tools/bows.json").writeText("""{"values":["resmod:bow"]}""")
+        dataDir.resolve("tags/items/tools/shields.json").writeText("""{"values":["resmod:shield"]}""")
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        assertTrue(result.changes.any { it.ruleId == "res-common-tag-path" })
+        assertTrue(dataDir.resolve("tags/item/tools/bow.json").exists(), "tools/bows should become tools/bow")
+        assertTrue(dataDir.resolve("tags/item/tools/shield.json").exists(), "tools/shields should become tools/shield")
+        assertFalse(dataDir.resolve("tags/item/tools/bows.json").exists())
+        assertFalse(dataDir.resolve("tags/item/tools/shields.json").exists())
+    }
+
+    @Test
+    fun `recipe string result is migrated to id object`() {
+        val projectDir = setupResourceProject()
+        val recipeDir = projectDir.resolve("src/main/resources/data/resmod/recipes")
+        recipeDir.resolve("string_result.json").writeText("""
+            {"type":"minecraft:smelting","ingredient":{"item":"minecraft:water_bucket"},"result":"resmod:hot_water_bucket"}
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/main/resources/data/resmod/recipe/string_result.json").readText()
+        assertTrue(recipe.contains(""""result": {"""), "Recipe result should be an object")
+        assertTrue(recipe.contains(""""id": "resmod:hot_water_bucket""""))
+        assertFalse(recipe.contains(""""result":"resmod:hot_water_bucket""""))
+    }
+
+    @Test
+    fun `custom recipe data fields migrate only from source derived serializer codecs`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/resmod")
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        javaDir.createDirectories()
+        recipeDir.createDirectories()
+
+        javaDir.resolve("ResMod.java").writeText("""
+            package resmod;
+
+            public final class ResMod {
+                public static final String MODID = "resmod";
+            }
+        """.trimIndent())
+        javaDir.resolve("ModRecipeSerializers.java").writeText("""
+            package resmod;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModRecipeSerializers {
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS = DeferredRegister.create(Registries.RECIPE_SERIALIZER, ResMod.MODID);
+                public static final DeferredHolder<RecipeSerializer<?>, HeatingRecipe.Serializer> HEATING = RECIPE_SERIALIZERS.register("heating", HeatingRecipe.Serializer::new);
+                public static final DeferredHolder<RecipeSerializer<?>, IncubationRecipe.Serializer> INCUBATION = RECIPE_SERIALIZERS.register("incubation", IncubationRecipe.Serializer::new);
+                public static final DeferredHolder<RecipeSerializer<?>, PlainRecipe.Serializer> PLAIN = RECIPE_SERIALIZERS.register("plain", PlainRecipe.Serializer::new);
+            }
+        """.trimIndent())
+        javaDir.resolve("AbstractHeatingSerializer.java").writeText("""
+            package resmod;
+
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class AbstractHeatingSerializer<T> implements RecipeSerializer<T> {
+                private final MapCodec<T> codec = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                    ItemStack.CODEC.fieldOf("result").forGetter(recipe -> null)
+                ).apply(instance, value -> null));
+            }
+        """.trimIndent())
+        javaDir.resolve("HeatingRecipe.java").writeText("""
+            package resmod;
+
+            public final class HeatingRecipe {
+                public static class Serializer extends AbstractHeatingSerializer<HeatingRecipe> {
+                }
+            }
+        """.trimIndent())
+        javaDir.resolve("IncubationRecipe.java").writeText("""
+            package resmod;
+
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public final class IncubationRecipe {
+                public static class Serializer implements RecipeSerializer<IncubationRecipe> {
+                    private static final MapCodec<IncubationRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                        CompoundTag.CODEC.optionalFieldOf("tag").forGetter(recipe -> null)
+                    ).apply(instance, value -> null));
+                }
+            }
+        """.trimIndent())
+        javaDir.resolve("PlainRecipe.java").writeText("""
+            package resmod;
+
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public final class PlainRecipe {
+                public static class Serializer implements RecipeSerializer<PlainRecipe> {
+                }
+            }
+        """.trimIndent())
+        recipeDir.resolve("heating.json").writeText("""
+            {
+              "type": "resmod:heating",
+              "ingredient": {
+                "item": "minecraft:stone"
+              },
+              "result": "resmod:heated_stone"
+            }
+        """.trimIndent())
+        recipeDir.resolve("incubation.json").writeText("""
+            {
+              "type": "resmod:incubation",
+              "ingredient": {
+                "item": "resmod:egg"
+              },
+              "tag": "{Hungry:1b,IsBaby:1b,MoaType:\"resmod:white\",Nested:{Value:2s},List:[1b,2b]}"
+            }
+        """.trimIndent())
+        recipeDir.resolve("plain.json").writeText("""
+            {
+              "type": "resmod:plain",
+              "result": "resmod:plain_result",
+              "tag": "{ShouldStay:1b}"
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val heating = projectDir.resolve("src/generated/resources/data/resmod/recipe/heating.json").readText()
+        val incubation = projectDir.resolve("src/generated/resources/data/resmod/recipe/incubation.json").readText()
+        val plain = projectDir.resolve("src/generated/resources/data/resmod/recipe/plain.json").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "res-recipe-result-entry-id" })
+        assertTrue(result.changes.any { it.ruleId == "res-recipe-snbt-compound-tag" })
+        assertTrue(heating.contains(""""result": {"""))
+        assertTrue(heating.contains(""""id": "resmod:heated_stone""""))
+        assertTrue(incubation.contains(""""tag": {"""))
+        assertTrue(incubation.contains(""""Hungry": 1"""))
+        assertTrue(incubation.contains(""""IsBaby": 1"""))
+        assertTrue(incubation.contains(""""MoaType": "resmod:white""""))
+        assertTrue(incubation.contains(""""Nested": {"""))
+        assertTrue(incubation.contains(""""Value": 2"""))
+        assertTrue(incubation.contains(""""List": ["""))
+        assertTrue(plain.contains(""""result": "resmod:plain_result""""))
+        assertTrue(plain.contains(""""tag": "{ShouldStay:1b}""""))
+    }
+
+    @Test
+    fun `custom recipe codec source index uses declared type names not java file names`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/resmod")
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        javaDir.createDirectories()
+        recipeDir.createDirectories()
+
+        javaDir.resolve("RegistrySurface.java").writeText("""
+            package resmod;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            final class RecipeRegistries {
+                static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS = DeferredRegister.create(Registries.RECIPE_SERIALIZER, "resmod");
+                static final DeferredHolder<RecipeSerializer<?>, RenamedRecipe.Serializer> RENAMED = RECIPE_SERIALIZERS.register("renamed", RenamedRecipe.Serializer::new);
+            }
+        """.trimIndent())
+        javaDir.resolve("RecipeSource.java").writeText("""
+            package resmod;
+
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            final class RenamedRecipe {
+                static class Serializer implements RecipeSerializer<RenamedRecipe> {
+                    private static final MapCodec<RenamedRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                        CompoundTag.CODEC.optionalFieldOf("tag").forGetter(recipe -> null)
+                    ).apply(instance, value -> null));
+                }
+            }
+        """.trimIndent())
+        recipeDir.resolve("renamed.json").writeText("""
+            {
+              "type": "resmod:renamed",
+              "tag": "{Value:1b}"
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val renamed = projectDir.resolve("src/generated/resources/data/resmod/recipe/renamed.json").readText()
+        assertTrue(result.changes.any { it.ruleId == "res-recipe-snbt-compound-tag" })
+        assertTrue(renamed.contains(""""tag": {"""), renamed)
+        assertTrue(renamed.contains(""""Value": 1"""), renamed)
+        assertFalse(renamed.contains(""""tag": "{Value:1b}""""), renamed)
+    }
+
+    @Test
+    fun `custom recipe codec source index does not resolve globally unique invisible types`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java")
+        val registryDir = javaDir.resolve("resmod")
+        val foreignDir = javaDir.resolve("other")
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        registryDir.createDirectories()
+        foreignDir.createDirectories()
+        recipeDir.createDirectories()
+
+        registryDir.resolve("ModRecipeSerializers.java").writeText("""
+            package resmod;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModRecipeSerializers {
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS = DeferredRegister.create(Registries.RECIPE_SERIALIZER, "resmod");
+                public static final DeferredHolder<RecipeSerializer<?>, ForeignRecipe.Serializer> FOREIGN = RECIPE_SERIALIZERS.register("foreign", ForeignRecipe.Serializer::new);
+            }
+        """.trimIndent())
+        foreignDir.resolve("ForeignRecipe.java").writeText("""
+            package other;
+
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public final class ForeignRecipe {
+                public static class Serializer implements RecipeSerializer<ForeignRecipe> {
+                    private static final MapCodec<ForeignRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                        CompoundTag.CODEC.optionalFieldOf("tag").forGetter(recipe -> null)
+                    ).apply(instance, value -> null));
+                }
+            }
+        """.trimIndent())
+        recipeDir.resolve("foreign.json").writeText("""
+            {
+              "type": "resmod:foreign",
+              "tag": "{Value:1b}"
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val foreign = projectDir.resolve("src/generated/resources/data/resmod/recipe/foreign.json").readText()
+        assertFalse(
+            result.changes.any { it.ruleId == "res-recipe-snbt-compound-tag" },
+            "Recipe codec source lookup must follow Java visibility, not globally unique simple type names"
+        )
+        assertTrue(foreign.contains(""""tag": "{Value:1b}""""), foreign)
+        assertFalse(foreign.contains(""""tag": {"""), foreign)
+    }
+
+    @Test
+    fun `custom recipe serializer registries do not resolve bare namespaces by global uniqueness`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/resmod")
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        javaDir.createDirectories()
+        recipeDir.createDirectories()
+
+        javaDir.resolve("ResMod.java").writeText("""
+            package resmod;
+
+            public final class ResMod {
+                public static final String MODID = "resmod";
+            }
+        """.trimIndent())
+        javaDir.resolve("ModRecipeSerializers.java").writeText("""
+            package resmod;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModRecipeSerializers {
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS = DeferredRegister.create(Registries.RECIPE_SERIALIZER, MODID);
+                public static final DeferredHolder<RecipeSerializer<?>, IncubationRecipe.Serializer> INCUBATION = RECIPE_SERIALIZERS.register("incubation", IncubationRecipe.Serializer::new);
+            }
+        """.trimIndent())
+        javaDir.resolve("IncubationRecipe.java").writeText("""
+            package resmod;
+
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public final class IncubationRecipe {
+                public static class Serializer implements RecipeSerializer<IncubationRecipe> {
+                    private static final MapCodec<IncubationRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                        CompoundTag.CODEC.optionalFieldOf("tag").forGetter(recipe -> null)
+                    ).apply(instance, value -> null));
+                }
+            }
+        """.trimIndent())
+        recipeDir.resolve("incubation.json").writeText("""
+            {
+              "type": "resmod:incubation",
+              "tag": "{Hungry:1b}"
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val incubation = projectDir.resolve("src/generated/resources/data/resmod/recipe/incubation.json").readText()
+        assertFalse(
+            result.changes.any { it.ruleId == "res-recipe-snbt-compound-tag" },
+            "Bare serializer registry namespaces must resolve from the declaration owner, not from globally unique constants"
+        )
+        assertTrue(incubation.contains(""""tag": "{Hungry:1b}""""), incubation)
+        assertFalse(incubation.contains(""""tag": {"""), incubation)
+    }
+
+    @Test
+    fun `custom recipe data fields ignore text block serializer codecs`() {
+        val projectDir = setupResourceProject()
+        val javaDir = projectDir.resolve("src/main/java/resmod")
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        javaDir.createDirectories()
+        recipeDir.createDirectories()
+
+        javaDir.resolve("ResMod.java").writeText("""
+            package resmod;
+
+            public final class ResMod {
+                public static final String MODID = "resmod";
+            }
+        """.trimIndent())
+        javaDir.resolve("ModRecipeSerializers.java").writeText("""
+            package resmod;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public final class ModRecipeSerializers {
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS = DeferredRegister.create(Registries.RECIPE_SERIALIZER, ResMod.MODID);
+                public static final DeferredHolder<RecipeSerializer<?>, IncubationRecipe.Serializer> INCUBATION = RECIPE_SERIALIZERS.register("incubation", IncubationRecipe.Serializer::new);
+            }
+        """.trimIndent())
+        javaDir.resolve("IncubationRecipe.java").writeText(listOf(
+            "package resmod;",
+            "",
+            "import net.minecraft.nbt.CompoundTag;",
+            "import net.minecraft.world.item.crafting.RecipeSerializer;",
+            "",
+            "public final class IncubationRecipe {",
+            "    public static class Serializer implements RecipeSerializer<IncubationRecipe> {",
+            "        String docs() {",
+            "            return \"\"\"",
+            "                CompoundTag.CODEC.optionalFieldOf(\"tag\").forGetter(recipe -> null)",
+            "                \"\"\";",
+            "        }",
+            "    }",
+            "}",
+            ""
+        ).joinToString(System.lineSeparator()))
+        recipeDir.resolve("incubation.json").writeText("""
+            {
+              "type": "resmod:incubation",
+              "ingredient": {
+                "item": "resmod:egg"
+              },
+              "tag": "{Hungry:1b}"
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val incubation = projectDir.resolve("src/generated/resources/data/resmod/recipe/incubation.json").readText()
+        assertFalse(
+            result.changes.any { it.ruleId == "res-recipe-snbt-compound-tag" },
+            "Text block serializer codec examples must not drive recipe SNBT component migration"
+        )
+        assertTrue(incubation.contains(""""tag": "{Hungry:1b}""""), incubation)
+        assertFalse(incubation.contains(""""tag": {"""), incubation)
+    }
+
+    @Test
+    fun `codec declared result list item stack fields migrate without mod specific recipe ids`() {
+        val projectDir = setupResourceProject()
+        writeResultEntryCodecRecipeSources(projectDir)
+        val recipeDir = projectDir.resolve("src/main/resources/data/resmod/recipes")
+        recipeDir.resolve("cutting_result_array.json").writeText("""
+            {
+              "type": "resmod:cutting",
+              "ingredients": [
+                {
+                  "item": "resmod:cabbage"
+                }
+              ],
+              "result": [
+                {
+                  "item": "resmod:sliced_cabbage",
+                  "count": 2
+                }
+              ],
+              "tool": {
+                "tag": "forge:tools/knives"
+              }
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/main/resources/data/resmod/recipe/cutting_result_array.json").readText()
+        assertEquals(
+            1,
+            result.changes.count { it.ruleId == "res-recipe-result-entry-id" },
+            "Codec-declared result entry stack migration rule should be recorded exactly once"
+        )
+        assertTrue(recipe.contains(""""item": "resmod:cabbage""""))
+        assertTrue(recipe.contains(""""item": {"""))
+        assertTrue(recipe.contains(""""id": "resmod:sliced_cabbage""""))
+        assertTrue(recipe.contains(""""count": 2"""))
+        assertTrue(recipe.contains(""""tag": "c:tools/knife""""))
+        assertFalse(recipe.contains(""""item": "resmod:sliced_cabbage""""))
+        assertFalse(recipe.contains("forge:tools/knives"))
+    }
+
+    @Test
+    fun `result list item stack fields require serializer codec evidence`() {
+        val projectDir = setupResourceProject()
+        val recipeDir = projectDir.resolve("src/main/resources/data/resmod/recipes")
+        recipeDir.resolve("unproven_result_array.json").writeText("""
+            {
+              "type": "resmod:cutting",
+              "ingredients": [
+                {
+                  "item": "resmod:cabbage"
+                }
+              ],
+              "result": [
+                {
+                  "item": "resmod:sliced_cabbage",
+                  "count": 2
+                }
+              ]
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/main/resources/data/resmod/recipe/unproven_result_array.json").readText()
+        assertFalse(
+            result.changes.any { it.ruleId == "res-recipe-result-entry-id" },
+            "Result entry stack migration must require source-declared serializer codec or target dependency data evidence"
+        )
+        assertTrue(recipe.contains(""""item": "resmod:sliced_cabbage""""))
+        assertTrue(recipe.contains(""""count": 2"""))
+        assertFalse(recipe.contains(""""item": {"""))
+    }
+
+    @Test
+    fun `dependency recipe data shape migrates external result entry item stack fields`() {
+        val projectDir = setupResourceProject()
+        val dependencyJar = projectDir.resolve("libs/depmod-1.0.0.jar")
+        writeJarWithEntry(
+            dependencyJar,
+            "data/depmod/recipe/cutting/example.json",
+            """
+                {
+                  "type": "depmod:cutting",
+                  "ingredients": [
+                    {
+                      "item": "depmod:cabbage"
+                    }
+                  ],
+                  "result": [
+                    {
+                      "item": {
+                        "count": 2,
+                        "id": "depmod:sliced_cabbage"
+                      }
+                    }
+                  ]
+                }
+            """.trimIndent()
+        )
+        projectDir.resolve("build.gradle").writeText("""
+            repositories { flatDir { dirs 'libs' } }
+            dependencies {
+                implementation files('libs/depmod-1.0.0.jar')
+            }
+        """.trimIndent())
+        val recipeDir = projectDir.resolve("src/main/resources/data/resmod/recipes")
+        recipeDir.resolve("external_cutting.json").writeText("""
+            {
+              "type": "depmod:cutting",
+              "ingredients": [
+                {
+                  "item": "resmod:cabbage"
+                }
+              ],
+              "result": [
+                {
+                  "item": "resmod:sliced_cabbage",
+                  "count": 2
+                }
+              ]
+            }
+        """.trimIndent())
+
+        val result = ResourceMigrationPass(MappingDatabase.loadDefault()).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/main/resources/data/resmod/recipe/external_cutting.json").readText()
+        assertTrue(
+            result.changes.any { it.ruleId == "res-recipe-result-entry-id" },
+            "Target dependency data should prove external result entry item stack fields"
+        )
+        assertTrue(recipe.contains(""""item": {"""))
+        assertTrue(recipe.contains(""""id": "resmod:sliced_cabbage""""))
+        assertTrue(recipe.contains(""""count": 2"""))
+        assertTrue(recipe.contains(""""item": "resmod:cabbage""""))
+        assertFalse(recipe.contains(""""item": "resmod:sliced_cabbage""""))
+    }
+
+    @Test
+    fun `conditional codec declared result list item stack fields are unwrapped and migrated`() {
+        val projectDir = setupResourceProject()
+        writeResultEntryCodecRecipeSources(projectDir)
+        val recipeDir = projectDir.resolve("src/main/resources/data/resmod/recipes")
+        recipeDir.resolve("conditional_cutting.json").writeText("""
+            {
+              "type": "neoforge:conditional",
+              "recipes": [
+                {
+                  "neoforge:conditions": [
+                    {
+                      "type": "neoforge:mod_loaded",
+                      "modid": "resmod"
+                    }
+                  ],
+                  "recipe": {
+                    "type": "resmod:cutting",
+                    "ingredients": [
+                      {
+                        "item": "resmod:cabbage"
+                      }
+                    ],
+                    "tool": {
+                      "tag": "forge:tools/knives"
+                    },
+                    "result": [
+                      {
+                        "item": "resmod:sliced_cabbage",
+                        "count": 2
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/main/resources/data/resmod/recipe/conditional_cutting.json").readText()
+        assertEquals(
+            1,
+            result.changes.count { it.ruleId == "res-recipe-result-entry-id" },
+            "Conditional codec-declared result entry stack migration should be recorded exactly once"
+        )
+        assertTrue(recipe.contains(""""neoforge:conditions":"""))
+        assertTrue(recipe.contains(""""type": "resmod:cutting""""))
+        assertTrue(recipe.contains(""""item": {"""))
+        assertTrue(recipe.contains(""""id": "resmod:sliced_cabbage""""))
+        assertTrue(recipe.contains(""""count": 2"""))
+        assertTrue(recipe.contains(""""tag": "c:tools/knife""""))
+        assertFalse(recipe.contains(""""type": "neoforge:conditional""""))
+        assertFalse(recipe.contains(""""item": "resmod:sliced_cabbage""""))
+    }
+
+    @Test
+    fun `single conditional recipe is unwrapped with top level conditions`() {
+        val projectDir = setupResourceProject()
+        val recipeDir = projectDir.resolve("src/generated/resources/data/resmod/recipes")
+        recipeDir.createDirectories()
+        recipeDir.resolve("conditional_table.json").writeText("""
+            {
+              "type": "neoforge:conditional",
+              "recipes": [
+                {
+                  "neoforge:conditions": [
+                    {
+                      "type": "neoforge:mod_loaded",
+                      "modid": "farmersdelight"
+                    }
+                  ],
+                  "recipe": {
+                    "type": "minecraft:crafting_shapeless",
+                    "ingredients": [
+                      {
+                        "tag": "forge:lumber"
+                      }
+                    ],
+                    "result": {
+                      "item": "resmod:conditional_table"
+                    }
+                  }
+                }
+              ]
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val recipe = projectDir.resolve("src/generated/resources/data/resmod/recipe/conditional_table.json").readText()
+        assertTrue(
+            result.changes.any { it.ruleId == "res-recipe-unwrap-single-conditional" },
+            "Conditional recipe unwrap rule should be recorded"
+        )
+        assertTrue(recipe.contains(""""neoforge:conditions":"""))
+        assertTrue(recipe.contains(""""type": "minecraft:crafting_shapeless""""))
+        assertTrue(recipe.contains(""""tag": "c:lumber""""))
+        assertTrue(recipe.contains(""""id": "resmod:conditional_table""""))
+        assertFalse(recipe.contains(""""type": "neoforge:conditional""""))
+        assertFalse(recipe.contains(""""recipes":"""))
+        assertFalse(recipe.contains(""""recipe":"""))
+    }
+
+    @Test
+    fun `loot table conditions remain vanilla conditions`() {
+        val projectDir = setupResourceProject()
+        val lootDir = projectDir.resolve("src/main/resources/data/resmod/loot_tables/blocks")
+        lootDir.resolve("explosive_block.json").writeText("""
+            {
+              "type": "minecraft:block",
+              "pools": [
+                {
+                  "rolls": 1,
+                  "entries": [
+                    {
+                      "type": "minecraft:item",
+                      "name": "resmod:explosive_block"
+                    }
+                  ],
+                  "conditions": [
+                    {
+                      "condition": "minecraft:survives_explosion"
+                    }
+                  ]
+                }
+              ]
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        ResourceMigrationPass(db).apply(projectDir)
+
+        val lootTable = projectDir.resolve("src/main/resources/data/resmod/loot_table/blocks/explosive_block.json").readText()
+        assertTrue(lootTable.contains(""""conditions""""))
+        assertTrue(lootTable.contains(""""condition": "minecraft:survives_explosion""""))
+        assertFalse(lootTable.contains(""""neoforge:conditions""""))
+    }
+
+    @Test
+    fun `global loot modifier conditions use loot condition codec wrapper key`() {
+        val projectDir = setupResourceProject()
+        val lootModifierDir = projectDir.resolve("src/main/resources/data/resmod/loot_modifiers")
+        lootModifierDir.createDirectories()
+        lootModifierDir.resolve("grass_seeds.json").writeText("""
+            {
+              "type": "resmod:grass_drops",
+              "neoforge:conditions": [
+                {
+                  "condition": "minecraft:random_chance",
+                  "chance": 0.0625
+                },
+                {
+                  "condition": "minecraft:inverted",
+                  "term": {
+                    "condition": "minecraft:match_tool",
+                    "predicate": {
+                      "items": [
+                        "minecraft:shears"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "condition": "minecraft:alternative",
+                  "terms": [
+                    {
+                      "condition": "minecraft:random_chance",
+                      "chance": 0.25
+                    },
+                    {
+                      "condition": "forge:loot_table_id",
+                      "loot_table_id": "minecraft:gameplay/fishing"
+                    }
+                  ]
+                },
+                {
+                  "condition": "block_state_property",
+                  "block": "minecraft:grass"
+                }
+              ]
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val result = ResourceMigrationPass(db).apply(projectDir)
+
+        val lootModifier = projectDir.resolve("src/main/resources/data/resmod/loot_modifiers/grass_seeds.json").readText()
+        assertTrue(
+            result.changes.any { it.ruleId == "res-glm-loot-conditions-121" },
+            "Global loot modifier condition migration rule should be recorded"
+        )
+        assertTrue(
+            result.changes.any { it.ruleId == "res-legacy-resource-id-renames-121" },
+            "Legacy resource id rename rule should be recorded"
+        )
+        assertTrue(lootModifier.contains(""""conditions":"""))
+        assertTrue(lootModifier.contains(""""condition": "minecraft:random_chance""""))
+        assertTrue(lootModifier.contains(""""condition": "minecraft:inverted""""))
+        assertTrue(lootModifier.contains(""""condition": "minecraft:match_tool""""))
+        assertTrue(lootModifier.contains(""""condition": "minecraft:any_of""""))
+        assertTrue(lootModifier.contains(""""condition": "neoforge:loot_table_id""""))
+        assertTrue(lootModifier.contains(""""condition": "minecraft:block_state_property""""))
+        assertTrue(lootModifier.contains(""""block": "minecraft:short_grass""""))
+        assertFalse(lootModifier.contains(""""neoforge:conditions""""))
+        assertFalse(lootModifier.contains("minecraft:alternative"))
+        assertFalse(lootModifier.contains("minecraft:grass"))
+    }

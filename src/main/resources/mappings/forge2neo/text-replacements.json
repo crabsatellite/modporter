@@ -1807,10 +1807,10 @@
       "isRegex": true
     },
     {
-      "id": "blockstate-get-to-getValue",
-      "pattern": "state\\.get\\(",
-      "replacement": "state.getValue(",
-      "description": "BlockState.get() renamed to getValue() in 1.21",
+      "id": "vanilla-options-screen-package",
+      "pattern": "net\\.minecraft\\.client\\.gui\\.screens\\.(AccessibilityOptionsScreen|ChatOptionsScreen|FontOptionsScreen|LanguageSelectScreen|MouseSettingsScreen|OnlineOptionsScreen|OptionsScreen|OptionsSubScreen|SkinCustomizationScreen|SoundOptionsScreen|UnsupportedGraphicsWarningScreen|VideoSettingsScreen)",
+      "replacement": "net.minecraft.client.gui.screens.options.$1",
+      "description": "Vanilla options screens moved under net.minecraft.client.gui.screens.options in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -2649,14 +2649,6 @@
       "isRegex": true
     },
     {
-      "id": "item-isCorrectToolForDrops-add-stack",
-      "pattern": "isCorrectToolForDrops\\(BlockState\\s+(\\w+)\\)",
-      "replacement": "isCorrectToolForDrops(ItemStack stack, BlockState $1)",
-      "description": "isCorrectToolForDrops() gained ItemStack parameter in 1.21",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "item-appendHoverText-level-to-context",
       "pattern": "appendHoverText\\(([^,]+),\\s*Level\\s+(\\w+),",
       "replacement": "appendHoverText($1, Item.TooltipContext $2,",
@@ -2846,14 +2838,6 @@
       "replacement": "",
       "description": "Remove HANDLER = null assignment (SimpleChannel removed)",
       "fileGlob": "*.java"
-    },
-    {
-      "id": "item-isCorrectToolForDrops-annotated",
-      "pattern": "isCorrectToolForDrops\\(@\\w+\\s+BlockState\\s+(\\w+)\\)",
-      "replacement": "isCorrectToolForDrops(ItemStack stack, BlockState $1)",
-      "description": "isCorrectToolForDrops() gained ItemStack parameter in 1.21 (annotated variant)",
-      "fileGlob": "*.java",
-      "isRegex": true
     },
     {
       "id": "recipe-custom-constructor-remove-rl",
