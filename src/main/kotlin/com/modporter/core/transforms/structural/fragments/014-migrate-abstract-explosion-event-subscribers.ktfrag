@@ -1,4 +1,80 @@
 
+    private fun migrateAbstractExplosionEventSubscribers(source: String): String {
+        if (!source.contains("@SubscribeEvent") || !source.contains("ExplosionEvent")) return source
+        var result = source
+        val id = """[A-Za-z_$][\w$]*"""
+        javaMethodRangesIncludingDefault(maskJavaCommentsAndLiterals(result))
+            .asReversed()
+            .forEach { method ->
+                val header = result.substring(method.range.first, result.indexOf('{', method.range.first) + 1)
+                val subscribeAnnotation = Regex("""(?m)^[ \t]*@SubscribeEvent(?:\([^)]*\))?\s*\r?\n""")
+                    .find(header)
+                    ?.value
+                    ?: return@forEach
+                if (!Regex("""\bstatic\s+void\s+${Regex.escape(method.name)}\s*\(""").containsMatchIn(header)) {
+                    return@forEach
+                }
+                val eventParameter = Regex("""\bExplosionEvent\s+($id)\b""")
+                    .find(header)
+                    ?.groupValues
+                    ?.get(1)
+                    ?: return@forEach
+                val helperHeader = header
+                    .replace(subscribeAnnotation, "")
+                    .replaceFirst(Regex("""\bpublic\s+static\s+void\b"""), "private static void")
+                    .replaceFirst(Regex("""\bprotected\s+static\s+void\b"""), "private static void")
+                if (helperHeader == header) return@forEach
+                val methodText = result.substring(method.range)
+                val helperText = helperHeader + methodText.substring(header.length)
+                val indent = lineIndentAt(result, method.range.first)
+                val startName = uniqueLocalName(result, "${method.name}Start")
+                val detonateName = uniqueLocalName(result + "\n$startName", "${method.name}Detonate")
+                val wrappers = buildString {
+                    append(subscribeAnnotation)
+                    append("${indent}public static void $startName(ExplosionEvent.Start $eventParameter) {\n")
+                    append("${indent}    ${method.name}($eventParameter);\n")
+                    append("${indent}}\n\n")
+                    append(subscribeAnnotation)
+                    append("${indent}public static void $detonateName(ExplosionEvent.Detonate $eventParameter) {\n")
+                    append("${indent}    ${method.name}($eventParameter);\n")
+                    append("${indent}}\n\n")
+                }
+                result = result.substring(0, method.range.first) + wrappers + helperText + result.substring(method.range.last + 1)
+            }
+        return result
+    }
+
+    private fun migrateCandleCakeByCandlePatternVariables(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("instanceof CandleBlock") || !executableCode.contains("CandleCakeBlock.byCandle(")) {
+            return source
+        }
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        val ifPattern = Regex("""if\s*\(\s*([A-Za-z_$][\w$]*)\s+instanceof\s+CandleBlock\s*\)\s*\{""")
+        ifPattern.findAll(executableCode).forEach { match ->
+            val blockVariable = match.groupValues[1]
+            val openBrace = executableCode.indexOf('{', match.range.last - 1)
+            if (openBrace < 0) return@forEach
+            val closeBrace = findMatchingBrace(executableCode, openBrace)
+            if (closeBrace < 0) return@forEach
+            val blockText = source.substring(match.range.first, closeBrace + 1)
+            val callPattern = Regex("""CandleCakeBlock\.byCandle\(\s*${Regex.escape(blockVariable)}\s*\)""")
+            if (!callPattern.containsMatchIn(blockText)) return@forEach
+            val patternVariable = uniqueLocalNameInScope(blockText, "candleBlock")
+            val migrated = blockText
+                .replace(
+                    Regex("""if\s*\(\s*${Regex.escape(blockVariable)}\s+instanceof\s+CandleBlock\s*\)""")
+                ) {
+                    "if ($blockVariable instanceof CandleBlock $patternVariable)"
+                }
+                .replace(callPattern) {
+                    "CandleCakeBlock.byCandle($patternVariable)"
+                }
+            edits += match.range.first..closeBrace to migrated
+        }
+        return if (edits.isEmpty()) source else applyStringEdits(source, edits)
+    }
+
     private fun migrateDeprecatedLevelReaderHasChunksAtCalls(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return emptyList()
@@ -2890,79 +2966,4 @@ ${registrations.joinToString("\n") { "        $it" }}
             }
         }
         return result
-    }
-
-    private fun migrateLegacyEyeHeightOverrides(
-        source: String,
-        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
-    ): String {
-        if (!source.contains("getStandingEyeHeight(") && !source.contains("getEyeHeight(Pose")) return source
-        var result = source
-        var cursor = 0
-        val signaturePattern = Regex(
-            """(?m)(?:[ \t]*@\w+(?:\([^)]*\))?\s*\r?\n)*[ \t]*(?:public|protected)\s+float\s+(getStandingEyeHeight|getEyeHeight)\s*\(\s*Pose\s+([A-Za-z_$][\w$]*)(?:\s*,\s*EntityDimensions\s+([A-Za-z_$][\w$]*))?\s*\)\s*\{"""
-        )
-        while (true) {
-            val match = signaturePattern.find(result, cursor) ?: break
-            val openBrace = result.indexOf('{', match.range.first)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
-            if (openBrace < 0 || closeBrace <= openBrace) {
-                cursor = match.range.last + 1
-                continue
-            }
-            val methodText = result.substring(match.range.first, closeBrace + 1)
-            val returnMatch = Regex("""return\s+(.+?);""", RegexOption.DOT_MATCHES_ALL).find(methodText)
-            if (returnMatch == null) {
-                cursor = closeBrace + 1
-                continue
-            }
-            val poseName = match.groupValues[2]
-            val dimensionsName = match.groupValues.getOrNull(3).orEmpty()
-            var eyeExpression = returnMatch.groupValues[1].trim()
-            val classDeclaration = enclosingJavaClassDeclaration(result, match.range.first)
-            val livingEntityTarget = match.groupValues[1] == "getStandingEyeHeight" ||
-                javaClassExtendsAny(classDeclaration, javaLivingEntityBaseTypes(), javaInheritanceIndex)
-            val targetMethodName = if (livingEntityTarget) "getDefaultDimensions" else "getDimensions"
-            val targetAccess = if (livingEntityTarget) "protected" else "public"
-            val superDimensionsCall = "super.$targetMethodName($poseName)"
-            if (dimensionsName.isNotBlank()) {
-                eyeExpression = Regex("""\b${Regex.escape(dimensionsName)}\.height\(\)""")
-                    .replace(eyeExpression, "$superDimensionsCall.height()")
-            }
-            eyeExpression = eyeExpression
-                .replace(Regex("""super\.getStandingEyeHeight\s*\(\s*${Regex.escape(poseName)}\s*,\s*[A-Za-z_$][\w$]*\s*\)"""), "$superDimensionsCall.eyeHeight()")
-                .replace(Regex("""super\.getEyeHeight\s*\(\s*${Regex.escape(poseName)}\s*\)"""), "$superDimensionsCall.eyeHeight()")
-                .replace(Regex("""this\.getBbHeight\s*\(\s*\)"""), "$superDimensionsCall.height()")
-
-            val withoutLegacyMethod = result.removeRange(match.range.first, closeBrace + 1)
-            val targetExistsOutsideMethod = Regex("""\b$targetMethodName\s*\(\s*Pose\s+""")
-                .containsMatchIn(withoutLegacyMethod)
-            if (targetExistsOutsideMethod) {
-                val merged = mergeLegacyEyeHeightIntoExistingDimensionsMethod(
-                    withoutLegacyMethod,
-                    classDeclaration?.name,
-                    targetMethodName,
-                    poseName,
-                    dimensionsName,
-                    returnMatch.groupValues[1].trim()
-                )
-                if (merged != null) {
-                    result = merged
-                    cursor = match.range.first.coerceAtMost(result.length)
-                    continue
-                }
-                cursor = closeBrace + 1
-                continue
-            }
-
-            val replacement = """
-@Override
-$targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
-		return $superDimensionsCall.withEyeHeight($eyeExpression);
-	}
-            """.trimIndent()
-            result = result.substring(0, match.range.first) + replacement + result.substring(closeBrace + 1)
-            cursor = match.range.first + replacement.length
-        }
-        return if (result != source) addImportIfMissing(result, "net.minecraft.world.entity.EntityDimensions") else result
     }

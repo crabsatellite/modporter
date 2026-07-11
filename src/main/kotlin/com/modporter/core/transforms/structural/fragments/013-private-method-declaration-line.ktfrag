@@ -270,40 +270,140 @@
     private fun migrateLegacyBlockValidSpawnOverrides(source: String): String {
         val executableCode = maskJavaCommentsAndLiterals(source)
         if (!executableCode.contains("isValidSpawn") || !executableCode.contains("EntityType<?>")) return source
-        val method = javaMethodRanges(executableCode)
-            .singleOrNull { it.name == "isValidSpawn" && it.header.contains("EntityType<?>") }
-            ?: return source
-        val methodText = source.substring(method.range)
-        val executableMethodText = executableCode.substring(method.range)
-        val signature = Regex(
-            """(?s)(?:[ \t]*@\w+(?:\([^)]*\))?\s*\r?\n)*[ \t]*(?:public|protected)\s+boolean\s+isValidSpawn\s*\(\s*BlockState\s+([A-Za-z_$][\w$]*)\s*,\s*BlockGetter\s+([A-Za-z_$][\w$]*)\s*,\s*BlockPos\s+([A-Za-z_$][\w$]*)\s*,\s*EntityType<\?>\s+([A-Za-z_$][\w$]*)\s*\)"""
-        ).find(executableMethodText) ?: return source
-        val returnMatch = Regex("""\breturn\s+(.+?);""", RegexOption.DOT_MATCHES_ALL)
-            .find(executableMethodText)
-            ?: return source
-        val returnRange = returnMatch.groups[1]?.range ?: return source
-        val returnExpr = methodText.substring(returnRange).trim()
-        var methodEnd = method.range.last + 1
-        if (methodEnd < source.length && source[methodEnd] == '\r') methodEnd++
-        if (methodEnd < source.length && source[methodEnd] == '\n') methodEnd++
-        var result = source.removeRange(method.range.first, methodEnd)
-        val executableResult = maskJavaCommentsAndLiterals(result)
-        val constructorPattern = Regex("""\bsuper\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*;""")
-        val constructorSuper = constructorPattern.find(executableResult) ?: return source
-        val replacement = constructorSuper.let { match ->
-            val propertiesRange = match.groups[1]?.range ?: return source
-            val properties = result.substring(propertiesRange.first, propertiesRange.last + 1)
-            val stateName = signature.groupValues[1]
-            val getterName = signature.groupValues[2]
-            val posName = signature.groupValues[3]
-            val entityTypeName = signature.groupValues[4]
-            "super($properties.isValidSpawn(($stateName, $getterName, $posName, $entityTypeName) -> $returnExpr));"
+        val parser = JavaParser(
+            ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
+        )
+        val parsed = parser.parse(source)
+        val cu = parsed.result.orElseThrow {
+            IllegalStateException("Cannot parse legacy Block isValidSpawn override: ${parsed.problems.joinToString()}")
         }
-        result = result.substring(0, constructorSuper.range.first) + replacement + result.substring(constructorSuper.range.last + 1)
-        val withoutEntityType = removeImport(result, "net.minecraft.world.entity.EntityType")
-        result = if (!Regex("""\bEntityType\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutEntityType))) withoutEntityType else result
+        fun exactType(typeName: String, simpleName: String, qualifiedName: String): Boolean {
+            val normalized = typeName.replace(" ", "")
+            val qualifiedImport = qualifiedName.substringBefore('<')
+            return normalized == qualifiedName || normalized == simpleName && cu.imports.any {
+                !it.isStatic && it.nameAsString == qualifiedImport
+            }
+        }
+        fun exactSpawnType(typeName: String): Boolean {
+            val normalized = typeName.replace(" ", "")
+            return exactType(normalized, "Type", "net.minecraft.world.entity.SpawnPlacements.Type") ||
+                normalized == "SpawnPlacements.Type" && cu.imports.any {
+                    !it.isStatic && it.nameAsString == "net.minecraft.world.entity.SpawnPlacements"
+                }
+        }
+
+        LexicalPreservingPrinter.setup(cu)
+        var changed = false
+        cu.findAll(ClassOrInterfaceDeclaration::class.java).forEach typeLoop@{ owner ->
+            val methods = owner.methods.filter { it.nameAsString == "isValidSpawn" }
+            if (methods.isEmpty()) return@typeLoop
+            val candidates = methods.filter { method ->
+                method.typeAsString == "boolean" && method.parameters.size in 4..5 &&
+                    exactType(method.parameters[0].typeAsString, "BlockState", "net.minecraft.world.level.block.state.BlockState") &&
+                    exactType(method.parameters[1].typeAsString, "BlockGetter", "net.minecraft.world.level.BlockGetter") &&
+                    exactType(method.parameters[2].typeAsString, "BlockPos", "net.minecraft.core.BlockPos") &&
+                    exactType(
+                        method.parameters.last().typeAsString,
+                        "EntityType<?>",
+                        "net.minecraft.world.entity.EntityType<?>"
+                    ) && (method.parameters.size == 4 || exactSpawnType(method.parameters[3].typeAsString))
+            }
+            if (candidates.isEmpty()) return@typeLoop
+            if (candidates.size != 1 || methods.size != 1) {
+                throw IllegalStateException("Legacy Block isValidSpawn owner has multiple overloads: ${owner.nameAsString}")
+            }
+            val method = candidates.single()
+            if (method.annotations.none { it.nameAsString == "Override" }) {
+                throw IllegalStateException("Legacy Block isValidSpawn method is not a proven override: ${owner.nameAsString}")
+            }
+            val extended = owner.extendedTypes.singleOrNull()?.nameWithScope
+            if (extended == null || !exactType(extended, "Block", "net.minecraft.world.level.block.Block")) {
+                throw IllegalStateException(
+                    "Legacy isValidSpawn owner is not proven to directly extend Minecraft Block: ${owner.nameAsString}"
+                )
+            }
+            val statements = method.body.orElse(null)?.statements
+                ?: throw IllegalStateException("Legacy Block isValidSpawn method has no body: ${owner.nameAsString}")
+            if (statements.size != 1) {
+                throw IllegalStateException("Legacy Block isValidSpawn predicate has nontrivial control flow: ${owner.nameAsString}")
+            }
+            val returnExpression = (statements.single() as? ReturnStmt)?.expression?.orElse(null)
+                ?: throw IllegalStateException("Legacy Block isValidSpawn body is not one return: ${owner.nameAsString}")
+            val lambdaParameters = listOf(
+                method.parameters[0],
+                method.parameters[1],
+                method.parameters[2],
+                method.parameters.last()
+            )
+            val allowedNames = lambdaParameters.map { it.nameAsString }.toSet()
+            val unsupportedNames = returnExpression.findAll(NameExpr::class.java)
+                .map { it.nameAsString }
+                .filterNot { it in allowedNames }
+                .toSet()
+            if (unsupportedNames.isNotEmpty() || returnExpression.findAll(ThisExpr::class.java).isNotEmpty()) {
+                throw IllegalStateException(
+                    "Legacy Block isValidSpawn predicate depends on state unavailable before super(): " +
+                        unsupportedNames.sorted().joinToString()
+                )
+            }
+            val lambda = StaticJavaParser.parseExpression<LambdaExpr>(
+                "(${lambdaParameters.joinToString(", ") { it.nameAsString }}) -> $returnExpression"
+            )
+
+            var directConstructors = 0
+            owner.constructors.forEach constructorLoop@{ constructor ->
+                val superCall = constructor.body.statements.firstOrNull() as? ExplicitConstructorInvocationStmt
+                    ?: throw IllegalStateException(
+                        "Legacy Block isValidSpawn constructor has no explicit source-proven delegation: ${owner.nameAsString}"
+                    )
+                if (superCall.isThis) return@constructorLoop
+                directConstructors++
+                if (superCall.arguments.size != 1) {
+                    throw IllegalStateException(
+                        "Legacy Block isValidSpawn constructor does not call Block(Properties): ${owner.nameAsString}"
+                    )
+                }
+                val properties = superCall.arguments.single()
+                if (properties is MethodCallExpr && properties.nameAsString == "isValidSpawn") {
+                    throw IllegalStateException(
+                        "Legacy Block isValidSpawn constructor already configures a spawn predicate: ${owner.nameAsString}"
+                    )
+                }
+                superCall.setArgument(
+                    0,
+                    MethodCallExpr(properties.clone(), "isValidSpawn").addArgument(lambda.clone())
+                )
+            }
+            if (directConstructors == 0) {
+                throw IllegalStateException("Legacy Block isValidSpawn owner has no direct constructor path: ${owner.nameAsString}")
+            }
+            method.remove()
+            changed = true
+        }
+        if (!changed) return source
+        var result = LexicalPreservingPrinter.print(cu)
+        result = replaceExecutableJavaRegex(
+            result,
+            Regex(
+                """(\.isValidSpawn\s*\(\s*\()\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*->"""
+            )
+        ) { match ->
+            "${match.groupValues[1]}${match.groupValues[2]}, ${match.groupValues[3]}, " +
+                "${match.groupValues[4]}, ${match.groupValues[5]}) ->"
+        }
+        result = removeImport(result, "net.minecraft.world.entity.SpawnPlacements.Type")
         val withoutSpawnPlacements = removeImport(result, "net.minecraft.world.entity.SpawnPlacements")
-        result = if (!Regex("""\bSpawnPlacements\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutSpawnPlacements))) withoutSpawnPlacements else result
+        result = if (!Regex("""\bSpawnPlacements\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutSpawnPlacements))) {
+            withoutSpawnPlacements
+        } else {
+            result
+        }
+        val withoutEntityType = removeImport(result, "net.minecraft.world.entity.EntityType")
+        result = if (!Regex("""\bEntityType\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutEntityType))) {
+            withoutEntityType
+        } else {
+            result
+        }
         return result
     }
 
@@ -2897,80 +2997,4 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 null
             }
         }
-    }
-
-    private fun migrateAbstractExplosionEventSubscribers(source: String): String {
-        if (!source.contains("@SubscribeEvent") || !source.contains("ExplosionEvent")) return source
-        var result = source
-        val id = """[A-Za-z_$][\w$]*"""
-        javaMethodRangesIncludingDefault(maskJavaCommentsAndLiterals(result))
-            .asReversed()
-            .forEach { method ->
-                val header = result.substring(method.range.first, result.indexOf('{', method.range.first) + 1)
-                val subscribeAnnotation = Regex("""(?m)^[ \t]*@SubscribeEvent(?:\([^)]*\))?\s*\r?\n""")
-                    .find(header)
-                    ?.value
-                    ?: return@forEach
-                if (!Regex("""\bstatic\s+void\s+${Regex.escape(method.name)}\s*\(""").containsMatchIn(header)) {
-                    return@forEach
-                }
-                val eventParameter = Regex("""\bExplosionEvent\s+($id)\b""")
-                    .find(header)
-                    ?.groupValues
-                    ?.get(1)
-                    ?: return@forEach
-                val helperHeader = header
-                    .replace(subscribeAnnotation, "")
-                    .replaceFirst(Regex("""\bpublic\s+static\s+void\b"""), "private static void")
-                    .replaceFirst(Regex("""\bprotected\s+static\s+void\b"""), "private static void")
-                if (helperHeader == header) return@forEach
-                val methodText = result.substring(method.range)
-                val helperText = helperHeader + methodText.substring(header.length)
-                val indent = lineIndentAt(result, method.range.first)
-                val startName = uniqueLocalName(result, "${method.name}Start")
-                val detonateName = uniqueLocalName(result + "\n$startName", "${method.name}Detonate")
-                val wrappers = buildString {
-                    append(subscribeAnnotation)
-                    append("${indent}public static void $startName(ExplosionEvent.Start $eventParameter) {\n")
-                    append("${indent}    ${method.name}($eventParameter);\n")
-                    append("${indent}}\n\n")
-                    append(subscribeAnnotation)
-                    append("${indent}public static void $detonateName(ExplosionEvent.Detonate $eventParameter) {\n")
-                    append("${indent}    ${method.name}($eventParameter);\n")
-                    append("${indent}}\n\n")
-                }
-                result = result.substring(0, method.range.first) + wrappers + helperText + result.substring(method.range.last + 1)
-            }
-        return result
-    }
-
-    private fun migrateCandleCakeByCandlePatternVariables(source: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains("instanceof CandleBlock") || !executableCode.contains("CandleCakeBlock.byCandle(")) {
-            return source
-        }
-        val edits = mutableListOf<Pair<IntRange, String>>()
-        val ifPattern = Regex("""if\s*\(\s*([A-Za-z_$][\w$]*)\s+instanceof\s+CandleBlock\s*\)\s*\{""")
-        ifPattern.findAll(executableCode).forEach { match ->
-            val blockVariable = match.groupValues[1]
-            val openBrace = executableCode.indexOf('{', match.range.last - 1)
-            if (openBrace < 0) return@forEach
-            val closeBrace = findMatchingBrace(executableCode, openBrace)
-            if (closeBrace < 0) return@forEach
-            val blockText = source.substring(match.range.first, closeBrace + 1)
-            val callPattern = Regex("""CandleCakeBlock\.byCandle\(\s*${Regex.escape(blockVariable)}\s*\)""")
-            if (!callPattern.containsMatchIn(blockText)) return@forEach
-            val patternVariable = uniqueLocalNameInScope(blockText, "candleBlock")
-            val migrated = blockText
-                .replace(
-                    Regex("""if\s*\(\s*${Regex.escape(blockVariable)}\s+instanceof\s+CandleBlock\s*\)""")
-                ) {
-                    "if ($blockVariable instanceof CandleBlock $patternVariable)"
-                }
-                .replace(callPattern) {
-                    "CandleCakeBlock.byCandle($patternVariable)"
-                }
-            edits += match.range.first..closeBrace to migrated
-        }
-        return if (edits.isEmpty()) source else applyStringEdits(source, edits)
     }

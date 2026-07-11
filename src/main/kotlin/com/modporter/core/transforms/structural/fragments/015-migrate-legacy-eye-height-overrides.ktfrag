@@ -1,4 +1,79 @@
 
+    private fun migrateLegacyEyeHeightOverrides(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
+        if (!source.contains("getStandingEyeHeight(") && !source.contains("getEyeHeight(Pose")) return source
+        var result = source
+        var cursor = 0
+        val signaturePattern = Regex(
+            """(?m)(?:[ \t]*@\w+(?:\([^)]*\))?\s*\r?\n)*[ \t]*(?:public|protected)\s+float\s+(getStandingEyeHeight|getEyeHeight)\s*\(\s*Pose\s+([A-Za-z_$][\w$]*)(?:\s*,\s*EntityDimensions\s+([A-Za-z_$][\w$]*))?\s*\)\s*\{"""
+        )
+        while (true) {
+            val match = signaturePattern.find(result, cursor) ?: break
+            val openBrace = result.indexOf('{', match.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace <= openBrace) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val methodText = result.substring(match.range.first, closeBrace + 1)
+            val returnMatch = Regex("""return\s+(.+?);""", RegexOption.DOT_MATCHES_ALL).find(methodText)
+            if (returnMatch == null) {
+                cursor = closeBrace + 1
+                continue
+            }
+            val poseName = match.groupValues[2]
+            val dimensionsName = match.groupValues.getOrNull(3).orEmpty()
+            var eyeExpression = returnMatch.groupValues[1].trim()
+            val classDeclaration = enclosingJavaClassDeclaration(result, match.range.first)
+            val livingEntityTarget = match.groupValues[1] == "getStandingEyeHeight" ||
+                javaClassExtendsAny(classDeclaration, javaLivingEntityBaseTypes(), javaInheritanceIndex)
+            val targetMethodName = if (livingEntityTarget) "getDefaultDimensions" else "getDimensions"
+            val targetAccess = if (livingEntityTarget) "protected" else "public"
+            val superDimensionsCall = "super.$targetMethodName($poseName)"
+            if (dimensionsName.isNotBlank()) {
+                eyeExpression = Regex("""\b${Regex.escape(dimensionsName)}\.height\(\)""")
+                    .replace(eyeExpression, "$superDimensionsCall.height()")
+            }
+            eyeExpression = eyeExpression
+                .replace(Regex("""super\.getStandingEyeHeight\s*\(\s*${Regex.escape(poseName)}\s*,\s*[A-Za-z_$][\w$]*\s*\)"""), "$superDimensionsCall.eyeHeight()")
+                .replace(Regex("""super\.getEyeHeight\s*\(\s*${Regex.escape(poseName)}\s*\)"""), "$superDimensionsCall.eyeHeight()")
+                .replace(Regex("""this\.getBbHeight\s*\(\s*\)"""), "$superDimensionsCall.height()")
+
+            val withoutLegacyMethod = result.removeRange(match.range.first, closeBrace + 1)
+            val targetExistsOutsideMethod = Regex("""\b$targetMethodName\s*\(\s*Pose\s+""")
+                .containsMatchIn(withoutLegacyMethod)
+            if (targetExistsOutsideMethod) {
+                val merged = mergeLegacyEyeHeightIntoExistingDimensionsMethod(
+                    withoutLegacyMethod,
+                    classDeclaration?.name,
+                    targetMethodName,
+                    poseName,
+                    dimensionsName,
+                    returnMatch.groupValues[1].trim()
+                )
+                if (merged != null) {
+                    result = merged
+                    cursor = match.range.first.coerceAtMost(result.length)
+                    continue
+                }
+                cursor = closeBrace + 1
+                continue
+            }
+
+            val replacement = """
+@Override
+$targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
+		return $superDimensionsCall.withEyeHeight($eyeExpression);
+	}
+            """.trimIndent()
+            result = result.substring(0, match.range.first) + replacement + result.substring(closeBrace + 1)
+            cursor = match.range.first + replacement.length
+        }
+        return if (result != source) addImportIfMissing(result, "net.minecraft.world.entity.EntityDimensions") else result
+    }
+
     private fun mergeLegacyEyeHeightIntoExistingDimensionsMethod(
         source: String,
         className: String?,
@@ -2893,74 +2968,5 @@ ${indent}}
         }
         result = Regex("""\b([A-Za-z_$][\w$]*)\.getContainerSize\(\)""")
             .replace(result) { match -> "${match.groupValues[1]}.size()" }
-        return result
-    }
-
-    private fun migrateLegacyMenuScreensRegistration(source: String): String {
-        if (!source.contains("MenuScreens.register(") &&
-            !source.contains(".renderScreens();") &&
-            !(source.contains("FMLClientSetupEvent") && source.contains("event.register("))) {
-            return source
-        }
-        var result = source
-        val convertedHelpers = linkedSetOf<String>()
-        if (result.contains("MenuScreens.register(")) {
-            result = Regex("""(?m)^([ \t]*)public\s+static\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{""")
-                .replace(result) { match ->
-                    val methodStart = match.range.first
-                    val openBrace = result.indexOf('{', match.range.last)
-                    val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
-                    if (closeBrace >= 0 && result.substring(openBrace + 1, closeBrace).contains("MenuScreens.register(")) {
-                        val indent = match.groupValues[1]
-                        val methodName = match.groupValues[2]
-                        val annotationStart = annotationStartBefore(result, methodStart)
-                        val hasSubscribeEvent = result.substring(annotationStart, methodStart).contains("@SubscribeEvent")
-                        convertedHelpers += methodName
-                        val annotation = if (hasSubscribeEvent) "" else "${indent}@SubscribeEvent\n"
-                        "${annotation}${indent}public static void $methodName(RegisterMenuScreensEvent event) {"
-                    } else {
-                        result.substring(methodStart, match.range.last + 1)
-                    }
-            }
-            result = result.replace("MenuScreens.register(", "event.register(")
-        }
-        for (helper in convertedHelpers) {
-            result = Regex("""(?m)^[ \t]*(?:this\.)?${Regex.escape(helper)}\(\);\s*\r?\n""")
-                .replace(result, "")
-        }
-        if (result.contains("FMLClientSetupEvent") && result.contains("event.register(")) {
-            result = migrateFmlClientSetupMenuRegistrationMethods(result)
-        }
-        if (result.contains(".renderScreens();") && result.contains("FMLClientSetupEvent")) {
-            val helpers = Regex("""(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.renderScreens\(\);\s*$""")
-                .findAll(result)
-                .map { it.groupValues[2] }
-                .toList()
-            if (helpers.isNotEmpty()) {
-                result = Regex("""(?m)^[ \t]*[A-Za-z_$][\w$]*\.renderScreens\(\);\s*\r?\n""").replace(result, "")
-                if (!result.contains("RegisterMenuScreensEvent event") && !result.contains("registerMenuScreens(RegisterMenuScreensEvent")) {
-                    val methodBody = helpers.distinct().joinToString("\n") { helper ->
-                        "        $helper.renderScreens(event);"
-                    }
-                    val insertion = """
-
-    @SubscribeEvent
-    public static void registerMenuScreens(RegisterMenuScreensEvent event) {
-$methodBody
-    }
-""".trimEnd()
-                    result = insertBeforeLastClassBrace(result, insertion)
-                }
-            }
-        }
-        if (result.contains("RegisterMenuScreensEvent")) {
-            result = addImportIfMissing(result, "net.neoforged.neoforge.client.event.RegisterMenuScreensEvent")
-        }
-        if (Regex("""(?m)^[ \t]*@SubscribeEvent\b""").containsMatchIn(result)) {
-            result = addImportIfMissing(result, "net.neoforged.bus.api.SubscribeEvent")
-        }
-        if (!result.contains("MenuScreens.")) {
-            result = removeImport(result, "net.minecraft.client.gui.screens.MenuScreens")
-        }
         return result
     }

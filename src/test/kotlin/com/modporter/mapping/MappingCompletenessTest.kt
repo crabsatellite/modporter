@@ -5631,17 +5631,18 @@ class MappingCompletenessTest {
 
         assertTrue(
             body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
-                body.contains("javaMethodRanges(executableCode)") &&
-                body.contains(".singleOrNull { it.name == \"isValidSpawn\"") &&
-                body.contains("val executableMethodText = executableCode.substring(method.range)") &&
-                body.contains("val returnRange = returnMatch.groups[1]?.range ?: return source") &&
-                body.contains("var result = source.removeRange(method.range.first, methodEnd)") &&
-                body.contains("val executableResult = maskJavaCommentsAndLiterals(result)") &&
-                body.contains("constructorPattern.find(executableResult)") &&
-                body.contains("maskJavaCommentsAndLiterals(result)") &&
+                body.contains("LexicalPreservingPrinter.setup(cu)") &&
+                body.contains("cu.findAll(ClassOrInterfaceDeclaration::class.java)") &&
+                body.contains("method.parameters.size in 4..5") &&
+                body.contains("exactSpawnType(method.parameters[3].typeAsString)") &&
+                body.contains("returnExpression.findAll(NameExpr::class.java)") &&
+                body.contains("owner.constructors.forEach") &&
+                body.contains("ExplicitConstructorInvocationStmt") &&
+                body.contains("MethodCallExpr(properties.clone(), \"isValidSpawn\")") &&
+                body.contains("method.remove()") &&
                 body.contains("maskJavaCommentsAndLiterals(withoutEntityType)") &&
                 body.contains("maskJavaCommentsAndLiterals(withoutSpawnPlacements)"),
-            "Legacy isValidSpawn migration must derive method removal, return expression, and constructor insertion from executable Java"
+            "Legacy isValidSpawn migration must prove API types, predicate scope, and every direct constructor path"
         )
         assertTrue(
             offenders.isEmpty(),

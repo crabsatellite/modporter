@@ -1,4 +1,79 @@
 
+    private fun wrapVoidLevelStorageDataTagReads(
+        source: String,
+        levelStorageAccessVariables: Set<String>
+    ): Pair<String, Boolean> {
+        if (!source.contains(".getDataTag()") || levelStorageAccessVariables.isEmpty()) return source to false
+
+        var result = source
+        var changed = false
+        for (method in javaMethodRanges(source).asReversed()) {
+            val methodText = result.substring(method.range.first, method.range.last + 1)
+            if (!Regex("""\bvoid\s+${Regex.escape(method.name)}\s*\(""").containsMatchIn(method.header)) continue
+            if (methodText.contains("catch (IOException") || method.header.contains("throws IOException")) continue
+            val wrapped = wrapVoidLevelStorageDataTagIfBlocks(methodText, levelStorageAccessVariables)
+            if (wrapped != methodText) {
+                result = result.substring(0, method.range.first) + wrapped + result.substring(method.range.last + 1)
+                changed = true
+            }
+        }
+        return result to changed
+    }
+
+    private fun wrapVoidLevelStorageDataTagIfBlocks(
+        methodText: String,
+        levelStorageAccessVariables: Set<String>
+    ): String {
+        var result = methodText
+        var changed = false
+        var searchStart = 0
+        while (searchStart < result.length) {
+            val ifMatch = Regex("""(?m)^([ \t]*)if\s*\(""").find(result, searchStart) ?: break
+            val indent = ifMatch.groupValues[1]
+            val openParen = result.indexOf('(', ifMatch.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(result, openParen) else -1
+            if (closeParen < 0) {
+                searchStart = ifMatch.range.last + 1
+                continue
+            }
+            val condition = result.substring(openParen + 1, closeParen)
+            val readsLevelStorageDataTag = levelStorageAccessVariables.any { receiver ->
+                condition.contains("$receiver.getDataTag()")
+            }
+            if (!readsLevelStorageDataTag) {
+                searchStart = closeParen + 1
+                continue
+            }
+            val openBrace = result.indexOf('{', closeParen)
+            if (openBrace < 0) {
+                searchStart = closeParen + 1
+                continue
+            }
+            val closeBrace = findMatchingBrace(result, openBrace)
+            if (closeBrace < 0) {
+                searchStart = openBrace + 1
+                continue
+            }
+            if (isInsideTryBlock(result, ifMatch.range.first)) {
+                searchStart = closeBrace + 1
+                continue
+            }
+
+            val statement = result.substring(ifMatch.range.first, closeBrace + 1)
+            val wrappedStatement = buildString {
+                append(indent).append("try {\n")
+                append(indentJavaStatement(statement, indent))
+                append("\n").append(indent).append("} catch (IOException e) {\n")
+                append(indent).append("    return;\n")
+                append(indent).append("}")
+            }
+            result = result.substring(0, ifMatch.range.first) + wrappedStatement + result.substring(closeBrace + 1)
+            changed = true
+            searchStart = ifMatch.range.first + wrappedStatement.length
+        }
+        return if (changed) result else methodText
+    }
+
     private fun indentJavaStatement(statement: String, baseIndent: String): String =
         statement.lines().joinToString("\n") { line ->
             if (line.startsWith(baseIndent)) {
@@ -2878,78 +2953,6 @@ ${indent}}
                 continue
             }
             result = removeRangeWithTrailingLineBreak(result, method.range)
-        }
-        return result
-    }
-
-    private fun migrateLegacyAuthlibProfileFetchSource(source: String): String {
-        if (!source.contains("YggdrasilAuthenticationService") ||
-            !source.contains("MinecraftProfilePropertiesResponse") ||
-            !source.contains("performGetRequest(")) {
-            return source
-        }
-        var result = source
-        val oldStart = result.indexOf("URL url = HttpAuthenticationService.constantURL(")
-        val oldEndMarker = "GAME_PROFILES.add(result);"
-        val oldEndCall = result.indexOf(oldEndMarker, oldStart)
-        if (oldStart >= 0 && oldEndCall >= 0) {
-            var oldBlockEnd = result.indexOf('\n', oldEndCall + oldEndMarker.length).let { if (it < 0) oldEndCall + oldEndMarker.length else it + 1 }
-            while (oldBlockEnd < result.length) {
-                val nextLineEnd = result.indexOf('\n', oldBlockEnd).let { if (it < 0) result.length else it + 1 }
-                val line = result.substring(oldBlockEnd, nextLineEnd).trim()
-                if (line.isNotEmpty() && line != "}") break
-                oldBlockEnd = nextLineEnd
-            }
-            val indent = result.substring(result.lastIndexOf('\n', oldStart).let { if (it < 0) 0 else it + 1 }, oldStart)
-                .takeWhile { it == ' ' || it == '\t' }
-            val replacement = """
-${indent}var profileResult = service.createMinecraftSessionService().fetchProfile(uuid, false);
-${indent}if (profileResult != null && profileResult.profile() != null) {
-${indent}	GAME_PROFILES.add(profileResult.profile());
-${indent}}
-            """.trimIndent()
-            result = result.substring(0, oldStart) + replacement + "\n" + result.substring(oldBlockEnd)
-        }
-        result = Regex("""(?m)^[ \t]*String\s+baseUrl\s*=\s*EnvironmentParser\.getEnvironmentFromProperties\(\).*?;\s*\r?\n""")
-            .replace(result, "")
-        result = Regex("""(?m)^[ \t]*boolean\s+requireSecure\s*=\s*false\s*;\s*\r?\n""")
-            .replace(result, "")
-        result = result.replace("catch (AuthenticationException | IOException e)", "catch (RuntimeException e)")
-        listOf(
-            "com.mojang.authlib.EnvironmentParser",
-            "com.mojang.authlib.HttpAuthenticationService",
-            "com.mojang.authlib.exceptions.*",
-            "com.mojang.authlib.minecraft.client.ObjectMapper",
-            "com.mojang.authlib.yggdrasil.YggdrasilEnvironment",
-            "com.mojang.authlib.yggdrasil.response.MinecraftProfilePropertiesResponse",
-            "org.apache.commons.lang3.StringUtils",
-            "java.io.IOException",
-            "java.net.URL"
-        ).forEach { importName ->
-            result = removeImport(result, importName)
-        }
-        return result
-    }
-
-    private fun migrateLegacyPaintingVariantAccessors(source: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains("PaintingVariant")) return source
-        val variables = Regex("""\bPaintingVariant\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(executableCode)
-            .map { it.groupValues[1] }
-            .toSet()
-        if (variables.isEmpty()) return source
-
-        var result = source
-        variables.forEach { variable ->
-            result = replaceExecutableRegex(
-                result,
-                Regex("""\b${Regex.escape(variable)}\.getWidth\(\)""")
-            ) { "$variable.width()" }
-            result = replaceExecutableRegex(
-                result,
-                Regex("""\b${Regex.escape(variable)}\.getHeight\(\)""")
-            ) { "$variable.height()" }
         }
         return result
     }

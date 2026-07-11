@@ -1,4 +1,63 @@
 
+    private fun addSuppressWarningToMethodsContaining(
+        source: String,
+        warning: String,
+        predicate: (String) -> Boolean
+    ): String {
+        val methodPattern = Regex(
+            """(?m)^[ \t]*(?:@[^\r\n]+\s*\r?\n[ \t]*)*(?:public|protected|private)\s+(?:static\s+)?(?:<[^>{};]+>\s*)?[\w<>\[\].?,\s]+\s+[A-Za-z_$][\w$]*\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\{"""
+        )
+        val starts = methodPattern.findAll(source)
+            .mapNotNull { match ->
+                val openBrace = source.indexOf('{', match.range.last)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+                if (openBrace < 0 || closeBrace < 0) return@mapNotNull null
+                val methodText = source.substring(match.range.first, closeBrace + 1)
+                if (predicate(methodText)) match.range.first else null
+            }
+            .toList()
+        var result = source
+        for (start in starts.asReversed()) {
+            result = addSuppressWarningToElementAt(result, start, warning)
+        }
+        return result
+    }
+
+    private fun addSuppressWarningToConstructorsContaining(
+        source: String,
+        className: String,
+        warning: String,
+        tokens: List<String>
+    ): String =
+        addSuppressWarningToConstructorsMatching(source, className, warning) { constructorText ->
+            tokens.any { constructorText.contains(it) }
+        }
+
+    private fun addSuppressWarningToConstructorsMatching(
+        source: String,
+        className: String,
+        warning: String,
+        predicate: (String) -> Boolean
+    ): String {
+        val constructorPattern = Regex(
+            """(?m)^[ \t]*(?:@[^\r\n]+\s*\r?\n[ \t]*)*(?:public|protected|private)\s+${Regex.escape(className)}\s*\([^;{}]*\)\s*(?:throws\s+[^{;]+)?\{"""
+        )
+        val starts = constructorPattern.findAll(source)
+            .mapNotNull { match ->
+                val openBrace = source.indexOf('{', match.range.last)
+                val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+                if (openBrace < 0 || closeBrace < 0) return@mapNotNull null
+                val constructorText = source.substring(match.range.first, closeBrace + 1)
+                if (predicate(constructorText)) match.range.first else null
+            }
+            .toList()
+        var result = source
+        for (start in starts.asReversed()) {
+            result = addSuppressWarningToElementAt(result, start, warning)
+        }
+        return result
+    }
+
     private fun addSuppressWarningToElementAt(source: String, elementStart: Int, warning: String): String {
         if (elementStart !in source.indices) return source
         val lineEnd = source.indexOf('\n', elementStart).let { if (it < 0) source.length else it }
@@ -2914,58 +2973,6 @@ ${indent}}
         val withoutRecipeImport = removeExecutableImport(result, "net.minecraft.world.item.crafting.Recipe")
         if (!hasSimpleTypeReference(withoutRecipeImport, "Recipe")) {
             result = withoutRecipeImport
-        }
-        return result
-    }
-
-    private fun migrateRecipeHolderInlineInstanceofConditions(source: String, variable: String): String {
-        val id = """[A-Za-z_$][\w$]*"""
-        val escapedVariable = Regex.escape(variable)
-        val instancePattern = Regex("""\b$escapedVariable\s+instanceof\s+($id(?:\.$id)*)\s*&&""")
-        var result = source
-        var cursor = 0
-        while (true) {
-            val executableCode = maskJavaCommentsAndLiterals(result)
-            val ifMatch = Regex("""\bif\s*\(""").find(executableCode, cursor) ?: break
-            val openParen = executableCode.indexOf('(', ifMatch.range.last - 1)
-            val closeParen = if (openParen >= 0) findMatchingParen(executableCode, openParen) else -1
-            if (openParen < 0 || closeParen < 0) {
-                cursor = ifMatch.range.last + 1
-                continue
-            }
-            val condition = result.substring(openParen + 1, closeParen)
-            val executableCondition = executableCode.substring(openParen + 1, closeParen)
-            val instanceMatch = instancePattern.find(executableCondition)
-            if (instanceMatch == null) {
-                cursor = closeParen + 1
-                continue
-            }
-
-            val recipeType = instanceMatch.groupValues[1]
-            val typedVariable = recipeType.substringAfterLast('.')
-                .replaceFirstChar { it.lowercase() }
-                .let { if (it == variable) "${it}Value" else it }
-            var migratedCondition = replaceExecutableRegex(
-                condition,
-                Regex("""\(\s*${Regex.escape(recipeType)}\s*\)\s*$escapedVariable\.value\(\)""")
-            ) { typedVariable }
-            migratedCondition = replaceExecutableRegex(
-                migratedCondition,
-                Regex("""\(\s*${Regex.escape(recipeType)}\s*\)\s*$escapedVariable\b""")
-            ) { typedVariable }
-            migratedCondition = replaceExecutableRegex(
-                migratedCondition,
-                Regex("""\b$escapedVariable\.""")
-            ) { "$typedVariable." }
-            migratedCondition = replaceExecutableRegex(migratedCondition, instancePattern) {
-                "$variable.value() instanceof $recipeType $typedVariable &&"
-            }
-            if (migratedCondition != condition) {
-                result = result.substring(0, openParen + 1) + migratedCondition + result.substring(closeParen)
-                cursor = openParen + 1 + migratedCondition.length
-            } else {
-                cursor = closeParen + 1
-            }
         }
         return result
     }

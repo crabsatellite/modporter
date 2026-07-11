@@ -1,4 +1,87 @@
 
+    private fun legacyShapedRecipeCodecHelpers(
+        className: String,
+        widthField: String,
+        heightField: String,
+        ingredientsField: String
+    ): String =
+        """
+    private static final String CODEC_KEY_SYMBOLS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+    private java.util.List<String> codecPattern() {
+        java.util.Map<Ingredient, String> keyByIngredient = new java.util.IdentityHashMap<>();
+        java.util.List<String> pattern = new java.util.ArrayList<>();
+        for (int y = 0; y < this.$heightField; y++) {
+            StringBuilder row = new StringBuilder();
+            for (int x = 0; x < this.$widthField; x++) {
+                Ingredient ingredient = this.$ingredientsField.get(x + y * this.$widthField);
+                row.append(ingredient.isEmpty() ? " " : codecSymbolFor(ingredient, keyByIngredient));
+            }
+            pattern.add(row.toString());
+        }
+        return pattern;
+    }
+
+    private java.util.Map<String, Ingredient> codecKey() {
+        java.util.Map<Ingredient, String> keyByIngredient = new java.util.IdentityHashMap<>();
+        java.util.Map<String, Ingredient> key = new java.util.LinkedHashMap<>();
+        for (Ingredient ingredient : this.$ingredientsField) {
+            if (!ingredient.isEmpty()) {
+                key.put(codecSymbolFor(ingredient, keyByIngredient), ingredient);
+            }
+        }
+        return key;
+    }
+
+    private static String codecSymbolFor(Ingredient ingredient, java.util.Map<Ingredient, String> keyByIngredient) {
+        String existing = keyByIngredient.get(ingredient);
+        if (existing != null) {
+            return existing;
+        }
+        int index = keyByIngredient.size();
+        if (index >= CODEC_KEY_SYMBOLS.length()) {
+            throw new IllegalStateException("Too many distinct ingredients for $className shaped recipe codec");
+        }
+        String symbol = String.valueOf(CODEC_KEY_SYMBOLS.charAt(index));
+        keyByIngredient.put(ingredient, symbol);
+        return symbol;
+    }
+
+    private static String[] patternFromCodec(java.util.List<String> pattern) {
+        if (pattern.size() > MAX_HEIGHT) {
+            throw new JsonSyntaxException("Invalid pattern: too many rows, " + MAX_HEIGHT + " is maximum");
+        }
+        if (pattern.isEmpty()) {
+            throw new JsonSyntaxException("Invalid pattern: empty pattern not allowed");
+        }
+        String[] rows = pattern.toArray(String[]::new);
+        for (int i = 0; i < rows.length; i++) {
+            if (rows[i].length() > MAX_WIDTH) {
+                throw new JsonSyntaxException("Invalid pattern: too many columns, " + MAX_WIDTH + " is maximum");
+            }
+            if (i > 0 && rows[0].length() != rows[i].length()) {
+                throw new JsonSyntaxException("Invalid pattern: each row must be the same width");
+            }
+        }
+        return rows;
+    }
+
+    private static java.util.Map<String, Ingredient> keyFromCodec(java.util.Map<String, Ingredient> key) {
+        java.util.Map<String, Ingredient> normalized = new java.util.LinkedHashMap<>();
+        for (java.util.Map.Entry<String, Ingredient> entry : key.entrySet()) {
+            if (entry.getKey().length() != 1) {
+                throw new JsonSyntaxException("Invalid key entry: '" + entry.getKey() + "' is an invalid symbol (must be 1 character only).");
+            }
+            if (" ".equals(entry.getKey())) {
+                throw new JsonSyntaxException("Invalid key entry: ' ' is a reserved symbol.");
+            }
+            normalized.put(entry.getKey(), entry.getValue());
+        }
+        normalized.put(" ", Ingredient.EMPTY);
+        return normalized;
+    }
+        """.trimIndent()
+
     private fun legacyShapedRecipeSerializerBody(
         className: String,
         groupField: String,
@@ -2908,88 +2991,4 @@ public class ${builder.className} implements RecipeBuilder {
             recipeExpression = "new ${constructor.className}(${constructorArgs.joinToString(", ")})",
             advancementExpression = advancementExpression
         )
-    }
-
-    private fun migrateRecipeOutputResultArgument(expression: String, sourceType: String, targetType: String): String {
-        val targetSimple = targetType.substringBefore('<').substringAfterLast('.').trim()
-        val sourceSimple = sourceType.substringBefore('<').substringAfterLast('.').trim()
-        return if (targetSimple == "Optional" && sourceSimple != "Optional") {
-            "Optional.ofNullable($expression)"
-        } else if (targetSimple == "ItemStack" && sourceSimple == "Item") {
-            "new ItemStack($expression)"
-        } else {
-            expression
-        }
-    }
-
-    private fun legacyResultRecipeClassCandidates(
-        source: String,
-        resultClassText: String,
-        recipeConstructors: Map<String, List<RecipeConstructorSignature>>
-    ): List<String> {
-        val candidates = linkedSetOf<String>()
-        Regex("""RecipeSerializer\s*<\s*([A-Za-z_$][\w$]*)\s*>""")
-            .findAll(resultClassText + "\n" + source)
-            .forEach { candidates += it.groupValues[1] }
-        Regex("""<([^;\r\n{}]*Recipe[^;\r\n{}]*)>""")
-            .findAll(source)
-            .forEach { match ->
-                splitTopLevelJavaArgs(match.groupValues[1])
-                    .map { it.trim().substringAfterLast('.') }
-                    .filter { it.endsWith("Recipe") && recipeConstructors.containsKey(it) }
-                    .forEach { candidates += it }
-            }
-        Regex("""import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.([A-Za-z_$][\w$]*Recipe));""")
-            .findAll(source)
-            .forEach { match -> candidates += match.groupValues[2] }
-        return candidates.filter { recipeConstructors.containsKey(it) }
-    }
-
-    private fun removeLegacyResultClass(source: String): String {
-        val match = Regex("""(?m)^[ \t]*(?:public|protected|private)?\s*(?:static\s+)?class\s+Result\b[^{]*\{""")
-            .find(source)
-            ?: return source
-        val openBrace = source.indexOf('{', match.range.last - 1)
-        val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
-        if (openBrace < 0 || closeBrace < 0) return source
-        var end = closeBrace + 1
-        if (end < source.length && source[end] == '\r') end++
-        if (end < source.length && source[end] == '\n') end++
-        return source.removeRange(match.range.first, end)
-    }
-
-    private fun removeUnusedLegacyRecipeOutputResultClasses(javaFiles: List<Path>, dryRun: Boolean): List<Change> {
-        val texts = javaFiles.associateWith { it.readText() }
-        val allText = texts.values.joinToString("\n")
-        val changes = mutableListOf<Change>()
-        texts.forEach { (file, source) ->
-            if (!source.contains("class Result implements RecipeOutput")) return@forEach
-            val owner = javaTopLevelTypeName(source) ?: return@forEach
-            val withoutOwnResult = removeLegacyResultClass(source)
-            val externalText = allText.replace(source, withoutOwnResult)
-            val referenced = Regex("""\b(?:new\s+|extends\s+)?${Regex.escape(owner)}\.Result\b""").containsMatchIn(externalText) ||
-                Regex("""\bnew\s+Result\s*\(""").containsMatchIn(withoutOwnResult) ||
-                Regex("""\bextends\s+Result\b""").containsMatchIn(withoutOwnResult)
-            if (referenced || withoutOwnResult == source) return@forEach
-            var migrated = withoutOwnResult
-            if (!Regex("""\bJsonObject\b""").containsMatchIn(migrated)) {
-                migrated = removeImport(migrated, "com.google.gson.JsonObject")
-            }
-            if (!Regex("""\bJsonOps\b""").containsMatchIn(migrated)) {
-                migrated = removeImport(migrated, "com.mojang.serialization.JsonOps")
-            }
-            changes.add(Change(
-                file = file,
-                line = 0,
-                description = "Remove unreferenced legacy RecipeOutput Result adapter",
-                before = "class Result implements RecipeOutput",
-                after = "direct RecipeOutput.accept recipe instances",
-                confidence = Confidence.HIGH,
-                ruleId = "struct-legacy-recipe-output-result-cleanup"
-            ))
-            if (!dryRun) {
-                file.writeText(migrated)
-            }
-        }
-        return changes
     }

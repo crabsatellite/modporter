@@ -4,6 +4,7 @@ import com.modporter.core.pipeline.*
 import com.modporter.core.transforms.shared.HolderLookupProviderPropagationMigration
 import com.github.javaparser.JavaParser
 import com.github.javaparser.ParserConfiguration
+import com.github.javaparser.StaticJavaParser
 import com.github.javaparser.ast.CompilationUnit
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
 import com.github.javaparser.ast.body.FieldDeclaration
@@ -12,6 +13,7 @@ import com.github.javaparser.ast.body.Parameter
 import com.github.javaparser.ast.body.VariableDeclarator
 import com.github.javaparser.ast.expr.*
 import com.github.javaparser.ast.stmt.ExplicitConstructorInvocationStmt
+import com.github.javaparser.ast.stmt.ReturnStmt
 import com.github.javaparser.ast.type.ClassOrInterfaceType
 import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
 import kotlinx.serialization.SerializationException

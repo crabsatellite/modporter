@@ -1,4 +1,56 @@
 
+    private fun migrateRecipeHolderInlineInstanceofConditions(source: String, variable: String): String {
+        val id = """[A-Za-z_$][\w$]*"""
+        val escapedVariable = Regex.escape(variable)
+        val instancePattern = Regex("""\b$escapedVariable\s+instanceof\s+($id(?:\.$id)*)\s*&&""")
+        var result = source
+        var cursor = 0
+        while (true) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val ifMatch = Regex("""\bif\s*\(""").find(executableCode, cursor) ?: break
+            val openParen = executableCode.indexOf('(', ifMatch.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(executableCode, openParen) else -1
+            if (openParen < 0 || closeParen < 0) {
+                cursor = ifMatch.range.last + 1
+                continue
+            }
+            val condition = result.substring(openParen + 1, closeParen)
+            val executableCondition = executableCode.substring(openParen + 1, closeParen)
+            val instanceMatch = instancePattern.find(executableCondition)
+            if (instanceMatch == null) {
+                cursor = closeParen + 1
+                continue
+            }
+
+            val recipeType = instanceMatch.groupValues[1]
+            val typedVariable = recipeType.substringAfterLast('.')
+                .replaceFirstChar { it.lowercase() }
+                .let { if (it == variable) "${it}Value" else it }
+            var migratedCondition = replaceExecutableRegex(
+                condition,
+                Regex("""\(\s*${Regex.escape(recipeType)}\s*\)\s*$escapedVariable\.value\(\)""")
+            ) { typedVariable }
+            migratedCondition = replaceExecutableRegex(
+                migratedCondition,
+                Regex("""\(\s*${Regex.escape(recipeType)}\s*\)\s*$escapedVariable\b""")
+            ) { typedVariable }
+            migratedCondition = replaceExecutableRegex(
+                migratedCondition,
+                Regex("""\b$escapedVariable\.""")
+            ) { "$typedVariable." }
+            migratedCondition = replaceExecutableRegex(migratedCondition, instancePattern) {
+                "$variable.value() instanceof $recipeType $typedVariable &&"
+            }
+            if (migratedCondition != condition) {
+                result = result.substring(0, openParen + 1) + migratedCondition + result.substring(closeParen)
+                cursor = openParen + 1 + migratedCondition.length
+            } else {
+                cursor = closeParen + 1
+            }
+        }
+        return result
+    }
+
     private fun migrateRecipeHolderBareInstanceofBlocks(source: String, variable: String): String {
         val id = """[A-Za-z_$][\w$]*"""
         val pattern = Regex("""if\s*\(\s*${Regex.escape(variable)}\s+instanceof\s+($id(?:\.$id)*)\s*\)\s*\{""")
@@ -2888,86 +2940,3 @@ $encodeLines
         }
         return result
     }
-
-    private fun legacyShapedRecipeCodecHelpers(
-        className: String,
-        widthField: String,
-        heightField: String,
-        ingredientsField: String
-    ): String =
-        """
-    private static final String CODEC_KEY_SYMBOLS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-
-    private java.util.List<String> codecPattern() {
-        java.util.Map<Ingredient, String> keyByIngredient = new java.util.IdentityHashMap<>();
-        java.util.List<String> pattern = new java.util.ArrayList<>();
-        for (int y = 0; y < this.$heightField; y++) {
-            StringBuilder row = new StringBuilder();
-            for (int x = 0; x < this.$widthField; x++) {
-                Ingredient ingredient = this.$ingredientsField.get(x + y * this.$widthField);
-                row.append(ingredient.isEmpty() ? " " : codecSymbolFor(ingredient, keyByIngredient));
-            }
-            pattern.add(row.toString());
-        }
-        return pattern;
-    }
-
-    private java.util.Map<String, Ingredient> codecKey() {
-        java.util.Map<Ingredient, String> keyByIngredient = new java.util.IdentityHashMap<>();
-        java.util.Map<String, Ingredient> key = new java.util.LinkedHashMap<>();
-        for (Ingredient ingredient : this.$ingredientsField) {
-            if (!ingredient.isEmpty()) {
-                key.put(codecSymbolFor(ingredient, keyByIngredient), ingredient);
-            }
-        }
-        return key;
-    }
-
-    private static String codecSymbolFor(Ingredient ingredient, java.util.Map<Ingredient, String> keyByIngredient) {
-        String existing = keyByIngredient.get(ingredient);
-        if (existing != null) {
-            return existing;
-        }
-        int index = keyByIngredient.size();
-        if (index >= CODEC_KEY_SYMBOLS.length()) {
-            throw new IllegalStateException("Too many distinct ingredients for $className shaped recipe codec");
-        }
-        String symbol = String.valueOf(CODEC_KEY_SYMBOLS.charAt(index));
-        keyByIngredient.put(ingredient, symbol);
-        return symbol;
-    }
-
-    private static String[] patternFromCodec(java.util.List<String> pattern) {
-        if (pattern.size() > MAX_HEIGHT) {
-            throw new JsonSyntaxException("Invalid pattern: too many rows, " + MAX_HEIGHT + " is maximum");
-        }
-        if (pattern.isEmpty()) {
-            throw new JsonSyntaxException("Invalid pattern: empty pattern not allowed");
-        }
-        String[] rows = pattern.toArray(String[]::new);
-        for (int i = 0; i < rows.length; i++) {
-            if (rows[i].length() > MAX_WIDTH) {
-                throw new JsonSyntaxException("Invalid pattern: too many columns, " + MAX_WIDTH + " is maximum");
-            }
-            if (i > 0 && rows[0].length() != rows[i].length()) {
-                throw new JsonSyntaxException("Invalid pattern: each row must be the same width");
-            }
-        }
-        return rows;
-    }
-
-    private static java.util.Map<String, Ingredient> keyFromCodec(java.util.Map<String, Ingredient> key) {
-        java.util.Map<String, Ingredient> normalized = new java.util.LinkedHashMap<>();
-        for (java.util.Map.Entry<String, Ingredient> entry : key.entrySet()) {
-            if (entry.getKey().length() != 1) {
-                throw new JsonSyntaxException("Invalid key entry: '" + entry.getKey() + "' is an invalid symbol (must be 1 character only).");
-            }
-            if (" ".equals(entry.getKey())) {
-                throw new JsonSyntaxException("Invalid key entry: ' ' is a reserved symbol.");
-            }
-            normalized.put(entry.getKey(), entry.getValue());
-        }
-        normalized.put(" ", Ingredient.EMPTY);
-        return normalized;
-    }
-        """.trimIndent()

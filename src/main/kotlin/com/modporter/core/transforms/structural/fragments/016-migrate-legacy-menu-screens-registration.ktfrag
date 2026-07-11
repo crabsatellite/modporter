@@ -1,4 +1,73 @@
 
+    private fun migrateLegacyMenuScreensRegistration(source: String): String {
+        if (!source.contains("MenuScreens.register(") &&
+            !source.contains(".renderScreens();") &&
+            !(source.contains("FMLClientSetupEvent") && source.contains("event.register("))) {
+            return source
+        }
+        var result = source
+        val convertedHelpers = linkedSetOf<String>()
+        if (result.contains("MenuScreens.register(")) {
+            result = Regex("""(?m)^([ \t]*)public\s+static\s+void\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{""")
+                .replace(result) { match ->
+                    val methodStart = match.range.first
+                    val openBrace = result.indexOf('{', match.range.last)
+                    val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+                    if (closeBrace >= 0 && result.substring(openBrace + 1, closeBrace).contains("MenuScreens.register(")) {
+                        val indent = match.groupValues[1]
+                        val methodName = match.groupValues[2]
+                        val annotationStart = annotationStartBefore(result, methodStart)
+                        val hasSubscribeEvent = result.substring(annotationStart, methodStart).contains("@SubscribeEvent")
+                        convertedHelpers += methodName
+                        val annotation = if (hasSubscribeEvent) "" else "${indent}@SubscribeEvent\n"
+                        "${annotation}${indent}public static void $methodName(RegisterMenuScreensEvent event) {"
+                    } else {
+                        result.substring(methodStart, match.range.last + 1)
+                    }
+            }
+            result = result.replace("MenuScreens.register(", "event.register(")
+        }
+        for (helper in convertedHelpers) {
+            result = Regex("""(?m)^[ \t]*(?:this\.)?${Regex.escape(helper)}\(\);\s*\r?\n""")
+                .replace(result, "")
+        }
+        if (result.contains("FMLClientSetupEvent") && result.contains("event.register(")) {
+            result = migrateFmlClientSetupMenuRegistrationMethods(result)
+        }
+        if (result.contains(".renderScreens();") && result.contains("FMLClientSetupEvent")) {
+            val helpers = Regex("""(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.renderScreens\(\);\s*$""")
+                .findAll(result)
+                .map { it.groupValues[2] }
+                .toList()
+            if (helpers.isNotEmpty()) {
+                result = Regex("""(?m)^[ \t]*[A-Za-z_$][\w$]*\.renderScreens\(\);\s*\r?\n""").replace(result, "")
+                if (!result.contains("RegisterMenuScreensEvent event") && !result.contains("registerMenuScreens(RegisterMenuScreensEvent")) {
+                    val methodBody = helpers.distinct().joinToString("\n") { helper ->
+                        "        $helper.renderScreens(event);"
+                    }
+                    val insertion = """
+
+    @SubscribeEvent
+    public static void registerMenuScreens(RegisterMenuScreensEvent event) {
+$methodBody
+    }
+""".trimEnd()
+                    result = insertBeforeLastClassBrace(result, insertion)
+                }
+            }
+        }
+        if (result.contains("RegisterMenuScreensEvent")) {
+            result = addImportIfMissing(result, "net.neoforged.neoforge.client.event.RegisterMenuScreensEvent")
+        }
+        if (Regex("""(?m)^[ \t]*@SubscribeEvent\b""").containsMatchIn(result)) {
+            result = addImportIfMissing(result, "net.neoforged.bus.api.SubscribeEvent")
+        }
+        if (!result.contains("MenuScreens.")) {
+            result = removeImport(result, "net.minecraft.client.gui.screens.MenuScreens")
+        }
+        return result
+    }
+
     private fun migrateFmlClientSetupMenuRegistrationMethods(source: String): String {
         var result = source
         var cursor = 0
@@ -2916,79 +2985,4 @@ ${indent}}""".trimStart('\n')
         }
         builder.append(source, cursor, source.length)
         return builder.toString()
-    }
-
-    private fun wrapVoidLevelStorageDataTagReads(
-        source: String,
-        levelStorageAccessVariables: Set<String>
-    ): Pair<String, Boolean> {
-        if (!source.contains(".getDataTag()") || levelStorageAccessVariables.isEmpty()) return source to false
-
-        var result = source
-        var changed = false
-        for (method in javaMethodRanges(source).asReversed()) {
-            val methodText = result.substring(method.range.first, method.range.last + 1)
-            if (!Regex("""\bvoid\s+${Regex.escape(method.name)}\s*\(""").containsMatchIn(method.header)) continue
-            if (methodText.contains("catch (IOException") || method.header.contains("throws IOException")) continue
-            val wrapped = wrapVoidLevelStorageDataTagIfBlocks(methodText, levelStorageAccessVariables)
-            if (wrapped != methodText) {
-                result = result.substring(0, method.range.first) + wrapped + result.substring(method.range.last + 1)
-                changed = true
-            }
-        }
-        return result to changed
-    }
-
-    private fun wrapVoidLevelStorageDataTagIfBlocks(
-        methodText: String,
-        levelStorageAccessVariables: Set<String>
-    ): String {
-        var result = methodText
-        var changed = false
-        var searchStart = 0
-        while (searchStart < result.length) {
-            val ifMatch = Regex("""(?m)^([ \t]*)if\s*\(""").find(result, searchStart) ?: break
-            val indent = ifMatch.groupValues[1]
-            val openParen = result.indexOf('(', ifMatch.range.last - 1)
-            val closeParen = if (openParen >= 0) findMatchingParen(result, openParen) else -1
-            if (closeParen < 0) {
-                searchStart = ifMatch.range.last + 1
-                continue
-            }
-            val condition = result.substring(openParen + 1, closeParen)
-            val readsLevelStorageDataTag = levelStorageAccessVariables.any { receiver ->
-                condition.contains("$receiver.getDataTag()")
-            }
-            if (!readsLevelStorageDataTag) {
-                searchStart = closeParen + 1
-                continue
-            }
-            val openBrace = result.indexOf('{', closeParen)
-            if (openBrace < 0) {
-                searchStart = closeParen + 1
-                continue
-            }
-            val closeBrace = findMatchingBrace(result, openBrace)
-            if (closeBrace < 0) {
-                searchStart = openBrace + 1
-                continue
-            }
-            if (isInsideTryBlock(result, ifMatch.range.first)) {
-                searchStart = closeBrace + 1
-                continue
-            }
-
-            val statement = result.substring(ifMatch.range.first, closeBrace + 1)
-            val wrappedStatement = buildString {
-                append(indent).append("try {\n")
-                append(indentJavaStatement(statement, indent))
-                append("\n").append(indent).append("} catch (IOException e) {\n")
-                append(indent).append("    return;\n")
-                append(indent).append("}")
-            }
-            result = result.substring(0, ifMatch.range.first) + wrappedStatement + result.substring(closeBrace + 1)
-            changed = true
-            searchStart = ifMatch.range.first + wrappedStatement.length
-        }
-        return if (changed) result else methodText
     }
