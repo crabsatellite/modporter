@@ -60,6 +60,24 @@ class LegacyItemStackBooleanEqualsMigrationTest {
     }
 
     @Test
+    fun `array access resolves the declared element type`() {
+        val file = write("sample/ArrayCompare.java", """
+            package sample;
+            import net.minecraft.world.item.ItemStack;
+            class ArrayCompare {
+                ItemStack[] stacks;
+                boolean same(ItemStack other) { return stacks[0].equals(other, false); }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(migrated.contains("ItemStack.matches(stacks[0], other)"), migrated)
+    }
+
+    @Test
     fun `generic screen menu field and Player method resolve structurally`() {
         write("sample/MenuBase.java", """
             package sample;

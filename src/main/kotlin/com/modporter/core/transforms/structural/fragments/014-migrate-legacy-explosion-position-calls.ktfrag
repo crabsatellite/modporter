@@ -1,4 +1,19 @@
 
+    private fun migrateLegacyExplosionPositionCalls(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains(".getPosition()")) return source
+        val explosionVariables = javaVariablesOfType(executableCode, "Explosion")
+        return rewriteExecutableJavaCall(source, "getPosition") { receiver, args ->
+            if (args.isNotEmpty()) return@rewriteExecutableJavaCall null
+            val normalized = receiver.trim()
+            if (normalized in explosionVariables || normalized.endsWith(".getExplosion()")) {
+                "${normalized}.center()"
+            } else {
+                null
+            }
+        }
+    }
+
     private fun migrateAbstractExplosionEventSubscribers(source: String): String {
         if (!source.contains("@SubscribeEvent") || !source.contains("ExplosionEvent")) return source
         var result = source

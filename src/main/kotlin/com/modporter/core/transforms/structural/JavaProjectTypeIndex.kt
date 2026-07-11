@@ -7,19 +7,28 @@ import com.github.javaparser.ast.Node
 import com.github.javaparser.ast.body.CallableDeclaration
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
 import com.github.javaparser.ast.body.VariableDeclarator
+import com.github.javaparser.ast.expr.CastExpr
+import com.github.javaparser.ast.expr.ArrayAccessExpr
 import com.github.javaparser.ast.expr.EnclosedExpr
 import com.github.javaparser.ast.expr.Expression
 import com.github.javaparser.ast.expr.FieldAccessExpr
+import com.github.javaparser.ast.expr.LambdaExpr
 import com.github.javaparser.ast.expr.MethodCallExpr
 import com.github.javaparser.ast.expr.NameExpr
+import com.github.javaparser.ast.expr.ObjectCreationExpr
 import com.github.javaparser.ast.expr.ThisExpr
+import com.github.javaparser.ast.type.Type
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.readText
 
 /** Lazily resolves project-source types from explicit Java structure, without heuristic fallback. */
 internal class JavaProjectTypeIndex private constructor(private val sourceRoot: Path) {
-    private data class TypeRef(val name: String, val arguments: List<TypeRef> = emptyList())
+    private data class TypeRef(
+        val name: String,
+        val arguments: List<TypeRef> = emptyList(),
+        val arrayDepth: Int = 0
+    )
 
     private data class TypeInfo(
         val qualifiedName: String,
@@ -46,7 +55,44 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             ?: throw IllegalStateException("Expression '$expression' is outside a declared type")
         val ownerInfo = typeInfo(owner)
             ?: throw IllegalStateException("Cannot index expression owner '${owner.nameAsString}'")
-        return resolveExpression(expression, use, ownerInfo, emptyMap())?.name
+        val resolved = resolveExpression(expression, use, ownerInfo, emptyMap()) ?: return null
+        return resolved.name.takeIf { resolved.arrayDepth == 0 }
+    }
+
+    fun isExpressionAssignableTo(expression: Expression, use: Node, expectedType: String): Boolean {
+        val owner = use.findAncestor(ClassOrInterfaceDeclaration::class.java).orElse(null)
+            ?: throw IllegalStateException("Expression '$expression' is outside a declared type")
+        val ownerInfo = typeInfo(owner)
+            ?: throw IllegalStateException("Cannot index expression owner '${owner.nameAsString}'")
+        val actual = resolveExpression(expression, use, ownerInfo, emptyMap()) ?: return false
+        return isAssignableTo(actual, expectedType, mutableSetOf())
+    }
+
+    fun declaredType(type: Type, use: Node): String? {
+        val owner = use.findAncestor(ClassOrInterfaceDeclaration::class.java).orElse(null)
+            ?: throw IllegalStateException("Type '$type' is outside a declared type")
+        val ownerInfo = typeInfo(owner)
+            ?: throw IllegalStateException("Cannot index type owner '${owner.nameAsString}'")
+        val resolved = resolveType(parseType(type.asString()), ownerInfo, emptyMap()) ?: return null
+        return resolved.name.takeIf { resolved.arrayDepth == 0 }
+    }
+
+    fun projectMethodOwner(call: MethodCallExpr, declarationArity: Int = call.arguments.size): String? {
+        val owner = call.findAncestor(ClassOrInterfaceDeclaration::class.java).orElse(null)
+            ?: return null
+        val ownerInfo = typeInfo(owner)
+            ?: throw IllegalStateException("Cannot index call owner '${owner.nameAsString}'")
+        val scope = call.scope.orElse(null)
+        val receiver = if (scope == null) {
+            TypeRef(ownerInfo.qualifiedName)
+        } else {
+            resolveExpression(scope, call, ownerInfo, emptyMap()) ?: if (scope is NameExpr) {
+                resolveType(TypeRef(scope.nameAsString), ownerInfo, emptyMap())
+            } else {
+                null
+            } ?: return null
+        }
+        return resolveProjectMethodOwner(receiver, call.nameAsString, declarationArity, mutableSetOf())
     }
 
     private fun resolveExpression(
@@ -57,6 +103,15 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
     ): TypeRef? {
         return when (expression) {
             is EnclosedExpr -> resolveExpression(expression.inner, use, owner, substitutions)
+            is ArrayAccessExpr -> {
+                val array = resolveExpression(expression.name, use, owner, substitutions) ?: return null
+                if (array.arrayDepth == 0) {
+                    throw IllegalStateException("Array access '$expression' has a non-array declared receiver")
+                }
+                array.copy(arrayDepth = array.arrayDepth - 1)
+            }
+            is CastExpr -> resolveType(parseType(expression.typeAsString), owner, substitutions)
+            is ObjectCreationExpr -> resolveType(parseType(expression.typeAsString), owner, substitutions)
             is ThisExpr -> TypeRef(owner.qualifiedName)
             is NameExpr -> resolveName(expression.nameAsString, use, owner, substitutions)
             is FieldAccessExpr -> {
@@ -74,14 +129,60 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         owner: TypeInfo,
         substitutions: Map<String, TypeRef>
     ): TypeRef? {
-        val scopeExpression = call.scope.orElse(null) ?: return null
+        val scopeExpression = call.scope.orElse(null)
+        if (scopeExpression == null) {
+            return resolveProjectMethod(
+                TypeRef(owner.qualifiedName, owner.typeParameters.mapNotNull(substitutions::get)),
+                call.nameAsString,
+                call.arguments.size,
+                mutableSetOf()
+            )
+        }
         val scope = resolveExpression(scopeExpression, use, owner, substitutions) ?: return null
         if (scope.name == "java.util.List" && call.nameAsString == "get" && call.arguments.size == 1) {
             return scope.arguments.singleOrNull()
                 ?: throw IllegalStateException("Raw List receiver has no exact element type for '$call'")
         }
+        if (scope.name == "java.util.Map" && call.nameAsString == "values" && call.arguments.isEmpty()) {
+            val valueType = scope.arguments.getOrNull(1)
+                ?: throw IllegalStateException("Raw Map receiver has no exact value type for '$call'")
+            return TypeRef("java.util.Collection", listOf(valueType))
+        }
+        if (scope.name == "java.util.Optional" && call.nameAsString == "get" && call.arguments.isEmpty()) {
+            return scope.arguments.singleOrNull()
+                ?: throw IllegalStateException("Raw Optional receiver has no exact value type for '$call'")
+        }
         knownMethods[scope.name]?.get(call.nameAsString to call.arguments.size)?.let { return it }
         return resolveProjectMethod(scope, call.nameAsString, call.arguments.size, mutableSetOf())
+    }
+
+    private fun resolveProjectMethodOwner(
+        receiver: TypeRef,
+        name: String,
+        arity: Int,
+        visited: MutableSet<String>
+    ): String? {
+        if (!visited.add(receiver.toString())) return null
+        val info = loadType(receiver.name) ?: return null
+        val methods = info.declaration.methods.filter { it.nameAsString == name && it.parameters.size == arity }
+        if (methods.size > 1) throw IllegalStateException("Ambiguous method '$name/$arity' on ${receiver.name}")
+        if (methods.size == 1) return info.qualifiedName
+        val substitutions = substitutions(info, receiver)
+        return exactSingle(
+            resolvedSupers(info, substitutions).mapNotNull {
+                resolveProjectMethodOwner(it, name, arity, visited)
+            },
+            "method owner '$name/$arity' inherited by ${receiver.name}"
+        )
+    }
+
+    private fun isAssignableTo(actual: TypeRef, expectedType: String, visited: MutableSet<String>): Boolean {
+        if (actual.arrayDepth != 0) return false
+        if (actual.name == expectedType) return true
+        if (!visited.add(actual.toString())) return false
+        val info = loadType(actual.name) ?: return false
+        val substitutions = substitutions(info, actual)
+        return resolvedSupers(info, substitutions).any { isAssignableTo(it, expectedType, visited) }
     }
 
     private fun resolveProjectMethod(
@@ -112,6 +213,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         owner: TypeInfo,
         substitutions: Map<String, TypeRef>
     ): TypeRef? {
+        resolveLambdaParameter(name, use, owner, substitutions)?.let { return it }
         val callable = use.findAncestor(CallableDeclaration::class.java).orElse(null)
         if (callable != null) {
             val parameters = callable.parameters.filter { it.nameAsString == name }.map {
@@ -123,6 +225,90 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             exactSingle((parameters + locals).filterNotNull(), "local or parameter '$name'")?.let { return it }
         }
         return resolveField(TypeRef(owner.qualifiedName), name, mutableSetOf())
+    }
+
+    private fun resolveLambdaParameter(
+        name: String,
+        use: Node,
+        owner: TypeInfo,
+        substitutions: Map<String, TypeRef>
+    ): TypeRef? {
+        val lambda = use.findAncestor(LambdaExpr::class.java).orElse(null) ?: return null
+        val parameterIndex = lambda.parameters.indexOfFirst { it.nameAsString == name }
+        if (parameterIndex < 0) return null
+        val parentCall = lambda.findAncestor(MethodCallExpr::class.java).orElse(null) ?: return null
+        val argumentIndex = parentCall.arguments.indexOfFirst { it === lambda || it.isAncestorOf(lambda) }
+        if (argumentIndex < 0) return null
+        val scopeExpression = parentCall.scope.orElse(null)
+        val scope = if (scopeExpression == null) {
+            TypeRef(owner.qualifiedName, owner.typeParameters.mapNotNull(substitutions::get))
+        } else {
+            resolveExpression(scopeExpression, parentCall, owner, substitutions) ?: return null
+        }
+        val external = when {
+            parentCall.nameAsString == "forEach" && argumentIndex == 0 &&
+                scope.name in setOf("java.lang.Iterable", "java.util.Collection", "java.util.List") ->
+                scope.arguments.singleOrNull()
+                    ?: throw IllegalStateException("Raw ${scope.name} has no exact lambda element type for '$parentCall'")
+            parentCall.nameAsString == "forEach" && argumentIndex == 0 && scope.name == "java.util.Map" ->
+                scope.arguments.getOrNull(parameterIndex)
+                    ?: throw IllegalStateException("Raw Map has no exact lambda parameter type for '$parentCall'")
+            parentCall.nameAsString == "ifPresent" && argumentIndex == 0 && scope.name == "java.util.Optional" &&
+                parameterIndex == 0 -> scope.arguments.singleOrNull()
+            else -> null
+        }
+        return external ?: resolveProjectFunctionalParameter(
+            scope,
+            parentCall.nameAsString,
+            parentCall.arguments.size,
+            argumentIndex,
+            parameterIndex,
+            mutableSetOf()
+        )
+    }
+
+    private fun resolveProjectFunctionalParameter(
+        receiver: TypeRef,
+        methodName: String,
+        arity: Int,
+        argumentIndex: Int,
+        lambdaParameterIndex: Int,
+        visited: MutableSet<String>
+    ): TypeRef? {
+        if (!visited.add(receiver.toString())) return null
+        val info = loadType(receiver.name) ?: return null
+        val substitutions = substitutions(info, receiver)
+        val methods = info.declaration.methods.filter {
+            it.nameAsString == methodName && it.parameters.size == arity
+        }
+        if (methods.size > 1) throw IllegalStateException("Ambiguous method '$methodName/$arity' on ${receiver.name}")
+        methods.singleOrNull()?.let { method ->
+            val functionalType = resolveType(
+                parseType(method.parameters[argumentIndex].typeAsString),
+                info,
+                substitutions
+            ) ?: return null
+            return when (functionalType.name) {
+                "java.util.function.Consumer", "java.util.function.Predicate", "java.util.function.Function" ->
+                    functionalType.arguments.firstOrNull().takeIf { lambdaParameterIndex == 0 }
+                "java.util.function.BiConsumer", "java.util.function.BiPredicate" ->
+                    functionalType.arguments.getOrNull(lambdaParameterIndex)
+                else -> null
+            }
+        }
+        return exactSingle(
+            resolvedSupers(info, substitutions).mapNotNull {
+                resolveProjectFunctionalParameter(
+                    it,
+                    methodName,
+                    arity,
+                    argumentIndex,
+                    lambdaParameterIndex,
+                    visited
+                )
+            },
+            "functional parameter '$methodName/$arity' inherited by ${receiver.name}"
+        )
     }
 
     private fun resolveField(receiver: TypeRef, name: String, visited: MutableSet<String>): TypeRef? {
@@ -148,14 +334,18 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         info.directSupers.mapNotNull { raw -> resolveType(raw, info, substitutions) }
 
     private fun resolveType(raw: TypeRef, owner: TypeInfo, substitutions: Map<String, TypeRef>): TypeRef? {
-        substitutions[raw.name]?.let { return it }
-        owner.typeParameterBounds[raw.name]?.let { bound -> return resolveType(bound, owner, substitutions) }
+        substitutions[raw.name]?.let { return it.copy(arrayDepth = it.arrayDepth + raw.arrayDepth) }
+        owner.typeParameterBounds[raw.name]?.let { bound ->
+            return resolveType(bound, owner, substitutions)?.let {
+                it.copy(arrayDepth = it.arrayDepth + raw.arrayDepth)
+            }
+        }
         val qualified = qualify(raw.name, owner.unit, owner.qualifiedName.substringBeforeLast('.', "")) ?: return null
         val arguments = mutableListOf<TypeRef>()
         raw.arguments.forEach { argument ->
             arguments += resolveType(argument, owner, substitutions) ?: return null
         }
-        return TypeRef(qualified, arguments)
+        return TypeRef(qualified, arguments, raw.arrayDepth)
     }
 
     private fun qualify(name: String, unit: CompilationUnit, packageName: String): String? {
@@ -185,6 +375,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             ?.nameAsString?.let { return it }
         val samePackage = if (packageName.isEmpty()) name else "$packageName.$name"
         if (loadType(samePackage) != null) return samePackage
+        implicitJavaLangTypes[name]?.let { return it }
         val wildcardMatches = unit.imports.filter { !it.isStatic && it.isAsterisk }
             .mapNotNull { import ->
                 val qualified = "${import.nameAsString}.$name"
@@ -207,7 +398,8 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
     }
 
     private fun substitute(type: TypeRef, substitutions: Map<String, TypeRef>): TypeRef =
-        substitutions[type.name] ?: TypeRef(type.name, type.arguments.map { substitute(it, substitutions) })
+        substitutions[type.name]?.let { it.copy(arrayDepth = it.arrayDepth + type.arrayDepth) }
+            ?: TypeRef(type.name, type.arguments.map { substitute(it, substitutions) }, type.arrayDepth)
 
     private fun visibleBefore(variable: VariableDeclarator, use: Node): Boolean {
         val declaration = variable.range.orElse(null)?.begin ?: return false
@@ -282,8 +474,15 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             "ItemStack" to "net.minecraft.world.item.ItemStack",
             "Player" to "net.minecraft.world.entity.player.Player",
             "AbstractContainerScreen" to "net.minecraft.client.gui.screens.inventory.AbstractContainerScreen",
-            "List" to "java.util.List"
+            "List" to "java.util.List",
+            "Collection" to "java.util.Collection",
+            "Map" to "java.util.Map",
+            "Optional" to "java.util.Optional"
         )
+        private val implicitJavaLangTypes = setOf(
+            "Boolean", "Byte", "Character", "Class", "Double", "Enum", "Float", "Integer", "Long",
+            "Number", "Object", "Short", "String", "Throwable", "Void"
+        ).associateWith { "java.lang.$it" }
         private val knownFields = mapOf(
             "net.minecraft.client.gui.screens.inventory.AbstractContainerScreen" to mapOf("menu" to TypeRef("T"))
         )
@@ -297,12 +496,21 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             JavaProjectTypeIndex(sourceRoot.toAbsolutePath().normalize())
 
         private fun parseType(raw: String): TypeRef {
-            val text = raw.trim().removeSuffix("[]")
+            var text = raw.trim()
+            var arrayDepth = 0
+            while (text.endsWith("[]")) {
+                text = text.removeSuffix("[]").trimEnd()
+                arrayDepth++
+            }
             val open = text.indexOf('<')
-            if (open < 0) return TypeRef(text)
+            if (open < 0) return TypeRef(text, arrayDepth = arrayDepth)
             val close = text.lastIndexOf('>')
             if (close < open) throw IllegalStateException("Malformed generic type '$raw'")
-            return TypeRef(text.substring(0, open).trim(), splitArguments(text.substring(open + 1, close)).map(::parseType))
+            return TypeRef(
+                text.substring(0, open).trim(),
+                splitArguments(text.substring(open + 1, close)).map(::parseType),
+                arrayDepth
+            )
         }
 
         private fun splitArguments(text: String): List<String> {

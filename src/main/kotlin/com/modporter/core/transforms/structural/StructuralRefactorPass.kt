@@ -551,6 +551,12 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            changes.addAll(ExactFluidTankProviderCallMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Exact FluidTank provider call migration error: ${e.message}")
+        }
+
+        try {
             val structureStartLoadChanges = migrateProjectStructureStartLoadFromTagCalls(projectDir, dryRun)
             changes.addAll(structureStartLoadChanges)
         } catch (e: Exception) {
@@ -37951,6 +37957,11 @@ public $className(Properties $propertiesName, WoodType $typeName) {
             !executableCode.contains("FluidTank")) {
             return source
         }
+        val exactFluidTankImport = Regex(
+            """(?m)^\s*import\s+net\.neoforged\.neoforge\.fluids\.capability\.templates\.FluidTank\s*;"""
+        ).containsMatchIn(source)
+        val qualifiedFluidTank = "net.neoforged.neoforge.fluids.capability.templates.FluidTank"
+        if (!exactFluidTankImport && !executableCode.contains(qualifiedFluidTank)) return source
         val fluidTankType = """(?:FluidTank|net\.neoforged\.neoforge\.fluids\.capability\.templates\.FluidTank)"""
         val declaredTankVariables = Regex("""\b$fluidTankType\s+([A-Za-z_$][\w$]*)\b""")
             .findAll(executableCode)

@@ -2479,6 +2479,11 @@ public $className(Properties $propertiesName, WoodType $typeName) {
             !executableCode.contains("FluidTank")) {
             return source
         }
+        val exactFluidTankImport = Regex(
+            """(?m)^\s*import\s+net\.neoforged\.neoforge\.fluids\.capability\.templates\.FluidTank\s*;"""
+        ).containsMatchIn(source)
+        val qualifiedFluidTank = "net.neoforged.neoforge.fluids.capability.templates.FluidTank"
+        if (!exactFluidTankImport && !executableCode.contains(qualifiedFluidTank)) return source
         val fluidTankType = """(?:FluidTank|net\.neoforged\.neoforge\.fluids\.capability\.templates\.FluidTank)"""
         val declaredTankVariables = Regex("""\b$fluidTankType\s+([A-Za-z_$][\w$]*)\b""")
             .findAll(executableCode)
@@ -2981,20 +2986,5 @@ public $className(Properties $propertiesName, WoodType $typeName) {
                 return@rewriteExecutableJavaCall null
             }
             "${receiver.trim()}.useWithoutItem(${args[0].trim()}, ${args[1].trim()}, ${args[3].trim()})"
-        }
-    }
-
-    private fun migrateLegacyExplosionPositionCalls(source: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains(".getPosition()")) return source
-        val explosionVariables = javaVariablesOfType(executableCode, "Explosion")
-        return rewriteExecutableJavaCall(source, "getPosition") { receiver, args ->
-            if (args.isNotEmpty()) return@rewriteExecutableJavaCall null
-            val normalized = receiver.trim()
-            if (normalized in explosionVariables || normalized.endsWith(".getExplosion()")) {
-                "${normalized}.center()"
-            } else {
-                null
-            }
         }
     }
