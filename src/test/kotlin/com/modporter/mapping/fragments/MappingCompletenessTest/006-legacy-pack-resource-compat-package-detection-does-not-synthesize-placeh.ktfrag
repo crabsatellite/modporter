@@ -1131,9 +1131,10 @@
         assertTrue(
             body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
                 body.contains("""executableCode.contains(".hideTooltipPart(")""") &&
-                body.contains("""executableCode.contains("ItemStack.TooltipPart.ADDITIONAL")""") &&
                 body.contains("""rewriteExecutableJavaCall(source, "hideTooltipPart")""") &&
-                body.contains("DataComponents.HIDE_ADDITIONAL_TOOLTIP"),
+                body.contains("DataComponents.HIDE_ADDITIONAL_TOOLTIP") &&
+                body.contains("ItemStack.TooltipPart.MODIFIERS") &&
+                body.contains("ItemAttributeModifiers.EMPTY).withTooltip(false)"),
             "Tooltip part hiding migration must use executable call evidence and preserve real replacement semantics"
         )
         assertTrue(

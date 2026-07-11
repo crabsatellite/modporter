@@ -11,7 +11,9 @@ import com.github.javaparser.ast.body.MethodDeclaration
 import com.github.javaparser.ast.body.Parameter
 import com.github.javaparser.ast.body.VariableDeclarator
 import com.github.javaparser.ast.expr.*
+import com.github.javaparser.ast.stmt.ExplicitConstructorInvocationStmt
 import com.github.javaparser.ast.type.ClassOrInterfaceType
+import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.*
 import mu.KotlinLogging
@@ -367,9 +369,21 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            changes.addAll(LegacyDefaultTooltipFlagsMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Default tooltip flags migration error: ${e.message}")
+        }
+
+        try {
             changes.addAll(LegacyTrackingChunkPacketTargetMigration().migrate(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Tracking chunk packet target migration error: ${e.message}")
+        }
+
+        try {
+            changes.addAll(LegacyDirectTrackingChunkTargetMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Direct tracking chunk target migration error: ${e.message}")
         }
 
         try {

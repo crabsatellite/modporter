@@ -11,7 +11,9 @@ import com.github.javaparser.ast.body.MethodDeclaration
 import com.github.javaparser.ast.body.Parameter
 import com.github.javaparser.ast.body.VariableDeclarator
 import com.github.javaparser.ast.expr.*
+import com.github.javaparser.ast.stmt.ExplicitConstructorInvocationStmt
 import com.github.javaparser.ast.type.ClassOrInterfaceType
+import com.github.javaparser.printer.lexicalpreservation.LexicalPreservingPrinter
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.*
 import mu.KotlinLogging
@@ -367,9 +369,21 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            changes.addAll(LegacyDefaultTooltipFlagsMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Default tooltip flags migration error: ${e.message}")
+        }
+
+        try {
             changes.addAll(LegacyTrackingChunkPacketTargetMigration().migrate(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Tracking chunk packet target migration error: ${e.message}")
+        }
+
+        try {
+            changes.addAll(LegacyDirectTrackingChunkTargetMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Direct tracking chunk target migration error: ${e.message}")
         }
 
         try {
@@ -28377,19 +28391,37 @@ ${indent}}
 
     private fun migrateLegacyTooltipPartHiding(source: String): String {
         val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains(".hideTooltipPart(") || !executableCode.contains("ItemStack.TooltipPart.ADDITIONAL")) return source
+        if (!executableCode.contains(".hideTooltipPart(")) return source
 
         var changed = false
+        var needsUnit = false
+        var needsAttributeModifiers = false
         var result = rewriteExecutableJavaCall(source, "hideTooltipPart") { receiver, args ->
-            if (args.size != 1 || args[0].trim() != "ItemStack.TooltipPart.ADDITIONAL") {
-                return@rewriteExecutableJavaCall null
+            if (args.size != 1) return@rewriteExecutableJavaCall null
+            when (args[0].trim()) {
+                "ItemStack.TooltipPart.ADDITIONAL", "TooltipPart.ADDITIONAL" -> {
+                    changed = true
+                    needsUnit = true
+                    "$receiver.set(DataComponents.HIDE_ADDITIONAL_TOOLTIP, Unit.INSTANCE)"
+                }
+                "ItemStack.TooltipPart.MODIFIERS", "TooltipPart.MODIFIERS" -> {
+                    changed = true
+                    needsAttributeModifiers = true
+                    "$receiver.set(DataComponents.ATTRIBUTE_MODIFIERS, " +
+                        "$receiver.getOrDefault(DataComponents.ATTRIBUTE_MODIFIERS, ItemAttributeModifiers.EMPTY).withTooltip(false))"
+                }
+                else -> null
             }
-            changed = true
-            "$receiver.set(DataComponents.HIDE_ADDITIONAL_TOOLTIP, Unit.INSTANCE)"
         }
         if (!changed) return source
         result = addImportIfMissing(result, "net.minecraft.core.component.DataComponents")
-        result = addImportIfMissing(result, "net.minecraft.util.Unit")
+        if (needsUnit) result = addImportIfMissing(result, "net.minecraft.util.Unit")
+        if (needsAttributeModifiers) {
+            result = addImportIfMissing(result, "net.minecraft.world.item.component.ItemAttributeModifiers")
+        }
+        if (!maskJavaCommentsAndLiterals(result).contains("TooltipPart.")) {
+            result = removeImport(result, "net.minecraft.world.item.ItemStack.TooltipPart")
+        }
         return result
     }
 
@@ -43741,36 +43773,73 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
             }
             result = addImportIfMissing(result, "net.minecraft.world.item.Item")
         }
-        result = rewriteExecutableJavaNew(result, "SwordItem") { args ->
-            if (args.size != 4) return@rewriteExecutableJavaNew null
-            val tier = args[0].trim()
-            val damage = args[1].trim()
-            val speed = args[2].trim()
-            val properties = args[3].trim()
-            "new SwordItem($tier, $properties.attributes(SwordItem.createAttributes($tier, $damage, $speed)))"
+        if (Regex("""(?m)^\s*import\s+net\.minecraft\.world\.item\.SwordItem\s*;""")
+                .containsMatchIn(maskJavaCommentsAndLiterals(result))) {
+            result = rewriteExecutableJavaNew(result, "SwordItem") { args ->
+                if (args.size != 4) return@rewriteExecutableJavaNew null
+                val tier = args[0].trim()
+                val damage = args[1].trim()
+                val speed = args[2].trim()
+                val properties = args[3].trim()
+                "new SwordItem($tier, $properties.attributes(SwordItem.createAttributes($tier, $damage, $speed)))"
+            }
         }
         result = migrateLegacyRecordItemRegistrations(result)
-        if (Regex("""\bextends\s+SwordItem\b""").containsMatchIn(maskJavaCommentsAndLiterals(result))) {
-            result = rewriteExecutableSuperConstructorCalls(result) { args ->
-                if (args.size != 4) return@rewriteExecutableSuperConstructorCalls null
-                val tier = args[0].trim()
-                val damage = args[1].trim()
-                val speed = args[2].trim()
-                val properties = args[3].trim()
-                "super($tier, $properties.attributes(SwordItem.createAttributes($tier, $damage, $speed)))"
+        return migrateLegacyToolItemSuperConstructors(result)
+    }
+
+    private fun migrateLegacyToolItemSuperConstructors(source: String): String {
+        val parser = JavaParser(
+            ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
+        )
+        val parsed = parser.parse(source)
+        val cu = parsed.result.orElseThrow {
+            IllegalStateException(
+                "Cannot parse legacy tool item constructors: ${parsed.problems.joinToString()}"
+            )
+        }
+        val importedOwners = cu.imports.filter { !it.isStatic }.associateBy { it.nameAsString }
+        val toolOwners = linkedMapOf(
+            "SwordItem" to "net.minecraft.world.item.SwordItem",
+            "PickaxeItem" to "net.minecraft.world.item.PickaxeItem",
+            "AxeItem" to "net.minecraft.world.item.AxeItem",
+            "HoeItem" to "net.minecraft.world.item.HoeItem",
+            "ShovelItem" to "net.minecraft.world.item.ShovelItem"
+        )
+        LexicalPreservingPrinter.setup(cu)
+        var changed = false
+        cu.findAll(ClassOrInterfaceDeclaration::class.java).forEach typeLoop@{ type ->
+            val extended = type.extendedTypes.singleOrNull()?.nameWithScope ?: return@typeLoop
+            val simpleOwner = toolOwners.entries.singleOrNull { (simple, qualified) ->
+                extended == qualified || extended == simple && qualified in importedOwners
+            }?.key ?: return@typeLoop
+            type.constructors.forEach constructorLoop@{ constructor ->
+                val superCall = constructor.body.statements.firstOrNull() as? ExplicitConstructorInvocationStmt
+                    ?: return@constructorLoop
+                if (superCall.isThis || superCall.arguments.size != 4) return@constructorLoop
+                val tier = superCall.arguments[0].clone()
+                val damage = superCall.arguments[1].clone()
+                val speed = superCall.arguments[2].clone()
+                val properties = superCall.arguments[3].clone()
+                val attributeOwner = if (simpleOwner == "SwordItem") {
+                    NameExpr("SwordItem")
+                } else {
+                    "net.minecraft.world.item.DiggerItem".split('.').drop(1).fold(NameExpr("net") as Expression) {
+                            scope, part -> FieldAccessExpr(scope, part)
+                    }
+                }
+                val attributes = MethodCallExpr(attributeOwner, "createAttributes")
+                    .addArgument(tier.clone())
+                    .addArgument(damage)
+                    .addArgument(speed)
+                val propertiesWithAttributes = MethodCallExpr(properties, "attributes").addArgument(attributes)
+                superCall.arguments.clear()
+                superCall.addArgument(tier)
+                superCall.addArgument(propertiesWithAttributes)
+                changed = true
             }
         }
-        if (Regex("""\bextends\s+(?:PickaxeItem|AxeItem|HoeItem|ShovelItem)\b""").containsMatchIn(maskJavaCommentsAndLiterals(result))) {
-            result = rewriteExecutableSuperConstructorCalls(result) { args ->
-                if (args.size != 4) return@rewriteExecutableSuperConstructorCalls null
-                val tier = args[0].trim()
-                val damage = args[1].trim()
-                val speed = args[2].trim()
-                val properties = args[3].trim()
-                "super($tier, $properties.attributes(net.minecraft.world.item.DiggerItem.createAttributes($tier, $damage, $speed)))"
-            }
-        }
-        return result
+        return if (changed) LexicalPreservingPrinter.print(cu) else source
     }
 
     private fun migrateLegacyBowlFoodItemSubclasses(projectDir: Path, dryRun: Boolean): List<Change> {

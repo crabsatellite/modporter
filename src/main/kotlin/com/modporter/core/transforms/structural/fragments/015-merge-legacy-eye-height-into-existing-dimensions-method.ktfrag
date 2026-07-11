@@ -2395,36 +2395,73 @@
             }
             result = addImportIfMissing(result, "net.minecraft.world.item.Item")
         }
-        result = rewriteExecutableJavaNew(result, "SwordItem") { args ->
-            if (args.size != 4) return@rewriteExecutableJavaNew null
-            val tier = args[0].trim()
-            val damage = args[1].trim()
-            val speed = args[2].trim()
-            val properties = args[3].trim()
-            "new SwordItem($tier, $properties.attributes(SwordItem.createAttributes($tier, $damage, $speed)))"
+        if (Regex("""(?m)^\s*import\s+net\.minecraft\.world\.item\.SwordItem\s*;""")
+                .containsMatchIn(maskJavaCommentsAndLiterals(result))) {
+            result = rewriteExecutableJavaNew(result, "SwordItem") { args ->
+                if (args.size != 4) return@rewriteExecutableJavaNew null
+                val tier = args[0].trim()
+                val damage = args[1].trim()
+                val speed = args[2].trim()
+                val properties = args[3].trim()
+                "new SwordItem($tier, $properties.attributes(SwordItem.createAttributes($tier, $damage, $speed)))"
+            }
         }
         result = migrateLegacyRecordItemRegistrations(result)
-        if (Regex("""\bextends\s+SwordItem\b""").containsMatchIn(maskJavaCommentsAndLiterals(result))) {
-            result = rewriteExecutableSuperConstructorCalls(result) { args ->
-                if (args.size != 4) return@rewriteExecutableSuperConstructorCalls null
-                val tier = args[0].trim()
-                val damage = args[1].trim()
-                val speed = args[2].trim()
-                val properties = args[3].trim()
-                "super($tier, $properties.attributes(SwordItem.createAttributes($tier, $damage, $speed)))"
+        return migrateLegacyToolItemSuperConstructors(result)
+    }
+
+    private fun migrateLegacyToolItemSuperConstructors(source: String): String {
+        val parser = JavaParser(
+            ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
+        )
+        val parsed = parser.parse(source)
+        val cu = parsed.result.orElseThrow {
+            IllegalStateException(
+                "Cannot parse legacy tool item constructors: ${parsed.problems.joinToString()}"
+            )
+        }
+        val importedOwners = cu.imports.filter { !it.isStatic }.associateBy { it.nameAsString }
+        val toolOwners = linkedMapOf(
+            "SwordItem" to "net.minecraft.world.item.SwordItem",
+            "PickaxeItem" to "net.minecraft.world.item.PickaxeItem",
+            "AxeItem" to "net.minecraft.world.item.AxeItem",
+            "HoeItem" to "net.minecraft.world.item.HoeItem",
+            "ShovelItem" to "net.minecraft.world.item.ShovelItem"
+        )
+        LexicalPreservingPrinter.setup(cu)
+        var changed = false
+        cu.findAll(ClassOrInterfaceDeclaration::class.java).forEach typeLoop@{ type ->
+            val extended = type.extendedTypes.singleOrNull()?.nameWithScope ?: return@typeLoop
+            val simpleOwner = toolOwners.entries.singleOrNull { (simple, qualified) ->
+                extended == qualified || extended == simple && qualified in importedOwners
+            }?.key ?: return@typeLoop
+            type.constructors.forEach constructorLoop@{ constructor ->
+                val superCall = constructor.body.statements.firstOrNull() as? ExplicitConstructorInvocationStmt
+                    ?: return@constructorLoop
+                if (superCall.isThis || superCall.arguments.size != 4) return@constructorLoop
+                val tier = superCall.arguments[0].clone()
+                val damage = superCall.arguments[1].clone()
+                val speed = superCall.arguments[2].clone()
+                val properties = superCall.arguments[3].clone()
+                val attributeOwner = if (simpleOwner == "SwordItem") {
+                    NameExpr("SwordItem")
+                } else {
+                    "net.minecraft.world.item.DiggerItem".split('.').drop(1).fold(NameExpr("net") as Expression) {
+                            scope, part -> FieldAccessExpr(scope, part)
+                    }
+                }
+                val attributes = MethodCallExpr(attributeOwner, "createAttributes")
+                    .addArgument(tier.clone())
+                    .addArgument(damage)
+                    .addArgument(speed)
+                val propertiesWithAttributes = MethodCallExpr(properties, "attributes").addArgument(attributes)
+                superCall.arguments.clear()
+                superCall.addArgument(tier)
+                superCall.addArgument(propertiesWithAttributes)
+                changed = true
             }
         }
-        if (Regex("""\bextends\s+(?:PickaxeItem|AxeItem|HoeItem|ShovelItem)\b""").containsMatchIn(maskJavaCommentsAndLiterals(result))) {
-            result = rewriteExecutableSuperConstructorCalls(result) { args ->
-                if (args.size != 4) return@rewriteExecutableSuperConstructorCalls null
-                val tier = args[0].trim()
-                val damage = args[1].trim()
-                val speed = args[2].trim()
-                val properties = args[3].trim()
-                "super($tier, $properties.attributes(net.minecraft.world.item.DiggerItem.createAttributes($tier, $damage, $speed)))"
-            }
-        }
-        return result
+        return if (changed) LexicalPreservingPrinter.print(cu) else source
     }
 
     private fun migrateLegacyBowlFoodItemSubclasses(projectDir: Path, dryRun: Boolean): List<Change> {
@@ -2924,42 +2961,6 @@ $methodBody
         }
         if (!result.contains("MenuScreens.")) {
             result = removeImport(result, "net.minecraft.client.gui.screens.MenuScreens")
-        }
-        return result
-    }
-
-    private fun migrateFmlClientSetupMenuRegistrationMethods(source: String): String {
-        var result = source
-        var cursor = 0
-        var changed = false
-        val signaturePattern = Regex(
-            """(?m)^([ \t]*(?:(?:@\w+(?:\([^)]*\))?)\s*)*public\s+static\s+void\s+[A-Za-z_$][\w$]*\s*\(\s*(?:final\s+)?FMLClientSetupEvent\s+event\s*\)\s*\{)"""
-        )
-        while (true) {
-            val match = signaturePattern.find(result, cursor) ?: break
-            val openBrace = result.indexOf('{', match.range.last - 1)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
-            if (openBrace < 0 || closeBrace < 0) {
-                cursor = match.range.last + 1
-                continue
-            }
-            val body = result.substring(openBrace + 1, closeBrace)
-            if (!body.contains("event.register(")) {
-                cursor = closeBrace + 1
-                continue
-            }
-            var migratedBody = Regex("""(?m)^([ \t]*)event\.enqueueWork\(\(\)\s*->\s*\{\s*\r?\n""")
-                .replace(body, "")
-            migratedBody = Regex("""(?m)^[ \t]*\}\);\s*\r?\n""").replaceFirst(migratedBody, "")
-            val migratedSignature = match.value.replace("FMLClientSetupEvent", "RegisterMenuScreensEvent")
-            result = result.substring(0, match.range.first) + migratedSignature + migratedBody + result.substring(closeBrace)
-            cursor = match.range.first + migratedSignature.length + migratedBody.length + 1
-            changed = true
-        }
-        if (!changed) return source
-        result = addImportIfMissing(result, "net.neoforged.neoforge.client.event.RegisterMenuScreensEvent")
-        if (!Regex("""\bFMLClientSetupEvent\b""").containsMatchIn(removeImport(result, "net.neoforged.fml.event.lifecycle.FMLClientSetupEvent"))) {
-            result = removeImport(result, "net.neoforged.fml.event.lifecycle.FMLClientSetupEvent")
         }
         return result
     }

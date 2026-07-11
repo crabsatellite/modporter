@@ -1143,9 +1143,12 @@
                 body.contains("replaceExecutableJavaRegex(result, Regex(\"\"\"\\bnew\\s+BowlFoodItem") &&
                 body.contains("""rewriteExecutableJavaNew(result, "SwordItem")""") &&
                 body.contains("containsMatchIn(maskJavaCommentsAndLiterals(result))") &&
-                body.contains("rewriteExecutableSuperConstructorCalls(result)") &&
-                source.contains("private fun rewriteExecutableSuperConstructorCalls("),
-            "Legacy item constructor migration must locate item constructors and tool superclass calls in executable Java"
+                body.contains("migrateLegacyToolItemSuperConstructors(result)") &&
+                body.contains("LexicalPreservingPrinter.setup(cu)") &&
+                body.contains("type.constructors.forEach") &&
+                body.contains("ExplicitConstructorInvocationStmt") &&
+                body.contains("net.minecraft.world.item.SwordItem"),
+            "Legacy item constructor migration must prove exact Minecraft owners and class-scoped constructors"
         )
         assertTrue(
             offenders.isEmpty(),

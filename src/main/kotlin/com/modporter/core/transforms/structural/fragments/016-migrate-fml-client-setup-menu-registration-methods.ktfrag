@@ -1,4 +1,40 @@
 
+    private fun migrateFmlClientSetupMenuRegistrationMethods(source: String): String {
+        var result = source
+        var cursor = 0
+        var changed = false
+        val signaturePattern = Regex(
+            """(?m)^([ \t]*(?:(?:@\w+(?:\([^)]*\))?)\s*)*public\s+static\s+void\s+[A-Za-z_$][\w$]*\s*\(\s*(?:final\s+)?FMLClientSetupEvent\s+event\s*\)\s*\{)"""
+        )
+        while (true) {
+            val match = signaturePattern.find(result, cursor) ?: break
+            val openBrace = result.indexOf('{', match.range.last - 1)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            if (!body.contains("event.register(")) {
+                cursor = closeBrace + 1
+                continue
+            }
+            var migratedBody = Regex("""(?m)^([ \t]*)event\.enqueueWork\(\(\)\s*->\s*\{\s*\r?\n""")
+                .replace(body, "")
+            migratedBody = Regex("""(?m)^[ \t]*\}\);\s*\r?\n""").replaceFirst(migratedBody, "")
+            val migratedSignature = match.value.replace("FMLClientSetupEvent", "RegisterMenuScreensEvent")
+            result = result.substring(0, match.range.first) + migratedSignature + migratedBody + result.substring(closeBrace)
+            cursor = match.range.first + migratedSignature.length + migratedBody.length + 1
+            changed = true
+        }
+        if (!changed) return source
+        result = addImportIfMissing(result, "net.neoforged.neoforge.client.event.RegisterMenuScreensEvent")
+        if (!Regex("""\bFMLClientSetupEvent\b""").containsMatchIn(removeImport(result, "net.neoforged.fml.event.lifecycle.FMLClientSetupEvent"))) {
+            result = removeImport(result, "net.neoforged.fml.event.lifecycle.FMLClientSetupEvent")
+        }
+        return result
+    }
+
     private fun migrateLegacyEnchantmentIterationSource(source: String): String {
         val executableSource = maskJavaCommentsAndLiterals(source)
         val hasTypedHolderComparison = Regex(
@@ -2955,30 +2991,4 @@ ${indent}}""".trimStart('\n')
             searchStart = ifMatch.range.first + wrappedStatement.length
         }
         return if (changed) result else methodText
-    }
-
-    private fun indentJavaStatement(statement: String, baseIndent: String): String =
-        statement.lines().joinToString("\n") { line ->
-            if (line.startsWith(baseIndent)) {
-                baseIndent + "    " + line.substring(baseIndent.length)
-            } else if (line.isBlank()) {
-                line
-            } else {
-                baseIndent + "    " + line.trimStart()
-            }
-        }
-
-    private fun isInsideTryBlock(source: String, offset: Int): Boolean {
-        val lineStart = source.lastIndexOf('\n', offset).let { if (it < 0) 0 else it + 1 }
-        val beforeLine = source.substring(0, lineStart).lineSequence()
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .lastOrNull()
-        return beforeLine == "try {"
-    }
-
-    private fun isNullableLevelSummaryMethod(source: String, offset: Int): Boolean {
-        val method = javaMethodRanges(source).firstOrNull { offset in it.range } ?: return false
-        return Regex("""\bLevelSummary\s+${Regex.escape(method.name)}\s*\(""").containsMatchIn(method.header) &&
-            Regex("""(?<![\w$])@Nullable(?![\w$])""").containsMatchIn(method.header)
     }

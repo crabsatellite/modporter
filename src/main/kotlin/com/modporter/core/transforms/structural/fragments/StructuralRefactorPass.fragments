@@ -13,8 +13,8 @@
 013-private-method-declaration-line.ktfrag
 014-migrate-deprecated-level-reader-has-chunks-at-calls.ktfrag
 015-merge-legacy-eye-height-into-existing-dimensions-method.ktfrag
-016-migrate-legacy-enchantment-iteration-source.ktfrag
-017-migrate-legacy-binding-curse-checks.ktfrag
+016-migrate-fml-client-setup-menu-registration-methods.ktfrag
+017-indent-java-statement.ktfrag
 018-migrate-legacy-painting-variant-registry-source.ktfrag
 019-add-suppress-warning-to-element-at.ktfrag
 020-migrate-recipe-holder-bare-instanceof-blocks.ktfrag

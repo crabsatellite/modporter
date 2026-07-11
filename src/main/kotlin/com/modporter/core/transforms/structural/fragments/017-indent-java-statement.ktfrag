@@ -1,4 +1,30 @@
 
+    private fun indentJavaStatement(statement: String, baseIndent: String): String =
+        statement.lines().joinToString("\n") { line ->
+            if (line.startsWith(baseIndent)) {
+                baseIndent + "    " + line.substring(baseIndent.length)
+            } else if (line.isBlank()) {
+                line
+            } else {
+                baseIndent + "    " + line.trimStart()
+            }
+        }
+
+    private fun isInsideTryBlock(source: String, offset: Int): Boolean {
+        val lineStart = source.lastIndexOf('\n', offset).let { if (it < 0) 0 else it + 1 }
+        val beforeLine = source.substring(0, lineStart).lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .lastOrNull()
+        return beforeLine == "try {"
+    }
+
+    private fun isNullableLevelSummaryMethod(source: String, offset: Int): Boolean {
+        val method = javaMethodRanges(source).firstOrNull { offset in it.range } ?: return false
+        return Regex("""\bLevelSummary\s+${Regex.escape(method.name)}\s*\(""").containsMatchIn(method.header) &&
+            Regex("""(?<![\w$])@Nullable(?![\w$])""").containsMatchIn(method.header)
+    }
+
     private fun migrateLegacyBindingCurseChecks(source: String): String {
         val token = "EnchantmentHelper.hasBindingCurse"
         if (!source.contains(token)) return source

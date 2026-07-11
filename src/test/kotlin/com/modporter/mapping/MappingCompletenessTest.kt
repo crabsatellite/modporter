@@ -7039,9 +7039,10 @@ class MappingCompletenessTest {
         assertTrue(
             body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
                 body.contains("""executableCode.contains(".hideTooltipPart(")""") &&
-                body.contains("""executableCode.contains("ItemStack.TooltipPart.ADDITIONAL")""") &&
                 body.contains("""rewriteExecutableJavaCall(source, "hideTooltipPart")""") &&
-                body.contains("DataComponents.HIDE_ADDITIONAL_TOOLTIP"),
+                body.contains("DataComponents.HIDE_ADDITIONAL_TOOLTIP") &&
+                body.contains("ItemStack.TooltipPart.MODIFIERS") &&
+                body.contains("ItemAttributeModifiers.EMPTY).withTooltip(false)"),
             "Tooltip part hiding migration must use executable call evidence and preserve real replacement semantics"
         )
         assertTrue(
@@ -8227,9 +8228,12 @@ class MappingCompletenessTest {
                 body.contains("replaceExecutableJavaRegex(result, Regex(\"\"\"\\bnew\\s+BowlFoodItem") &&
                 body.contains("""rewriteExecutableJavaNew(result, "SwordItem")""") &&
                 body.contains("containsMatchIn(maskJavaCommentsAndLiterals(result))") &&
-                body.contains("rewriteExecutableSuperConstructorCalls(result)") &&
-                source.contains("private fun rewriteExecutableSuperConstructorCalls("),
-            "Legacy item constructor migration must locate item constructors and tool superclass calls in executable Java"
+                body.contains("migrateLegacyToolItemSuperConstructors(result)") &&
+                body.contains("LexicalPreservingPrinter.setup(cu)") &&
+                body.contains("type.constructors.forEach") &&
+                body.contains("ExplicitConstructorInvocationStmt") &&
+                body.contains("net.minecraft.world.item.SwordItem"),
+            "Legacy item constructor migration must prove exact Minecraft owners and class-scoped constructors"
         )
         assertTrue(
             offenders.isEmpty(),
