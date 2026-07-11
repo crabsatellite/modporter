@@ -3687,6 +3687,9 @@ class MappingCompletenessTest {
         val source = projectRoot
             .resolve("src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt")
             .readText()
+        val migration = projectRoot
+            .resolve("src/main/kotlin/com/modporter/core/transforms/text/LegacyTagManagerMigration.kt")
+            .readText()
         val start = source.indexOf("private fun migrateRemovedTagManagerAccess")
         assertTrue(start >= 0, "migrateRemovedTagManagerAccess is missing")
         val end = source.indexOf("private fun isNetworkHooksExtraDataWriter", start + 1).let {
@@ -3705,18 +3708,15 @@ class MappingCompletenessTest {
             .map { (label, _) -> label }
 
         assertTrue(
-            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
-                body.contains("if (!executableCode.contains(\"ITagManager<\")) return source") &&
-                body.contains("val executableLines = executableCode.lines()") &&
-                body.contains("var changed = false") &&
-                body.contains("declaration.find(executableLines[i])") &&
-                body.contains("nullGuard.matches(executableLines[i + 1])") &&
-                body.contains(".find(executableLines[i + 2])") &&
-                body.contains("executableLines[i + 3].trim() == \"}\"") &&
-                body.contains("if (!changed) return source") &&
-                body.contains("val remainingExecutableBody = maskJavaCommentsAndLiterals(result).lines()") &&
-                body.contains("removeImportLine(result, \"net.neoforged.neoforge.registries.tags.ITagManager\")"),
-            "Removed ITagManager migration must use executable Java evidence and only clean imports after a proven rewrite"
+            body.contains("return LegacyTagManagerMigration().migrate(source)") &&
+                migration.contains("class LegacyTagManagerMigration") &&
+                migration.contains("collectManagers(cu)") &&
+                migration.contains("migrateKnownOrEmptyReturns(manager)") &&
+                migration.contains("migrateMaterializedTags(manager)") &&
+                migration.contains("migrateForEachLambda") &&
+                migration.contains("Unsupported ITagManager") &&
+                migration.contains("containsMatchIn(remaining)"),
+            "Removed ITagManager migration must be AST-scoped, file-atomic, and reject unsupported operations"
         )
         assertTrue(
             offenders.isEmpty(),
