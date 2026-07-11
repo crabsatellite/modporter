@@ -780,9 +780,6 @@
                     if (chunkAt != null) {
                         needsChunkPos = true
                         "PacketDistributor.sendToPlayersTrackingChunk(${chunkAt.groupValues[1].trim()}, new ChunkPos(${chunkAt.groupValues[2].trim()}), $payload)"
-                    } else if (target.isNotBlank()) {
-                        needsServerLevel = true
-                        "PacketDistributor.sendToPlayersTrackingChunk((ServerLevel) $target.getLevel(), $target.getPos(), $payload)"
                     } else {
                         null
                     }

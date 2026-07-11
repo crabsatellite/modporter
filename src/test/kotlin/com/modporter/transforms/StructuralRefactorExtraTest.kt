@@ -44042,7 +44042,10 @@ $suppliers
         assertTrue(registry.contains("void sendToNear(Level level, BlockPos pos, int range"), registry)
         assertFalse(registry.contains("SimpleChannel"), registry)
         assertTrue(caller.contains("PacketDistributor.sendToServer(packet)"), caller)
-        assertTrue(caller.contains("PacketDistributor.sendToPlayer((ServerPlayer)"), caller)
+        assertTrue(
+            Regex("""PacketDistributor\s*\.sendToPlayer\s*\(\s*\(ServerPlayer\)""").containsMatchIn(caller),
+            caller
+        )
         assertFalse(caller.contains("AllPackets.getChannel()"), caller)
         assertTrue(clientCaller.contains("import net.neoforged.neoforge.network.PacketDistributor;"), clientCaller)
         assertTrue(clientCaller.contains("PacketDistributor.sendToServer(packet)"), clientCaller)

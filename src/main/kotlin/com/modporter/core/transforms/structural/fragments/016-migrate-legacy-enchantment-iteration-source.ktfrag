@@ -1954,6 +1954,16 @@
                 "import net.minecraft.world.level.storage.loot.functions.EnchantedCountIncreaseFunction;"
             )
         }
+        if (result.contains("LootingEnchantFunction")) {
+            val renamed = replaceExecutableJavaRegex(
+                result,
+                Regex("""\bLootingEnchantFunction\b""")
+            ) { "EnchantedCountIncreaseFunction" }
+            if (renamed != result) {
+                changed = true
+                result = renamed
+            }
+        }
 
         if (result.contains("SetNameFunction.setName(")) {
             result = rewriteJavaCall(result, "setName") { receiver, args ->

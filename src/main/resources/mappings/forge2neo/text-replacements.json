@@ -2265,14 +2265,6 @@
       "isRegex": true
     },
     {
-      "id": "network-send-player-with",
-      "pattern": "\\w+\\.send\\(PacketDistributor\\.PLAYER\\.with\\((\\w+)\\),\\s*(\\w+)\\)",
-      "replacement": "PacketDistributor.sendToPlayer($1, $2)",
-      "description": "CHANNEL.send(PacketDistributor.PLAYER.with(p), msg) -> PacketDistributor.sendToPlayer(p, msg)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "network-toBytes-rename",
       "pattern": "void toBytes(FriendlyByteBuf",
       "replacement": "void write(FriendlyByteBuf",
@@ -2813,14 +2805,6 @@
       "pattern": "new RegistryObject\\[",
       "replacement": "new DeferredHolder[",
       "description": "RegistryObject array constructor -> DeferredHolder array",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "net-handler-send-player-lambda",
-      "pattern": "\\w+\\.instance\\.HANDLER\\.send\\(PacketDistributor\\.PLAYER\\.with\\(\\(\\)\\s*->\\s*\\(ServerPlayer\\)\\s*(\\w+)\\),\\s*(\\w+)\\)",
-      "replacement": "PacketDistributor.sendToPlayer((ServerPlayer) $1, $2)",
-      "description": "HANDLER.send(PacketDistributor.PLAYER.with(...), pkt) -> PacketDistributor.sendToPlayer(player, pkt)",
       "fileGlob": "*.java",
       "isRegex": true
     },

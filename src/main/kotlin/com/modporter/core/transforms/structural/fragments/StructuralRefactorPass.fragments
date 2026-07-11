@@ -1,5 +1,5 @@
 001-header.ktfrag
-002-migrate-block-attached-structure-template-processor-source.ktfrag
+002-migrate-block-attached-structure-template-processors.ktfrag
 003-detect-lazy-optional-usage.ktfrag
 004-migrate-provider-backed-entity-capabilities.ktfrag
 005-legacy-capability-return-to-provider.ktfrag

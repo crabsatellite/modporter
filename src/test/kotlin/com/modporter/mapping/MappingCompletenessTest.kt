@@ -1800,33 +1800,28 @@ class MappingCompletenessTest {
     fun `split tick phase cleanup uses executable phase evidence`() {
         val projectRoot = Path.of("").toAbsolutePath()
         val source = projectRoot
-            .resolve("src/main/kotlin/com/modporter/core/transforms/build/BuildSystemPass.kt")
+            .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
             .readText()
-        val start = source.indexOf("private fun cleanupSplitTickPhaseChecks")
-        assertTrue(start >= 0, "cleanupSplitTickPhaseChecks is missing")
-        val end = source.indexOf("private fun migrateRemovedTitleScreenAccessors", start + 1).let {
+        val start = source.indexOf("private fun removeLegacyTickPhaseChecks")
+        assertTrue(start >= 0, "removeLegacyTickPhaseChecks is missing")
+        val end = source.indexOf("private fun removeInvalidTickEventImports", start + 1).let {
             if (it < 0) source.length else it
         }
         val body = source.substring(start, end)
         val forbidden = listOf(
-            "raw START phase scan" to Regex("""modified\.contains\("event\.phase\s*(?:==|!=)\s*TickEvent\.Phase\.START"\)"""),
-            "raw RenderFrameEvent replacement" to Regex("""\.replace\("RenderFrameEvent\.Post""""),
-            "raw modified replacement" to Regex("""\.replace\(modified"""),
-            "raw TickEvent phase residual scan" to Regex("""containsMatchIn\(modified\)""")
+            "raw split event scan" to Regex("""\.findAll\(source\)"""),
+            "unbounded generic phase removal" to Regex("""event\\\.phase[^\n]+\.replace\(result""")
         )
             .filter { (_, marker) -> marker.containsMatchIn(body) }
             .map { (label, _) -> "split tick phase cleanup contains $label" }
-        val required = listOf(
-            "executable mask" to Regex("""val\s+executableOriginal\s*=\s*maskJavaCommentsAndLiterals\(original\)"""),
-            "executable START phase scan" to Regex("""executableOriginal\.contains\("event\.phase\s*==\s*TickEvent\.Phase\.START"\)"""),
-            "executable START not-equals scan" to Regex("""executableOriginal\.contains\("event\.phase\s*!=\s*TickEvent\.Phase\.START"\)"""),
-            "executable RenderFrameEvent replacement" to Regex("""replaceExecutableRegex\(\s*modified,\s*Regex\("{3}\\bRenderFrameEvent\\\.Post\\b"{3}\)"""),
-            "executable event phase replacements" to Regex("""replaceExecutableRegex\(\s*modified,\s*Regex\("{3}[^"]*event\\\.phase"""),
-            "executable residual mask" to Regex("""val\s+executableModified\s*=\s*maskJavaCommentsAndLiterals\(modified\)"""),
-            "bounded residual identifier scan" to Regex("""containsJavaIdentifier\(executableModified,\s*"TickEvent"\)""")
-        )
-            .filterNot { (_, marker) -> marker.containsMatchIn(body) }
-            .map { (label, _) -> "split tick phase cleanup missing $label" }
+        val executableReplacementCount = Regex("""replaceExecutableRegex\(""").findAll(body).count()
+        val required = buildList {
+            if (!body.contains("val executableCode = maskJavaCommentsAndLiterals(source)")) {
+                add("executable split event mask")
+            }
+            if (!body.contains(".findAll(executableCode)")) add("executable split event scan")
+            if (executableReplacementCount < 7) add("executable phase replacements")
+        }
 
         assertTrue(
             required.isEmpty(),
@@ -4115,39 +4110,14 @@ class MappingCompletenessTest {
     }
 
     @Test
-    fun `player tick event player argument migration uses executable method evidence`() {
+    fun `player tick event migration does not infer bare player argument ownership`() {
         val source = Path.of("")
             .toAbsolutePath()
             .resolve("src/main/kotlin/com/modporter/core/transforms/structural/StructuralRefactorPass.kt")
             .readText()
-        val start = source.indexOf("private fun migratePlayerTickEventPlayerArguments")
-        assertTrue(start >= 0, "migratePlayerTickEventPlayerArguments is missing")
-        val end = source.indexOf("private fun migrateSplitLevelTickSideChecks", start + 1).let {
-            if (it < 0) source.length else it
-        }
-        val body = source.substring(start, end)
-        val offenders = listOf(
-            "raw player tick prefilter" to body.contains("""source.contains("PlayerTickEvent.Post")"""),
-            "raw tick(player) prefilter" to body.contains("""source.contains(".tick(player)")"""),
-            "raw event scan" to (
-                body.contains(".find(result)") || body.contains(".find(source)")
-                ),
-            "raw tick replacement" to body.contains(".replace(result")
-        )
-            .filter { (_, failed) -> failed }
-            .map { (label, _) -> label }
-
         assertTrue(
-            body.contains("val executableCode = maskJavaCommentsAndLiterals(source)") &&
-                body.contains("javaMethodRanges(executableCode)") &&
-                body.contains("eventParameterPattern.find(methodText)") &&
-                body.contains("tickPlayerPattern.findAll(executableCode, method.range.first)") &&
-                body.contains("applyStringEdits(source, edits)"),
-            "PlayerTickEvent player argument migration must use executable method-scoped event evidence"
-        )
-        assertTrue(
-            offenders.isEmpty(),
-            "PlayerTickEvent player argument migration must not use comments, strings, or whole-file event fallbacks: $offenders"
+            !source.contains("migratePlayerTickEventPlayerArguments"),
+            "Bare variable names cannot prove that a PlayerTickEvent entity is the intended call argument"
         )
     }
 

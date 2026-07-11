@@ -1,4 +1,58 @@
 
+    private fun migrateBlockAttachedStructureTemplateProcessors(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists() || !projectHasBlockAttachedStructureTemplateEntities(projectDir)) return emptyList()
+        val changes = mutableListOf<Change>()
+        var usesGeneratedProcessor = false
+
+        Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .filter { !srcDir.relativize(it).toString().replace('\\', '/').startsWith("com/modporter/generated/") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                if (original.contains("ModPorterBlockAttachedEntityProcessor.PROCESSOR_LIST")) {
+                    usesGeneratedProcessor = true
+                }
+                val modified = migrateBlockAttachedStructureTemplateProcessorSource(original)
+                if (modified == original) return@forEach
+                usesGeneratedProcessor = true
+                changes.add(Change(
+                    file = javaFile,
+                    line = 1,
+                    description = "Route structure template entities with TileX/Y/Z through a placement-time position processor",
+                    before = "SinglePoolElement.single(template, minecraft:empty processor list)",
+                    after = "SinglePoolElement.single(template, ModPorterBlockAttachedEntityProcessor.PROCESSOR_LIST)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-structure-block-attached-entity-processor"
+                ))
+                if (!dryRun) {
+                    javaFile.writeText(modified)
+                }
+            }
+
+        if (usesGeneratedProcessor) {
+            val generatedFile = srcDir.resolve("com/modporter/generated/structure/ModPorterBlockAttachedEntityProcessor.java")
+            val generatedSource = generatedBlockAttachedEntityProcessorSource()
+            if (!generatedFile.exists() || generatedFile.readText() != generatedSource) {
+                changes.add(Change(
+                    file = generatedFile,
+                    line = 1,
+                    description = "Generate structure entity processor that writes transformed TileX/Y/Z before entity load",
+                    before = "(missing block-attached entity structure processor)",
+                    after = "ModPorterBlockAttachedEntityProcessor",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-structure-block-attached-entity-processor-helper"
+                ))
+                if (!dryRun) {
+                    generatedFile.parent.createDirectories()
+                    generatedFile.writeText(generatedSource)
+                }
+            }
+        }
+
+        return changes
+    }
+
     private fun migrateBlockAttachedStructureTemplateProcessorSource(source: String): String {
         if ((!source.contains("SinglePoolElement.single(") &&
                 !source.contains("StructurePoolElement.single(") &&

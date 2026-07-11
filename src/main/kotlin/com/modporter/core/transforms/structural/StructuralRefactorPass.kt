@@ -361,6 +361,24 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            changes.addAll(LegacyJukeboxApiMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Jukebox component migration error: ${e.message}")
+        }
+
+        try {
+            changes.addAll(LegacyTrackingChunkPacketTargetMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Tracking chunk packet target migration error: ${e.message}")
+        }
+
+        try {
+            changes.addAll(LegacyPacketTargetMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Legacy packet target migration error: ${e.message}")
+        }
+
+        try {
             val conditionCodecChanges = migrateLegacyConditionCodecRegistrations(projectDir, dryRun)
             changes.addAll(conditionCodecChanges)
         } catch (e: Exception) {
@@ -20055,6 +20073,7 @@ ${entries.joinToString(",\n")}
 
     private fun removeLegacyTickPhaseChecks(source: String): String {
         var result = source
+        // These two patterns remove only legacy migration marker comments, never executable Java.
         result = Regex(
             """(?m)^[ \t]*//.*TickEvent\.Phase\.(?:END|START).*\r?\n[ \t]*//\s*phase check removed in NeoForge\s*\r?\n?""",
             RegexOption.IGNORE_CASE
@@ -20063,28 +20082,20 @@ ${entries.joinToString(",\n")}
             """(?m)^[ \t]*//.*Phase check removed.*\r?\n""",
             RegexOption.IGNORE_CASE
         ).replace(result, "")
-        result = Regex(
-            """(?m)^[ \t]*if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\)\s*return;\s*\r?\n"""
-        ).replace(result, "")
         splitTickEventParameterNames(result, "Post").forEach { eventName ->
             result = removeSplitTickPhaseChecksForEventName(result, eventName, "END")
         }
         splitTickEventParameterNames(result, "Pre").forEach { eventName ->
             result = removeSplitTickPhaseChecksForEventName(result, eventName, "START")
         }
-        result = Regex(
-            """if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\|\|\s*([^{}\r\n;]+?)\s*\)\s*\{"""
-        ).replace(result) { match -> "if (${match.groupValues[1].trim()}) {" }
-        result = Regex(
-            """if\s*\(\s*([^{}\r\n;]+?)\s*\|\|\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\)\s*\{"""
-        ).replace(result) { match -> "if (${match.groupValues[1].trim()}) {" }
         return result
     }
 
     private fun splitTickEventParameterNames(source: String, phaseClass: String): Set<String> {
         val splitTypes = "(?:ClientTickEvent|ServerTickEvent|LevelTickEvent|PlayerTickEvent|EntityTickEvent|RenderFrameEvent)"
+        val executableCode = maskJavaCommentsAndLiterals(source)
         return Regex("""\b$splitTypes\.${Regex.escape(phaseClass)}\s+([A-Za-z_$][\w$]*)""")
-            .findAll(source)
+            .findAll(executableCode)
             .map { it.groupValues[1] }
             .toSet()
     }
@@ -20093,27 +20104,43 @@ ${entries.joinToString(",\n")}
         val event = Regex.escape(eventName)
         val phaseToken = Regex.escape(phase)
         var result = source
-        result = Regex(
+        result = replaceExecutableRegex(
+            result,
             """(?m)^[ \t]*if\s*\(\s*$event\.phase\s*!=\s*TickEvent\.Phase\.$phaseToken\s*\)\s*return;\s*\r?\n"""
-        ).replace(result, "")
-        result = Regex(
+                .toRegex()
+        ) { "" }
+        result = replaceExecutableRegex(
+            result,
             """if\s*\(\s*$event\.phase\s*!=\s*TickEvent\.Phase\.$phaseToken\s*\|\|\s*([^{}\r\n;]+?)\s*\)\s*\{"""
-        ).replace(result) { match -> "if (${match.groupValues[1].trim()}) {" }
-        result = Regex(
+                .toRegex()
+        ) { match -> "if (${match.groupValues[1].trim()}) {" }
+        result = replaceExecutableRegex(
+            result,
             """if\s*\(\s*([^{}\r\n;]+?)\s*\|\|\s*$event\.phase\s*!=\s*TickEvent\.Phase\.$phaseToken\s*\)\s*\{"""
-        ).replace(result) { match -> "if (${match.groupValues[1].trim()}) {" }
-        result = Regex(
+                .toRegex()
+        ) { match -> "if (${match.groupValues[1].trim()}) {" }
+        result = replaceExecutableRegex(
+            result,
             """if\s*\(\s*$event\.phase\s*==\s*TickEvent\.Phase\.$phaseToken\s*&&\s*([^{}\r\n;]+?)\s*\)\s*\{"""
-        ).replace(result) { match -> "if (${match.groupValues[1].trim()}) {" }
-        result = Regex(
+                .toRegex()
+        ) { match -> "if (${match.groupValues[1].trim()}) {" }
+        result = replaceExecutableRegex(
+            result,
             """if\s*\(\s*([^{}\r\n;]+?)\s*&&\s*$event\.phase\s*==\s*TickEvent\.Phase\.$phaseToken\s*\)\s*\{"""
-        ).replace(result) { match -> "if (${match.groupValues[1].trim()}) {" }
-        result = Regex("""if\s*\(\s*$event\.phase\s*==\s*TickEvent\.Phase\.$phaseToken\s*\)\s*\{""")
-            .replace(result, "{")
-        result = Regex("""$event\.phase\s*==\s*TickEvent\.Phase\.$phaseToken\s*&&\s*""")
-            .replace(result, "")
-        result = Regex("""\s*&&\s*$event\.phase\s*==\s*TickEvent\.Phase\.$phaseToken""")
-            .replace(result, "")
+                .toRegex()
+        ) { match -> "if (${match.groupValues[1].trim()}) {" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""if\s*\(\s*$event\.phase\s*==\s*TickEvent\.Phase\.$phaseToken\s*\)\s*\{""")
+        ) { "{" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""$event\.phase\s*==\s*TickEvent\.Phase\.$phaseToken\s*&&\s*""")
+        ) { "" }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\s*&&\s*$event\.phase\s*==\s*TickEvent\.Phase\.$phaseToken""")
+        ) { "" }
         return result
     }
 
@@ -42099,9 +42126,6 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
                     if (chunkAt != null) {
                         needsChunkPos = true
                         "PacketDistributor.sendToPlayersTrackingChunk(${chunkAt.groupValues[1].trim()}, new ChunkPos(${chunkAt.groupValues[2].trim()}), $payload)"
-                    } else if (target.isNotBlank()) {
-                        needsServerLevel = true
-                        "PacketDistributor.sendToPlayersTrackingChunk((ServerLevel) $target.getLevel(), $target.getPos(), $payload)"
                     } else {
                         null
                     }
@@ -46240,6 +46264,16 @@ $methodBody
                 "import net.minecraft.world.level.storage.loot.functions.LootingEnchantFunction;",
                 "import net.minecraft.world.level.storage.loot.functions.EnchantedCountIncreaseFunction;"
             )
+        }
+        if (result.contains("LootingEnchantFunction")) {
+            val renamed = replaceExecutableJavaRegex(
+                result,
+                Regex("""\bLootingEnchantFunction\b""")
+            ) { "EnchantedCountIncreaseFunction" }
+            if (renamed != result) {
+                changed = true
+                result = renamed
+            }
         }
 
         if (result.contains("SetNameFunction.setName(")) {
