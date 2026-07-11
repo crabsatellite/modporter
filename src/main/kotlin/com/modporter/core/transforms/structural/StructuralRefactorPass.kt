@@ -401,6 +401,12 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            changes.addAll(LegacyBlockSourceAdapterMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("BlockSource adapter migration error: ${e.message}")
+        }
+
+        try {
             changes.addAll(LegacyTrackingChunkPacketTargetMigration().migrate(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Tracking chunk packet target migration error: ${e.message}")
