@@ -377,6 +377,12 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            changes.addAll(LegacyConfigScreenFactoryMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Config screen factory migration error: ${e.message}")
+        }
+
+        try {
             changes.addAll(LegacyTrackingChunkPacketTargetMigration().migrate(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Tracking chunk packet target migration error: ${e.message}")
