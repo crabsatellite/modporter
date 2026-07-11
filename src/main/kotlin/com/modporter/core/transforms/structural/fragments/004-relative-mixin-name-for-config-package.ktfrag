@@ -1,4 +1,188 @@
 
+    private fun relativeMixinNameForConfigPackage(
+        mixinPackageName: String,
+        mixinClassName: String,
+        configPackageName: String
+    ): String? = when {
+        mixinPackageName == configPackageName -> mixinClassName
+        mixinPackageName.startsWith("$configPackageName.") ->
+            mixinPackageName.removePrefix("$configPackageName.") + "." + mixinClassName
+        else -> null
+    }
+
+    private fun removeMixinClassFromConfigArrays(source: String, mixinClassName: String): String {
+        var result = source
+        for (arrayName in listOf("mixins", "client", "server")) {
+            result = removeMixinClassFromConfigArray(result, arrayName, mixinClassName)
+        }
+        return result
+    }
+
+    private fun removeMixinClassFromConfigArray(source: String, arrayName: String, mixinClassName: String): String {
+        val arrayMatch = Regex(""""${Regex.escape(arrayName)}"\s*:\s*\[""").find(source) ?: return source
+        val openBracket = source.indexOf('[', arrayMatch.range.first)
+        val closeBracket = if (openBracket >= 0) findMatchingJsonBracket(source, openBracket) else -1
+        if (closeBracket <= openBracket) return source
+        val inside = source.substring(openBracket + 1, closeBracket)
+        val entries = Regex(""""([^"]+)"""")
+            .findAll(inside)
+            .map { it.groupValues[1] }
+            .toList()
+        if (mixinClassName !in entries) return source
+        val remaining = entries.filterNot { it == mixinClassName }
+        val arrayIndent = Regex("""(?m)^([ \t]*)"${Regex.escape(arrayName)}"""")
+            .find(source.substring(0, arrayMatch.range.last + 1))
+            ?.groupValues
+            ?.get(1)
+            ?: "  "
+        val entryIndent = Regex("""\r?\n([ \t]*)"""")
+            .find(inside)
+            ?.groupValues
+            ?.get(1)
+            ?: "$arrayIndent  "
+        val replacement = if (remaining.isEmpty()) {
+            "\n$arrayIndent"
+        } else {
+            "\n" + remaining.joinToString(",\n") { "$entryIndent\"$it\"" } + "\n$arrayIndent"
+        }
+        return source.substring(0, openBracket + 1) + replacement + source.substring(closeBracket)
+    }
+
+    private fun findMatchingJsonBracket(source: String, openBracket: Int): Int {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (i in openBracket until source.length) {
+            val c = source[i]
+            if (inString) {
+                if (escaped) {
+                    escaped = false
+                } else if (c == '\\') {
+                    escaped = true
+                } else if (c == '"') {
+                    inString = false
+                }
+                continue
+            }
+            when (c) {
+                '"' -> inString = true
+                '[' -> depth++
+                ']' -> {
+                    depth--
+                    if (depth == 0) return i
+                }
+            }
+        }
+        return -1
+    }
+
+    private fun cleanupAttachmentRegistrationEventAnnotations(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val changes = mutableListOf<Change>()
+        Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+            .forEach { file ->
+                val original = file.readText()
+                val executableOriginal = maskJavaCommentsAndLiterals(original)
+                if (!executableOriginal.contains("registerAttachments(IEventBus") ||
+                    !Regex("""@\s*SubscribeEvent\b""").containsMatchIn(executableOriginal)) {
+                    return@forEach
+                }
+                var modified = replaceExecutableRegex(
+                    original,
+                    Regex("""(?m)^([ \t]*)@SubscribeEvent[ \t]*(?:\r?\n[ \t]*)+((?:public|protected|private)\s+static\s+void\s+registerAttachments\s*\(\s*IEventBus\b)""")
+                ) { match -> match.groupValues[1] + match.groupValues[2] }
+                if (modified != original) {
+                    if (!Regex("""@\s*SubscribeEvent\b""").containsMatchIn(maskJavaCommentsAndLiterals(modified))) {
+                        modified = replaceExecutableRegex(
+                            modified,
+                            Regex("""(?m)^[ \t]*@(?:Mod\.)?EventBusSubscriber\b[^\r\n]*\r?\n""")
+                        ) { "" }
+                        modified = removeExecutableImport(modified, "net.neoforged.fml.common.EventBusSubscriber")
+                    }
+                    modified = removeUnusedSimpleImports(modified, listOf(
+                        "net.neoforged.bus.api.SubscribeEvent",
+                        "net.neoforged.fml.common.Mod"
+                    ))
+                    if (!dryRun) file.writeText(modified)
+                    changes.add(Change(
+                        file = file,
+                        line = 1,
+                        description = "Remove event-subscriber wiring from attachment registration helper",
+                        before = "@SubscribeEvent public static void registerAttachments(IEventBus)",
+                        after = "public static void registerAttachments(IEventBus)",
+                        confidence = Confidence.HIGH,
+                        ruleId = "struct-attachment-registration-event-cleanup"
+                    ))
+                }
+            }
+        return changes
+    }
+
+    private data class LegacyEntityCapability(
+        val fieldName: String,
+        val apiType: String,
+        val implementationType: String?,
+        val entityKind: String,
+        val setsEntity: Boolean,
+        val constructorArgFromEntity: Boolean = false,
+        val entityVariableName: String = entityKind.replaceFirstChar { it.lowercase() },
+        val idPath: String? = null,
+        val modIdExpression: String? = null,
+        val serializable: Boolean = false
+    )
+
+    private data class LegacyLevelCapability(
+        val fieldName: String,
+        val apiType: String,
+        val implementationType: String,
+        val idPath: String,
+        val modIdExpression: String
+    )
+
+    private data class ProviderBackedEntityCapability(
+        val providerFile: Path,
+        val providerPackage: String,
+        val providerClass: String,
+        val fieldName: String,
+        val apiType: String,
+        val dataGetterName: String,
+        val idPath: String,
+        val modIdExpression: String,
+        val modIdImport: String?,
+        val attachFile: Path,
+        val attachPackage: String,
+        val attachClass: String,
+        val guardExpression: String
+    ) {
+        val attachmentFieldName: String get() = "${fieldName}_ATTACHMENT"
+        val qualifiedAttachClass: String get() = if (attachPackage.isBlank()) attachClass else "$attachPackage.$attachClass"
+        val providerReferenceFromAttach: String get() =
+            if (providerPackage == attachPackage || providerPackage.isBlank()) providerClass else "$providerPackage.$providerClass"
+    }
+
+    private data class ProviderCapabilityDeclaration(
+        val file: Path,
+        val packageName: String,
+        val className: String,
+        val fieldName: String,
+        val apiType: String,
+        val dataGetterName: String
+    )
+
+    private data class ProviderAttachBinding(
+        val attachFile: Path,
+        val attachPackage: String,
+        val attachClass: String,
+        val providerClass: String,
+        val idPath: String,
+        val modIdExpression: String,
+        val modIdImport: String?,
+        val guardExpression: String
+    )
+
     private fun migrateProviderBackedEntityCapabilities(
         projectDir: Path,
         dryRun: Boolean,
@@ -2812,160 +2996,4 @@ public class DelegatingPackResources extends AbstractPackResources {
                 }
                 BlockEntityCapabilityProviderSpec(capability, guardedProvider, provider.consumedLazyOptionalFields)
             }
-    }
-
-    private fun findIfBlockContainingToken(source: String, token: String): JavaIfBlock? {
-        val tokenIndex = source.indexOf(token)
-        if (tokenIndex < 0) return null
-        var searchBefore = tokenIndex
-        while (searchBefore >= 0) {
-            val ifIndex = source.lastIndexOf("if", searchBefore)
-            if (ifIndex < 0) return null
-            val before = source.getOrNull(ifIndex - 1)
-            val after = source.getOrNull(ifIndex + 2)
-            if ((before != null && (before.isLetterOrDigit() || before == '_' || before == '$')) ||
-                (after != null && (after.isLetterOrDigit() || after == '_' || after == '$'))) {
-                searchBefore = ifIndex - 1
-                continue
-            }
-            val openParen = source.indexOf('(', ifIndex)
-            if (openParen < 0) return null
-            val closeParen = findMatchingParen(source, openParen)
-            if (closeParen < 0) return null
-            if (tokenIndex !in openParen..closeParen) {
-                searchBefore = ifIndex - 1
-                continue
-            }
-            val bodyStart = skipWhitespace(source, closeParen + 1)
-            if (bodyStart >= source.length) return null
-            if (source[bodyStart] != '{') {
-                val statementEnd = findJavaStatementSemicolon(source, bodyStart)
-                if (statementEnd < 0) return null
-                return JavaIfBlock(
-                    condition = source.substring(openParen + 1, closeParen).trim(),
-                    body = source.substring(bodyStart, statementEnd + 1)
-                )
-            }
-            val closeBrace = findMatchingBrace(source, bodyStart)
-            if (closeBrace < 0) return null
-            return JavaIfBlock(
-                condition = source.substring(openParen + 1, closeParen).trim(),
-                body = source.substring(bodyStart + 1, closeBrace)
-            )
-        }
-        return null
-    }
-
-    private data class LegacyCapabilityProvider(
-        val expression: String,
-        val consumedLazyOptionalFields: Set<String> = emptySet()
-    )
-
-    private fun getCapabilityDirectionParameterName(methodText: String): String {
-        val signatureEnd = javaMethodOpeningBrace(methodText) ?: return "side"
-        val signature = methodText.substring(0, signatureEnd)
-        val paramsStart = signature.indexOf('(')
-        val paramsEnd = signature.lastIndexOf(')')
-        if (paramsStart < 0 || paramsEnd <= paramsStart) return "side"
-        val params = splitTopLevelJavaArgs(signature.substring(paramsStart + 1, paramsEnd))
-        return params.asReversed().firstNotNullOfOrNull { param ->
-            Regex("""\bDirection\s+([A-Za-z_$][\w$]*)\b""").find(param)?.groupValues?.get(1)
-        } ?: "side"
-    }
-
-    private fun blockEntityCapabilityProviderGuard(
-        condition: String,
-        capabilityExpression: String,
-        sideParameter: String
-    ): List<String> {
-        return condition.split("&&")
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .filterNot { part ->
-                part.contains(capabilityExpression) ||
-                    Regex("""\b(?:cap|capability)\b""").containsMatchIn(part) &&
-                    part.contains("Capabilities.")
-            }
-            .mapNotNull { part ->
-                var migrated = part
-                    .replace(Regex("""!\s*this\.remove\b"""), "!blockEntity.isRemoved()")
-                    .replace(Regex("""!\s*remove\b"""), "!blockEntity.isRemoved()")
-                    .replace(Regex("""this\.remove\b"""), "blockEntity.isRemoved()")
-                    .replace(Regex("""\bthis\.isRemoved\s*\(\s*\)"""), "blockEntity.isRemoved()")
-                if (sideParameter != "side") {
-                    migrated = Regex("""\b${Regex.escape(sideParameter)}\b""").replace(migrated, "side")
-                }
-                migrated = migrated.replace("this.", "blockEntity.")
-                if (migrated.contains("Capabilities.")) null else migrated
-            }
-    }
-
-    private fun extractBlockEntityCapabilityProviderExpression(
-        branchBody: String,
-        source: String,
-        sideParameter: String
-    ): LegacyCapabilityProvider? {
-        parseLegacyCapabilityReturnChain(branchBody, source, sideParameter)
-            ?.let { return it }
-
-        val sideBranch = Regex(
-            """(?s)if\s*\((.*?)\)\s*\{\s*return\s+([^;]+);\s*}\s*else\s*\{\s*return\s+([^;]+);\s*}"""
-        ).find(branchBody)
-        if (sideBranch != null) {
-            var condition = sideBranch.groupValues[1].trim().replace("this.", "blockEntity.")
-            if (sideParameter != "side") {
-                condition = Regex("""\b${Regex.escape(sideParameter)}\b""").replace(condition, "side")
-            }
-            val whenTrue = legacyCapabilityReturnToProvider(sideBranch.groupValues[2], branchBody, source) ?: return null
-            val whenFalse = legacyCapabilityReturnToProvider(sideBranch.groupValues[3], branchBody, source) ?: return null
-            return LegacyCapabilityProvider(
-                expression = "($condition ? ${whenTrue.expression} : ${whenFalse.expression})",
-                consumedLazyOptionalFields = whenTrue.consumedLazyOptionalFields + whenFalse.consumedLazyOptionalFields
-            )
-        }
-
-        val directReturn = Regex("""return\s+([^;]+);""").find(branchBody) ?: return null
-        return legacyCapabilityReturnToProvider(directReturn.groupValues[1], branchBody, source)
-    }
-
-    private fun parseLegacyCapabilityReturnChain(
-        branchBody: String,
-        source: String,
-        sideParameter: String
-    ): LegacyCapabilityProvider? {
-        val returns = Regex("""return\s+([^;]+);""").findAll(branchBody).toList()
-        if (returns.size < 2) return null
-        val firstIf = Regex("""(?s)^\s*if\s*\((.*?)\)\s*\{""").find(branchBody) ?: return null
-        val openBrace = branchBody.indexOf('{', firstIf.range.last)
-        if (openBrace < 0) return null
-        val closeBrace = findMatchingBrace(branchBody, openBrace)
-        if (closeBrace < 0) return null
-        val condition = firstIf.groupValues[1].trim()
-        val ifBody = branchBody.substring(openBrace + 1, closeBrace)
-        val trueReturn = Regex("""return\s+([^;]+);""").find(ifBody)?.groupValues?.get(1) ?: return null
-        val elseIndex = branchBody.indexOf("else", closeBrace + 1)
-        if (elseIndex < 0) return null
-        val elseTail = branchBody.substring(elseIndex + "else".length).trimStart()
-        val falseProvider = if (elseTail.startsWith("if")) {
-            val nested = parseLegacyCapabilityReturnChain(elseTail.removePrefix("if").let { "if$it" }, source, sideParameter)
-                ?: return null
-            nested
-        } else {
-            val elseOpen = branchBody.indexOf('{', elseIndex)
-            if (elseOpen < 0) return null
-            val elseClose = findMatchingBrace(branchBody, elseOpen)
-            if (elseClose < 0) return null
-            val elseBody = branchBody.substring(elseOpen + 1, elseClose)
-            val falseReturn = Regex("""return\s+([^;]+);""").find(elseBody)?.groupValues?.get(1) ?: return null
-            legacyCapabilityReturnToProvider(falseReturn, branchBody, source) ?: return null
-        }
-        val trueProvider = legacyCapabilityReturnToProvider(trueReturn, branchBody, source) ?: return null
-        var migratedCondition = condition.replace("this.", "blockEntity.")
-        if (sideParameter != "side") {
-            migratedCondition = Regex("""\b${Regex.escape(sideParameter)}\b""").replace(migratedCondition, "side")
-        }
-        return LegacyCapabilityProvider(
-            expression = "($migratedCondition ? ${trueProvider.expression} : ${falseProvider.expression})",
-            consumedLazyOptionalFields = trueProvider.consumedLazyOptionalFields + falseProvider.consumedLazyOptionalFields
-        )
     }

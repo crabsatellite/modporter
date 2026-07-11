@@ -395,6 +395,12 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            changes.addAll(LegacyMultiItemValueMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("MultiItemValue migration error: ${e.message}")
+        }
+
+        try {
             changes.addAll(LegacyTrackingChunkPacketTargetMigration().migrate(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Tracking chunk packet target migration error: ${e.message}")
@@ -2959,40 +2965,4 @@ public final class DistExecution {
             }
 
         return changes
-    }
-
-    private fun migrateConfigResourceLocationListValidatorSource(source: String): String {
-        if (!source.contains("ModConfigSpec") ||
-            !source.contains("defineList") ||
-            !source.contains("BuiltInRegistries.ITEM") ||
-            !source.contains("ResourceLocation.parse")
-        ) {
-            return source
-        }
-
-        val javaIdentifier = """[A-Za-z_$][\w$]*"""
-        var result = source
-        result = replaceExecutableRegex(
-            result,
-            Regex(
-                """return\s+($javaIdentifier)\s+instanceof\s+((?:final\s+)?)String\s+($javaIdentifier)\s*&&\s*BuiltInRegistries\.ITEM\.containsKey\s*\(\s*ResourceLocation\.parse\s*\(\s*\3\s*\)\s*\)\s*;"""
-            )
-        ) { match ->
-            val obj = match.groupValues[1]
-            val modifier = match.groupValues[2]
-            val name = match.groupValues[3]
-            "return $obj instanceof ${modifier}String $name && ResourceLocation.tryParse($name) != null;"
-        }
-
-        result = replaceExecutableRegex(
-            result,
-            Regex(
-                """\.stream\(\)\s*\.map\s*\(\s*($javaIdentifier)\s*->\s*BuiltInRegistries\.ITEM\.get\s*\(\s*ResourceLocation\.parse\s*\(\s*\1\s*\)\s*\)\s*\)"""
-            )
-        ) { match ->
-            val name = match.groupValues[1]
-            ".stream().filter($name -> BuiltInRegistries.ITEM.containsKey(ResourceLocation.parse($name))).map($name -> BuiltInRegistries.ITEM.get(ResourceLocation.parse($name)))"
-        }
-
-        return result
     }

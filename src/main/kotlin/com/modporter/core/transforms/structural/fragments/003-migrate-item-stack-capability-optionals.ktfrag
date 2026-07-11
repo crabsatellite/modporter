@@ -1,3 +1,231 @@
+    private fun migrateItemStackCapabilityOptionals(
+        source: String,
+        cu: CompilationUnit,
+        file: Path,
+        changes: MutableList<Change>
+    ): String {
+        val itemStackNames = findItemStackNames(cu)
+        if (itemStackNames.isEmpty() || !source.contains("getCapability")) return source
+
+        var result = source
+        var changed = false
+
+        for (name in itemStackNames) {
+            val itemHandlerRegex = Regex(
+                """\b${Regex.escape(name)}\.getCapability\(\s*Capabilities\.(?:ITEM_HANDLER|ItemHandler\.BLOCK)(?:\s*,\s*[^)\r\n]+)?\s*\)"""
+            )
+            result = itemHandlerRegex.replace(result) { match ->
+                changed = true
+                val line = lineNumber(source, match.range.first)
+                changes.add(Change(
+                    file = file,
+                    line = line,
+                    description = "ItemStack ForgeCapabilities.ITEM_HANDLER -> Capabilities.ItemHandler.ITEM",
+                    before = match.value,
+                    after = "$name.getCapability(Capabilities.ItemHandler.ITEM)",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-itemstack-item-handler-capability"
+                ))
+                "$name.getCapability(Capabilities.ItemHandler.ITEM)"
+            }
+        }
+
+        val migratedOptionalNames = mutableSetOf<String>()
+        val optionalResolveRegex = Regex(
+            """(?m)^([ \t]*)Optional<([^>\r\n]+)>\s+(\w+)\s*=\s*([^;\r\n]+?\.getCapability\([^;\r\n]+?\))\.resolve\(\);\s*$"""
+        )
+        result = optionalResolveRegex.replace(result) { match ->
+            val indent = match.groupValues[1]
+            val type = match.groupValues[2].trim()
+            val varName = match.groupValues[3]
+            val getter = match.groupValues[4].trim()
+            if (itemStackNames.none { getter.startsWith("$it.") }) {
+                return@replace match.value
+            }
+            migratedOptionalNames.add(varName)
+            changed = true
+            val replacement = "$indent$type $varName = $getter;"
+            changes.add(Change(
+                file = file,
+                line = lineNumber(result, match.range.first),
+                description = "Capability Optional.resolve() -> nullable capability local",
+                before = match.value.trim(),
+                after = replacement.trim(),
+                confidence = Confidence.HIGH,
+                ruleId = "struct-capability-resolve-nullable"
+            ))
+            replacement
+        }
+
+        val directResolveOrThrowRegex = Regex(
+            """(?m)^([ \t]*)([A-Za-z_$][\w$]*(?:\s*<[^;\r\n=]+>)?)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\r\n]+?\.getCapability\([^;\r\n]+?\))\.resolve\(\)\.orElseThrow\(\)\s*;\s*$"""
+        )
+        result = directResolveOrThrowRegex.replace(result) { match ->
+            val getter = match.groupValues[4].trim()
+            if (itemStackNames.none { getter.startsWith("$it.") }) {
+                match.value
+            } else {
+                changed = true
+                val replacement = "${match.groupValues[1]}${match.groupValues[2].trim()} ${match.groupValues[3]} = $getter;"
+                changes.add(Change(
+                    file = file,
+                    line = lineNumber(result, match.range.first),
+                    description = "ItemStack capability resolve().orElseThrow() -> direct nullable capability result",
+                    before = match.value.trim(),
+                    after = replacement.trim(),
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-itemstack-capability-resolve-or-throw"
+                ))
+                replacement
+            }
+        }
+
+        val directResolveGetRegex = Regex(
+            """(?m)^([ \t]*)([A-Za-z_$][\w$]*(?:\s*<[^;\r\n=]+>)?)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\r\n]+?\.getCapability\([^;\r\n]+?\))\.resolve\(\)\.get\(\)\s*;\s*$"""
+        )
+        result = directResolveGetRegex.replace(result) { match ->
+            val getter = match.groupValues[4].trim()
+            if (itemStackNames.none { getter.startsWith("$it.") }) {
+                match.value
+            } else {
+                changed = true
+                val replacement = "${match.groupValues[1]}${match.groupValues[2].trim()} ${match.groupValues[3]} = $getter;"
+                changes.add(Change(
+                    file = file,
+                    line = lineNumber(result, match.range.first),
+                    description = "ItemStack capability resolve().get() -> direct nullable capability result",
+                    before = match.value.trim(),
+                    after = replacement.trim(),
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-itemstack-capability-resolve-get"
+                ))
+                replacement
+            }
+        }
+
+        for (varName in migratedOptionalNames) {
+            result = Regex("""\b${Regex.escape(varName)}\.isEmpty\(\)""").replace(result) { match ->
+                changed = true
+                changes.add(Change(
+                    file = file,
+                    line = lineNumber(result, match.range.first),
+                    description = "Capability Optional.isEmpty() -> null check",
+                    before = match.value,
+                    after = "$varName == null",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-capability-optional-empty-null"
+                ))
+                "$varName == null"
+            }
+            result = Regex("""\b${Regex.escape(varName)}\.isPresent\(\)""").replace(result) { match ->
+                changed = true
+                changes.add(Change(
+                    file = file,
+                    line = lineNumber(result, match.range.first),
+                    description = "Capability Optional.isPresent() -> null check",
+                    before = match.value,
+                    after = "$varName != null",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-capability-optional-present-null"
+                ))
+                "$varName != null"
+            }
+            result = Regex("""\b${Regex.escape(varName)}\.get\(\)""").replace(result) { match ->
+                changed = true
+                changes.add(Change(
+                    file = file,
+                    line = lineNumber(result, match.range.first),
+                    description = "Capability Optional.get() -> nullable local",
+                    before = match.value,
+                    after = varName,
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-capability-optional-get-local"
+                ))
+                varName
+            }
+        }
+
+        val directNegatedIsPresentRegex = Regex("""!\s*(\b\w+\.getCapability\([^;\r\n]+?\))\.isPresent\(\)""")
+        result = directNegatedIsPresentRegex.replace(result) { match ->
+            val getter = match.groupValues[1]
+            if (itemStackNames.none { getter.startsWith("$it.") }) {
+                match.value
+            } else {
+                changed = true
+                val replacement = "$getter == null"
+                changes.add(Change(
+                    file = file,
+                    line = lineNumber(result, match.range.first),
+                    description = "Negated ItemStack capability isPresent() -> null check",
+                    before = match.value,
+                    after = replacement,
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-itemstack-capability-not-present-null"
+                ))
+                replacement
+            }
+        }
+
+        val directIsPresentRegex = Regex("""(\b\w+\.getCapability\([^;\r\n]+?\))\.isPresent\(\)""")
+        result = directIsPresentRegex.replace(result) { match ->
+            val getter = match.groupValues[1]
+            if (itemStackNames.none { getter.startsWith("$it.") }) {
+                match.value
+            } else {
+                changed = true
+                val replacement = "$getter != null"
+                changes.add(Change(
+                    file = file,
+                    line = lineNumber(result, match.range.first),
+                    description = "ItemStack capability isPresent() -> null check",
+                    before = match.value,
+                    after = replacement,
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-itemstack-capability-present-null"
+                ))
+                replacement
+            }
+        }
+
+        if (changed && result.contains("import java.util.Optional;") &&
+            !Regex("""\bOptional(?:[.<])""").containsMatchIn(result.replace("import java.util.Optional;", ""))
+        ) {
+            result = result.replace(Regex("""import java\.util\.Optional;\r?\n"""), "")
+            changes.add(Change(
+                file = file,
+                line = 0,
+                description = "Remove stale Optional import after capability nullable migration",
+                before = "import java.util.Optional;",
+                after = "",
+                confidence = Confidence.HIGH,
+                ruleId = "struct-capability-remove-optional-import"
+            ))
+        }
+
+        return result
+    }
+
+    private fun findItemStackNames(cu: CompilationUnit): Set<String> {
+        val names = mutableSetOf<String>()
+        cu.findAll(Parameter::class.java).forEach { parameter ->
+            if (parameter.type.asString() == "ItemStack") {
+                names.add(parameter.nameAsString)
+            }
+        }
+        cu.findAll(VariableDeclarator::class.java).forEach { variable ->
+            if (variable.type.asString() == "ItemStack") {
+                names.add(variable.nameAsString)
+            }
+        }
+        return names
+    }
+
+    private fun lineNumber(text: String, offset: Int): Int =
+        text.substring(0, offset.coerceIn(0, text.length)).count { it == '\n' } + 1
+
+    /**
+     * Detect LazyOptional usage and flag for null-based replacement.
+     */
     private fun detectLazyOptionalUsage(
         cu: CompilationUnit,
         file: Path,
@@ -2766,187 +2994,3 @@ $itemArguments
             }
         return changes
     }
-
-    private fun relativeMixinNameForConfigPackage(
-        mixinPackageName: String,
-        mixinClassName: String,
-        configPackageName: String
-    ): String? = when {
-        mixinPackageName == configPackageName -> mixinClassName
-        mixinPackageName.startsWith("$configPackageName.") ->
-            mixinPackageName.removePrefix("$configPackageName.") + "." + mixinClassName
-        else -> null
-    }
-
-    private fun removeMixinClassFromConfigArrays(source: String, mixinClassName: String): String {
-        var result = source
-        for (arrayName in listOf("mixins", "client", "server")) {
-            result = removeMixinClassFromConfigArray(result, arrayName, mixinClassName)
-        }
-        return result
-    }
-
-    private fun removeMixinClassFromConfigArray(source: String, arrayName: String, mixinClassName: String): String {
-        val arrayMatch = Regex(""""${Regex.escape(arrayName)}"\s*:\s*\[""").find(source) ?: return source
-        val openBracket = source.indexOf('[', arrayMatch.range.first)
-        val closeBracket = if (openBracket >= 0) findMatchingJsonBracket(source, openBracket) else -1
-        if (closeBracket <= openBracket) return source
-        val inside = source.substring(openBracket + 1, closeBracket)
-        val entries = Regex(""""([^"]+)"""")
-            .findAll(inside)
-            .map { it.groupValues[1] }
-            .toList()
-        if (mixinClassName !in entries) return source
-        val remaining = entries.filterNot { it == mixinClassName }
-        val arrayIndent = Regex("""(?m)^([ \t]*)"${Regex.escape(arrayName)}"""")
-            .find(source.substring(0, arrayMatch.range.last + 1))
-            ?.groupValues
-            ?.get(1)
-            ?: "  "
-        val entryIndent = Regex("""\r?\n([ \t]*)"""")
-            .find(inside)
-            ?.groupValues
-            ?.get(1)
-            ?: "$arrayIndent  "
-        val replacement = if (remaining.isEmpty()) {
-            "\n$arrayIndent"
-        } else {
-            "\n" + remaining.joinToString(",\n") { "$entryIndent\"$it\"" } + "\n$arrayIndent"
-        }
-        return source.substring(0, openBracket + 1) + replacement + source.substring(closeBracket)
-    }
-
-    private fun findMatchingJsonBracket(source: String, openBracket: Int): Int {
-        var depth = 0
-        var inString = false
-        var escaped = false
-        for (i in openBracket until source.length) {
-            val c = source[i]
-            if (inString) {
-                if (escaped) {
-                    escaped = false
-                } else if (c == '\\') {
-                    escaped = true
-                } else if (c == '"') {
-                    inString = false
-                }
-                continue
-            }
-            when (c) {
-                '"' -> inString = true
-                '[' -> depth++
-                ']' -> {
-                    depth--
-                    if (depth == 0) return i
-                }
-            }
-        }
-        return -1
-    }
-
-    private fun cleanupAttachmentRegistrationEventAnnotations(projectDir: Path, dryRun: Boolean): List<Change> {
-        val srcDir = projectDir.resolve("src/main/java")
-        if (!srcDir.exists()) return emptyList()
-        val changes = mutableListOf<Change>()
-        Files.walk(srcDir)
-            .filter { it.extension == "java" }
-            .toList()
-            .forEach { file ->
-                val original = file.readText()
-                val executableOriginal = maskJavaCommentsAndLiterals(original)
-                if (!executableOriginal.contains("registerAttachments(IEventBus") ||
-                    !Regex("""@\s*SubscribeEvent\b""").containsMatchIn(executableOriginal)) {
-                    return@forEach
-                }
-                var modified = replaceExecutableRegex(
-                    original,
-                    Regex("""(?m)^([ \t]*)@SubscribeEvent[ \t]*(?:\r?\n[ \t]*)+((?:public|protected|private)\s+static\s+void\s+registerAttachments\s*\(\s*IEventBus\b)""")
-                ) { match -> match.groupValues[1] + match.groupValues[2] }
-                if (modified != original) {
-                    if (!Regex("""@\s*SubscribeEvent\b""").containsMatchIn(maskJavaCommentsAndLiterals(modified))) {
-                        modified = replaceExecutableRegex(
-                            modified,
-                            Regex("""(?m)^[ \t]*@(?:Mod\.)?EventBusSubscriber\b[^\r\n]*\r?\n""")
-                        ) { "" }
-                        modified = removeExecutableImport(modified, "net.neoforged.fml.common.EventBusSubscriber")
-                    }
-                    modified = removeUnusedSimpleImports(modified, listOf(
-                        "net.neoforged.bus.api.SubscribeEvent",
-                        "net.neoforged.fml.common.Mod"
-                    ))
-                    if (!dryRun) file.writeText(modified)
-                    changes.add(Change(
-                        file = file,
-                        line = 1,
-                        description = "Remove event-subscriber wiring from attachment registration helper",
-                        before = "@SubscribeEvent public static void registerAttachments(IEventBus)",
-                        after = "public static void registerAttachments(IEventBus)",
-                        confidence = Confidence.HIGH,
-                        ruleId = "struct-attachment-registration-event-cleanup"
-                    ))
-                }
-            }
-        return changes
-    }
-
-    private data class LegacyEntityCapability(
-        val fieldName: String,
-        val apiType: String,
-        val implementationType: String?,
-        val entityKind: String,
-        val setsEntity: Boolean,
-        val constructorArgFromEntity: Boolean = false,
-        val entityVariableName: String = entityKind.replaceFirstChar { it.lowercase() },
-        val idPath: String? = null,
-        val modIdExpression: String? = null,
-        val serializable: Boolean = false
-    )
-
-    private data class LegacyLevelCapability(
-        val fieldName: String,
-        val apiType: String,
-        val implementationType: String,
-        val idPath: String,
-        val modIdExpression: String
-    )
-
-    private data class ProviderBackedEntityCapability(
-        val providerFile: Path,
-        val providerPackage: String,
-        val providerClass: String,
-        val fieldName: String,
-        val apiType: String,
-        val dataGetterName: String,
-        val idPath: String,
-        val modIdExpression: String,
-        val modIdImport: String?,
-        val attachFile: Path,
-        val attachPackage: String,
-        val attachClass: String,
-        val guardExpression: String
-    ) {
-        val attachmentFieldName: String get() = "${fieldName}_ATTACHMENT"
-        val qualifiedAttachClass: String get() = if (attachPackage.isBlank()) attachClass else "$attachPackage.$attachClass"
-        val providerReferenceFromAttach: String get() =
-            if (providerPackage == attachPackage || providerPackage.isBlank()) providerClass else "$providerPackage.$providerClass"
-    }
-
-    private data class ProviderCapabilityDeclaration(
-        val file: Path,
-        val packageName: String,
-        val className: String,
-        val fieldName: String,
-        val apiType: String,
-        val dataGetterName: String
-    )
-
-    private data class ProviderAttachBinding(
-        val attachFile: Path,
-        val attachPackage: String,
-        val attachClass: String,
-        val providerClass: String,
-        val idPath: String,
-        val modIdExpression: String,
-        val modIdImport: String?,
-        val guardExpression: String
-    )

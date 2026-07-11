@@ -1,8 +1,8 @@
 001-header.ktfrag
-002-migrate-block-attached-structure-template-processors.ktfrag
-003-detect-lazy-optional-usage.ktfrag
-004-migrate-provider-backed-entity-capabilities.ktfrag
-005-legacy-capability-return-to-provider.ktfrag
+002-migrate-config-resource-location-list-validator-source.ktfrag
+003-migrate-item-stack-capability-optionals.ktfrag
+004-relative-mixin-name-for-config-package.ktfrag
+005-find-if-block-containing-token.ktfrag
 006-migrate-common-neo-forge121-apis.ktfrag
 007-merge-mob-category-enum-extension-helper-methods.ktfrag
 008-migrate-entity-additional-save-data-holder-lookup-source.ktfrag

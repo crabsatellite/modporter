@@ -1,4 +1,160 @@
 
+    private fun findIfBlockContainingToken(source: String, token: String): JavaIfBlock? {
+        val tokenIndex = source.indexOf(token)
+        if (tokenIndex < 0) return null
+        var searchBefore = tokenIndex
+        while (searchBefore >= 0) {
+            val ifIndex = source.lastIndexOf("if", searchBefore)
+            if (ifIndex < 0) return null
+            val before = source.getOrNull(ifIndex - 1)
+            val after = source.getOrNull(ifIndex + 2)
+            if ((before != null && (before.isLetterOrDigit() || before == '_' || before == '$')) ||
+                (after != null && (after.isLetterOrDigit() || after == '_' || after == '$'))) {
+                searchBefore = ifIndex - 1
+                continue
+            }
+            val openParen = source.indexOf('(', ifIndex)
+            if (openParen < 0) return null
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen < 0) return null
+            if (tokenIndex !in openParen..closeParen) {
+                searchBefore = ifIndex - 1
+                continue
+            }
+            val bodyStart = skipWhitespace(source, closeParen + 1)
+            if (bodyStart >= source.length) return null
+            if (source[bodyStart] != '{') {
+                val statementEnd = findJavaStatementSemicolon(source, bodyStart)
+                if (statementEnd < 0) return null
+                return JavaIfBlock(
+                    condition = source.substring(openParen + 1, closeParen).trim(),
+                    body = source.substring(bodyStart, statementEnd + 1)
+                )
+            }
+            val closeBrace = findMatchingBrace(source, bodyStart)
+            if (closeBrace < 0) return null
+            return JavaIfBlock(
+                condition = source.substring(openParen + 1, closeParen).trim(),
+                body = source.substring(bodyStart + 1, closeBrace)
+            )
+        }
+        return null
+    }
+
+    private data class LegacyCapabilityProvider(
+        val expression: String,
+        val consumedLazyOptionalFields: Set<String> = emptySet()
+    )
+
+    private fun getCapabilityDirectionParameterName(methodText: String): String {
+        val signatureEnd = javaMethodOpeningBrace(methodText) ?: return "side"
+        val signature = methodText.substring(0, signatureEnd)
+        val paramsStart = signature.indexOf('(')
+        val paramsEnd = signature.lastIndexOf(')')
+        if (paramsStart < 0 || paramsEnd <= paramsStart) return "side"
+        val params = splitTopLevelJavaArgs(signature.substring(paramsStart + 1, paramsEnd))
+        return params.asReversed().firstNotNullOfOrNull { param ->
+            Regex("""\bDirection\s+([A-Za-z_$][\w$]*)\b""").find(param)?.groupValues?.get(1)
+        } ?: "side"
+    }
+
+    private fun blockEntityCapabilityProviderGuard(
+        condition: String,
+        capabilityExpression: String,
+        sideParameter: String
+    ): List<String> {
+        return condition.split("&&")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .filterNot { part ->
+                part.contains(capabilityExpression) ||
+                    Regex("""\b(?:cap|capability)\b""").containsMatchIn(part) &&
+                    part.contains("Capabilities.")
+            }
+            .mapNotNull { part ->
+                var migrated = part
+                    .replace(Regex("""!\s*this\.remove\b"""), "!blockEntity.isRemoved()")
+                    .replace(Regex("""!\s*remove\b"""), "!blockEntity.isRemoved()")
+                    .replace(Regex("""this\.remove\b"""), "blockEntity.isRemoved()")
+                    .replace(Regex("""\bthis\.isRemoved\s*\(\s*\)"""), "blockEntity.isRemoved()")
+                if (sideParameter != "side") {
+                    migrated = Regex("""\b${Regex.escape(sideParameter)}\b""").replace(migrated, "side")
+                }
+                migrated = migrated.replace("this.", "blockEntity.")
+                if (migrated.contains("Capabilities.")) null else migrated
+            }
+    }
+
+    private fun extractBlockEntityCapabilityProviderExpression(
+        branchBody: String,
+        source: String,
+        sideParameter: String
+    ): LegacyCapabilityProvider? {
+        parseLegacyCapabilityReturnChain(branchBody, source, sideParameter)
+            ?.let { return it }
+
+        val sideBranch = Regex(
+            """(?s)if\s*\((.*?)\)\s*\{\s*return\s+([^;]+);\s*}\s*else\s*\{\s*return\s+([^;]+);\s*}"""
+        ).find(branchBody)
+        if (sideBranch != null) {
+            var condition = sideBranch.groupValues[1].trim().replace("this.", "blockEntity.")
+            if (sideParameter != "side") {
+                condition = Regex("""\b${Regex.escape(sideParameter)}\b""").replace(condition, "side")
+            }
+            val whenTrue = legacyCapabilityReturnToProvider(sideBranch.groupValues[2], branchBody, source) ?: return null
+            val whenFalse = legacyCapabilityReturnToProvider(sideBranch.groupValues[3], branchBody, source) ?: return null
+            return LegacyCapabilityProvider(
+                expression = "($condition ? ${whenTrue.expression} : ${whenFalse.expression})",
+                consumedLazyOptionalFields = whenTrue.consumedLazyOptionalFields + whenFalse.consumedLazyOptionalFields
+            )
+        }
+
+        val directReturn = Regex("""return\s+([^;]+);""").find(branchBody) ?: return null
+        return legacyCapabilityReturnToProvider(directReturn.groupValues[1], branchBody, source)
+    }
+
+    private fun parseLegacyCapabilityReturnChain(
+        branchBody: String,
+        source: String,
+        sideParameter: String
+    ): LegacyCapabilityProvider? {
+        val returns = Regex("""return\s+([^;]+);""").findAll(branchBody).toList()
+        if (returns.size < 2) return null
+        val firstIf = Regex("""(?s)^\s*if\s*\((.*?)\)\s*\{""").find(branchBody) ?: return null
+        val openBrace = branchBody.indexOf('{', firstIf.range.last)
+        if (openBrace < 0) return null
+        val closeBrace = findMatchingBrace(branchBody, openBrace)
+        if (closeBrace < 0) return null
+        val condition = firstIf.groupValues[1].trim()
+        val ifBody = branchBody.substring(openBrace + 1, closeBrace)
+        val trueReturn = Regex("""return\s+([^;]+);""").find(ifBody)?.groupValues?.get(1) ?: return null
+        val elseIndex = branchBody.indexOf("else", closeBrace + 1)
+        if (elseIndex < 0) return null
+        val elseTail = branchBody.substring(elseIndex + "else".length).trimStart()
+        val falseProvider = if (elseTail.startsWith("if")) {
+            val nested = parseLegacyCapabilityReturnChain(elseTail.removePrefix("if").let { "if$it" }, source, sideParameter)
+                ?: return null
+            nested
+        } else {
+            val elseOpen = branchBody.indexOf('{', elseIndex)
+            if (elseOpen < 0) return null
+            val elseClose = findMatchingBrace(branchBody, elseOpen)
+            if (elseClose < 0) return null
+            val elseBody = branchBody.substring(elseOpen + 1, elseClose)
+            val falseReturn = Regex("""return\s+([^;]+);""").find(elseBody)?.groupValues?.get(1) ?: return null
+            legacyCapabilityReturnToProvider(falseReturn, branchBody, source) ?: return null
+        }
+        val trueProvider = legacyCapabilityReturnToProvider(trueReturn, branchBody, source) ?: return null
+        var migratedCondition = condition.replace("this.", "blockEntity.")
+        if (sideParameter != "side") {
+            migratedCondition = Regex("""\b${Regex.escape(sideParameter)}\b""").replace(migratedCondition, "side")
+        }
+        return LegacyCapabilityProvider(
+            expression = "($migratedCondition ? ${trueProvider.expression} : ${falseProvider.expression})",
+            consumedLazyOptionalFields = trueProvider.consumedLazyOptionalFields + falseProvider.consumedLazyOptionalFields
+        )
+    }
+
     private fun legacyCapabilityReturnToProvider(
         returnExpression: String,
         branchBody: String,

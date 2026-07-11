@@ -1,4 +1,40 @@
 
+    private fun migrateConfigResourceLocationListValidatorSource(source: String): String {
+        if (!source.contains("ModConfigSpec") ||
+            !source.contains("defineList") ||
+            !source.contains("BuiltInRegistries.ITEM") ||
+            !source.contains("ResourceLocation.parse")
+        ) {
+            return source
+        }
+
+        val javaIdentifier = """[A-Za-z_$][\w$]*"""
+        var result = source
+        result = replaceExecutableRegex(
+            result,
+            Regex(
+                """return\s+($javaIdentifier)\s+instanceof\s+((?:final\s+)?)String\s+($javaIdentifier)\s*&&\s*BuiltInRegistries\.ITEM\.containsKey\s*\(\s*ResourceLocation\.parse\s*\(\s*\3\s*\)\s*\)\s*;"""
+            )
+        ) { match ->
+            val obj = match.groupValues[1]
+            val modifier = match.groupValues[2]
+            val name = match.groupValues[3]
+            "return $obj instanceof ${modifier}String $name && ResourceLocation.tryParse($name) != null;"
+        }
+
+        result = replaceExecutableRegex(
+            result,
+            Regex(
+                """\.stream\(\)\s*\.map\s*\(\s*($javaIdentifier)\s*->\s*BuiltInRegistries\.ITEM\.get\s*\(\s*ResourceLocation\.parse\s*\(\s*\1\s*\)\s*\)\s*\)"""
+            )
+        ) { match ->
+            val name = match.groupValues[1]
+            ".stream().filter($name -> BuiltInRegistries.ITEM.containsKey(ResourceLocation.parse($name))).map($name -> BuiltInRegistries.ITEM.get(ResourceLocation.parse($name)))"
+        }
+
+        return result
+    }
+
     private fun migrateBlockAttachedStructureTemplateProcessors(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists() || !projectHasBlockAttachedStructureTemplateEntities(projectDir)) return emptyList()
@@ -2764,232 +2800,4 @@ ${registrations.distinct().joinToString("\n")}
      * T handler = maybe.get();
      *
      * In NeoForge 1.21, ItemStack#getCapability returns nullable T directly.
-     */
-    private fun migrateItemStackCapabilityOptionals(
-        source: String,
-        cu: CompilationUnit,
-        file: Path,
-        changes: MutableList<Change>
-    ): String {
-        val itemStackNames = findItemStackNames(cu)
-        if (itemStackNames.isEmpty() || !source.contains("getCapability")) return source
-
-        var result = source
-        var changed = false
-
-        for (name in itemStackNames) {
-            val itemHandlerRegex = Regex(
-                """\b${Regex.escape(name)}\.getCapability\(\s*Capabilities\.(?:ITEM_HANDLER|ItemHandler\.BLOCK)(?:\s*,\s*[^)\r\n]+)?\s*\)"""
-            )
-            result = itemHandlerRegex.replace(result) { match ->
-                changed = true
-                val line = lineNumber(source, match.range.first)
-                changes.add(Change(
-                    file = file,
-                    line = line,
-                    description = "ItemStack ForgeCapabilities.ITEM_HANDLER -> Capabilities.ItemHandler.ITEM",
-                    before = match.value,
-                    after = "$name.getCapability(Capabilities.ItemHandler.ITEM)",
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-itemstack-item-handler-capability"
-                ))
-                "$name.getCapability(Capabilities.ItemHandler.ITEM)"
-            }
-        }
-
-        val migratedOptionalNames = mutableSetOf<String>()
-        val optionalResolveRegex = Regex(
-            """(?m)^([ \t]*)Optional<([^>\r\n]+)>\s+(\w+)\s*=\s*([^;\r\n]+?\.getCapability\([^;\r\n]+?\))\.resolve\(\);\s*$"""
-        )
-        result = optionalResolveRegex.replace(result) { match ->
-            val indent = match.groupValues[1]
-            val type = match.groupValues[2].trim()
-            val varName = match.groupValues[3]
-            val getter = match.groupValues[4].trim()
-            if (itemStackNames.none { getter.startsWith("$it.") }) {
-                return@replace match.value
-            }
-            migratedOptionalNames.add(varName)
-            changed = true
-            val replacement = "$indent$type $varName = $getter;"
-            changes.add(Change(
-                file = file,
-                line = lineNumber(result, match.range.first),
-                description = "Capability Optional.resolve() -> nullable capability local",
-                before = match.value.trim(),
-                after = replacement.trim(),
-                confidence = Confidence.HIGH,
-                ruleId = "struct-capability-resolve-nullable"
-            ))
-            replacement
-        }
-
-        val directResolveOrThrowRegex = Regex(
-            """(?m)^([ \t]*)([A-Za-z_$][\w$]*(?:\s*<[^;\r\n=]+>)?)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\r\n]+?\.getCapability\([^;\r\n]+?\))\.resolve\(\)\.orElseThrow\(\)\s*;\s*$"""
-        )
-        result = directResolveOrThrowRegex.replace(result) { match ->
-            val getter = match.groupValues[4].trim()
-            if (itemStackNames.none { getter.startsWith("$it.") }) {
-                match.value
-            } else {
-                changed = true
-                val replacement = "${match.groupValues[1]}${match.groupValues[2].trim()} ${match.groupValues[3]} = $getter;"
-                changes.add(Change(
-                    file = file,
-                    line = lineNumber(result, match.range.first),
-                    description = "ItemStack capability resolve().orElseThrow() -> direct nullable capability result",
-                    before = match.value.trim(),
-                    after = replacement.trim(),
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-itemstack-capability-resolve-or-throw"
-                ))
-                replacement
-            }
-        }
-
-        val directResolveGetRegex = Regex(
-            """(?m)^([ \t]*)([A-Za-z_$][\w$]*(?:\s*<[^;\r\n=]+>)?)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\r\n]+?\.getCapability\([^;\r\n]+?\))\.resolve\(\)\.get\(\)\s*;\s*$"""
-        )
-        result = directResolveGetRegex.replace(result) { match ->
-            val getter = match.groupValues[4].trim()
-            if (itemStackNames.none { getter.startsWith("$it.") }) {
-                match.value
-            } else {
-                changed = true
-                val replacement = "${match.groupValues[1]}${match.groupValues[2].trim()} ${match.groupValues[3]} = $getter;"
-                changes.add(Change(
-                    file = file,
-                    line = lineNumber(result, match.range.first),
-                    description = "ItemStack capability resolve().get() -> direct nullable capability result",
-                    before = match.value.trim(),
-                    after = replacement.trim(),
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-itemstack-capability-resolve-get"
-                ))
-                replacement
-            }
-        }
-
-        for (varName in migratedOptionalNames) {
-            result = Regex("""\b${Regex.escape(varName)}\.isEmpty\(\)""").replace(result) { match ->
-                changed = true
-                changes.add(Change(
-                    file = file,
-                    line = lineNumber(result, match.range.first),
-                    description = "Capability Optional.isEmpty() -> null check",
-                    before = match.value,
-                    after = "$varName == null",
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-capability-optional-empty-null"
-                ))
-                "$varName == null"
-            }
-            result = Regex("""\b${Regex.escape(varName)}\.isPresent\(\)""").replace(result) { match ->
-                changed = true
-                changes.add(Change(
-                    file = file,
-                    line = lineNumber(result, match.range.first),
-                    description = "Capability Optional.isPresent() -> null check",
-                    before = match.value,
-                    after = "$varName != null",
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-capability-optional-present-null"
-                ))
-                "$varName != null"
-            }
-            result = Regex("""\b${Regex.escape(varName)}\.get\(\)""").replace(result) { match ->
-                changed = true
-                changes.add(Change(
-                    file = file,
-                    line = lineNumber(result, match.range.first),
-                    description = "Capability Optional.get() -> nullable local",
-                    before = match.value,
-                    after = varName,
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-capability-optional-get-local"
-                ))
-                varName
-            }
-        }
-
-        val directNegatedIsPresentRegex = Regex("""!\s*(\b\w+\.getCapability\([^;\r\n]+?\))\.isPresent\(\)""")
-        result = directNegatedIsPresentRegex.replace(result) { match ->
-            val getter = match.groupValues[1]
-            if (itemStackNames.none { getter.startsWith("$it.") }) {
-                match.value
-            } else {
-                changed = true
-                val replacement = "$getter == null"
-                changes.add(Change(
-                    file = file,
-                    line = lineNumber(result, match.range.first),
-                    description = "Negated ItemStack capability isPresent() -> null check",
-                    before = match.value,
-                    after = replacement,
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-itemstack-capability-not-present-null"
-                ))
-                replacement
-            }
-        }
-
-        val directIsPresentRegex = Regex("""(\b\w+\.getCapability\([^;\r\n]+?\))\.isPresent\(\)""")
-        result = directIsPresentRegex.replace(result) { match ->
-            val getter = match.groupValues[1]
-            if (itemStackNames.none { getter.startsWith("$it.") }) {
-                match.value
-            } else {
-                changed = true
-                val replacement = "$getter != null"
-                changes.add(Change(
-                    file = file,
-                    line = lineNumber(result, match.range.first),
-                    description = "ItemStack capability isPresent() -> null check",
-                    before = match.value,
-                    after = replacement,
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-itemstack-capability-present-null"
-                ))
-                replacement
-            }
-        }
-
-        if (changed && result.contains("import java.util.Optional;") &&
-            !Regex("""\bOptional(?:[.<])""").containsMatchIn(result.replace("import java.util.Optional;", ""))
-        ) {
-            result = result.replace(Regex("""import java\.util\.Optional;\r?\n"""), "")
-            changes.add(Change(
-                file = file,
-                line = 0,
-                description = "Remove stale Optional import after capability nullable migration",
-                before = "import java.util.Optional;",
-                after = "",
-                confidence = Confidence.HIGH,
-                ruleId = "struct-capability-remove-optional-import"
-            ))
-        }
-
-        return result
-    }
-
-    private fun findItemStackNames(cu: CompilationUnit): Set<String> {
-        val names = mutableSetOf<String>()
-        cu.findAll(Parameter::class.java).forEach { parameter ->
-            if (parameter.type.asString() == "ItemStack") {
-                names.add(parameter.nameAsString)
-            }
-        }
-        cu.findAll(VariableDeclarator::class.java).forEach { variable ->
-            if (variable.type.asString() == "ItemStack") {
-                names.add(variable.nameAsString)
-            }
-        }
-        return names
-    }
-
-    private fun lineNumber(text: String, offset: Int): Int =
-        text.substring(0, offset.coerceIn(0, text.length)).count { it == '\n' } + 1
-
-    /**
-     * Detect LazyOptional usage and flag for null-based replacement.
      */
