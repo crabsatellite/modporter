@@ -557,6 +557,12 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            changes.addAll(ExactProjectProviderCallMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Exact project provider call migration error: ${e.message}")
+        }
+
+        try {
             val structureStartLoadChanges = migrateProjectStructureStartLoadFromTagCalls(projectDir, dryRun)
             changes.addAll(structureStartLoadChanges)
         } catch (e: Exception) {
