@@ -72,6 +72,83 @@
     }
 
     @Test
+    fun `remaining typed DistExecutor expressions use a generated FMLLoader adapter`() {
+        val projectDir = createFile("DeferredDistCalls.java", """
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.DistExecutor;
+
+            public class DeferredDistCalls {
+                Object clientValue() {
+                    return DistExecutor.unsafeCallWhenOn(Dist.CLIENT, () -> () -> ClientHooks.value());
+                }
+
+                void configure(Supplier<Runnable> supplied) {
+                    callback(value -> DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () -> ClientHooks.accept(value)));
+                    DistExecutor.unsafeRunWhenOn(Dist.CLIENT, supplied);
+                }
+
+                String documentation = "DistExecutor.unsafeRunWhenOn remains documentation";
+            }
+        """.trimIndent())
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+            import net.neoforged.fml.common.Mod;
+            @Mod("example")
+            public class ExampleMod {}
+        """.trimIndent())
+        srcDir.resolve("OrphanDistImport.java").writeText("""
+            package com.example;
+            import net.neoforged.fml.DistExecutor;
+            public class OrphanDistImport {}
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = srcDir.resolve("DeferredDistCalls.java").readText()
+        val orphan = srcDir.resolve("OrphanDistImport.java").readText()
+        val helper = projectDir.resolve(
+            "src/main/java/com/modporter/generated/example/compat/DistExecution.java"
+        )
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(migrated.contains("import net.neoforged.fml.DistExecutor;"), migrated)
+        assertEquals(1, Regex("""DistExecutor\.""").findAll(migrated).count(), migrated)
+        assertTrue(migrated.contains("com.modporter.generated.example.compat.DistExecution.callWhenOn"), migrated)
+        assertTrue(migrated.contains("com.modporter.generated.example.compat.DistExecution.runWhenOn"), migrated)
+        assertTrue(migrated.contains("\"DistExecutor.unsafeRunWhenOn remains documentation\""), migrated)
+        assertFalse(orphan.contains("import net.neoforged.fml.DistExecutor;"), orphan)
+        assertTrue(helper.exists(), helper.toString())
+        assertTrue(helper.readText().contains("if (FMLLoader.getDist() == dist)"), helper.readText())
+        assertTrue(helper.readText().contains("target.get().run();"), helper.readText())
+        assertTrue(result.changes.any { it.ruleId == "struct-dist-executor-typed-adapter" })
+        assertTrue(result.changes.any { it.ruleId == "struct-dist-executor-typed-adapter-source" })
+    }
+
+    @Test
+    fun `unknown DistExecutor members hard fail instead of using an adapter guess`() {
+        val projectDir = createFile("UnknownDistCall.java", """
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.DistExecutor;
+
+            public class UnknownDistCall {
+                void run() {
+                    DistExecutor.futureRunWhenOn(Dist.CLIENT, () -> () -> ClientHooks.run());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+
+        assertTrue(result.errors.any { it.contains("unsupported DistExecutor members") }, result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "struct-dist-executor-typed-adapter" })
+    }
+
+    @Test
     fun `BaseEntityBlock codec is high confidence with Properties constructor`() {
         val projectDir = createFile("LightBlock.java", """
             package com.example;
@@ -1011,114 +1088,4 @@
         assertTrue(recipe.contains("buffer.writeVarInt(recipe.getCookingTime());"), recipe)
         assertFalse(recipe.contains("recipe.category"), recipe)
         assertFalse(recipe.contains("recipe.repairTime"), recipe)
-    }
-
-    @Test
-    fun `legacy recipe output adapters use codec defaults for omitted constructor parameters`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("BookCategory.java").writeText("""
-            package com.example;
-
-            import com.mojang.serialization.Codec;
-
-            public enum BookCategory {
-                UNKNOWN;
-
-                public static final Codec<BookCategory> CODEC = null;
-            }
-        """.trimIndent())
-        srcDir.resolve("DefaultedRecipe.java").writeText("""
-            package com.example;
-
-            import com.mojang.serialization.Codec;
-            import com.mojang.serialization.MapCodec;
-            import com.mojang.serialization.codecs.RecordCodecBuilder;
-            import net.minecraft.world.item.crafting.Ingredient;
-            import net.minecraft.world.item.crafting.RecipeSerializer;
-
-            public class DefaultedRecipe {
-                public DefaultedRecipe(String group, BookCategory category, Ingredient ingredient, int time) {
-                }
-
-                public static class Serializer implements RecipeSerializer<DefaultedRecipe> {
-                    private static final MapCodec<DefaultedRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
-                            Codec.STRING.optionalFieldOf("group", "").forGetter((recipe) -> ""),
-                            BookCategory.CODEC.fieldOf("category").orElse(BookCategory.UNKNOWN).forGetter((recipe) -> BookCategory.UNKNOWN),
-                            Ingredient.CODEC_NONEMPTY.fieldOf("ingredient").forGetter((recipe) -> null),
-                            Codec.INT.fieldOf("time").orElse(200).forGetter((recipe) -> 200)
-                    ).apply(instance, DefaultedRecipe::new));
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("DefaultedRecipeBuilder.java").writeText("""
-            package com.example;
-
-            import com.google.gson.JsonObject;
-            import net.minecraft.advancements.Advancement;
-            import net.minecraft.data.recipes.RecipeOutput;
-            import net.minecraft.resources.ResourceLocation;
-            import net.minecraft.world.item.crafting.Ingredient;
-            import net.minecraft.world.item.crafting.RecipeSerializer;
-
-            public class DefaultedRecipeBuilder {
-                private final Ingredient ingredient;
-                private final int time;
-                private final Advancement.Builder advancement;
-                private final ResourceLocation advancementId;
-
-                public DefaultedRecipeBuilder(Ingredient ingredient, int time, Advancement.Builder advancement, ResourceLocation advancementId) {
-                    this.ingredient = ingredient;
-                    this.time = time;
-                    this.advancement = advancement;
-                    this.advancementId = advancementId;
-                }
-
-                public void save(RecipeOutput output, ResourceLocation id) {
-                    output.accept(new DefaultedRecipeBuilder.Result(id, "", this.ingredient, this.time, this.advancement, this.advancementId));
-                }
-
-                public static class Result implements RecipeOutput {
-                    private final ResourceLocation id;
-                    private final String group;
-                    private final Ingredient ingredient;
-                    private final int time;
-                    private final Advancement.Builder advancement;
-                    private final ResourceLocation advancementId;
-
-                    public Result(ResourceLocation id, String group, Ingredient ingredient, int time, Advancement.Builder advancement, ResourceLocation advancementId) {
-                        this.id = id;
-                        this.group = group;
-                        this.ingredient = ingredient;
-                        this.time = time;
-                        this.advancement = advancement;
-                        this.advancementId = advancementId;
-                    }
-
-                    public RecipeSerializer<DefaultedRecipe> getType() {
-                        return ExampleSerializers.DEFAULTED.get();
-                    }
-
-                    public void serializeRecipeData(JsonObject json) {
-                    }
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("ExampleSerializers.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.item.crafting.RecipeSerializer;
-            import net.neoforged.neoforge.registries.DeferredHolder;
-
-            public class ExampleSerializers {
-                public static final DeferredHolder<RecipeSerializer<?>, DefaultedRecipe.Serializer> DEFAULTED = null;
-            }
-        """.trimIndent())
-
-        StructuralRefactorPass().apply(tempDir)
-        val builder = srcDir.resolve("DefaultedRecipeBuilder.java").readText()
-
-        assertTrue(builder.contains("output.accept(id, new DefaultedRecipe(\"\", com.example.BookCategory.UNKNOWN, this.ingredient, this.time), this.advancement.build(this.advancementId));"), builder)
-        assertFalse(builder.contains("class Result"), builder)
-        assertFalse(builder.contains("JsonObject"), builder)
     }

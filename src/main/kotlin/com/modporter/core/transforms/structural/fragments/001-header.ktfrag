@@ -1,6 +1,7 @@
 package com.modporter.core.transforms.structural
 
 import com.modporter.core.pipeline.*
+import com.modporter.core.transforms.shared.HolderLookupProviderPropagationMigration
 import com.github.javaparser.JavaParser
 import com.github.javaparser.ParserConfiguration
 import com.github.javaparser.ast.CompilationUnit
@@ -124,6 +125,18 @@ class StructuralRefactorPass : Pass {
             } catch (e: Exception) {
                 errors.add("Structural analysis error in $file: ${e.message}")
             }
+        }
+
+        try {
+            changes.addAll(LegacyParticleSerializationMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Legacy particle serialization migration error: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateRemainingDistExecutorCalls(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("DistExecutor compatibility migration error: ${e.message}")
         }
 
         // Replace obsolete WorldGenRegion private-field accessors with the
@@ -461,6 +474,8 @@ class StructuralRefactorPass : Pass {
         try {
             val commonApiChanges = migrateCommonNeoForge121Apis(projectDir, dryRun)
             changes.addAll(commonApiChanges)
+            if (!dryRun) changes.addAll(HolderLookupProviderPropagationMigration().migrate(projectDir, dryRun = false))
+            changes.addAll(LegacyMutableInventoryMigration().migrate(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Common NeoForge 1.21 API migration error: ${e.message}")
         }
@@ -610,14 +625,6 @@ class StructuralRefactorPass : Pass {
             changes.addAll(ebsChanges)
         } catch (e: Exception) {
             errors.add("EventBusSubscriber cleanup error: ${e.message}")
-        }
-
-        // Remove orphaned SimpleChannel code once generated payload registration owns it.
-        try {
-            val netCleanupChanges = cleanupSimpleChannelRemnants(projectDir, dryRun)
-            changes.addAll(netCleanupChanges)
-        } catch (e: Exception) {
-            errors.add("SimpleChannel cleanup error: ${e.message}")
         }
 
         // Fix static @SubscribeEvent with instance registration:
@@ -1180,92 +1187,6 @@ class StructuralRefactorPass : Pass {
      * Fix EVENT_BUS.register(this) when @SubscribeEvent methods are static.
      * NeoForge 1.21.1 requires class registration for static methods.
      */
-    /**
-     * Clean up orphaned SimpleChannel code after payload registration has been generated.
-     * Old SimpleChannel setup is removed once ModNetwork/RegisterPayloadHandlersEvent owns
-     * equivalent packet registration.
-     */
-    private fun cleanupSimpleChannelRemnants(projectDir: Path, dryRun: Boolean): List<Change> {
-        val changes = mutableListOf<Change>()
-        val srcDir = projectDir.resolve("src/main/java")
-        if (!srcDir.exists()) return changes
-
-        Files.walk(srcDir)
-            .filter { it.toString().endsWith(".java") }
-            .forEach { javaFile ->
-                val text = javaFile.toFile().readText()
-
-                // Only process files where earlier passes removed SimpleChannel or where a
-                // generated ModNetwork exists for this source tree.
-                val hasGeneratedNetwork = srcDir.resolve(srcDir.relativize(javaFile).parent ?: Path.of(""))
-                    .resolve("ModNetwork.java")
-                    .exists()
-                fun isLegacySimpleChannelCleanupComment(line: String): Boolean {
-                    val trimmed = line.trimStart()
-                    return trimmed.startsWith("//") &&
-                        (trimmed.contains("SimpleChannel field removed") ||
-                            trimmed.contains("registerMessage() removed") ||
-                            (trimmed.contains("HANDLER removed") && trimmed.contains("RegisterPayloadHandlersEvent")))
-                }
-
-                if (!hasGeneratedNetwork && text.lineSequence().none(::isLegacySimpleChannelCleanupComment)) return@forEach
-
-                var modified = text
-
-                val lines = modified.lines()
-                val cleanedLines = mutableListOf<String>()
-                var removedRegisterMessages = false
-                val removedRegisterMessageComment = lines.any { line ->
-                    isLegacySimpleChannelCleanupComment(line) && line.contains("registerMessage() removed")
-                }
-                for (line in lines) {
-                    val trimmed = line.trimStart()
-                    val removeLine =
-                        isLegacySimpleChannelCleanupComment(line) ||
-                            trimmed == "int packetIndex = 0;" && removedRegisterMessageComment
-                    if (removeLine) {
-                        removedRegisterMessages = true
-                    } else {
-                        cleanedLines.add(line)
-                    }
-                }
-                if (removedRegisterMessages) {
-                    modified = cleanedLines.joinToString("\n")
-                }
-
-                // Remove orphaned chain calls: lines starting with .method(...)
-                modified = modified.replace(
-                    Regex("""^(\s+)(\.[a-zA-Z]+\([^)]*\)[^;\r\n]*;?)""", RegexOption.MULTILINE),
-                    ""
-                )
-
-                // Remove INSTANCE.xxx calls (messageBuilder, send, etc) after ModNetwork takes over.
-                modified = modified.replace(
-                    Regex("""^(\s+)(INSTANCE\.[^\r\n]+)""", RegexOption.MULTILINE),
-                    ""
-                )
-
-                // INSTANCE-only method bodies are handled by the line-by-line removal above.
-
-                if (modified != text) {
-                    if (!dryRun) {
-                        javaFile.toFile().writeText(modified)
-                    }
-                    changes.add(Change(
-                        file = javaFile,
-                        line = 0,
-                        description = "Clean up orphaned SimpleChannel code in ${javaFile.fileName}",
-                        before = "(orphaned SimpleChannel chain calls)",
-                        after = "(removed after ModNetwork migration)",
-                        confidence = Confidence.HIGH,
-                        ruleId = "structural-simplechannel-cleanup"
-                    ))
-                }
-            }
-
-        return changes
-    }
-
     private fun fixStaticEventBusRegistration(projectDir: Path, dryRun: Boolean): List<Change> {
         val changes = mutableListOf<Change>()
         val srcDir = projectDir.resolve("src/main/java")
@@ -1786,7 +1707,9 @@ ${indent}}
         }
 
         if (!migrated) return result
-        result = removeDistExecutorImports(result)
+        if (!maskJavaCommentsAndLiterals(result).contains("DistExecutor.")) {
+            result = removeDistExecutorImports(result)
+        }
         result = addImportIfMissing(result, "net.neoforged.api.distmarker.Dist")
         return addImportIfMissing(result, "net.neoforged.fml.loading.FMLLoader")
     }
@@ -1830,6 +1753,138 @@ ${indent}}
             )
         )
     }
+
+    private fun migrateRemainingDistExecutorCalls(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val oldOwners = listOf(
+            "net.minecraftforge.fml.DistExecutor",
+            "net.neoforged.fml.DistExecutor"
+        )
+        val methodMappings = mapOf(
+            "unsafeRunWhenOn" to "runWhenOn",
+            "safeRunWhenOn" to "runWhenOn",
+            "unsafeCallWhenOn" to "callWhenOn",
+            "safeCallWhenOn" to "callWhenOn",
+            "unsafeRunForDist" to "runForDist",
+            "safeRunForDist" to "runForDist"
+        )
+        data class Candidate(
+            val file: Path,
+            val source: String,
+            val owners: List<String>,
+            val members: Set<String>
+        )
+
+        val candidates = Files.walk(srcDir).use { files ->
+            files.iterator().asSequence()
+                .filter { it.extension == "java" }
+                .filter { !srcDir.relativize(it).toString().replace('\\', '/').startsWith("com/modporter/generated/") }
+                .mapNotNull { file ->
+                    val source = file.readText()
+                    val executable = maskJavaCommentsAndLiterals(source)
+                    val importsOwner = oldOwners.any { owner ->
+                        Regex("""(?m)^\s*import\s+${Regex.escape(owner)}\s*;\s*$""")
+                            .containsMatchIn(executable)
+                    }
+                    val owners = buildList {
+                        if (importsOwner) add("DistExecutor")
+                        oldOwners.filterTo(this) { executable.contains("$it.") }
+                    }.distinct()
+                    if (owners.isEmpty() && !importsOwner) return@mapNotNull null
+                    val members = owners.flatMap { owner ->
+                        Regex("""\b${Regex.escape(owner)}\s*\.\s*([A-Za-z_$][\w$]*)\b""")
+                            .findAll(executable)
+                            .map { it.groupValues[1] }
+                            .toList()
+                    }.toSet()
+                    Candidate(file, source, owners, members)
+                }
+                .toList()
+        }
+        if (candidates.isEmpty()) return emptyList()
+
+        val unsupported = candidates.flatMap { candidate ->
+            (candidate.members - methodMappings.keys).map { member -> "${candidate.file}: $member" }
+        }
+        require(unsupported.isEmpty()) {
+            "unsupported DistExecutor members require an explicit semantic rule: ${unsupported.joinToString()}"
+        }
+
+        val needsHelper = candidates.any { it.members.isNotEmpty() }
+        val compatPackage = if (needsHelper) {
+            detectRequiredGeneratedCompatPackage(projectDir, "remaining typed DistExecutor calls")
+        } else {
+            null
+        }
+        val changes = mutableListOf<Change>()
+        candidates.forEach { candidate ->
+            var migrated = candidate.source
+            if (compatPackage != null) {
+                candidate.owners.forEach { owner ->
+                    methodMappings.forEach { (oldMethod, newMethod) ->
+                        migrated = replaceExecutableRegex(
+                            migrated,
+                            Regex("""\b${Regex.escape(owner)}\s*\.\s*${Regex.escape(oldMethod)}\b""")
+                        ) { "$compatPackage.DistExecution.$newMethod" }
+                    }
+                }
+            }
+            migrated = removeDistExecutorImports(migrated)
+            if (migrated == candidate.source) return@forEach
+            changes += Change(
+                file = candidate.file,
+                line = 1,
+                description = "Preserve remaining typed DistExecutor run/call semantics with a generated FMLLoader-backed adapter",
+                before = candidate.members.joinToString().ifBlank { "orphan DistExecutor import" },
+                after = if (candidate.members.isEmpty()) "removed orphan import" else "$compatPackage.DistExecution",
+                confidence = Confidence.HIGH,
+                ruleId = "struct-dist-executor-typed-adapter"
+            )
+            if (!dryRun) candidate.file.writeText(migrated)
+        }
+        if (compatPackage != null) {
+            changes += ensureGeneratedCompatJavaSource(
+                srcDir = srcDir,
+                packageName = compatPackage,
+                className = "DistExecution",
+                source = generatedDistExecutionSource(compatPackage),
+                dryRun = dryRun,
+                description = "Generate a typed DistExecutor compatibility adapter backed by FMLLoader distribution checks",
+                before = "removed DistExecutor run/call methods",
+                after = "DistExecution runWhenOn/callWhenOn/runForDist",
+                ruleId = "struct-dist-executor-typed-adapter-source"
+            )
+        }
+        return changes
+    }
+
+    private fun generatedDistExecutionSource(packageName: String): String = """
+package $packageName;
+
+import java.util.function.Supplier;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.fml.loading.FMLLoader;
+
+public final class DistExecution {
+    private DistExecution() {
+    }
+
+    public static void runWhenOn(Dist dist, Supplier<Runnable> target) {
+        if (FMLLoader.getDist() == dist) {
+            target.get().run();
+        }
+    }
+
+    public static <T> T callWhenOn(Dist dist, Supplier<Supplier<T>> target) {
+        return FMLLoader.getDist() == dist ? target.get().get() : null;
+    }
+
+    public static <T> T runForDist(Supplier<Supplier<T>> clientTarget, Supplier<Supplier<T>> serverTarget) {
+        return (FMLLoader.getDist() == Dist.CLIENT ? clientTarget : serverTarget).get().get();
+    }
+}
+""".trimIndent() + "\n"
 
     private fun cleanupCommentedOutJavaLogicBlocks(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
@@ -2121,7 +2176,8 @@ ${indent}}
         val streamCodecExpression: String,
         val namespaceExpression: String,
         val referenceName: String = className,
-        val registrationMethod: String? = null
+        val registrationMethod: String? = null,
+        val writerMethodName: String? = null
     )
 
     private data class PacketClassCandidate(
@@ -2228,6 +2284,7 @@ ${indent}}
     }
 
     private fun constructorPacketInfoFromRegisteredType(
+        srcDir: Path,
         packetType: ResolvedRegisteredPacketType,
         packetSource: String,
         networkPackageName: String,
@@ -2237,38 +2294,26 @@ ${indent}}
     ): PacketClassInfo? {
         val executablePacketSource = maskJavaCommentsAndLiterals(packetSource)
         val body = javaTypeBody(executablePacketSource, packetType.simpleName) ?: return null
-        val typeStart = findTypeDeclarationStart(executablePacketSource, packetType.simpleName)
-        val typeOpenBrace = typeStart?.let { executablePacketSource.indexOf('{', it) } ?: -1
-        val typeHeader = if (typeStart != null && typeOpenBrace > typeStart) {
-            executablePacketSource.substring(typeStart, typeOpenBrace)
-        } else {
-            ""
-        }
-        val explicitlyExtendsOwner = Regex("""\bextends\s+${Regex.escape(packetType.ownerSimpleName)}\b""")
-            .containsMatchIn(typeHeader)
-        val ownerBody = if (packetType.ownerSimpleName != packetType.simpleName && explicitlyExtendsOwner) {
-            javaTypeBody(executablePacketSource, packetType.ownerSimpleName)
-        } else {
-            null
-        }
+        val contractBodies = packetContractBodies(srcDir, packetType, packetSource)
         val constructorBufferType = Regex(
             """\b(?:public|protected|private)?\s*${Regex.escape(packetType.simpleName)}\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+[A-Za-z_$][\w$]*\s*\)"""
         ).find(body)?.groupValues?.get(1) ?: return null
         val writerPattern = Regex(
             """\b(?:public|protected|private)?\s*void\s+([A-Za-z_$][\w$]*)\s*\(\s*(RegistryFriendlyByteBuf|FriendlyByteBuf)\s+[A-Za-z_$][\w$]*\s*\)"""
         )
-        val writer = writerPattern.findAll(body)
-            .firstOrNull { it.groupValues[1] in setOf("write", "toBytes", "encode") }
-            ?: ownerBody?.let { inheritedBody ->
-                writerPattern.findAll(inheritedBody)
+        val writer = contractBodies.asSequence()
+            .mapNotNull { contractBody ->
+                writerPattern.findAll(contractBody)
                     .firstOrNull { it.groupValues[1] in setOf("write", "toBytes", "encode") }
             }
+            .firstOrNull()
             ?: return null
         val handlerPattern = Regex(
-            """\b(?:public|protected|private)?\s*(?:boolean|void)\s+([A-Za-z_$][\w$]*)\s*\(\s*IPayloadContext\s+[A-Za-z_$][\w$]*\s*\)"""
+            """\b(?:public|protected|private)?\s*(?:boolean|void)\s+([A-Za-z_$][\w$]*)\s*\(\s*(?:IPayloadContext|(?:NetworkEvent\.)?Context)\s+[A-Za-z_$][\w$]*\s*\)"""
         )
-        val handlerMethod = handlerPattern.find(body)?.groupValues?.get(1)
-            ?: ownerBody?.let { handlerPattern.find(it)?.groupValues?.get(1) }
+        val handlerMethod = contractBodies.asSequence()
+            .mapNotNull { handlerPattern.find(it)?.groupValues?.get(1) }
+            .firstOrNull()
 
         val bufferType = if (constructorBufferType == "RegistryFriendlyByteBuf" ||
             writer.groupValues[2] == "RegistryFriendlyByteBuf") {
@@ -2293,8 +2338,53 @@ ${indent}}
             streamCodecExpression = "StreamCodec.of((buf, packet) -> packet.${writer.groupValues[1]}(buf), ${packetType.simpleName}::new)",
             namespaceExpression = namespaceExpression,
             referenceName = packetType.registrationReferenceName,
-            registrationMethod = registrationMethod
+            registrationMethod = registrationMethod,
+            writerMethodName = writer.groupValues[1]
         )
+    }
+
+    private fun packetContractBodies(
+        srcDir: Path,
+        packetType: ResolvedRegisteredPacketType,
+        packetSource: String
+    ): List<String> {
+        val bodies = mutableListOf<String>()
+        val visited = mutableSetOf<Pair<Path?, String>>()
+        var currentSource = packetSource
+        var currentType = packetType.simpleName
+        var currentFile: Path? = packetType.file
+
+        while (visited.add(currentFile to currentType)) {
+            val executable = maskJavaCommentsAndLiterals(currentSource)
+            val body = javaTypeBody(executable, currentType) ?: break
+            bodies += body
+            val typeStart = findTypeDeclarationStart(executable, currentType) ?: break
+            val openBrace = executable.indexOf('{', typeStart)
+            if (openBrace <= typeStart) break
+            val header = executable.substring(typeStart, openBrace)
+            val superName = Regex(
+                """\bextends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*(?:<|\{|implements|$)"""
+            ).find(header)?.groupValues?.get(1) ?: break
+            val superFile = resolveJavaOwnerFile(superName, currentSource, srcDir) ?: break
+            val superSource = superFile.readText()
+            currentType = superName.substringAfterLast('.')
+            currentSource = superSource
+            currentFile = superFile
+        }
+        return bodies
+    }
+
+    private fun resolveJavaOwnerFile(ownerName: String, contextSource: String, srcDir: Path): Path? {
+        val simpleName = ownerName.substringAfterLast('.')
+        val imported = Regex("""(?m)^[ \t]*import\s+([\w.]+\.${Regex.escape(simpleName)})\s*;""")
+            .find(contextSource)?.groupValues?.get(1)
+        val candidates = linkedSetOf<String>()
+        imported?.let(candidates::add)
+        if (ownerName.contains('.')) candidates += ownerName
+        packageNameOf(contextSource).takeIf(String::isNotBlank)?.let { candidates += "$it.$simpleName" }
+        return candidates.asSequence()
+            .map { srcDir.resolve(it.replace('.', '/') + ".java") }
+            .firstOrNull(Files::exists)
     }
 
     private fun packetReceptionDirection(executableCode: String): Boolean? {
@@ -2402,11 +2492,30 @@ ${indent}}
             )
         }
 
+        fun packetFromQualifiedType(
+            qualifiedTypeName: String,
+            trailingNestedParts: List<String>,
+            sourceReferenceName: String
+        ): ResolvedRegisteredPacketType? {
+            val qualifiedParts = qualifiedTypeName.split('.').filter(String::isNotBlank)
+            for (ownerPartCount in qualifiedParts.size downTo 1) {
+                val ownerFqn = qualifiedParts.take(ownerPartCount).joinToString(".")
+                val ownerPath = srcDir.resolve(ownerFqn.replace('.', '/') + ".java")
+                if (!Files.exists(ownerPath)) continue
+                return packetFromOwner(
+                    ownerFqn,
+                    qualifiedParts.drop(ownerPartCount) + trailingNestedParts,
+                    sourceReferenceName
+                )
+            }
+            return null
+        }
+
         val parts = classReference.split('.').filter { it.isNotBlank() }
         if (parts.isEmpty()) return null
         val first = parts.first()
         imports[first]?.let { importedOwner ->
-            return packetFromOwner(importedOwner, parts.drop(1), classReference)
+            return packetFromQualifiedType(importedOwner, parts.drop(1), classReference)
         }
         wildcardImports
             .mapNotNull { importedPackage -> packetFromOwner("$importedPackage.$first", parts.drop(1), classReference) }
@@ -2888,92 +2997,4 @@ ${indent}}
         }
 
         return changes
-    }
-
-    private fun migrateBlockAttachedStructureTemplateProcessorSource(source: String): String {
-        if ((!source.contains("SinglePoolElement.single(") &&
-                !source.contains("StructurePoolElement.single(") &&
-                !source.contains("SinglePoolElement.legacy(") &&
-                !source.contains("StructurePoolElement.legacy(")) ||
-            source.contains("ModPorterBlockAttachedEntityProcessor.PROCESSOR_LIST")
-        ) {
-            return source
-        }
-
-        val emptyProcessorVariables = Regex(
-            """(?s)\b(?:Holder\s*<\s*StructureProcessorList\s*>|net\.minecraft\.core\.Holder\s*<\s*net\.minecraft\.world\.level\.levelgen\.structure\.templatesystem\.StructureProcessorList\s*>|var)\s+([A-Za-z_$][\w$]*)\s*=\s*[^;]*Registries\.PROCESSOR_LIST[^;]*(?:"minecraft"|fromNamespaceAndPath\s*\(\s*"minecraft"\s*,\s*"empty"\s*\)|parse\s*\(\s*"minecraft:empty"\s*\))[^;]*;"""
-        ).findAll(source)
-            .map { it.groupValues[1] }
-            .toSet()
-
-        var result = source
-        var changed = false
-        for (methodName in listOf("single", "legacy")) {
-            result = rewriteExecutableJavaCall(result, methodName) { receiver, args ->
-                val trimmedReceiver = receiver.trim()
-                if (trimmedReceiver != "SinglePoolElement" && trimmedReceiver != "StructurePoolElement") {
-                    return@rewriteExecutableJavaCall null
-                }
-                val templateArg = args.firstOrNull()?.trim() ?: return@rewriteExecutableJavaCall null
-                if (args.size == 1) {
-                    changed = true
-                    "$trimmedReceiver.$methodName($templateArg, ModPorterBlockAttachedEntityProcessor.PROCESSOR_LIST)"
-                } else if (args.size == 2 && args[1].trim() in emptyProcessorVariables) {
-                    changed = true
-                    "$trimmedReceiver.$methodName($templateArg, ModPorterBlockAttachedEntityProcessor.PROCESSOR_LIST)"
-                } else {
-                    null
-                }
-            }
-        }
-        if (!changed) return source
-        return addImportIfMissing(result, "com.modporter.generated.structure.ModPorterBlockAttachedEntityProcessor")
-    }
-
-    private fun projectHasBlockAttachedStructureTemplateEntities(projectDir: Path): Boolean {
-        val dataDir = projectDir.resolve("src/main/resources/data")
-        if (!dataDir.exists()) return false
-        val structureNbtFiles = Files.walk(dataDir)
-            .filter { Files.isRegularFile(it) && it.extension == "nbt" }
-            .filter { file ->
-                val relative = dataDir.relativize(file).toString().replace('\\', '/')
-                relative.contains("/structure/") || relative.contains("/structures/")
-            }
-            .toList()
-
-        for (file in structureNbtFiles) {
-            val bytes = try {
-                maybeDecompressGzip(file.readBytes())
-            } catch (_: Exception) {
-                continue
-            }
-            if (bytes.containsAscii("entities") &&
-                bytes.containsAscii("TileX") &&
-                bytes.containsAscii("TileY") &&
-                bytes.containsAscii("TileZ")
-            ) {
-                return true
-            }
-        }
-        return false
-    }
-
-    private fun maybeDecompressGzip(bytes: ByteArray): ByteArray {
-        if (bytes.size < 2 || bytes[0] != 0x1f.toByte() || bytes[1] != 0x8b.toByte()) return bytes
-        return GZIPInputStream(ByteArrayInputStream(bytes)).use { it.readBytes() }
-    }
-
-    private fun ByteArray.containsAscii(value: String): Boolean {
-        val needle = value.toByteArray(Charsets.US_ASCII)
-        if (needle.isEmpty() || needle.size > size) return false
-        var offset = 0
-        while (offset <= size - needle.size) {
-            var index = 0
-            while (index < needle.size && this[offset + index] == needle[index]) {
-                index++
-            }
-            if (index == needle.size) return true
-            offset++
-        }
-        return false
     }

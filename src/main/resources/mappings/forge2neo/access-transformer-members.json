@@ -1,0 +1,148 @@
+{
+  "schema": "modporter.access-transformer-members.v1",
+  "mappings": [
+    {
+      "owner": "net.minecraft.client.gui.Font",
+      "sourceMember": "m_92863_",
+      "sourceDescriptor": "(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/client/gui/font/FontSet;",
+      "targetMember": "getFontSet"
+    },
+    {
+      "owner": "net.minecraft.client.gui.screens.TitleScreen",
+      "sourceMember": "f_96729_",
+      "targetOwner": "net.minecraft.client.gui.screens.Screen",
+      "targetMember": "PANORAMA"
+    },
+    {
+      "owner": "net.minecraft.client.particle.Particle",
+      "sourceMember": "f_107205_",
+      "targetMember": "stoppedByCollision"
+    },
+    {
+      "owner": "net.minecraft.client.renderer.ItemInHandRenderer",
+      "sourceMember": "f_109300_",
+      "targetMember": "mainHandItem"
+    },
+    {
+      "owner": "net.minecraft.client.renderer.ItemInHandRenderer",
+      "sourceMember": "f_109301_",
+      "targetMember": "offHandItem"
+    },
+    {
+      "owner": "net.minecraft.server.MinecraftServer",
+      "sourceMember": "f_129744_",
+      "targetMember": "storageSource"
+    },
+    {
+      "owner": "net.minecraft.server.network.ServerGamePacketListenerImpl",
+      "sourceMember": "f_9737_",
+      "targetMember": "aboveGroundTickCount"
+    },
+    {
+      "owner": "net.minecraft.server.network.ServerGamePacketListenerImpl",
+      "sourceMember": "f_9739_",
+      "targetMember": "aboveGroundVehicleTickCount"
+    },
+    {
+      "owner": "net.minecraft.world.entity.Entity",
+      "sourceMember": "f_146795_",
+      "targetMember": "removalReason"
+    },
+    {
+      "owner": "net.minecraft.world.entity.LivingEntity",
+      "sourceMember": "f_20899_",
+      "targetMember": "jumping"
+    },
+    {
+      "owner": "net.minecraft.world.item.HoneycombItem",
+      "sourceMember": "f_150863_",
+      "targetMember": "WAXABLES"
+    },
+    {
+      "owner": "net.minecraft.world.item.alchemy.PotionBrewing",
+      "sourceMember": "f_43494_",
+      "targetMember": "POTION_MIXES"
+    },
+    {
+      "owner": "net.minecraft.world.item.alchemy.PotionBrewing",
+      "sourceMember": "f_43495_",
+      "targetMember": "CONTAINER_MIXES"
+    },
+    {
+      "owner": "net.minecraft.world.item.alchemy.PotionBrewing",
+      "sourceMember": "f_43497_",
+      "targetMember": "ALLOWED_CONTAINER"
+    },
+    {
+      "owner": "net.minecraft.world.item.crafting.Ingredient",
+      "sourceMember": "f_43902_",
+      "targetMember": "values"
+    },
+    {
+      "owner": "net.minecraft.world.item.crafting.RecipeManager",
+      "sourceMember": "f_44007_",
+      "targetMember": "recipes"
+    },
+    {
+      "owner": "net.minecraft.world.level.BaseSpawner",
+      "sourceMember": "f_45443_",
+      "targetMember": "spawnPotentials"
+    },
+    {
+      "owner": "net.minecraft.world.level.BaseSpawner",
+      "sourceMember": "f_45444_",
+      "targetMember": "nextSpawnData"
+    },
+    {
+      "owner": "net.minecraft.world.level.block.entity.BeaconBlockEntity",
+      "sourceMember": "f_58648_",
+      "targetMember": "beamSections"
+    },
+    {
+      "owner": "net.minecraft.world.level.chunk.HashMapPalette",
+      "sourceMember": "f_62658_",
+      "targetMember": "values"
+    },
+    {
+      "owner": "net.minecraft.client.model.geom.ModelPart",
+      "sourceMember": "f_104212_",
+      "targetMember": "cubes"
+    },
+    {
+      "owner": "net.minecraft.client.model.geom.ModelPart",
+      "sourceMember": "f_104213_",
+      "targetMember": "children"
+    },
+    {
+      "owner": "net.minecraft.client.model.AgeableListModel",
+      "sourceMember": "f_102007_",
+      "targetMember": "scaleHead"
+    },
+    {
+      "owner": "net.minecraft.client.model.AgeableListModel",
+      "sourceMember": "f_170338_",
+      "targetMember": "babyYHeadOffset"
+    },
+    {
+      "owner": "net.minecraft.client.model.AgeableListModel",
+      "sourceMember": "f_170339_",
+      "targetMember": "babyZHeadOffset"
+    },
+    {
+      "owner": "net.minecraft.client.model.AgeableListModel",
+      "sourceMember": "f_102010_",
+      "targetMember": "babyHeadScale"
+    },
+    {
+      "owner": "net.minecraft.client.gui.components.CommandSuggestions",
+      "sourceMember": "f_93866_",
+      "targetMember": "suggestions"
+    },
+    {
+      "owner": "net.minecraft.data.recipes.RecipeProvider",
+      "sourceMember": "m_6055_",
+      "sourceDescriptor": "()Ljava/lang/String;",
+      "targetMember": "getName"
+    }
+  ]
+}

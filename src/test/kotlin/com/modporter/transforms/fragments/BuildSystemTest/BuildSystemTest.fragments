@@ -1,7 +1,8 @@
 001-header.ktfrag
-002-entity-visibility-reflection-migration-ignores-comments-strings-and-text.ktfrag
-003-rewrites-class-for-name-loader-presence-probes-to-class-resource-probes.ktfrag
-004-adds-entity-render-dispatcher-renderers-access-transformer-when-source-u.ktfrag
-005-rewrites-legacy-abstract-tree-grower-call-sites.ktfrag
-006-resolves-curios-curse-maven-coordinate-to-target-neo-forge-artifacts.ktfrag
-007-does-not-exclude-legacy-criterion-triggers-and-payload-registrars-with-m.ktfrag
+002-adds-structure-pool-access-transformers-only-for-typed-direct-field-acce.ktfrag
+003-rewrites-class-for-name-is-instance-checks-without-member-reflection.ktfrag
+004-restores-get-tag-on-local-tag-key-holder-types-after-nbt-text-migration.ktfrag
+005-hard-gates-forbidden-reflection-after-migration.ktfrag
+006-mmlib-recipe-base-relocation-requires-executable-removed-type-evidence.ktfrag
+007-mmlib-recipe-provider-without-any-mod-id-source-reports-hard-migration-e.ktfrag
+008-complete-legacy-food-properties-codecs-use-the-target-standard-codec.ktfrag

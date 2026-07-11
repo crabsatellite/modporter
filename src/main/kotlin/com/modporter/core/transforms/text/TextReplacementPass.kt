@@ -3,12 +3,30 @@ package com.modporter.core.transforms.text
 import com.modporter.core.pipeline.*
 import com.modporter.mapping.MappingDatabase
 import com.modporter.mapping.TextReplacement
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import mu.KotlinLogging
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.*
 
 private val logger = KotlinLogging.logger {}
+
+private data class PublicTypeRename(
+    val file: Path,
+    val packageName: String,
+    val oldType: String,
+    val newType: String
+) {
+    val oldFqn: String = "$packageName.$oldType"
+    val newFqn: String = "$packageName.$newType"
+}
 
 /**
  * Pass 1: Text-based find-and-replace transformations.
@@ -34,6 +52,7 @@ class TextReplacementPass(
         val rules = buildRuleList()
         val changes = mutableListOf<Change>()
         val errors = mutableListOf<String>()
+        val publicTypeRenames = mutableListOf<PublicTypeRename>()
 
         val javaFiles = findJavaFiles(projectDir)
         logger.info { "Found ${javaFiles.size} Java files to process" }
@@ -76,7 +95,8 @@ class TextReplacementPass(
                     dryRun,
                     errors,
                     legacyDyeableLeatherItemClasses,
-                    legacyLootCodecOwners
+                    legacyLootCodecOwners,
+                    publicTypeRenames
                 )
                 changes.addAll(result)
             } catch (e: Exception) {
@@ -93,6 +113,10 @@ class TextReplacementPass(
             )
         )
 
+        changes.addAll(
+            synchronizeRenamedPublicTypes(projectDir, publicTypeRenames, dryRun, errors)
+        )
+
         return PassResult(name, changes, errors)
     }
 
@@ -103,7 +127,8 @@ class TextReplacementPass(
         dryRun: Boolean,
         errors: MutableList<String>,
         legacyDyeableLeatherItemClasses: Set<String>,
-        legacyLootCodecOwners: Set<String>
+        legacyLootCodecOwners: Set<String>,
+        publicTypeRenames: MutableList<PublicTypeRename>
     ): List<Change> {
         val originalContent = file.readText()
         var content = originalContent
@@ -111,7 +136,7 @@ class TextReplacementPass(
         val tierIncorrectTagResources = mutableListOf<TierIncorrectTagResource>()
         val relativePath = projectDir.relativize(file).toString().replace('\\', '/')
 
-        val networkHooksOpenScreen = migrateNetworkHooksOpenScreen(content, file)
+        val networkHooksOpenScreen = migrateNetworkHooksOpenScreen(content, file, projectDir)
         content = networkHooksOpenScreen.content
         changes.addAll(networkHooksOpenScreen.changes)
         errors.addAll(networkHooksOpenScreen.errors)
@@ -150,6 +175,38 @@ class TextReplacementPass(
             }
         }
 
+        val beforeCatnipPlatformServices = content
+        content = migrateCatnipLoaderPlatformServices(content)
+        if (content != beforeCatnipPlatformServices) {
+            changes.add(
+                Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate Catnip's Forge loader service owner to its NeoForge owner",
+                    before = "net.createmod.catnip.platform.ForgeCatnipServices",
+                    after = "net.createmod.catnip.platform.NeoForgeCatnipServices",
+                    confidence = Confidence.HIGH,
+                    ruleId = "catnip-neoforge-platform-services"
+                )
+            )
+        }
+
+        val beforeCatnipRegistryHelper = content
+        content = migrateCatnipRegistryKeyHelper(content)
+        if (content != beforeCatnipRegistryHelper) {
+            changes.add(
+                Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate Catnip registry key lookups to the 1.21 registered-object helper",
+                    before = "CatnipServices.REGISTRIES.getKeyOrThrow / ::getKeyOrThrow",
+                    after = "RegisteredObjectsHelper.getKeyOrThrow / ::getKeyOrThrow",
+                    confidence = Confidence.HIGH,
+                    ruleId = "catnip-registered-objects-key-helper"
+                )
+            )
+        }
+
         val beforeInventoryRecipeHolder = content
         content = migrateInventoryRecipeHolderInterface(content)
         if (content != beforeInventoryRecipeHolder) {
@@ -178,6 +235,38 @@ class TextReplacementPass(
                     after = "renderToBuffer(..., int color) and FastColor.ARGB32.colorFromFloat(...)",
                     confidence = Confidence.HIGH,
                     ruleId = "model-render-packed-color-executable"
+                )
+            )
+        }
+
+        val beforeLegacyGuiOverlayContext = content
+        content = migrateLegacyGuiOverlayRenderContext(content)
+        if (content != beforeLegacyGuiOverlayContext) {
+            changes.add(
+                Change(
+                    file = file,
+                    line = 1,
+                    description = "Bind the removed legacy GUI overlay parameter to the Minecraft GUI instance",
+                    before = "IGuiOverlay.render(ForgeGui gui, GuiGraphics graphics, ...)",
+                    after = "LayeredDraw.Layer.render(GuiGraphics graphics, DeltaTracker deltaTracker) with Minecraft.getInstance().gui",
+                    confidence = Confidence.HIGH,
+                    ruleId = "gui-overlay-render-context"
+                )
+            )
+        }
+
+        val beforeLegacyGuiOverlayType = content
+        content = migrateLegacyGuiOverlayType(content)
+        if (content != beforeLegacyGuiOverlayType) {
+            changes.add(
+                Change(
+                    file = file,
+                    line = 1,
+                    description = "Migrate the removed Forge GUI overlay interface to the vanilla layered-draw contract",
+                    before = "IGuiOverlay",
+                    after = "LayeredDraw.Layer",
+                    confidence = Confidence.HIGH,
+                    ruleId = "gui-overlay-layer-owner"
                 )
             )
         }
@@ -483,6 +572,8 @@ class TextReplacementPass(
         // Post-processing: clean up imports after all replacements
         content = cleanupImports(content, changes, file)
 
+        detectPublicTypeRename(file, originalContent, content)?.let(publicTypeRenames::add)
+
         if (!dryRun && content != originalContent) {
             file.writeText(content)
         }
@@ -718,7 +809,10 @@ class TextReplacementPass(
         if (Regex("\\bRegistry<").containsMatchIn(result) && !result.contains("import net.minecraft.core.Registry;")) {
             missingImports.add("import net.minecraft.core.Registry;")
         }
-        if (Regex("\\bSupplier<").containsMatchIn(result) && !result.contains("import java.util.function.Supplier;")) {
+        val supplierAlreadyImported = Regex(
+            """(?m)^\s*import\s+(?!static\b)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.Supplier\s*;"""
+        ).containsMatchIn(maskJavaCommentsAndLiterals(result))
+        if (Regex("\\bSupplier<").containsMatchIn(result) && !supplierAlreadyImported) {
             missingImports.add("import java.util.function.Supplier;")
         }
 
@@ -752,6 +846,170 @@ class TextReplacementPass(
 
         return dedupeImports(result)
     }
+
+    private fun migrateCatnipRegistryKeyHelper(source: String): String {
+        val oldOwner = "net.createmod.catnip.platform.CatnipServices"
+        val newOwner = "net.createmod.catnip.registry.RegisteredObjectsHelper"
+        val executable = maskJavaCommentsAndLiterals(source)
+        val importsOldOwner = Regex(
+            """(?m)^\s*import\s+${Regex.escape(oldOwner)}\s*;\s*$"""
+        ).containsMatchIn(executable)
+        val usesQualifiedOldOwner = executable.contains("$oldOwner.REGISTRIES")
+        if (!importsOldOwner && !usesQualifiedOldOwner) return source
+
+        var result = source
+        val owners = buildList {
+            if (importsOldOwner) add("CatnipServices")
+            add(oldOwner)
+        }
+        owners.forEach { owner ->
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b${Regex.escape(owner)}\s*\.\s*REGISTRIES\s*\.\s*getKeyOrThrow\b""")
+            ) { "$newOwner.getKeyOrThrow" }
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\b${Regex.escape(owner)}\s*\.\s*REGISTRIES\s*::\s*getKeyOrThrow\b""")
+            ) { "$newOwner::getKeyOrThrow" }
+        }
+        if (!maskJavaCommentsAndLiterals(result).contains("CatnipServices.")) {
+            result = removeImportLine(result, oldOwner)
+        }
+        return result
+    }
+
+    private fun migrateCatnipLoaderPlatformServices(source: String): String {
+        val oldOwner = "net.createmod.catnip.platform.ForgeCatnipServices"
+        val newOwner = "net.createmod.catnip.platform.NeoForgeCatnipServices"
+        val executable = maskJavaCommentsAndLiterals(source)
+        val importsOldOwner = Regex(
+            """(?m)^\s*import\s+${Regex.escape(oldOwner)}\s*;\s*$"""
+        ).containsMatchIn(executable)
+        val usesQualifiedOldOwner = executable.contains(oldOwner)
+        if (!importsOldOwner && !usesQualifiedOldOwner) return source
+
+        var result = replaceExecutableRegex(
+            source,
+            Regex("""\b${Regex.escape(oldOwner)}\b""")
+        ) { newOwner }
+        if (importsOldOwner) {
+            result = replaceExecutableRegex(
+                result,
+                Regex("""\bForgeCatnipServices\b""")
+            ) { "NeoForgeCatnipServices" }
+        }
+        return result
+    }
+
+    private fun detectPublicTypeRename(file: Path, before: String, after: String): PublicTypeRename? {
+        val oldType = publicTopLevelType(before) ?: return null
+        val newType = publicTopLevelType(after) ?: return null
+        if (oldType == newType || file.nameWithoutExtension != oldType) return null
+        val oldPackage = javaPackage(before) ?: return null
+        val newPackage = javaPackage(after) ?: return null
+        if (oldPackage != newPackage) return null
+        return PublicTypeRename(file, oldPackage, oldType, newType)
+    }
+
+    private fun publicTopLevelType(source: String): String? =
+        Regex(
+            """\bpublic\s+(?:(?:abstract|final|sealed|non-sealed|strictfp)\s+)*(?:class|interface|enum|record|@interface)\s+([A-Za-z_$][\w$]*)\b"""
+        ).find(maskJavaCommentsAndLiterals(source))?.groupValues?.get(1)
+
+    private fun javaPackage(source: String): String? =
+        Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$.]*)\s*;""")
+            .find(maskJavaCommentsAndLiterals(source))?.groupValues?.get(1)
+
+    private fun synchronizeRenamedPublicTypes(
+        projectDir: Path,
+        requested: List<PublicTypeRename>,
+        dryRun: Boolean,
+        errors: MutableList<String>
+    ): List<Change> {
+        if (requested.isEmpty()) return emptyList()
+        val renames = requested.distinctBy { it.file }
+        val accepted = mutableListOf<PublicTypeRename>()
+        val changes = mutableListOf<Change>()
+        for (rename in renames) {
+            val target = rename.file.resolveSibling("${rename.newType}.java")
+            if (target != rename.file && target.exists()) {
+                errors += "Cannot synchronize renamed public type ${rename.oldFqn} -> ${rename.newFqn}: target file already exists: $target"
+                continue
+            }
+            accepted += rename
+            changes += Change(
+                file = rename.file,
+                line = 1,
+                description = "Synchronize Java file name with a structurally renamed public top-level type",
+                before = "${rename.oldType}.java / public ${rename.oldType}",
+                after = "${rename.newType}.java / public ${rename.newType}",
+                confidence = Confidence.HIGH,
+                ruleId = "text-sync-public-type-file-name"
+            )
+            if (!dryRun) Files.move(rename.file, target)
+        }
+        if (accepted.isEmpty()) return changes
+
+        val resourceRoots = listOf(
+            projectDir.resolve("src/main/resources"),
+            projectDir.resolve("src/generated/resources")
+        ).filter(Path::exists)
+        val json = Json { prettyPrint = true }
+        for (root in resourceRoots) {
+            Files.walk(root).use { paths ->
+                paths.filter { it.extension.equals("json", ignoreCase = true) }
+                    .forEach { resource ->
+                        val original = resource.readText()
+                        if (accepted.none { original.contains(it.oldType) }) return@forEach
+                        val parsed = runCatching { json.parseToJsonElement(original) }.getOrElse { error ->
+                            errors += "Cannot parse JSON while synchronizing renamed public types in $resource: ${error.message}"
+                            return@forEach
+                        }
+                        val mixinPackage = (parsed as? JsonObject)
+                            ?.get("package")
+                            ?.jsonPrimitive
+                            ?.contentOrNull
+                        val replacements = buildMap {
+                            for (rename in accepted) {
+                                put(rename.oldFqn, rename.newFqn)
+                                if (mixinPackage != null && rename.oldFqn.startsWith("$mixinPackage.")) {
+                                    put(
+                                        rename.oldFqn.removePrefix("$mixinPackage."),
+                                        rename.newFqn.removePrefix("$mixinPackage.")
+                                    )
+                                }
+                            }
+                        }
+                        val rewritten = rewriteJsonStrings(parsed, replacements)
+                        if (rewritten == parsed) return@forEach
+                        changes += Change(
+                            file = resource,
+                            line = 1,
+                            description = "Synchronize structured resource references with renamed public Java types",
+                            before = replacements.keys.joinToString(),
+                            after = replacements.values.joinToString(),
+                            confidence = Confidence.HIGH,
+                            ruleId = "text-sync-public-type-resource-reference"
+                        )
+                        if (!dryRun) {
+                            resource.writeText(json.encodeToString(JsonElement.serializer(), rewritten) + "\n")
+                        }
+                    }
+            }
+        }
+        return changes
+    }
+
+    private fun rewriteJsonStrings(element: JsonElement, replacements: Map<String, String>): JsonElement =
+        when (element) {
+            is JsonObject -> JsonObject(element.mapValues { (_, value) -> rewriteJsonStrings(value, replacements) })
+            is JsonArray -> JsonArray(element.map { value -> rewriteJsonStrings(value, replacements) })
+            is JsonPrimitive -> if (element.isString) {
+                replacements[element.contentOrNull]?.let(::JsonPrimitive) ?: element
+            } else {
+                element
+            }
+        }
 
     private fun migrateMobEffectInstanceSaveCalls(source: String): String {
         if (!source.contains("MobEffectInstance") || !source.contains(".save(")) return source
@@ -2160,7 +2418,8 @@ ${codecFields.joinToString(",\n")}
         val fieldName: String,
         val registryName: String,
         val className: String,
-        val constructorArgs: List<String>
+        val constructorArgs: List<String>,
+        val declarationRange: IntRange? = null
     )
 
     private data class LegacyEnchantmentCategorySpec(
@@ -2240,10 +2499,10 @@ ${codecFields.joinToString(",\n")}
             collectLegacyRegistryEntries(javaSources, modIds)
         }
         val itemRegistryEntries = customEnchantmentDataStep("collectLegacyItemRegistryEntries") {
-            collectLegacyItemRegistryEntries(javaSources, modIds)
+            collectLegacyItemRegistryEntries(javaSources, modIds, classSources)
         }
         val categories = customEnchantmentDataStep("collectLegacyEnchantmentCategories") {
-            collectLegacyEnchantmentCategories(javaSources)
+            collectLegacyEnchantmentCategories(javaSources, classSources)
         }
         val registrations = customEnchantmentDataStep("collectLegacyCustomEnchantmentRegistrations") {
             collectLegacyCustomEnchantmentRegistrations(javaSources, modIds, classSources, errors)
@@ -2258,6 +2517,7 @@ ${codecFields.joinToString(",\n")}
         )
         val writtenTags = linkedSetOf<String>()
         val migratedRegistrations = mutableListOf<LegacyCustomEnchantmentRegistration>()
+        val migratedDefinitions = mutableListOf<LegacyEnchantmentDefinition>()
 
         for (registration in registrations) {
             val definition = deriveLegacyEnchantmentDefinition(
@@ -2285,6 +2545,7 @@ ${codecFields.joinToString(",\n")}
                 target.writeText(legacyEnchantmentJson(definition))
             }
             migratedRegistrations += registration
+            migratedDefinitions += definition
 
             for (tag in definition.itemTags) {
                 val tagKey = "${tag.namespace}:${tag.path}"
@@ -2305,7 +2566,149 @@ ${codecFields.joinToString(",\n")}
                 }
             }
         }
+        changes += migrateLegacyRegistrateEnchantmentDeclarations(migratedDefinitions, dryRun)
+        changes += migrateLegacyEnchantmentMarkerInterfaces(
+            definitions = migratedDefinitions,
+            javaFiles = javaFiles,
+            classSources = classSources,
+            errors = errors,
+            dryRun = dryRun
+        )
         return migratedRegistrations
+    }
+
+    private fun migrateLegacyRegistrateEnchantmentDeclarations(
+        definitions: List<LegacyEnchantmentDefinition>,
+        dryRun: Boolean
+    ): List<Change> {
+        val changes = mutableListOf<Change>()
+        definitions
+            .filter { it.registration.declarationRange != null }
+            .groupBy { it.registration.file }
+            .forEach { (file, fileDefinitions) ->
+                val original = file.readText()
+                var migrated = original
+                fileDefinitions.sortedByDescending { it.registration.declarationRange!!.first }.forEach { definition ->
+                    val registration = definition.registration
+                    val range = registration.declarationRange!!
+                    val replacement = """
+public static final net.minecraft.resources.ResourceKey<net.minecraft.world.item.enchantment.Enchantment> ${registration.fieldName} =
+        net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENCHANTMENT,
+                net.minecraft.resources.ResourceLocation.fromNamespaceAndPath("${registration.modId}", "${registration.registryName}"));
+                    """.trimIndent()
+                    migrated = migrated.replaceRange(range, replacement)
+                }
+
+                val removableImports = buildSet {
+                    add(registryEntryOwnerForLegacyEnchantments)
+                    add("net.minecraft.world.entity.EquipmentSlot")
+                    add("net.minecraft.world.item.enchantment.Enchantment.Rarity")
+                    fileDefinitions.forEach { add(it.registration.className) }
+                }
+                removableImports.forEach { owner ->
+                    val simpleName = owner.substringAfterLast('.')
+                    if (!usesSymbolOutsideImports(migrated, simpleName)) {
+                        migrated = removeImportLine(migrated, owner)
+                    }
+                }
+
+                if (migrated != original) {
+                    if (!dryRun) file.writeText(migrated)
+                    changes += Change(
+                        file = file,
+                        line = 1,
+                        description = "Migrate Registrate custom enchantment entries to data-driven ResourceKey constants",
+                        before = "RegistryEntry custom enchantment builder chains",
+                        after = "ResourceKey<Enchantment> constants backed by generated enchantment JSON",
+                        confidence = Confidence.HIGH,
+                        ruleId = "text-registrate-enchantment-resourcekeys"
+                    )
+                }
+            }
+        return changes
+    }
+
+    private val registryEntryOwnerForLegacyEnchantments =
+        "com.tterrag.registrate.util.entry.RegistryEntry"
+
+    private fun migrateLegacyEnchantmentMarkerInterfaces(
+        definitions: List<LegacyEnchantmentDefinition>,
+        javaFiles: List<Path>,
+        classSources: Map<String, List<Pair<Path, String>>>,
+        errors: MutableList<String>,
+        dryRun: Boolean
+    ): List<Change> {
+        val markerOwners = definitions.mapNotNull { definition ->
+            if (definition.itemTags.isEmpty()) return@mapNotNull null
+            val classSource = uniqueLegacyClassSource(definition.registration.className, classSources)?.second
+                ?: return@mapNotNull null
+            val marker = Regex("""stack\.getItem\(\)\s+instanceof\s+([A-Za-z_$][\w$]*)""")
+                .find(maskJavaCommentsAndLiterals(classSource))
+                ?.groupValues
+                ?.get(1)
+                ?: return@mapNotNull null
+            if (!Regex("""\binterface\s+${Regex.escape(marker)}\b""")
+                    .containsMatchIn(maskJavaCommentsAndLiterals(classSource))) {
+                return@mapNotNull null
+            }
+            "${definition.registration.className}.$marker" to marker
+        }.distinct()
+        if (markerOwners.isEmpty()) return emptyList()
+
+        val changes = mutableListOf<Change>()
+        javaFiles.filter { it.exists() }.forEach { file ->
+            val original = file.readText()
+            var migrated = original
+            markerOwners.forEach { (owner, marker) ->
+                val importsMarker = Regex(
+                    """(?m)^\s*import\s+${Regex.escape(owner)}\s*;\s*$"""
+                ).containsMatchIn(migrated)
+                if (!importsMarker && !Regex("""\bimplements\b[^\{;]*\b${Regex.escape(marker)}\b""")
+                        .containsMatchIn(maskJavaCommentsAndLiterals(migrated))) {
+                    return@forEach
+                }
+                val withoutInterface = removeImplementedInterface(migrated, marker) ?: return@forEach
+                val withoutImport = removeImportLine(withoutInterface, owner)
+                if (Regex("""\b${Regex.escape(marker)}\b""")
+                        .containsMatchIn(maskJavaCommentsAndLiterals(withoutImport))) {
+                    errors += "Cannot remove migrated enchantment marker $owner from $file: executable references remain"
+                    return@forEach
+                }
+                migrated = withoutImport
+            }
+            if (migrated != original) {
+                if (!dryRun) file.writeText(migrated)
+                changes += Change(
+                    file = file,
+                    line = 1,
+                    description = "Replace custom enchantment marker-interface membership with generated item-tag membership",
+                    before = "item class implements custom enchantment marker interface",
+                    after = "data/<namespace>/tags/item entry consumed by enchantment supported_items",
+                    confidence = Confidence.HIGH,
+                    ruleId = "text-enchantment-marker-to-item-tag"
+                )
+            }
+        }
+        return changes
+    }
+
+    private fun removeImplementedInterface(source: String, marker: String): String? {
+        val executable = maskJavaCommentsAndLiterals(source)
+        val headerPattern = Regex("""\bclass\s+[A-Za-z_$][\w$]*(?:\s+extends\s+[^\{]+?)?\s+implements\s+([^\{]+)\{""")
+        val matches = headerPattern.findAll(executable).toList()
+        var result = source
+        var changed = false
+        matches.asReversed().forEach { match ->
+            val interfaces = splitTopLevelArguments(source.substring(match.groups[1]!!.range))
+            val retained = interfaces.filterNot { it.trim().substringAfterLast('.') == marker }
+            if (retained.size == interfaces.size) return@forEach
+            val implementsStart = executable.lastIndexOf("implements", match.groups[1]!!.range.first)
+            if (implementsStart < 0) return@forEach
+            val replacement = if (retained.isEmpty()) "" else "implements ${retained.joinToString(", ")} "
+            result = result.replaceRange(implementsStart, match.groups[1]!!.range.last + 1, replacement)
+            changed = true
+        }
+        return result.takeIf { changed }
     }
 
     private fun removeMigratedTopLevelCustomEnchantmentClasses(
@@ -2496,11 +2899,30 @@ ${codecFields.joinToString(",\n")}
         classSources: Map<String, List<Pair<Path, String>>>
     ): String? {
         val trimmed = typeName.trim()
-        if (trimmed.contains('.')) return trimmed
         val context = legacyJavaContext(source)
+        if (trimmed.contains('.')) {
+            if (classSources.containsKey(trimmed)) return trimmed
+            val head = trimmed.substringBefore('.')
+            val suffix = trimmed.substringAfter('.')
+            context.typeImports[head]?.let { importedOwner ->
+                val importedNested = "$importedOwner.$suffix"
+                if (classSources.containsKey(importedNested)) return importedNested
+            }
+            if (context.packageName.isNotBlank()) {
+                val samePackage = "${context.packageName}.$trimmed"
+                if (classSources.containsKey(samePackage)) return samePackage
+            }
+            return null
+        }
         context.typeImports[trimmed]?.let { imported ->
             if (classSources.containsKey(imported)) return imported
         }
+        val localMatches = findJavaTypeDeclarations(source)
+            .filter { declaration -> declaration.kind == "class" && declaration.name == trimmed }
+            .map { declaration -> qualifiedLegacyTypeName(source, declaration) }
+            .filter { classSources.containsKey(it) }
+            .distinct()
+        localMatches.singleOrNull()?.let { return it }
         if (context.packageName.isNotBlank()) {
             val samePackage = "${context.packageName}.$trimmed"
             if (classSources.containsKey(samePackage)) return samePackage
@@ -2606,10 +3028,16 @@ ${codecFields.joinToString(",\n")}
         val result = linkedMapOf<String, MutableList<Pair<Path, String>>>()
         for ((file, source) in javaSources) {
             val packageName = legacyJavaPackageName(source)
-            findJavaTypeDeclarations(source)
-                .filter { it.kind == "class" }
+            val declarations = findJavaTypeDeclarations(source)
+            declarations.filter { it.kind == "class" }
                 .forEach { declaration ->
-                    val className = declaration.name
+                    val owners = declarations
+                        .filter { candidate ->
+                            candidate.openBrace < declaration.start && candidate.closeBrace > declaration.closeBrace
+                        }
+                        .sortedBy { it.openBrace }
+                        .map { it.name }
+                    val className = (owners + declaration.name).joinToString(".")
                     val key = if (packageName.isBlank()) className else "$packageName.$className"
                     result.getOrPut(key) { mutableListOf() }.add(file to source)
                 }
@@ -2722,7 +3150,240 @@ ${codecFields.joinToString(",\n")}
                 }
             }
         }
+        results += collectLegacyRegistrateEnchantmentRegistrations(
+            javaSources = javaSources,
+            modIds = modIds,
+            classSources = classSources,
+            errors = errors
+        )
         return results
+    }
+
+    private fun collectLegacyRegistrateEnchantmentRegistrations(
+        javaSources: List<Pair<Path, String>>,
+        modIds: Map<String, String>,
+        classSources: Map<String, List<Pair<Path, String>>>,
+        errors: MutableList<String>
+    ): List<LegacyCustomEnchantmentRegistration> {
+        val id = """[A-Za-z_$][\w$]*"""
+        val qualifiedId = """$id(?:\.$id)*"""
+        val results = mutableListOf<LegacyCustomEnchantmentRegistration>()
+
+        for ((file, source) in javaSources) {
+            val code = maskJavaComments(source)
+            val executable = maskJavaCommentsAndLiterals(source)
+            if (!executable.contains(".enchantment(") || !executable.contains("RegistryEntry")) continue
+
+            val registrarOwners = Regex(
+                """(?m)\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?$qualifiedId\s+($id)\s*=\s*($qualifiedId)\.registrate\(\s*\)\s*;"""
+            ).findAll(code).associate { it.groupValues[1] to it.groupValues[2] }
+            val declarationPattern = Regex(
+                """(?s)(?:public\s+)?static\s+final\s+RegistryEntry\s*<\s*($qualifiedId)\s*>\s+($id)\s*=\s*($id)\.object\(\s*"([^"]+)"\s*\)(.*?)\.register\(\s*\)\s*;"""
+            )
+
+            for (match in declarationPattern.findAll(code)) {
+                val segment = source.substring(match.range)
+                val executableSegment = executable.substring(match.range)
+                if (!executableSegment.contains("static") ||
+                    !executableSegment.contains("final") ||
+                    !executableSegment.contains(".enchantment(") ||
+                    !executableSegment.contains(".register(")) {
+                    continue
+                }
+                val fieldName = match.groupValues[2]
+                val registrarField = match.groupValues[3]
+                val registrarOwner = registrarOwners[registrarField]
+                if (registrarOwner == null) {
+                    errors += "Cannot derive Registrate custom enchantment ${file.fileName}: registrar '$registrarField' has no explicit owner"
+                    continue
+                }
+                val modId = modIdForRegistrateOwner(
+                    owner = registrarOwner,
+                    referenceSource = source,
+                    modIds = modIds,
+                    classSources = classSources
+                )
+                if (modId == null) {
+                    errors += "Cannot derive Registrate custom enchantment ${file.fileName}: owner '$registrarOwner' has no unique source-declared mod id"
+                    continue
+                }
+                val enchantmentArgs = uniqueFluentCallArguments(segment, "enchantment")
+                val slotArgs = uniqueFluentCallArguments(segment, "addSlots")
+                val rarityArgs = uniqueFluentCallArguments(segment, "rarity")
+                if (enchantmentArgs?.size != 2 || slotArgs.isNullOrEmpty() || rarityArgs?.size != 1) {
+                    errors += "Cannot derive Registrate custom enchantment $fieldName: category, factory, slots, and rarity must be structurally explicit"
+                    continue
+                }
+                val factory = Regex("""^\s*($qualifiedId)::new\s*$""")
+                    .find(enchantmentArgs[1])
+                    ?.groupValues
+                    ?.get(1)
+                if (factory == null) {
+                    errors += "Cannot derive Registrate custom enchantment $fieldName: factory '${enchantmentArgs[1]}' is not a constructor reference"
+                    continue
+                }
+                val resolvedClass = resolveLegacyClassReference(factory, source, classSources)
+                if (resolvedClass == null || resolvedClass.substringAfterLast('.') != match.groupValues[1].substringAfterLast('.')) {
+                    errors += "Cannot derive Registrate custom enchantment $fieldName: declared entry type and constructor owner do not resolve to one class"
+                    continue
+                }
+                val ownerClass = javaTypeNameContainingOffset(code, match.range.first)
+                if (ownerClass == null) {
+                    errors += "Cannot derive Registrate custom enchantment $fieldName: declaring Java type is unresolved"
+                    continue
+                }
+                results += LegacyCustomEnchantmentRegistration(
+                    file = file,
+                    ownerPackage = legacyJavaPackageName(source),
+                    ownerClass = ownerClass,
+                    modId = modId,
+                    fieldName = fieldName,
+                    registryName = match.groupValues[4],
+                    className = resolvedClass,
+                    constructorArgs = listOf(
+                        rarityArgs.single(),
+                        enchantmentArgs.first(),
+                        "new EquipmentSlot[] { ${slotArgs.joinToString(", ")} }"
+                    ),
+                    declarationRange = match.range
+                )
+            }
+        }
+        return results
+    }
+
+    private fun uniqueFluentCallArguments(source: String, methodName: String): List<String>? {
+        val executable = maskJavaCommentsAndLiterals(source)
+        val calls = Regex("""\.${Regex.escape(methodName)}\s*\(""").findAll(executable).toList()
+        if (calls.size != 1) return null
+        val openParen = executable.indexOf('(', calls.single().range.first)
+        val closeParen = findMatchingDelimiter(executable, openParen, '(', ')')
+        if (openParen < 0 || closeParen <= openParen) return null
+        return splitTopLevelArguments(source.substring(openParen + 1, closeParen))
+    }
+
+    private fun modIdForRegistrateOwner(
+        owner: String,
+        referenceSource: String,
+        modIds: Map<String, String>,
+        classSources: Map<String, List<Pair<Path, String>>>
+    ): String? {
+        val resolvedOwner = resolveLegacyClassReference(owner, referenceSource, classSources) ?: return null
+        val (_, ownerSource) = uniqueLegacyClassSource(resolvedOwner, classSources) ?: return null
+        val ownerSimpleName = resolvedOwner.substringAfterLast('.')
+        val accessorReturn = staticNoArgMethodReturnExpression(
+            source = ownerSource,
+            ownerSimpleName = ownerSimpleName,
+            methodName = "registrate"
+        ) ?: return null
+        val registrarInitializer = staticFieldInitializerFromReturn(
+            source = ownerSource,
+            ownerFqn = resolvedOwner,
+            returnedExpression = accessorReturn
+        ) ?: accessorReturn.takeIf { span ->
+            Regex("""^\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.create\s*\(""")
+                .containsMatchIn(maskJavaCommentsAndLiterals(span.text))
+        } ?: return null
+        return registrateCreationModId(registrarInitializer, ownerSource, modIds)
+    }
+
+    private fun staticNoArgMethodReturnExpression(
+        source: String,
+        ownerSimpleName: String,
+        methodName: String
+    ): LegacySourceSpan? {
+        val executable = maskJavaCommentsAndLiterals(source)
+        val methodToken = Regex("""(?<![\w$])${Regex.escape(methodName)}(?![\w$])""")
+        val returns = mutableListOf<LegacySourceSpan>()
+        for (token in methodToken.findAll(executable)) {
+            if (javaTypeNameContainingOffset(executable, token.range.first) != ownerSimpleName) continue
+            val openParen = executable.indexOf('(', token.range.last + 1)
+            if (openParen < 0 || executable.substring(token.range.last + 1, openParen).isNotBlank()) continue
+            val closeParen = findMatchingDelimiter(executable, openParen, '(', ')')
+            if (closeParen <= openParen || executable.substring(openParen + 1, closeParen).isNotBlank()) continue
+            val previousDelimiter = listOf(';', '{', '}')
+                .maxOf { delimiter -> executable.lastIndexOf(delimiter, token.range.first - 1) }
+            val prefix = executable.substring(previousDelimiter + 1, token.range.first)
+            if (!Regex("""\bstatic\b""").containsMatchIn(prefix)) continue
+            val openBrace = executable.indexOf('{', closeParen + 1)
+            if (openBrace < 0 || executable.substring(closeParen + 1, openBrace).isNotBlank()) continue
+            val closeBrace = findMatchingBrace(executable, openBrace)
+            if (closeBrace <= openBrace) continue
+            val body = executable.substring(openBrace + 1, closeBrace)
+            val returnMatches = Regex("""\breturn\s+([^;]+?)\s*;""").findAll(body).toList()
+            val returned = returnMatches.singleOrNull() ?: continue
+            val expressionRange = returned.groups[1]?.range ?: continue
+            val start = openBrace + 1 + expressionRange.first
+            val endExclusive = openBrace + 1 + expressionRange.last + 1
+            returns += LegacySourceSpan(source.substring(start, endExclusive), start)
+        }
+        return returns.singleOrNull()
+    }
+
+    private fun staticFieldInitializerFromReturn(
+        source: String,
+        ownerFqn: String,
+        returnedExpression: LegacySourceSpan
+    ): LegacySourceSpan? {
+        val ownerSimpleName = ownerFqn.substringAfterLast('.')
+        val field = Regex(
+            """^(?:(?:${Regex.escape(ownerFqn)}|${Regex.escape(ownerSimpleName)})\.)?([A-Za-z_$][\w$]*)$"""
+        ).matchEntire(returnedExpression.text.trim())?.groupValues?.get(1) ?: return null
+        val executable = maskJavaCommentsAndLiterals(source)
+        val declaration = Regex(
+            """(?m)^[ \t]*((?:(?:public|protected|private|static|final)\s+)+[A-Za-z_$][\w$<>,.? \t]*\s+)${Regex.escape(field)}\s*="""
+        ).findAll(executable)
+            .filter { match ->
+                val modifiersAndType = match.groupValues[1]
+                Regex("""\bstatic\b""").containsMatchIn(modifiersAndType) &&
+                    Regex("""\bfinal\b""").containsMatchIn(modifiersAndType) &&
+                    javaTypeNameContainingOffset(executable, match.range.first) == ownerSimpleName
+            }
+            .singleOrNull() ?: return null
+        val initializerStart = declaration.range.last + 1
+        val semicolon = findJavaStatementSemicolon(executable, initializerStart)
+        if (semicolon <= initializerStart) return null
+        return LegacySourceSpan(source.substring(initializerStart, semicolon), initializerStart)
+    }
+
+    private fun registrateCreationModId(
+        initializer: LegacySourceSpan,
+        ownerSource: String,
+        modIds: Map<String, String>
+    ): String? {
+        val executable = maskJavaCommentsAndLiterals(initializer.text)
+        val creation = Regex(
+            """^\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.create\s*\("""
+        ).find(executable) ?: return null
+        val openParen = executable.indexOf('(', creation.range.first)
+        val closeParen = findMatchingDelimiter(executable, openParen, '(', ')')
+        if (closeParen <= openParen) return null
+        val arguments = splitTopLevelArguments(initializer.text.substring(openParen + 1, closeParen))
+        val modIdExpression = arguments.singleOrNull() ?: return null
+        return resolveLegacyModIdExpression(
+            expression = modIdExpression,
+            modIds = modIds,
+            source = ownerSource,
+            offset = initializer.offset + openParen + 1
+        )
+    }
+
+    private fun findJavaStatementSemicolon(executableSource: String, start: Int): Int {
+        var parenDepth = 0
+        var braceDepth = 0
+        var bracketDepth = 0
+        for (index in start until executableSource.length) {
+            when (executableSource[index]) {
+                '(' -> parenDepth++
+                ')' -> if (parenDepth > 0) parenDepth--
+                '{' -> braceDepth++
+                '}' -> if (braceDepth > 0) braceDepth-- else return -1
+                '[' -> bracketDepth++
+                ']' -> if (bracketDepth > 0) bracketDepth--
+                ';' -> if (parenDepth == 0 && braceDepth == 0 && bracketDepth == 0) return index
+            }
+        }
+        return -1
     }
 
     private fun resolveLegacyModIdExpression(
@@ -2754,7 +3415,8 @@ ${codecFields.joinToString(",\n")}
     }
 
     private fun collectLegacyEnchantmentCategories(
-        javaSources: List<Pair<Path, String>>
+        javaSources: List<Pair<Path, String>>,
+        classSources: Map<String, List<Pair<Path, String>>>
     ): LegacyReferenceIndex<LegacyEnchantmentCategorySpec> {
         val id = """[A-Za-z_$][\w$]*"""
         val categoryPattern = Regex(
@@ -2774,11 +3436,16 @@ ${codecFields.joinToString(",\n")}
                     !executableSegment.contains("instanceof")) continue
                 val ownerClass = javaTypeNameContainingOffset(code, match.range.first)
                     ?: continue
+                val itemClassName = canonicalLegacyTypeReference(
+                    typeName = match.groupValues[2],
+                    source = source,
+                    classSources = classSources
+                )
                 val spec = LegacyEnchantmentCategorySpec(
                     ownerPackage = ownerPackage,
                     ownerClass = ownerClass,
                     fieldName = match.groupValues[1],
-                    itemClassName = match.groupValues[2]
+                    itemClassName = itemClassName
                 )
                 categories += spec
             }
@@ -2852,13 +3519,23 @@ ${codecFields.joinToString(",\n")}
 
     private fun collectLegacyItemRegistryEntries(
         javaSources: List<Pair<Path, String>>,
-        modIds: Map<String, String>
+        modIds: Map<String, String>,
+        classSources: Map<String, List<Pair<Path, String>>>
     ): Map<String, List<String>> {
         val id = """[A-Za-z_$][\w$]*"""
+        val qualifiedId = """$id(?:\.$id)*"""
         val registerPattern = Regex(
             """(?s)DeferredRegister\s*<\s*Item\s*>\s+($id)\s*=\s*DeferredRegister\.create\(\s*[^,]+,\s*([^)]+?)\s*\)\s*;"""
         )
         val results = linkedMapOf<String, MutableList<String>>()
+
+        fun recordItem(typeName: String, source: String, itemId: String) {
+            val resolvedType = canonicalLegacyTypeReference(typeName, source, classSources) ?: return
+            legacyItemTypeLineage(resolvedType, classSources).forEach { type ->
+                results.getOrPut(type) { mutableListOf() }.add(itemId)
+            }
+        }
+
         for ((_, source) in javaSources) {
             val code = maskJavaComments(source)
             val executableCode = maskJavaCommentsAndLiterals(source)
@@ -2882,11 +3559,167 @@ ${codecFields.joinToString(",\n")}
                     if (!entrySegment.contains(registerField) ||
                         !entrySegment.contains(".register(") ||
                         !entrySegment.contains("new")) continue
-                    results.getOrPut(entryMatch.groupValues[2]) { mutableListOf() }.add("$modId:${entryMatch.groupValues[1]}")
+                    recordItem(
+                        typeName = entryMatch.groupValues[2],
+                        source = source,
+                        itemId = "$modId:${entryMatch.groupValues[1]}"
+                    )
                 }
             }
+
+            if (!executableCode.contains(".item(")) continue
+            val registrarOwners = Regex(
+                """(?m)\b(?:public|protected|private)?\s*(?:static\s+)?(?:final\s+)?$qualifiedId\s+($id)\s*=\s*($qualifiedId)\.registrate\(\s*\)\s*;"""
+            ).findAll(executableCode).associate { it.groupValues[1] to it.groupValues[2] }
+            val itemCallPattern = Regex("""\b($id)\s*\.item\s*\(""")
+            for (itemCall in itemCallPattern.findAll(executableCode)) {
+                val registrarField = itemCall.groupValues[1]
+                val registrarOwner = registrarOwners[registrarField] ?: continue
+                val modId = modIdForRegistrateOwner(
+                    owner = registrarOwner,
+                    referenceSource = source,
+                    modIds = modIds,
+                    classSources = classSources
+                ) ?: continue
+                val openParen = executableCode.indexOf('(', itemCall.range.first)
+                val closeParen = findMatchingDelimiter(executableCode, openParen, '(', ')')
+                if (closeParen <= openParen) continue
+                val chainEnd = findFluentChainTerminator(executableCode, closeParen + 1)
+                if (chainEnd <= closeParen) continue
+                val chain = executableCode.substring(closeParen + 1, chainEnd)
+                if (!Regex("""\.register\s*\(\s*\)""").containsMatchIn(chain)) continue
+                val arguments = splitTopLevelArguments(source.substring(openParen + 1, closeParen))
+                if (arguments.size != 2) continue
+                val registryName = Regex("""^\s*"([a-z0-9_.-]+)"\s*$""")
+                    .matchEntire(arguments[0])
+                    ?.groupValues
+                    ?.get(1)
+                    ?: continue
+                val itemType = legacyItemFactoryType(arguments[1]) ?: continue
+                recordItem(itemType, source, "$modId:$registryName")
+            }
         }
-        return results
+        return results.mapValues { (_, ids) -> ids.distinct() }
+    }
+
+    private fun legacyItemFactoryType(factory: String): String? {
+        val id = """[A-Za-z_$][\w$]*"""
+        val qualifiedId = """$id(?:\.$id)*"""
+        Regex("""^\s*($qualifiedId)::new\s*$""")
+            .matchEntire(factory)
+            ?.let { return it.groupValues[1] }
+        return Regex("""(?:^|->)\s*new\s+($qualifiedId)\s*\(""")
+            .find(factory)
+            ?.groupValues
+            ?.get(1)
+    }
+
+    private fun findFluentChainTerminator(executableSource: String, start: Int): Int {
+        var parenDepth = 0
+        var braceDepth = 0
+        var bracketDepth = 0
+        for (index in start until executableSource.length) {
+            when (executableSource[index]) {
+                '(' -> parenDepth++
+                ')' -> if (parenDepth > 0) parenDepth--
+                '{' -> braceDepth++
+                '}' -> if (braceDepth > 0) braceDepth-- else return -1
+                '[' -> bracketDepth++
+                ']' -> if (bracketDepth > 0) bracketDepth--
+                ',', ';' -> if (parenDepth == 0 && braceDepth == 0 && bracketDepth == 0) return index
+            }
+        }
+        return -1
+    }
+
+    private fun legacyItemTypeLineage(
+        itemType: String,
+        classSources: Map<String, List<Pair<Path, String>>>
+    ): Set<String> {
+        val lineage = linkedSetOf<String>()
+
+        fun visit(typeName: String) {
+            if (!lineage.add(typeName)) return
+            val source = classSources[typeName]?.singleOrNull()?.second ?: return
+            val declarations = findJavaTypeDeclarations(source)
+            val declaration = declarations.singleOrNull { declaration ->
+                declaration.kind == "class" &&
+                    qualifiedLegacyTypeName(source, declaration, declarations) == typeName
+            } ?: return
+            val header = maskJavaCommentsAndLiterals(source.substring(declaration.start, declaration.openBrace))
+            val superTypes = mutableListOf<String>()
+            Regex("""\bextends\s+([A-Za-z_$][\w$.]*(?:\s*<[^>{}]+>)?)""")
+                .find(header)
+                ?.groupValues
+                ?.get(1)
+                ?.let(superTypes::add)
+            Regex("""\bimplements\s+(.+)$""")
+                .find(header)
+                ?.groupValues
+                ?.get(1)
+                ?.let { implemented -> superTypes += splitTopLevelArguments(implemented) }
+            superTypes.mapNotNull { superType ->
+                canonicalLegacyTypeReference(
+                    typeName = superType.substringBefore('<').trim(),
+                    source = source,
+                    classSources = classSources
+                )
+            }.forEach(::visit)
+        }
+
+        visit(itemType)
+        return lineage
+    }
+
+    private fun canonicalLegacyTypeReference(
+        typeName: String,
+        source: String,
+        classSources: Map<String, List<Pair<Path, String>>>
+    ): String? {
+        val type = typeName.trim().removeSuffix("[]").substringBefore('<').trim()
+        if (!Regex("""[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*""").matches(type)) return null
+        val context = legacyJavaContext(source)
+        val declarations = findJavaTypeDeclarations(source)
+
+        if (type.contains('.')) {
+            val head = type.substringBefore('.')
+            val suffix = type.substringAfter('.', "")
+            context.typeImports[head]?.let { imported -> return "$imported.$suffix" }
+            if (head.firstOrNull()?.isLowerCase() == true) return type
+            if (context.packageName.isNotBlank()) return "${context.packageName}.$type"
+            return type
+        }
+
+        context.typeImports[type]?.let { return it }
+        declarations
+            .filter { it.name == type }
+            .map { qualifiedLegacyTypeName(source, it, declarations) }
+            .distinct()
+            .singleOrNull()
+            ?.let { return it }
+        val wildcardMatches = context.wildcardImports
+            .map { packageName -> "$packageName.$type" }
+            .filter { classSources.containsKey(it) }
+            .distinct()
+        if (wildcardMatches.size == 1) return wildcardMatches.single()
+        if (context.packageName.isNotBlank()) return "${context.packageName}.$type"
+        return type
+    }
+
+    private fun qualifiedLegacyTypeName(
+        source: String,
+        declaration: JavaTypeDeclaration,
+        declarations: List<JavaTypeDeclaration> = findJavaTypeDeclarations(source)
+    ): String {
+        val owners = declarations
+            .filter { candidate ->
+                candidate.openBrace < declaration.start && candidate.closeBrace > declaration.closeBrace
+            }
+            .sortedBy { it.openBrace }
+            .map { it.name }
+        val localName = (owners + declaration.name).joinToString(".")
+        val packageName = legacyJavaPackageName(source)
+        return if (packageName.isBlank()) localName else "$packageName.$localName"
     }
 
     private fun deriveLegacyEnchantmentDefinition(
@@ -2904,24 +3737,40 @@ ${codecFields.joinToString(",\n")}
             errors.add("Cannot derive custom enchantment data for ${registration.className}: constructor super arguments are not structural")
             return null
         }
+        val constructorBindings = legacyConstructorArgumentBindings(
+            source,
+            registration.className,
+            registration.constructorArgs
+        )
 
-        val rarity = resolveLegacyRarity(registration.constructorArgs, superArgs[0].text)
+        val rarityExpression = constructorBindings[superArgs[0].text.trim()] ?: superArgs[0].text
+        val rarity = resolveLegacyRarity(registration.constructorArgs, rarityExpression)
         if (rarity == null) {
             errors.add("Cannot derive custom enchantment data for ${registration.className}: rarity is unresolved")
             return null
         }
 
-        val slots = parseLegacyEquipmentSlots(superArgs[2].text)
+        val slotsExpression = constructorBindings[superArgs[2].text.trim()] ?: superArgs[2].text
+        val slots = parseLegacyEquipmentSlots(slotsExpression)
         if (slots.isEmpty()) {
             errors.add("Cannot derive custom enchantment data for ${registration.className}: equipment slots are unresolved")
             return null
         }
 
+        val registrationSource = registration.file.readText()
+        val boundCategory = constructorBindings[superArgs[1].text.trim()]
+        val categoryExpression = if (boundCategory != null) {
+            LegacyExpression(boundCategory, registration.declarationRange?.first ?: 0)
+        } else {
+            superArgs[1]
+        }
         val itemTarget = deriveLegacyEnchantmentItemTarget(
             registration = registration,
             source = source,
-            categoryExpression = superArgs[1],
+            categoryExpression = categoryExpression,
+            categoryReferenceSource = if (boundCategory != null) registrationSource else source,
             categories = categories,
+            classSources = classSources,
             itemRegistryEntries = itemRegistryEntries,
             slots = slots,
             errors = errors
@@ -2970,7 +3819,9 @@ ${codecFields.joinToString(",\n")}
         registration: LegacyCustomEnchantmentRegistration,
         source: String,
         categoryExpression: LegacyExpression,
+        categoryReferenceSource: String,
         categories: LegacyReferenceIndex<LegacyEnchantmentCategorySpec>,
+        classSources: Map<String, List<Pair<Path, String>>>,
         itemRegistryEntries: Map<String, List<String>>,
         slots: List<String>,
         errors: MutableList<String>
@@ -2984,15 +3835,37 @@ ${codecFields.joinToString(",\n")}
             return armorLegacyItemTarget(slots)
         }
         if (canEnchantItemClass != null) {
-            return customItemLegacyTarget(registration, canEnchantItemClass, itemRegistryEntries, slots, errors)
+            return customItemLegacyTarget(
+                registration,
+                legacyItemSupportClasses(
+                    supportType = canEnchantItemClass,
+                    supportSource = source,
+                    classSources = classSources,
+                    itemRegistryEntries = itemRegistryEntries
+                ),
+                itemRegistryEntries,
+                slots,
+                errors
+            )
         }
 
         val category = categoryExpression.text.trim()
         legacyVanillaEnchantmentCategoryTarget(category, slots)?.let { return it }
 
-        val customCategory = resolveLegacyReferenceExpression(category, source, categoryExpression.offset, categories)
+        val customCategory = resolveLegacyReferenceExpression(
+            category,
+            categoryReferenceSource,
+            categoryExpression.offset,
+            categories
+        )
         if (customCategory?.itemClassName != null) {
-            return customItemLegacyTarget(registration, customCategory.itemClassName, itemRegistryEntries, slots, errors)
+            return customItemLegacyTarget(
+                registration,
+                setOf(customCategory.itemClassName),
+                itemRegistryEntries,
+                slots,
+                errors
+            )
         }
 
         errors.add("Cannot derive custom enchantment data for ${registration.className}: item support expression '${categoryExpression.text}' is unresolved")
@@ -3061,16 +3934,16 @@ ${codecFields.joinToString(",\n")}
 
     private fun customItemLegacyTarget(
         registration: LegacyCustomEnchantmentRegistration,
-        itemClassName: String,
+        itemClassNames: Set<String>,
         itemRegistryEntries: Map<String, List<String>>,
         slots: List<String>,
         errors: MutableList<String>
     ): LegacyItemTarget? {
-        val itemIds = itemRegistryEntries[itemClassName].orEmpty()
+        val itemIds = itemClassNames.flatMap { itemClassName -> itemRegistryEntries[itemClassName].orEmpty() }
             .filter { it.substringBefore(':') == registration.modId }
             .distinct()
         if (itemIds.isEmpty()) {
-            errors.add("Cannot derive custom enchantment data for ${registration.className}: item class '$itemClassName' has no source registry entry")
+            errors.add("Cannot derive custom enchantment data for ${registration.className}: item classes '${itemClassNames.joinToString()}' have no source registry entry")
             return null
         }
         val tagPath = if (itemIds.size == 1) {
@@ -3085,6 +3958,16 @@ ${codecFields.joinToString(",\n")}
             slotGroups = slotGroupsForLegacySlots(slots, customHand = true),
             itemTags = listOf(tag)
         )
+    }
+
+    private fun legacyItemSupportClasses(
+        supportType: String,
+        supportSource: String,
+        classSources: Map<String, List<Pair<Path, String>>>,
+        itemRegistryEntries: Map<String, List<String>>
+    ): Set<String> {
+        val resolved = canonicalLegacyTypeReference(supportType, supportSource, classSources) ?: return emptySet()
+        return setOf(resolved).filterTo(linkedSetOf()) { itemRegistryEntries.containsKey(it) }
     }
 
     private fun slotGroupsForLegacySlots(slots: List<String>, customHand: Boolean): List<String> {
@@ -3121,6 +4004,27 @@ ${codecFields.joinToString(",\n")}
             body.substring(openParen + 1, closeParen),
             baseOffset = openBrace + 1 + openParen + 1
         )
+    }
+
+    private fun legacyConstructorArgumentBindings(
+        source: String,
+        className: String,
+        constructorArgs: List<String>
+    ): Map<String, String> {
+        if (constructorArgs.isEmpty()) return emptyMap()
+        val executable = maskJavaCommentsAndLiterals(source)
+        val constructorName = Regex.escape(className.substringAfterLast('.'))
+        val declaration = Regex("""\b$constructorName\s*\(""").find(executable) ?: return emptyMap()
+        val openParen = executable.indexOf('(', declaration.range.first)
+        val closeParen = findMatchingDelimiter(executable, openParen, '(', ')')
+        if (openParen < 0 || closeParen <= openParen) return emptyMap()
+        val parameters = splitTopLevelArguments(source.substring(openParen + 1, closeParen))
+        if (parameters.size != constructorArgs.size) return emptyMap()
+        val parameterNames = parameters.map { parameter ->
+            Regex("""([A-Za-z_$][\w$]*)\s*$""").find(parameter.trim())?.groupValues?.get(1)
+                ?: return emptyMap()
+        }
+        return parameterNames.zip(constructorArgs).toMap()
     }
 
     private fun resolveLegacyRarity(constructorArgs: List<String>, rarityExpression: String): String? {
@@ -3724,7 +4628,7 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         val errors: List<String>
     )
 
-    private fun migrateNetworkHooksOpenScreen(source: String, file: Path): NetworkHooksOpenScreenMigration {
+    private fun migrateNetworkHooksOpenScreen(source: String, file: Path, projectDir: Path): NetworkHooksOpenScreenMigration {
         val executableCode = maskJavaCommentsAndLiterals(source)
         if (!executableCode.contains("NetworkHooks.openScreen")) {
             return NetworkHooksOpenScreenMigration(source, emptyList(), emptyList())
@@ -3759,7 +4663,7 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
                     when {
                         isNetworkHooksExtraDataWriter(extraData, source) ->
                             "(${args[0]}).openMenu(${args[1]}, $extraData)"
-                        isNetworkHooksBlockPosExtra(extraData, source) ->
+                        isNetworkHooksBlockPosExtra(extraData, source, file, projectDir) ->
                             "(${args[0]}).openMenu(${args[1]}, buf -> buf.writeBlockPos($extraData))"
                         else -> null
                     }
@@ -3793,6 +4697,53 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
 
         out.append(source, cursor, source.length)
         return NetworkHooksOpenScreenMigration(out.toString(), changes, errors)
+    }
+
+    private fun migrateLegacyGuiOverlayRenderContext(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!Regex("""\bimplements\s+IGuiOverlay\b""").containsMatchIn(executableCode)) return source
+
+        val signature = Regex(
+            """public\s+void\s+render\(\s*(?:ForgeGui|ExtendedGui|Gui)\s+([A-Za-z_$][\w$]*)\s*,\s*GuiGraphics\s+[A-Za-z_$][\w$]*\s*,\s*float\s+[A-Za-z_$][\w$]*\s*,\s*int\s+[A-Za-z_$][\w$]*\s*,\s*int\s+[A-Za-z_$][\w$]*\s*\)\s*\{"""
+        )
+        val matches = signature.findAll(executableCode).toList()
+        if (matches.isEmpty()) return source
+
+        var result = source
+        for (match in matches.asReversed()) {
+            val openBrace = match.range.last
+            val closeBrace = findMatchingBrace(executableCode, openBrace)
+            if (closeBrace <= openBrace) continue
+            val guiParameter = match.groupValues[1]
+            val bodyStart = openBrace + 1
+            val body = result.substring(bodyStart, closeBrace)
+            val migratedBody = replaceExecutableRegex(
+                body,
+                Regex("""\b${Regex.escape(guiParameter)}\b""")
+            ) { "net.minecraft.client.Minecraft.getInstance().gui" }
+            if (migratedBody != body) {
+                result = result.substring(0, bodyStart) + migratedBody + result.substring(closeBrace)
+            }
+        }
+        return result
+    }
+
+    private fun migrateLegacyGuiOverlayType(source: String): String {
+        val legacyOwners = listOf(
+            "net.minecraftforge.client.gui.overlay.IGuiOverlay",
+            "net.neoforged.neoforge.client.gui.overlay.IGuiOverlay"
+        )
+        val executable = maskJavaCommentsAndLiterals(source)
+        val importedOwner = legacyOwners.firstOrNull { owner ->
+            Regex("""(?m)^\s*import\s+${Regex.escape(owner)}\s*;""").containsMatchIn(executable)
+        } ?: return source
+
+        var result = replaceExecutableRegex(
+            source,
+            Regex("""(?m)^([ \t]*)import\s+${Regex.escape(importedOwner)}\s*;""")
+        ) { match -> "${match.groupValues[1]}import net.minecraft.client.gui.LayeredDraw;" }
+        result = replaceExecutableRegex(result, Regex("""\bIGuiOverlay\b""")) { "LayeredDraw.Layer" }
+        return result
     }
 
     private fun migrateInventoryRecipeHolderInterface(source: String): String {
@@ -3924,7 +4875,12 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
             .containsMatchIn(executableCode)
     }
 
-    private fun isNetworkHooksBlockPosExtra(expression: String, source: String): Boolean {
+    private fun isNetworkHooksBlockPosExtra(
+        expression: String,
+        source: String,
+        file: Path,
+        projectDir: Path
+    ): Boolean {
         val trimmed = stripOuterParentheses(expression.trim())
         if (trimmed.startsWith("new BlockPos(") ||
             trimmed.startsWith("new net.minecraft.core.BlockPos(") ||
@@ -3935,8 +4891,49 @@ public static boolean $methodName(net.minecraft.core.Holder<Enchantment> $paramN
         }
         val identifier = Regex("""^[A-Za-z_$][\w$]*$""").matchEntire(trimmed)?.value ?: return false
         val executableCode = maskJavaCommentsAndLiterals(source)
-        return Regex("""\b(?:net\.minecraft\.core\.)?BlockPos\s+${Regex.escape(identifier)}\b""")
-            .containsMatchIn(executableCode)
+        if (Regex("""\b(?:net\.minecraft\.core\.)?BlockPos\s+${Regex.escape(identifier)}\b""")
+                .containsMatchIn(executableCode)) {
+            return true
+        }
+        return identifier == "worldPosition" && enclosingTypeInheritsMinecraftBlockEntity(file, projectDir)
+    }
+
+    private fun enclosingTypeInheritsMinecraftBlockEntity(file: Path, projectDir: Path): Boolean {
+        val sourceRoot = projectDir.resolve("src/main/java")
+        if (!file.startsWith(sourceRoot) || !sourceRoot.exists()) return false
+
+        val sourceCache = mutableMapOf<Path, String>()
+        val visited = mutableSetOf<Path>()
+        var currentFile = file
+        repeat(32) {
+            if (!visited.add(currentFile)) return false
+            val currentSource = sourceCache.getOrPut(currentFile) { currentFile.readText() }
+            val executableCode = maskJavaCommentsAndLiterals(currentSource)
+            val superclass = Regex(
+                """\b(?:class|record)\s+[A-Za-z_$][\w$]*(?:\s*<[^>{}]*>)?\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)"""
+            ).find(executableCode)?.groupValues?.get(1) ?: return false
+            if (superclass == "BlockEntity" || superclass == "net.minecraft.world.level.block.entity.BlockEntity") {
+                return true
+            }
+
+            val packageName = Regex("""(?m)^\s*package\s+([A-Za-z_$][\w$.]*)\s*;""")
+                .find(executableCode)?.groupValues?.get(1).orEmpty()
+            val imports = Regex("""(?m)^\s*import\s+([A-Za-z_$][\w$.]*)\s*;""")
+                .findAll(executableCode)
+                .associate { it.groupValues[1].substringAfterLast('.') to it.groupValues[1] }
+            val superclassFqn = when {
+                '.' in superclass -> superclass
+                superclass in imports -> imports.getValue(superclass)
+                packageName.isNotEmpty() -> "$packageName.$superclass"
+                else -> return false
+            }
+            if (superclassFqn == "net.minecraft.world.level.block.entity.BlockEntity") return true
+
+            val candidate = sourceRoot.resolve(superclassFqn.replace('.', '/') + ".java")
+            if (!candidate.exists()) return false
+            currentFile = candidate
+        }
+        return false
     }
 
     private fun stripOuterParentheses(expression: String): String {

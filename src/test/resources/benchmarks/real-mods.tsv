@@ -8,6 +8,8 @@ twilightforest	Twilight Forest	git	https://github.com/TeamTwilight/twilightfores
 aether	The Aether	git	https://github.com/The-Aether-Team/The-Aether.git	1.20.1-develop	.	true	-
 beyondtheveil	Beyond the Veil	git	https://github.com/valeriotor/Beyond-The-Veil.git	1.20	.	true	-
 starmeowcraft	StarMeowCraft	git	https://github.com/rawchickenNEG/StarMeowCraft.git	master	.	true	-
+create	Create	git	https://github.com/Creators-of-Create/Create.git	mc1.20.1/dev	.	true	-
+worldedit	WorldEdit	git	https://github.com/EngineHub/WorldEdit.git	b04ab0e267285e51bcc064a25cf429f10f9b4aba	.	true	-
 radios	Radios	missing	-	-	.	false	-
 leaningtower	LeaningTower	missing	-	-	.	false	-
 villagertourism	VillagerTourism	missing	-	-	.	false	-

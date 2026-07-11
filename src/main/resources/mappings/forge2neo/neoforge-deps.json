@@ -340,19 +340,113 @@
       "modrinthSlug": "flywheel",
       "neoforgeCoords": [
         { "config": "compileOnly", "coord": "dev.engine-room.flywheel:flywheel-neoforge-api-1.21.1:1.0.6" },
-        { "config": "runtimeOnly", "coord": "dev.engine-room.flywheel:flywheel-neoforge-1.21.1:1.0.6" }
+        { "config": "runtimeOnly", "coord": "dev.engine-room.flywheel:flywheel-neoforge-1.21.1:1.0.6", "wrapper": "jarJar" }
       ],
       "mavenUrl": "https://maven.createmod.net",
-      "status": "unavailable",
-      "notes": "Flywheel: NeoForge 1.21.1 exists but is typically bundled with Create; standalone coordinate intentionally unavailable"
+      "status": "available",
+      "notes": "Flywheel publishes separate NeoForge 1.21.1 API and runtime artifacts"
     },
     {
       "forgePrefix": "net.createmod.ponder",
       "modrinthSlug": null,
-      "neoforgeCoords": [],
-      "mavenUrl": null,
-      "status": "unavailable",
-      "notes": "Ponder: part of Create ecosystem, exclude when Create is excluded"
+      "neoforgeCoords": [
+        { "config": "implementation", "coord": "net.createmod.ponder:ponder-neoforge:1.0.82+mc1.21.1", "wrapper": "jarJar" }
+      ],
+      "mavenUrl": "https://maven.createmod.net",
+      "status": "available",
+      "notes": "Ponder publishes a loader-specific NeoForge artifact with the Minecraft version encoded in its version"
+    },
+    {
+      "forgePrefix": "com.tterrag.registrate:Registrate",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "implementation", "coord": "com.tterrag.registrate:Registrate:MC1.21-1.3.0+67", "wrapper": "jarJar" }
+      ],
+      "mavenUrl": "https://maven.ithundxr.dev/snapshots",
+      "status": "available",
+      "notes": "Registrate publishes its Minecraft 1.21 line in the public snapshots repository"
+    },
+    {
+      "forgePrefix": "dev.engine-room.vanillin",
+      "modrinthSlug": null,
+      "neoforgeCoords": [
+        { "config": "runtimeOnly", "coord": "dev.engine-room.vanillin:vanillin-neoforge-1.21.1:1.1.3-41" }
+      ],
+      "mavenUrl": "https://maven.createmod.net",
+      "status": "available",
+      "notes": "Vanillin publishes a loader-specific NeoForge 1.21.1 runtime artifact"
+    },
+    {
+      "forgePrefix": "cc.tweaked:cc-tweaked",
+      "modrinthSlug": "cc-tweaked",
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "cc.tweaked:cc-tweaked-1.21.1-core-api:1.116.1" },
+        { "config": "compileOnly", "coord": "cc.tweaked:cc-tweaked-1.21.1-forge-api:1.116.1" },
+        { "config": "runtimeOnly", "coord": "cc.tweaked:cc-tweaked-1.21.1-forge:1.116.1" }
+      ],
+      "mavenUrl": "https://maven.squiddev.cc",
+      "status": "available",
+      "notes": "CC:Tweaked 1.21.1 retains separate core API, Forge-compatible API, and runtime artifacts"
+    },
+    {
+      "forgePrefix": "com.ferreusveritas.dynamictrees:DynamicTrees",
+      "modrinthSlug": "dynamic-trees",
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "com.dtteam.dynamictrees:dynamictrees-neoforge-1.21.1:1.7.2" }
+      ],
+      "mavenUrl": "https://harleyoconnor.com/maven",
+      "status": "replacement",
+      "replacementFor": "com.ferreusveritas.dynamictrees:DynamicTrees",
+      "replacementPolicy": "official-loader-artifact-and-group-rename",
+      "notes": "Dynamic Trees moved to the com.dtteam.dynamictrees group and publishes a loader-specific NeoForge 1.21.1 artifact"
+    },
+    {
+      "forgePrefix": "dev.architectury:architectury-forge",
+      "modrinthSlug": "architectury-api",
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "dev.architectury:architectury-neoforge:13.0.8" }
+      ],
+      "mavenUrl": "https://maven.architectury.dev",
+      "status": "replacement",
+      "replacementFor": "dev.architectury:architectury-forge",
+      "replacementPolicy": "official-loader-artifact-rename",
+      "notes": "Architectury publishes a loader-specific NeoForge 1.21.1 artifact"
+    },
+    {
+      "forgePrefix": "dev.ftb.mods:ftb-chunks-forge",
+      "modrinthSlug": "ftb-chunks",
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "dev.ftb.mods:ftb-chunks-neoforge:2101.1.1" }
+      ],
+      "mavenUrl": "https://maven.ftb.dev/releases",
+      "status": "replacement",
+      "replacementFor": "dev.ftb.mods:ftb-chunks-forge",
+      "replacementPolicy": "official-loader-artifact-rename",
+      "notes": "FTB Chunks publishes a loader-specific NeoForge 1.21.1 artifact"
+    },
+    {
+      "forgePrefix": "dev.ftb.mods:ftb-teams-forge",
+      "modrinthSlug": "ftb-teams",
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "dev.ftb.mods:ftb-teams-neoforge:2101.1.0" }
+      ],
+      "mavenUrl": "https://maven.ftb.dev/releases",
+      "status": "replacement",
+      "replacementFor": "dev.ftb.mods:ftb-teams-forge",
+      "replacementPolicy": "official-loader-artifact-rename",
+      "notes": "FTB Teams publishes a loader-specific NeoForge 1.21.1 artifact"
+    },
+    {
+      "forgePrefix": "dev.ftb.mods:ftb-library-forge",
+      "modrinthSlug": "ftb-library",
+      "neoforgeCoords": [
+        { "config": "compileOnly", "coord": "dev.ftb.mods:ftb-library-neoforge:2101.1.3" }
+      ],
+      "mavenUrl": "https://maven.ftb.dev/releases",
+      "status": "replacement",
+      "replacementFor": "dev.ftb.mods:ftb-library-forge",
+      "replacementPolicy": "official-loader-artifact-rename",
+      "notes": "FTB Library publishes a loader-specific NeoForge 1.21.1 artifact"
     },
     {
       "forgePrefix": "curse.maven:playeranimator-658587",

@@ -1,0 +1,25 @@
+{
+  "fields": [
+    {
+      "sourceOwner": "net.minecraft.client.Minecraft",
+      "sourceNames": ["f_91078_", "missTime"],
+      "targetOwner": "net.minecraft.client.Minecraft",
+      "targetName": "missTime",
+      "targetType": "int"
+    },
+    {
+      "sourceOwner": "net.minecraft.client.gui.Gui",
+      "sourceNames": ["f_92993_", "toolHighlightTimer"],
+      "targetOwner": "net.minecraft.client.gui.Gui",
+      "targetName": "toolHighlightTimer",
+      "targetType": "int"
+    },
+    {
+      "sourceOwner": "net.neoforged.neoforge.client.model.generators.ModelBuilder",
+      "sourceNames": ["textures"],
+      "targetOwner": "net.neoforged.neoforge.client.model.generators.ModelBuilder",
+      "targetName": "textures",
+      "targetType": "java.util.Map"
+    }
+  ]
+}

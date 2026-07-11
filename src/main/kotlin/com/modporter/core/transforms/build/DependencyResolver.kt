@@ -375,7 +375,8 @@ data class KnownDepVersionProperty(
 data class NeoForgeCoord(
     val config: String = "implementation",
     val coord: String,
-    val transitive: Boolean = true
+    val transitive: Boolean = true,
+    val wrapper: String? = null
 )
 
 data class GradleDependencyCoordinate(

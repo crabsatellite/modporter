@@ -1,0 +1,1200 @@
+
+    @Test
+    fun `mmlib recipe provider without any mod id source reports hard migration error`() {
+        val projectDir = tempDir.resolve("p19-mmlib-datagen-missing-modid")
+        val dataDir = projectDir.resolve("src/main/java/com/example/data")
+        dataDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        dataDir.resolve("ExampleRecipeProvider.java").writeText("""
+            package com.example.data;
+
+            import cn.mcmod_mmf.mmlib.data.AbstractRecipeProvider;
+            import net.minecraft.data.PackOutput;
+            import net.minecraft.data.recipes.RecipeOutput;
+
+            public class ExampleRecipeProvider extends AbstractRecipeProvider {
+                public ExampleRecipeProvider(PackOutput packOutput) {
+                    super(packOutput);
+                }
+
+                protected void buildRecipes(RecipeOutput output) {
+                    save(output, "example_recipe");
+                }
+            }
+        """.trimIndent())
+        dataDir.resolve("ModData.java").writeText("""
+            package com.example.data;
+
+            import net.minecraft.data.DataGenerator;
+            import net.minecraft.data.PackOutput;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class ModData {
+                public static void gatherData(GatherDataEvent event) {
+                    DataGenerator generator = event.getGenerator();
+                    PackOutput packOutput = generator.getPackOutput();
+                    generator.addProvider(true, new ExampleRecipeProvider(packOutput));
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val recipe = dataDir.resolve("ExampleRecipeProvider.java").readText()
+        val modData = dataDir.resolve("ModData.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive mod id for AbstractRecipeProvider ExampleRecipeProvider") },
+            "Expected hard migration error, got: ${result.errors}"
+        )
+        assertFalse(recipe.contains("\"minecraft\""))
+        assertTrue(recipe.contains("super(packOutput);"))
+        assertTrue(modData.contains("new ExampleRecipeProvider(packOutput)"))
+    }
+
+    @Test
+    fun `migrates custom stat registration to deferred register`() {
+        val projectDir = tempDir.resolve("p19-custom-stats")
+        val rootDir = projectDir.resolve("src/main/java/com/example")
+        val basicsDir = rootDir.resolve("basics")
+        basicsDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        rootDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.basics.ModStats;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(IEventBus modEventBus, ModContainer modContainer) {
+                    modEventBus.addListener(this::commonSetup);
+                    ModItems.ITEMS.register(modEventBus);
+                }
+
+                private void commonSetup(final FMLCommonSetupEvent event) {
+                    ModStats.register();
+                }
+            }
+        """.trimIndent())
+        basicsDir.resolve("ModStats.java").writeText("""
+            package com.example.basics;
+
+            import com.example.ExampleMod;
+            import net.minecraft.core.Registry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.stats.StatFormatter;
+            import net.minecraft.stats.Stats;
+
+            public class ModStats
+            {
+                public static final ResourceLocation USE_WAND = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "use_wand");
+
+                public static void register() {
+                    registerStat(USE_WAND);
+                }
+
+                private static void registerStat(ResourceLocation registryName) {
+                    Registry.register(BuiltInRegistries.CUSTOM_STAT, registryName.getPath(), registryName);
+                    Stats.CUSTOM.get(registryName, StatFormatter.DEFAULT);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val stats = basicsDir.resolve("ModStats.java").readText()
+        val mod = rootDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-custom-stat-deferred-register" })
+        assertTrue(result.changes.any { it.ruleId == "build-custom-stat-mod-event-bus" })
+        assertTrue(stats.contains("import net.minecraft.core.registries.Registries;"))
+        assertTrue(stats.contains("import net.neoforged.bus.api.IEventBus;"))
+        assertTrue(stats.contains("import net.neoforged.neoforge.registries.DeferredRegister;"))
+        assertTrue(stats.contains("DeferredRegister.create(Registries.CUSTOM_STAT, ExampleMod.MODID)"))
+        assertTrue(stats.contains("""CUSTOM_STATS.register("use_wand", () -> USE_WAND);"""))
+        assertTrue(stats.contains("public static void register(IEventBus modEventBus)"))
+        assertFalse(stats.contains("Registry.register(BuiltInRegistries.CUSTOM_STAT"))
+        assertFalse(stats.contains("Stats.CUSTOM.get"))
+        assertTrue(mod.contains("ModStats.register(modEventBus);"))
+        assertFalse(mod.contains("ModStats.register();"))
+    }
+
+    @Test
+    fun `custom stat migration uses declared Java owner not file name`() {
+        val projectDir = tempDir.resolve("p19-custom-stats-declared-owner")
+        val rootDir = projectDir.resolve("src/main/java/com/example/basics")
+        rootDir.createDirectories()
+        rootDir.resolve("ExampleMod.java").writeText("""
+            package com.example.basics;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "examplemod";
+
+                public ExampleMod(IEventBus modEventBus) {
+                    ModItems.ITEMS.register(modEventBus);
+                    ActualStats.register();
+                }
+            }
+        """.trimIndent())
+        rootDir.resolve("LegacyStatsContainer.java").writeText("""
+            package com.example.basics;
+
+            import net.minecraft.core.Registry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.stats.StatFormatter;
+            import net.minecraft.stats.Stats;
+
+            class ActualStats {
+                public static final ResourceLocation USE_WAND = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "use_wand");
+
+                public static void register() {
+                    registerStat(USE_WAND);
+                }
+
+                private static void registerStat(ResourceLocation registryName) {
+                    Registry.register(BuiltInRegistries.CUSTOM_STAT, registryName.getPath(), registryName);
+                    Stats.CUSTOM.get(registryName, StatFormatter.DEFAULT);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val stats = rootDir.resolve("LegacyStatsContainer.java").readText()
+        val mod = rootDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "build-custom-stat-deferred-register" })
+        assertTrue(stats.contains("class ActualStats {\n    private static final DeferredRegister<ResourceLocation> CUSTOM_STATS"), stats)
+        assertTrue(mod.contains("ActualStats.register(modEventBus);"), mod)
+        assertFalse(mod.contains("LegacyStatsContainer.register(modEventBus);"), mod)
+    }
+
+    @Test
+    fun `custom stat migration rejects mixed namespaces instead of choosing first declaration`() {
+        val projectDir = tempDir.resolve("p19-custom-stats-mixed-namespaces")
+        val rootDir = projectDir.resolve("src/main/java/com/example")
+        rootDir.createDirectories()
+        rootDir.resolve("ModStats.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.Registry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.stats.StatFormatter;
+            import net.minecraft.stats.Stats;
+
+            public class ModStats {
+                public static final ResourceLocation USE_WAND = ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "use_wand");
+                public static final ResourceLocation FOREIGN = ResourceLocation.fromNamespaceAndPath(OtherMod.MODID, "foreign");
+
+                public static void register() {
+                    registerStat(USE_WAND);
+                    registerStat(FOREIGN);
+                }
+
+                private static void registerStat(ResourceLocation registryName) {
+                    Registry.register(BuiltInRegistries.CUSTOM_STAT, registryName.getPath(), registryName);
+                    Stats.CUSTOM.get(registryName, StatFormatter.DEFAULT);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val stats = rootDir.resolve("ModStats.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("mixed custom stat namespaces") },
+            "Expected mixed namespace hard gate, got: ${result.errors}"
+        )
+        assertFalse(stats.contains("DeferredRegister.create(Registries.CUSTOM_STAT, ExampleMod.MODID)"), stats)
+        assertTrue(stats.contains("Registry.register(BuiltInRegistries.CUSTOM_STAT"), stats)
+    }
+
+    @Test
+    fun `namespaces register event resource locations with mod id`() {
+        val projectDir = tempDir.resolve("p19-registerevent-location")
+        val itemDir = projectDir.resolve("src/main/java/com/example/items")
+        itemDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        itemDir.resolve("ModItems.java").writeText("""
+            package com.example.items;
+
+            import com.example.ExampleMod;
+            import net.minecraft.core.registries.Registries;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod.EventBusSubscriber;
+            import net.neoforged.neoforge.registries.RegisterEvent;
+
+            @EventBusSubscriber(modid = ExampleMod.MODID)
+            public class ModItems {
+                @SubscribeEvent
+                public static void registerRecipeSerializers(RegisterEvent event) {
+                    event.register(Registries.RECIPE_SERIALIZER, registry -> {
+                        registry.register("wand_upgrade", RecipeWandUpgrade.SERIALIZER);
+                        registry.register("example:qualified_upgrade", QualifiedUpgrade.SERIALIZER);
+                    });
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = itemDir.resolve("ModItems.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-registerevent-resource-location-namespace" })
+        assertTrue(content.contains("import net.minecraft.resources.ResourceLocation;"))
+        assertTrue(content.contains("""registry.register(ResourceLocation.fromNamespaceAndPath(ExampleMod.MODID, "wand_upgrade"), RecipeWandUpgrade.SERIALIZER);"""))
+        assertTrue(content.contains("""registry.register(ResourceLocation.parse("example:qualified_upgrade"), QualifiedUpgrade.SERIALIZER);"""))
+        assertFalse(content.contains("""ResourceLocation.parse("wand_upgrade")"""))
+        assertFalse(content.contains("""registry.register("wand_upgrade""""))
+    }
+
+    @Test
+    fun `register event string ids are not namespaced without source mod id evidence`() {
+        val projectDir = tempDir.resolve("p19-registerevent-location-no-modid")
+        val itemDir = projectDir.resolve("src/main/java/com/example/items")
+        itemDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        itemDir.resolve("ModItems.java").writeText("""
+            package com.example.items;
+
+            import net.minecraft.core.registries.Registries;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.registries.RegisterEvent;
+
+            public class ModItems {
+                @SubscribeEvent
+                public static void registerRecipeSerializers(RegisterEvent event) {
+                    event.register(Registries.RECIPE_SERIALIZER, registry -> {
+                        registry.register("wand_upgrade", RecipeWandUpgrade.SERIALIZER);
+                    });
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = itemDir.resolve("ModItems.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "build-registerevent-resource-location-namespace" })
+        assertTrue(content.contains("""registry.register("wand_upgrade", RecipeWandUpgrade.SERIALIZER);"""))
+        assertFalse(content.contains("minecraft:wand_upgrade"))
+        assertFalse(content.contains("ResourceLocation.fromNamespaceAndPath"))
+    }
+
+    @Test
+    fun `migrates world carver register event to deferred register`() {
+        val projectDir = tempDir.resolve("p19-world-carvers")
+        val initDir = projectDir.resolve("src/main/java/com/example/init")
+        val rootDir = projectDir.resolve("src/main/java/com/example")
+        initDir.createDirectories()
+        rootDir.createDirectories()
+        initDir.resolve("ExampleCarvers.java").writeText("""
+            package com.example.init;
+
+            import net.minecraft.core.HolderGetter;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.data.worldgen.BootstrapContext;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.tags.BlockTags;
+            import net.minecraft.util.valueproviders.ConstantFloat;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.levelgen.VerticalAnchor;
+            import net.minecraft.world.level.levelgen.carver.CaveCarverConfiguration;
+            import net.minecraft.world.level.levelgen.carver.ConfiguredWorldCarver;
+            import net.minecraft.world.level.levelgen.heightproviders.UniformHeight;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.neoforge.registries.ForgeRegistries;
+            import net.neoforged.neoforge.registries.RegisterEvent;
+            import com.example.ExampleMod;
+            import com.example.world.ExampleCavesCarver;
+
+            import java.util.Objects;
+
+            @Mod.EventBusSubscriber(modid = ExampleMod.ID, bus = Mod.EventBusSubscriber.Bus.MOD)
+            public class ExampleCarvers {
+                public static final ExampleCavesCarver EXAMPLE_CAVES = new ExampleCavesCarver(CaveCarverConfiguration.CODEC, false);
+                public static final ExampleCavesCarver HIGHLAND_CAVES = new ExampleCavesCarver(CaveCarverConfiguration.CODEC, true);
+
+                // configured versions need explicit registration
+                @SubscribeEvent
+                public static void register(RegisterEvent evt) {
+                    if (Objects.equals(evt.getForgeRegistry(), ForgeRegistries.WORLD_CARVERS)) {
+                        evt.register(ForgeRegistries.Keys.WORLD_CARVERS, helper -> helper.register(ExampleMod.prefix("example_caves"), EXAMPLE_CAVES));
+                        evt.register(ForgeRegistries.Keys.WORLD_CARVERS, helper -> helper.register(ExampleMod.prefix("highland_caves"), HIGHLAND_CAVES));
+                    }
+                }
+
+                public static final ResourceKey<ConfiguredWorldCarver<?>> EXAMPLE_CAVES_CONFIGURED = registerKey("example_caves");
+
+                private static ResourceKey<ConfiguredWorldCarver<?>> registerKey(String name) {
+                    return ResourceKey.create(Registries.CONFIGURED_CARVER, ExampleMod.prefix(name));
+                }
+
+                public static void bootstrap(BootstrapContext<ConfiguredWorldCarver<?>> context) {
+                    HolderGetter<Block> blocks = context.lookup(Registries.BLOCK);
+                    context.register(EXAMPLE_CAVES_CONFIGURED, EXAMPLE_CAVES.configured(new CaveCarverConfiguration(0.1F, UniformHeight.of(VerticalAnchor.aboveBottom(5), VerticalAnchor.absolute(-8)), ConstantFloat.of(0.6F), VerticalAnchor.bottom(), blocks.getOrThrow(BlockTags.OVERWORLD_CARVER_REPLACEABLES), ConstantFloat.of(1.0F), ConstantFloat.of(1.0F), ConstantFloat.of(-0.7F))));
+                }
+            }
+        """.trimIndent())
+        rootDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public ExampleMod(IEventBus modbus) {
+                    modbus.addListener(com.example.init.ExampleCarvers::register);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val carvers = initDir.resolve("ExampleCarvers.java").readText()
+        val mod = rootDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-world-carver-deferred-register" })
+        assertTrue(result.changes.any { it.ruleId == "build-world-carver-modbus-register" })
+        assertTrue(carvers.contains("DeferredRegister<WorldCarver<?>> CARVER_TYPES = DeferredRegister.create(Registries.CARVER, ExampleMod.ID)"))
+        assertTrue(carvers.contains("DeferredHolder<WorldCarver<?>, ExampleCavesCarver> EXAMPLE_CAVES = CARVER_TYPES.register(\"example_caves\""))
+        assertTrue(carvers.contains("DeferredHolder<WorldCarver<?>, ExampleCavesCarver> HIGHLAND_CAVES = CARVER_TYPES.register(\"highland_caves\""))
+        assertTrue(carvers.contains("EXAMPLE_CAVES.value().configured(new CaveCarverConfiguration"))
+        assertFalse(carvers.contains("RegisterEvent"))
+        assertFalse(carvers.contains("ForgeRegistries.WORLD_CARVERS"))
+        assertFalse(carvers.contains("@SubscribeEvent"))
+        assertTrue(mod.contains("com.example.init.ExampleCarvers.CARVER_TYPES.register(modbus);"))
+        assertFalse(mod.contains("ExampleCarvers::register"))
+    }
+
+    @Test
+    fun `world carver migration derives mod id from source backed resource location factory`() {
+        val projectDir = tempDir.resolve("p19-world-carvers-source-factory")
+        val initDir = projectDir.resolve("src/main/java/com/example/init")
+        val rootDir = projectDir.resolve("src/main/java/com/example")
+        initDir.createDirectories()
+        rootDir.createDirectories()
+        initDir.resolve("ExampleCarvers.java").writeText("""
+            package com.example.init;
+
+            import com.example.ExampleMod;
+            import com.example.world.ExampleCavesCarver;
+            import net.minecraft.core.HolderGetter;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.data.worldgen.BootstrapContext;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.tags.BlockTags;
+            import net.minecraft.util.valueproviders.ConstantFloat;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.levelgen.VerticalAnchor;
+            import net.minecraft.world.level.levelgen.carver.CaveCarverConfiguration;
+            import net.minecraft.world.level.levelgen.carver.ConfiguredWorldCarver;
+            import net.minecraft.world.level.levelgen.heightproviders.UniformHeight;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.registries.ForgeRegistries;
+            import net.neoforged.neoforge.registries.RegisterEvent;
+
+            public class ExampleCarvers {
+                public static final ExampleCavesCarver EXAMPLE_CAVES = new ExampleCavesCarver(CaveCarverConfiguration.CODEC, false);
+
+                @SubscribeEvent
+                public static void register(RegisterEvent evt) {
+                    evt.register(ForgeRegistries.Keys.WORLD_CARVERS, helper -> helper.register(ExampleMod.prefix("example_caves"), EXAMPLE_CAVES));
+                }
+
+                public static final ResourceKey<ConfiguredWorldCarver<?>> EXAMPLE_CAVES_CONFIGURED = registerKey("example_caves");
+
+                private static ResourceKey<ConfiguredWorldCarver<?>> registerKey(String name) {
+                    return ResourceKey.create(Registries.CONFIGURED_CARVER, ExampleMod.prefix(name));
+                }
+
+                public static void bootstrap(BootstrapContext<ConfiguredWorldCarver<?>> context) {
+                    HolderGetter<Block> blocks = context.lookup(Registries.BLOCK);
+                    context.register(EXAMPLE_CAVES_CONFIGURED, EXAMPLE_CAVES.configured(new CaveCarverConfiguration(0.1F, UniformHeight.of(VerticalAnchor.aboveBottom(5), VerticalAnchor.absolute(-8)), ConstantFloat.of(0.6F), VerticalAnchor.bottom(), blocks.getOrThrow(BlockTags.OVERWORLD_CARVER_REPLACEABLES), ConstantFloat.of(1.0F), ConstantFloat.of(1.0F), ConstantFloat.of(-0.7F))));
+                }
+            }
+        """.trimIndent())
+        rootDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import java.util.Locale;
+            import net.minecraft.resources.ResourceLocation;
+            import net.neoforged.bus.api.IEventBus;
+
+            public class ExampleMod {
+                public static final String ID = "example";
+
+                public ExampleMod(IEventBus modbus) {
+                    modbus.addListener(com.example.init.ExampleCarvers::register);
+                }
+
+                public static ResourceLocation prefix(String path) {
+                    return ResourceLocation.fromNamespaceAndPath(ID, path.toLowerCase(Locale.ROOT));
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val carvers = initDir.resolve("ExampleCarvers.java").readText()
+        val mod = rootDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(
+            result.errors.none { it.contains("Cannot derive mod id for world carver registration") },
+            result.errors.joinToString("\n")
+        )
+        assertTrue(result.changes.any { it.ruleId == "build-world-carver-deferred-register" })
+        assertTrue(carvers.contains("DeferredRegister<WorldCarver<?>> CARVER_TYPES = DeferredRegister.create(Registries.CARVER, ExampleMod.ID)"))
+        assertTrue(carvers.contains("DeferredHolder<WorldCarver<?>, ExampleCavesCarver> EXAMPLE_CAVES = CARVER_TYPES.register(\"example_caves\""))
+        assertTrue(carvers.contains("EXAMPLE_CAVES.value().configured(new CaveCarverConfiguration"))
+        assertFalse(carvers.contains("RegisterEvent"))
+        assertFalse(carvers.contains("ForgeRegistries.WORLD_CARVERS"))
+        assertTrue(mod.contains("com.example.init.ExampleCarvers.CARVER_TYPES.register(modbus);"))
+    }
+
+    @Test
+    fun `world carver migration does not derive mod id from unrelated constants`() {
+        val projectDir = tempDir.resolve("p19-world-carvers-unrelated-modid")
+        val initDir = projectDir.resolve("src/main/java/com/example/init")
+        initDir.createDirectories()
+        initDir.resolve("ExampleCarvers.java").writeText("""
+            package com.example.init;
+
+            import com.dependency.DependencyMod;
+            import com.example.world.ExampleCavesCarver;
+            import net.minecraft.world.level.levelgen.carver.CaveCarverConfiguration;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.registries.ForgeRegistries;
+            import net.neoforged.neoforge.registries.RegisterEvent;
+
+            public class ExampleCarvers {
+                public static final ExampleCavesCarver EXAMPLE_CAVES = new ExampleCavesCarver(CaveCarverConfiguration.CODEC, false);
+
+                @SubscribeEvent
+                public static void register(RegisterEvent evt) {
+                    evt.register(ForgeRegistries.Keys.WORLD_CARVERS, helper -> helper.register(DependencyMod.prefix("example_caves"), EXAMPLE_CAVES));
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val carvers = initDir.resolve("ExampleCarvers.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive mod id for world carver registration") },
+            "Expected hard migration error, got: ${result.errors}"
+        )
+        assertFalse(carvers.contains("DeferredRegister<WorldCarver<?>> CARVER_TYPES"))
+        assertTrue(carvers.contains("DependencyMod.prefix(\"example_caves\")"))
+    }
+
+    @Test
+    fun `world carver migration rejects project mod id fallback without subscriber modid`() {
+        val projectDir = tempDir.resolve("p19-world-carvers-no-subscriber-modid")
+        val initDir = projectDir.resolve("src/main/java/com/example/init")
+        val rootDir = projectDir.resolve("src/main/java/com/example")
+        initDir.createDirectories()
+        rootDir.createDirectories()
+        projectDir.resolve("gradle.properties").writeText("mod_id=metadata_mod\n")
+        rootDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.ID)
+            public class ExampleMod {
+                public static final String ID = "example";
+            }
+        """.trimIndent())
+        initDir.resolve("ExampleCarvers.java").writeText("""
+            package com.example.init;
+
+            import com.example.world.ExampleCavesCarver;
+            import net.minecraft.world.level.levelgen.carver.CaveCarverConfiguration;
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.registries.ForgeRegistries;
+            import net.neoforged.neoforge.registries.RegisterEvent;
+
+            public class ExampleCarvers {
+                public static final ExampleCavesCarver EXAMPLE_CAVES = new ExampleCavesCarver(CaveCarverConfiguration.CODEC, false);
+
+                @SubscribeEvent
+                public static void register(RegisterEvent evt) {
+                    evt.register(ForgeRegistries.Keys.WORLD_CARVERS, helper -> helper.register(ExampleMod.prefix("example_caves"), EXAMPLE_CAVES));
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val carvers = initDir.resolve("ExampleCarvers.java").readText()
+
+        assertTrue(
+            result.errors.any { it.contains("Cannot derive mod id for world carver registration") },
+            "Expected missing subscriber modid to hard gate; got ${result.errors}"
+        )
+        assertFalse(carvers.contains("DeferredRegister<WorldCarver<?>> CARVER_TYPES"))
+        assertFalse(carvers.contains("metadata_mod"))
+        assertFalse(carvers.contains("ExampleMod.ID"))
+    }
+
+    @Test
+    fun `does not exclude legacy criterion triggers and payload registrars with missing packet classes`() {
+        val projectDir = tempDir.resolve("p20")
+        val advancementDir = projectDir.resolve("src/main/java/com/example/advancements")
+        val networkDir = projectDir.resolve("src/main/java/com/example/network")
+        advancementDir.createDirectories()
+        networkDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        advancementDir.resolve("AdvancementTrigger.java").writeText("""
+            package com.example.advancements;
+
+            import net.minecraft.advancements.CriterionTrigger;
+            import net.minecraft.advancements.CriterionTriggerInstance;
+            import net.minecraft.advancements.critereon.SerializationContext;
+
+            public class AdvancementTrigger implements CriterionTrigger<AdvancementTrigger.Instance> {
+                public static class Instance implements CriterionTriggerInstance {
+                }
+            }
+        """.trimIndent())
+        networkDir.resolve("ModNetwork.java").writeText("""
+            package com.example.network;
+
+            import net.neoforged.neoforge.network.registration.PayloadRegistrar;
+
+            public class ModNetwork {
+                public static void register(PayloadRegistrar registrar) {
+                    registrar.playToClient(MissingPacket.TYPE, MissingPacket.STREAM_CODEC, MissingPacket::handle);
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "build-exclude-integrations" })
+        assertFalse(content.contains("exclude 'com/example/advancements/AdvancementTrigger.java'"))
+        assertFalse(content.contains("exclude 'com/example/network/ModNetwork.java'"))
+    }
+
+    @Test
+    fun `does not exclude codec based criterion triggers`() {
+        val projectDir = tempDir.resolve("p20b")
+        val advancementDir = projectDir.resolve("src/main/java/com/example/advancements")
+        advancementDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+            }
+        """.trimIndent())
+        advancementDir.resolve("AdvancementTrigger.java").writeText("""
+            package com.example.advancements;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.advancements.CriterionTrigger;
+            import net.minecraft.advancements.CriterionTriggerInstance;
+            import net.minecraft.advancements.critereon.CriterionValidator;
+            import net.minecraft.server.PlayerAdvancements;
+
+            public class AdvancementTrigger implements CriterionTrigger<AdvancementTrigger.Instance> {
+                public void addPlayerListener(PlayerAdvancements playerAdvancements, CriterionTrigger.Listener<Instance> listener) {}
+                public void removePlayerListener(PlayerAdvancements playerAdvancements, CriterionTrigger.Listener<Instance> listener) {}
+                public void removePlayerListeners(PlayerAdvancements playerAdvancements) {}
+                public Codec<Instance> codec() { return Codec.unit(new Instance()); }
+
+                public static class Instance implements CriterionTriggerInstance {
+                    public void validate(CriterionValidator validator) {}
+                }
+            }
+        """.trimIndent())
+
+        pass.apply(projectDir)
+        val content = projectDir.resolve("build.gradle").readText()
+
+        assertFalse(content.contains("exclude 'com/example/advancements/AdvancementTrigger.java'"))
+    }
+
+    @Test
+    fun `cleans duplicate override annotations after chained rewrites`() {
+        val projectDir = tempDir.resolve("p21")
+        val blockDir = projectDir.resolve("src/main/java/com/example/block")
+        blockDir.createDirectories()
+        blockDir.resolve("TaikoBlock.java").writeText("""
+            package com.example.block;
+
+            public class TaikoBlock {
+                @Override
+                @SuppressWarnings("deprecation")
+                @Override
+                protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hit) {
+                    return InteractionResult.SUCCESS;
+                }
+
+                @Override
+                @Deprecated
+                @Override
+                protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hit, int variant) {
+                    return InteractionResult.SUCCESS;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val content = blockDir.resolve("TaikoBlock.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "build-cleanup-duplicate-override" })
+        assertFalse(Regex("""@Override\s*\r?\n\s*@SuppressWarnings\("deprecation"\)\s*\r?\n\s*@Override""").containsMatchIn(content))
+        assertFalse(Regex("""@Override\s*\r?\n\s*@Deprecated\s*\r?\n\s*@Override""").containsMatchIn(content))
+        assertTrue(Regex("""@SuppressWarnings\("deprecation"\)\s*\r?\n\s*@Override""").containsMatchIn(content))
+        assertTrue(Regex("""@Deprecated\s*\r?\n\s*@Override""").containsMatchIn(content))
+    }
+
+    @Test
+    fun `does not repair commented cleanup artifacts with synthetic returns`() {
+        val projectDir = tempDir.resolve("p22")
+        val rootDir = projectDir.resolve("src/main/java/cn/mcmod/sakura")
+        val fluidDir = rootDir.resolve("fluid")
+        val noodleDir = rootDir.resolve("block/noodles")
+        val decoratorDir = rootDir.resolve("level/tree/decorator")
+        val particleDir = rootDir.resolve("particle")
+        fluidDir.createDirectories()
+        noodleDir.createDirectories()
+        decoratorDir.createDirectories()
+        particleDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            sourceSets {
+                main {
+                    java {
+                        exclude 'cn/mcmod/sakura/item/FoodRegistry.java'
+                    }
+                }
+            }
+        """.trimIndent())
+        fluidDir.resolve("BucketItemRegistry.java").writeText("""
+            package cn.mcmod.sakura.fluid;
+
+            public class BucketItemRegistry {
+                public static final Object ITEMS = new Object();
+            }
+        """.trimIndent())
+        rootDir.resolve("SakuraMod.java").writeText("""
+            package cn.mcmod.sakura;
+
+            // [forge2neo] import cn.mcmod.sakura.fluid.BucketItemRegistry; // excluded
+
+            public class SakuraMod {
+                public void register(Object modEventBus) {
+                    BucketItemRegistry.ITEMS.toString();
+                }
+            }
+        """.trimIndent())
+        noodleDir.resolve("BlockPasta.java").writeText("""
+            package cn.mcmod.sakura.block.noodles;
+
+            import net.minecraft.world.item.ItemStack;
+
+            public class BlockPasta {
+                public ItemStack getNoodle() {
+                    // [forge2neo] return new ItemStack(FoodRegistry.FOOD.get()); // excluded: FoodRegistry unavailable
+                }
+            }
+        """.trimIndent())
+        decoratorDir.resolve("ChestnutBurrDecorator.java").writeText("""
+            package cn.mcmod.sakura.level.tree.decorator;
+
+            public class ChestnutBurrDecorator {
+                protected TreeDecoratorType<?> type() {
+                    // [forge2neo] return SakuraFeatureRegistry.CHESTNUT_BURR_DECORATOR.get(); // excluded: SakuraFeatureRegistry unavailable
+                }
+            }
+        """.trimIndent())
+        particleDir.resolve("ShowerParticle.java").writeText("""
+            package cn.mcmod.sakura.particle;
+
+            public class ShowerParticle {
+                public ParticleRenderType getRenderType() {
+                    // [forge2neo] return ClientConfig.enableTranslucentParticles // excluded: ClientConfig unavailable
+                        ? ParticleRenderType.PARTICLE_SHEET_TRANSLUCENT
+                        : ParticleRenderType.PARTICLE_SHEET_OPAQUE;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val pastaContent = noodleDir.resolve("BlockPasta.java").readText()
+        val decoratorContent = decoratorDir.resolve("ChestnutBurrDecorator.java").readText()
+        val particleContent = particleDir.resolve("ShowerParticle.java").readText()
+
+        assertFalse(result.changes.any { it.ruleId == "build-repair-post-cleanup-artifacts" })
+        assertFalse(result.changes.any { it.ruleId == "build-cleanup-excluded-refs" })
+        assertFalse(pastaContent.contains("return ItemStack.EMPTY;"))
+        assertFalse(decoratorContent.contains("return null;"))
+        assertFalse(particleContent.contains("return null;"))
+    }
+
+    @Test
+    fun `reflective gametest discovery becomes closed typed source registrations`() {
+        val projectDir = tempDir.resolve("gametest-static-registration")
+        val apiDir = projectDir.resolve("src/main/java/com/example/testing")
+        val testsDir = projectDir.resolve("src/main/java/com/example/tests")
+        val mixinDir = projectDir.resolve("src/main/java/com/example/mixin")
+        apiDir.createDirectories()
+        testsDir.createDirectories()
+        mixinDir.createDirectories()
+
+        apiDir.resolve("StructuredHelper.java").writeText("""
+            package com.example.testing;
+
+            import net.minecraft.gametest.framework.GameTestHelper;
+
+            public class StructuredHelper extends GameTestHelper {
+                public static final int TIMEOUT = 240;
+
+                public static StructuredHelper of(GameTestHelper helper) {
+                    return (StructuredHelper) helper;
+                }
+            }
+        """.trimIndent())
+        apiDir.resolve("TestFamily.java").writeText("""
+            package com.example.testing;
+
+            public @interface TestFamily {
+                String path();
+                String namespace() default ExampleIds.ID;
+            }
+        """.trimIndent())
+        apiDir.resolve("ExampleIds.java").writeText("""
+            package com.example.testing;
+
+            public final class ExampleIds {
+                public static final String ID = "example";
+            }
+        """.trimIndent())
+        testsDir.resolve("MachineTests.java").writeText("""
+            package com.example.tests;
+
+            import static com.example.testing.StructuredHelper.TIMEOUT;
+
+            import com.example.testing.StructuredHelper;
+            import com.example.testing.TestFamily;
+            import net.minecraft.gametest.framework.GameTest;
+
+            @TestFamily(path = "machines")
+            public class MachineTests {
+                @GameTest(template = "rotation", timeoutTicks = TIMEOUT, setupTicks = 5L,
+                    rotationSteps = 2, required = false, attempts = 4, requiredSuccesses = 3,
+                    batch = "mechanical")
+                public static void rotation(StructuredHelper helper) {
+                }
+
+                @GameTest(template = "default_values")
+                public static void defaultValues(StructuredHelper helper) {
+                }
+
+                // @GameTest(template = "commented")
+                public static void notATest(StructuredHelper helper) {
+                }
+            }
+        """.trimIndent())
+        apiDir.resolve("StructuredTestFunction.java").writeText("""
+            package com.example.testing;
+
+            import java.lang.reflect.Method;
+            import java.util.Collection;
+            import java.util.Map;
+            import java.util.HashMap;
+            import java.util.stream.Stream;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.gametest.framework.GameTest;
+            import net.minecraft.gametest.framework.GameTestHelper;
+            import net.minecraft.gametest.framework.TestFunction;
+
+            public class StructuredTestFunction extends TestFunction {
+                public static final Map<String, StructuredTestFunction> NAMES_TO_FUNCTIONS = new HashMap<>();
+                public final String fullName;
+
+                public static Collection<TestFunction> getTestsFrom(Class<?>... classes) {
+                    return Stream.of(classes)
+                        .map(Class::getDeclaredMethods)
+                        .map(StructuredTestFunction::of)
+                        .toList();
+                }
+
+                private static TestFunction of(Method method) {
+                    GameTest test = method.getAnnotation(GameTest.class);
+                    TestFamily group = method.getDeclaringClass().getAnnotation(TestFamily.class);
+                    if (method.getParameterTypes()[0] != StructuredHelper.class) {
+                        throw new IllegalArgumentException();
+                    }
+                    try {
+                        method.invoke(null, new Object());
+                    } catch (ReflectiveOperationException exception) {
+                        throw new RuntimeException(exception);
+                    }
+                    return null;
+                }
+
+                public void run(GameTestHelper helper) {
+                    helper.getBlockEntity(BlockPos.ZERO).getPersistentData().putString("TypedTestFunction", fullName);
+                    StructuredHelper.of(helper);
+                }
+            }
+        """.trimIndent())
+        apiDir.resolve("TestBootstrap.java").writeText("""
+            package com.example.testing;
+
+            import com.example.tests.MachineTests;
+            import java.util.Collection;
+            import net.minecraft.gametest.framework.TestFunction;
+
+            public class TestBootstrap {
+                private static final Class<?>[] HOLDERS = {
+                    MachineTests.class
+                };
+
+                public static Collection<TestFunction> tests() {
+                    return StructuredTestFunction.getTestsFrom(HOLDERS);
+                }
+            }
+        """.trimIndent())
+        mixinDir.resolve("TestLookupMixin.java").writeText("""
+            package com.example.mixin;
+
+            import com.example.testing.StructuredTestFunction;
+            import net.minecraft.gametest.framework.TestFunction;
+
+            public class TestLookupMixin {
+                public static TestFunction lookup(String name) {
+                    StructuredTestFunction function = StructuredTestFunction.NAMES_TO_FUNCTIONS.get(name);
+                    if (function == null) {
+                        throw new IllegalStateException(name);
+                    }
+                    return function;
+                }
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val generated = apiDir.resolve("StructuredTestFunction.java").readText()
+        val mixin = mixinDir.resolve("TestLookupMixin.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "build-gametest-static-registration" })
+        assertTrue(generated.contains("owner == com.example.tests.MachineTests.class"))
+        assertTrue(generated.contains("com.example.tests.MachineTests::rotation"))
+        assertTrue(generated.contains("com.example.testing.ExampleIds.ID, \"machines\""))
+        assertTrue(Regex("""\"mechanical\",\s+2, com\.example\.testing\.StructuredHelper\.TIMEOUT, 5L""").containsMatchIn(generated))
+        assertTrue(Regex("""\"defaultBatch\",\s+0, 100, 0L""").containsMatchIn(generated))
+        assertTrue(generated.contains("required, false, maxAttempts, requiredSuccesses, true"))
+        assertTrue(generated.contains("Comparator.comparing(TestFunction::testName)"))
+        assertTrue(generated.contains("putString(\"TypedTestFunction\", fullName)"))
+        assertFalse(generated.contains("java.lang.reflect"))
+        assertFalse(generated.contains("getDeclaredMethods"))
+        assertFalse(generated.contains("method.invoke"))
+        assertFalse(generated.contains("commented"))
+        assertTrue(mixin.contains("return function.testFunction;"))
+    }
+
+    @Test
+    fun `forgegradle reobfuscation dsl preserves publication blocks on moddev jar task`() {
+        val projectDir = tempDir.resolve("reobfuscation-publication")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+                id 'maven-publish'
+            }
+
+            final slimJar = tasks.register("slimJar", Jar) {
+                archiveClassifier = "slim"
+                from(sourceSets.main.output)
+            }
+            obfuscation.reobfuscate(
+                slimJar,
+                sourceSets.main
+            )
+
+            publishing {
+                publications {
+                    mavenJava(MavenPublication) {
+                        from components.java
+                        artifact(tasks.reobfJar) {
+                            classifier = "all"
+                        }
+                    }
+                }
+            }
+
+            publishMods {
+                file = reobfJar.archiveFile
+            }
+
+            // reobfJar in documentation must not affect executable migration.
+            ext.reobfDocumentation = "reobfJar"
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val build = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
+        assertTrue(build.contains("artifact(tasks.named(\"jar\")) {"))
+        assertTrue(build.contains("classifier = \"all\""))
+        assertTrue(build.contains("file = tasks.named(\"jar\").flatMap { it.archiveFile }"))
+        assertFalse(build.contains("obfuscation.reobfuscate("))
+        assertTrue(build.contains("// reobfJar in documentation"))
+        assertTrue(build.contains("ext.reobfDocumentation = \"reobfJar\""))
+        assertTrue(result.changes.any { it.ruleId == "build-migrate-reobfuscation-dsl" })
+        assertTrue(result.changes.any { it.ruleId == "build-migrate-reobfuscation-publication" })
+    }
+
+    @Test
+    fun `recipe manager private maps migrate with their holder data flow before at removal`() {
+        val projectDir = tempDir.resolve("recipe-manager-public-query")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val atDir = projectDir.resolve("src/main/resources/META-INF")
+        srcDir.createDirectories()
+        atDir.createDirectories()
+        srcDir.resolve("RecipeIndex.java").writeText("""
+            package com.example;
+
+            import java.util.Map;
+            import java.util.function.Consumer;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeManager;
+            import net.minecraft.world.item.crafting.RecipeType;
+
+            public class RecipeIndex {
+                @SuppressWarnings("unchecked")
+                static <T extends Recipe<?>> void consume(RecipeManager manager, Consumer<T> consumer, RecipeType<?> type) {
+                    Map<ResourceLocation, Recipe<?>> map = manager.recipes.get(type);
+                    if (map != null)
+                        map.values().forEach(recipe -> consumer.accept((T) recipe));
+                }
+            }
+        """.trimIndent())
+        atDir.resolve("accesstransformer.cfg").writeText(
+            "public net.minecraft.world.item.crafting.RecipeManager f_44007_ # recipes\n"
+        )
+
+        val result = pass.apply(projectDir)
+        val source = srcDir.resolve("RecipeIndex.java").readText()
+        val at = atDir.resolve("accesstransformer.cfg").readText()
+
+        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
+        assertTrue(source.contains("manager.getAllRecipesFor((RecipeType) type)"), source)
+        assertTrue(source.contains("modporterRecipeHolder -> consumer.accept((T) modporterRecipeHolder.value())"), source)
+        assertFalse(source.contains("manager.recipes"), source)
+        assertFalse(source.contains("map.values()"), source)
+        assertFalse(source.contains("java.util.Map"), source)
+        assertFalse(source.contains("net.minecraft.resources.ResourceLocation"), source)
+        assertFalse(at.contains("RecipeManager"), at)
+        assertTrue(result.changes.any { it.ruleId == "build-recipe-manager-public-query-api" })
+        assertTrue(result.changes.any { it.ruleId == "build-recipe-manager-obsolete-at" })
+    }
+
+    @Test
+    fun `static potion brewing tables become level scoped caches with retargeted ats`() {
+        val projectDir = tempDir.resolve("potion-brewing-level-state")
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        val atDir = projectDir.resolve("src/main/resources/META-INF")
+        srcDir.createDirectories()
+        atDir.createDirectories()
+        srcDir.resolve("PotionRecipeIndex.java").writeText("""
+            package com.example;
+
+            import java.util.ArrayList;
+            import java.util.HashMap;
+            import java.util.List;
+            import java.util.Map;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.alchemy.Potion;
+            import net.minecraft.world.item.alchemy.PotionBrewing;
+            import net.minecraft.world.level.Level;
+            import net.neoforged.neoforge.common.brewing.BrewingRecipeRegistry;
+
+            public class PotionRecipeIndex {
+                public static final List<String> ALL = createRecipes();
+                public static final Map<Item, List<String>> BY_ITEM = sortRecipesByItem(ALL);
+
+                private static List<String> createRecipes() {
+                    List<String> output = new ArrayList<>();
+                    ItemStack stack = ItemStack.EMPTY;
+                    if (PotionBrewing.ALLOWED_CONTAINER.test(stack)) {
+                        output.add("container");
+                    }
+                    for (PotionBrewing.Mix<Potion> mix : PotionBrewing.POTION_MIXES) {
+                        output.add(mix.from.value().toString());
+                        output.add(mix.to.value().toString());
+                        output.add(mix.ingredient.toString());
+                    }
+                    for (PotionBrewing.Mix<Item> mix : PotionBrewing.CONTAINER_MIXES) {
+                        output.add(mix.from.value().toString());
+                    }
+                    BrewingRecipeRegistry.getRecipes().forEach(recipe -> output.add(recipe.toString()));
+                    return output;
+                }
+
+                private static Map<Item, List<String>> sortRecipesByItem(List<String> all) {
+                    return new HashMap<>();
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("MachineBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntity;
+
+            public class MachineBlockEntity extends BlockEntity {
+                void query(Item item) {
+                    PotionRecipeIndex.BY_ITEM.get(item);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ClientRecipeView.java").writeText("""
+            package com.example;
+
+            import net.minecraft.client.Minecraft;
+
+            public class ClientRecipeView {
+                void register() {
+                    Minecraft.getInstance().getConnection();
+                    consume(PotionRecipeIndex.ALL);
+                }
+
+                void consume(Object recipes) {
+                }
+            }
+        """.trimIndent())
+        atDir.resolve("accesstransformer.cfg").writeText("""
+            public net.minecraft.world.item.alchemy.PotionBrewing f_43494_ # POTION_MIXES
+            public net.minecraft.world.item.alchemy.PotionBrewing f_43495_ # CONTAINER_MIXES
+            public net.minecraft.world.item.alchemy.PotionBrewing f_43497_ # ALLOWED_CONTAINER
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val index = srcDir.resolve("PotionRecipeIndex.java").readText()
+        val machine = srcDir.resolve("MachineBlockEntity.java").readText()
+        val client = srcDir.resolve("ClientRecipeView.java").readText()
+        val at = atDir.resolve("accesstransformer.cfg").readText()
+
+        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
+        assertTrue(index.contains("private static List<String> ALL;"), index)
+        assertTrue(index.contains("public static List<String> createRecipes(Level level)"), index)
+        assertTrue(index.contains("private static List<String> createRecipesImpl(Level level)"), index)
+        assertTrue(index.contains("PotionBrewing potionBrewing = level.potionBrewing();"), index)
+        assertTrue(index.contains("potionBrewing.isContainer(stack)"), index)
+        assertTrue(index.contains("potionBrewing.potionMixes"), index)
+        assertTrue(index.contains("potionBrewing.containerMixes"), index)
+        assertTrue(index.contains("mix.from().value()"), index)
+        assertTrue(index.contains("mix.to().value()"), index)
+        assertTrue(index.contains("mix.ingredient()"), index)
+        assertTrue(index.contains("potionBrewing.getRecipes()"), index)
+        assertTrue(machine.contains("PotionRecipeIndex.sortRecipesByItem(level).get(item)"), machine)
+        assertTrue(client.contains("PotionRecipeIndex.createRecipes(Minecraft.getInstance().level)"), client)
+        assertFalse(index.contains("PotionBrewing.POTION_MIXES"), index)
+        assertFalse(index.contains("BrewingRecipeRegistry"), index)
+        assertTrue(at.contains("public net.minecraft.world.item.alchemy.PotionBrewing potionMixes"), at)
+        assertTrue(at.contains("public net.minecraft.world.item.alchemy.PotionBrewing containerMixes"), at)
+        assertTrue(at.contains("public net.minecraft.world.item.alchemy.PotionBrewing isContainer(Lnet/minecraft/world/item/ItemStack;)Z"), at)
+        assertFalse(at.contains("f_43494_"), at)
+        assertFalse(at.contains("POTION_MIXES"), at)
+    }
+
+    @Test
+    fun `java 21 migration covers applied and subproject gradle scripts without touching literals`() {
+        val projectDir = tempDir.resolve("recursive-gradle-java-target")
+        val gradleDir = projectDir.resolve("gradle")
+        val moduleDir = projectDir.resolve("module")
+        gradleDir.createDirectories()
+        moduleDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            apply from: "gradle/java.gradle"
+        """.trimIndent())
+        gradleDir.resolve("java.gradle").writeText("""
+            java.toolchain.languageVersion = JavaLanguageVersion.of(17)
+            tasks.withType(JavaCompile).configureEach {
+                options.release = 17
+            }
+            // JavaLanguageVersion.of(17) is documentation.
+            ext.example = "options.release = 17"
+        """.trimIndent())
+        moduleDir.resolve("build.gradle.kts").writeText("""
+            java {
+                sourceCompatibility = JavaVersion.VERSION_17
+                targetCompatibility = JavaVersion.toVersion(17)
+            }
+            tasks.withType<JavaCompile>().configureEach {
+                options.release.set(17)
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val shared = gradleDir.resolve("java.gradle").readText()
+        val module = moduleDir.resolve("build.gradle.kts").readText()
+
+        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
+        assertTrue(shared.contains("JavaLanguageVersion.of(21)"), shared)
+        assertTrue(shared.contains("options.release = 21"), shared)
+        assertTrue(shared.contains("// JavaLanguageVersion.of(17) is documentation."), shared)
+        assertTrue(shared.contains("\"options.release = 17\""), shared)
+        assertTrue(module.contains("JavaVersion.VERSION_21"), module)
+        assertTrue(module.contains("JavaVersion.toVersion(21)"), module)
+        assertTrue(module.contains("options.release.set(21)"), module)
+    }
+
+    @Test
+    fun `nested jarjar dependencies retain packaging semantics when coordinates migrate`() {
+        val projectDir = tempDir.resolve("nested-jarjar-dependency")
+        projectDir.createDirectories()
+        projectDir.resolve("build.gradle").writeText("""
+            plugins {
+                id 'net.minecraftforge.gradle' version '6.0.24'
+            }
+
+            dependencies {
+                jarJar(implementation("net.createmod.ponder:Ponder-Forge-1.20.1:1.0.82"))
+            }
+        """.trimIndent())
+
+        val result = pass.apply(projectDir)
+        val build = projectDir.resolve("build.gradle").readText()
+
+        assertTrue(result.errors.isEmpty(), "Unexpected migration errors: ${result.errors}")
+        assertTrue(
+            build.contains("jarJar(implementation(\"net.createmod.ponder:ponder-neoforge:1.0.82+mc1.21.1\"))"),
+            build
+        )
+        assertFalse(build.contains("Ponder-Forge-1.20.1"), build)
+    }

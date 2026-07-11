@@ -1409,6 +1409,14 @@
       "isRegex": true
     },
     {
+      "id": "registry-recipe-types-getValue",
+      "pattern": "ForgeRegistries\\.RECIPE_TYPES\\.getValue\\(",
+      "replacement": "BuiltInRegistries.RECIPE_TYPE.get(",
+      "description": "Forge recipe type registry lookup -> vanilla built-in recipe type registry lookup",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
       "id": "registry-getValue",
       "pattern": "(BuiltInRegistries\\.\\w+|NeoForgeRegistries\\.\\w+)\\.getValue\\(",
       "replacement": "$1.get(",
@@ -1451,6 +1459,22 @@
       "pattern": "DeferredRegister\\s*\\.\\s*create\\(\\s*ForgeRegistries\\.RECIPE_TYPES",
       "replacement": "DeferredRegister.create(Registries.RECIPE_TYPE",
       "description": "DeferredRegister .create(ForgeRegistries.RECIPE_TYPES -> Registries.RECIPE_TYPE across line breaks",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "cls-ForgeRegistries-RECIPE_TYPES",
+      "pattern": "ForgeRegistries\\.RECIPE_TYPES",
+      "replacement": "BuiltInRegistries.RECIPE_TYPE",
+      "description": "ForgeRegistries.RECIPE_TYPES -> BuiltInRegistries.RECIPE_TYPE outside DeferredRegister declarations",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "keys-ForgeRegistries-ENTITY_DATA_SERIALIZERS",
+      "pattern": "ForgeRegistries\\.Keys\\.ENTITY_DATA_SERIALIZERS",
+      "replacement": "NeoForgeRegistries.Keys.ENTITY_DATA_SERIALIZERS",
+      "description": "Forge entity data serializer registry key -> NeoForge synchronized registry key",
       "fileGlob": "*.java",
       "isRegex": true
     },
@@ -2085,14 +2109,6 @@
       "fileGlob": "*.java"
     },
     {
-      "id": "distexecutor-import",
-      "pattern": "import net\\.neoforged\\.fml\\.DistExecutor;\\r?\\n",
-      "replacement": "",
-      "isRegex": true,
-      "description": "Remove DistExecutor import; structural pass rewrites active usages to FMLLoader guards",
-      "fileGlob": "*.java"
-    },
-    {
       "id": "gui-renderBackground-remove",
       "pattern": "\\s+renderBackground\\(guiGraphics\\);\\r?\\n",
       "replacement": "",
@@ -2617,14 +2633,6 @@
       "isRegex": true
     },
     {
-      "id": "leveltick-level-accessor",
-      "pattern": "(?<![\\w.])event\\.level\\b",
-      "replacement": "event.getLevel()",
-      "description": "LevelTickEvent.level is private in NeoForge 1.21; use getLevel()",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
       "id": "saveddata-load-provider",
       "pattern": "((?:(?:public|private|protected|static|final|abstract)\\s+)*class\\s+(\\w+)\\s+extends\\s+SavedData[\\s\\S]*?public\\s+static\\s+\\2\\s+load\\(\\s*CompoundTag\\s+(\\w+)\\s*)\\)",
       "replacement": "$1, HolderLookup.Provider registries)",
@@ -2911,32 +2919,10 @@
       "isRegex": true
     },
     {
-      "id": "tick-event-player-rename",
-      "pattern": "TickEvent.PlayerTickEvent",
-      "replacement": "PlayerTickEvent.Post",
-      "description": "TickEvent.PlayerTickEvent -> PlayerTickEvent.Post (1.21)",
-      "fileGlob": "*.java"
-    },
-    {
-      "id": "tick-event-phase-end-check-remove",
-      "pattern": "[ \\t]*if \\(event\\.phase != TickEvent\\.Phase\\.END\\) return;\\r?\\n",
-      "replacement": "",
-      "isRegex": true,
-      "description": "Remove TickEvent.Phase.END check after migrating to .Post event in 1.21",
-      "fileGlob": "*.java"
-    },
-    {
       "id": "entity-item-pickup-event",
       "pattern": "EntityItemPickupEvent",
       "replacement": "ItemEntityPickupEvent.Pre",
       "description": "EntityItemPickupEvent -> ItemEntityPickupEvent.Pre in 1.21",
-      "fileGlob": "*.java"
-    },
-    {
-      "id": "tick-event-player-field",
-      "pattern": "event.player",
-      "replacement": "event.getEntity()",
-      "description": "TickEvent.player field -> getEntity() method in 1.21",
       "fileGlob": "*.java"
     },
     {
@@ -2954,73 +2940,6 @@
       "fileGlob": "*.java"
     },
     {
-      "id": "tick-event-rename",
-      "pattern": "TickEvent.ClientTickEvent",
-      "replacement": "ClientTickEvent",
-      "description": "TickEvent.ClientTickEvent -> ClientTickEvent (1.21)",
-      "fileGlob": "*.java"
-    },
-    {
-      "id": "tick-event-server-rename",
-      "pattern": "TickEvent.ServerTickEvent",
-      "replacement": "ServerTickEvent",
-      "description": "TickEvent.ServerTickEvent -> ServerTickEvent (1.21)",
-      "fileGlob": "*.java"
-    },
-    {
-      "id": "tick-event-level-rename",
-      "pattern": "TickEvent.LevelTickEvent",
-      "replacement": "LevelTickEvent",
-      "description": "TickEvent.LevelTickEvent -> LevelTickEvent (1.21)",
-      "fileGlob": "*.java"
-    },
-    {
-      "id": "tick-event-render-rename",
-      "pattern": "TickEvent.RenderTickEvent",
-      "replacement": "RenderFrameEvent.Post",
-      "description": "TickEvent.RenderTickEvent -> RenderFrameEvent.Post (1.21)",
-      "fileGlob": "*.java"
-    },
-    {
-      "id": "import-render-frame-event",
-      "pattern": "(import net\\.neoforged\\.neoforge\\.client\\.event\\.ClientTickEvent;)\\r?\\n(?!import net\\.neoforged\\.neoforge\\.client\\.event\\.RenderFrameEvent;)",
-      "replacement": "$1\nimport net.neoforged.neoforge.client.event.RenderFrameEvent;\n",
-      "description": "Add RenderFrameEvent import alongside ClientTickEvent",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "tick-event-phase-end-return",
-      "pattern": "if \\(event\\.phase == TickEvent\\.Phase\\.END\\) \\{\\r?\\n[^\\S\\r\\n]*return;\\r?\\n[^\\S\\r\\n]*\\}",
-      "replacement": "",
-      "description": "Remove TickEvent.Phase.END guard (NeoForge uses Pre/Post subevents)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "tick-event-phase-start-return",
-      "pattern": "if \\(event\\.phase == TickEvent\\.Phase\\.START\\) \\{\\r?\\n[^\\S\\r\\n]*return;\\r?\\n[^\\S\\r\\n]*\\}",
-      "replacement": "",
-      "description": "Remove TickEvent.Phase.START guard (NeoForge uses Pre/Post subevents)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "tick-event-phase-check-neq",
-      "pattern": "if \\(event\\.phase != TickEvent\\.Phase\\.(START|END)\\)[^{]*\\{\\r?\\n[^\\S\\r\\n]*return;\\r?\\n[^\\S\\r\\n]*\\}",
-      "replacement": "",
-      "description": "Remove TickEvent.Phase != check (NeoForge uses Pre/Post subevents)",
-      "fileGlob": "*.java",
-      "isRegex": true
-    },
-    {
-      "id": "render-tick-time-field",
-      "pattern": "event\\.renderTickTime",
-      "replacement": "Minecraft.getInstance().getTimer().getRealtimeDeltaTicks()",
-      "description": "event.renderTickTime -> Minecraft.getInstance().getTimer().getRealtimeDeltaTicks() (1.21)",
-      "fileGlob": "*.java"
-    },
-    {
       "id": "get-delta-frame-time",
       "pattern": "Minecraft\\.getInstance\\(\\)\\.getDeltaFrameTime\\(\\)",
       "replacement": "Minecraft.getInstance().getTimer().getRealtimeDeltaTicks()",
@@ -3029,26 +2948,12 @@
       "isRegex": true
     },
     {
-      "id": "import-tick-event-replace",
-      "pattern": "import net.neoforged.neoforge.event.TickEvent;",
-      "replacement": "import net.neoforged.neoforge.client.event.ClientTickEvent;\nimport net.neoforged.neoforge.event.tick.ServerTickEvent;\nimport net.neoforged.neoforge.event.tick.LevelTickEvent;\nimport net.neoforged.neoforge.event.tick.PlayerTickEvent;",
-      "description": "Replace TickEvent import with specific tick event imports (1.21)",
-      "fileGlob": "*.java"
-    },
-    {
       "id": "sound-events-get-remove",
       "pattern": "SoundEvents\\.(\\w+)\\.get\\(\\)",
       "replacement": "SoundEvents.$1.value()",
       "description": "SoundEvents.xxx.get() -> SoundEvents.xxx.value() (Holder<SoundEvent> in 1.21)",
       "fileGlob": "*.java",
       "isRegex": true
-    },
-    {
-      "id": "gui-overlay-import-remove",
-      "pattern": "import net.neoforged.neoforge.client.gui.overlay.IGuiOverlay;",
-      "replacement": "import net.minecraft.client.gui.LayeredDraw;",
-      "description": "IGuiOverlay removed in 1.21 - use LayeredDraw.Layer",
-      "fileGlob": "*.java"
     },
     {
       "id": "gui-overlay-vanilla-import-remove",
@@ -3126,30 +3031,6 @@
       "replacement": "",
       "isRegex": true,
       "description": "Remove .endVertex() calls - no longer needed in 1.21",
-      "fileGlob": "*.java"
-    },
-    {
-      "id": "clienttickevent-param",
-      "pattern": "(ClientTickEvent)(?!\\.)\\s+(\\w+)\\)",
-      "replacement": "ClientTickEvent.Post $2)",
-      "isRegex": true,
-      "description": "ClientTickEvent -> ClientTickEvent.Post in method parameters",
-      "fileGlob": "*.java"
-    },
-    {
-      "id": "servertickevent-param",
-      "pattern": "(ServerTickEvent)(?!\\.)\\s+(\\w+)\\)",
-      "replacement": "ServerTickEvent.Post $2)",
-      "isRegex": true,
-      "description": "ServerTickEvent -> ServerTickEvent.Post in method parameters",
-      "fileGlob": "*.java"
-    },
-    {
-      "id": "leveltickevent-param",
-      "pattern": "(LevelTickEvent)(?!\\.)\\s+(\\w+)\\)",
-      "replacement": "LevelTickEvent.Post $2)",
-      "isRegex": true,
-      "description": "LevelTickEvent -> LevelTickEvent.Post in method parameters",
       "fileGlob": "*.java"
     },
     {
@@ -3498,6 +3379,22 @@
       "pattern": "import\\s+net\\.minecraft\\.client\\.particle\\.EnchantmentTableParticle;",
       "replacement": "import net.minecraft.client.particle.FlyTowardsPositionParticle;",
       "description": "EnchantmentTableParticle class was renamed/merged in 1.21 particle providers",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "vanilla-enchantment-table-block-entity-rename",
+      "pattern": "\\bEnchantmentTableBlockEntity\\b",
+      "replacement": "EnchantingTableBlockEntity",
+      "description": "EnchantmentTableBlockEntity was renamed to EnchantingTableBlockEntity in 1.21",
+      "fileGlob": "*.java",
+      "isRegex": true
+    },
+    {
+      "id": "vanilla-enchantment-table-block-rename",
+      "pattern": "\\bEnchantmentTableBlock\\b",
+      "replacement": "EnchantingTableBlock",
+      "description": "EnchantmentTableBlock was renamed to EnchantingTableBlock in 1.21",
       "fileGlob": "*.java",
       "isRegex": true
     },

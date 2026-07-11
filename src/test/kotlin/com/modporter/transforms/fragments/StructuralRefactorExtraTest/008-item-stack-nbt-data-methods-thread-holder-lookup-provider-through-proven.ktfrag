@@ -681,7 +681,7 @@
     }
 
     @Test
-    fun `client Minecraft singleton supplies holder lookup provider for migrated load calls`() {
+    fun `current method client level access supplies holder lookup provider for migrated load calls`() {
         val dataDir = tempDir.resolve("src/main/java/com/example/data")
         val clientDir = tempDir.resolve("src/main/java/com/example/client")
         dataDir.createDirectories()
@@ -714,6 +714,7 @@
                 private StackData data;
 
                 public void sync(CompoundTag tag) {
+                    Minecraft.getInstance().level.getGameTime();
                     data = StackData.load(tag);
                 }
 

@@ -104,7 +104,9 @@
         val result = TextReplacementPass(MappingDatabase.loadDefault()).apply(tempDir)
 
         assertTrue(
-            result.errors.any { it.contains("item class 'ChainBlockItem' has no source registry entry") },
+            result.errors.any {
+                it.contains("item classes 'com.example.ChainBlockItem' have no source registry entry")
+            },
             result.errors.joinToString("\n")
         )
         assertFalse(tempDir.resolve("src/generated/resources/data/example/enchantment/destruction.json").exists())
@@ -1033,6 +1035,45 @@
     }
 
     @Test
+    fun `network hooks open screen resolves inherited block entity world position`() {
+        val projectDir = createTestFile("""
+            package com.example;
+
+            import net.minecraftforge.network.NetworkHooks;
+
+            public class TestMod extends IntermediateMenuBlockEntity {
+                public void open(ServerPlayer player, MenuProvider menu) {
+                    NetworkHooks.openScreen(player, menu, worldPosition);
+                }
+            }
+        """.trimIndent())
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.resolve("IntermediateMenuBlockEntity.java").writeText("""
+            package com.example;
+
+            public abstract class IntermediateMenuBlockEntity extends BaseMenuBlockEntity {
+            }
+        """.trimIndent())
+        srcDir.resolve("BaseMenuBlockEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntity;
+
+            public abstract class BaseMenuBlockEntity extends BlockEntity {
+            }
+        """.trimIndent())
+
+        val db = MappingDatabase.loadDefault()
+        val pass = TextReplacementPass(db)
+        val result = pass.apply(projectDir)
+
+        val transformed = srcDir.resolve("TestMod.java").readText()
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(transformed.contains("(player).openMenu(menu, buf -> buf.writeBlockPos(worldPosition));"), transformed)
+        assertFalse(transformed.contains("NetworkHooks.openScreen"), transformed)
+    }
+
+    @Test
     fun `network hooks open screen ignores commented third argument type evidence`() {
         val projectDir = createTestFile("""
             package com.example;
@@ -1118,55 +1159,4 @@
         assertFalse(transformed.contains(".overlayCoords("))
         assertFalse(transformed.contains(".uv2("))
         assertFalse(transformed.contains(".endVertex()"))
-    }
-
-    @Test
-    fun `sakura effect particle fluid and nested event migrations compile against 1_21 APIs`() {
-        val projectDir = createTestFile("""
-            package com.example;
-
-            import net.minecraft.core.particles.SimpleParticleType;
-            import net.minecraft.world.level.material.FlowingFluid;
-            import net.neoforged.neoforge.event.entity.living.LivingDamageEvent.Post;
-            import net.neoforged.neoforge.registries.DeferredHolder;
-
-            public class TestMod {
-                public static final DeferredHolder<SimpleParticleType, SimpleParticleType> LEAF = PARTICLES.register("leaf", () -> new SimpleParticleType(false));
-                public static final DeferredHolder<FlowingFluid, FlowingFluid> SAKE = FLUIDS.register("sake", () -> new BaseFlowingFluid.Source(PROPS));
-
-                public void onLivingHurt(LivingDamageEvent.Post event, Player player, MobEffectInstance instance) {
-                    if (player.hasEffect(EffectRegistry.FIRE_BLADE.get())) {
-                        int amplifier = player.getEffect(EffectRegistry.EXP_UP.get()).getAmplifier();
-                    }
-                    boolean bad = instance.getEffect().isBeneficial();
-                    Object effect = new MobEffectInstance(EffectRegistry.GOLDEN_HEART.get(), 20, 0);
-                    Object bucket = new BucketItem(FluidRegistry.SAKE_STILL, props);
-                    Object block = new LiquidBlock(FluidRegistry.SAKE_FLOWING, props);
-                }
-            }
-        """.trimIndent())
-
-        val db = MappingDatabase.loadDefault()
-        val pass = TextReplacementPass(db)
-        pass.apply(projectDir)
-
-        val transformed = projectDir.resolve("src/main/java/com/example/TestMod.java").readText()
-
-        assertTrue(transformed.contains("import net.minecraft.core.particles.ParticleType;"))
-        assertTrue(transformed.contains("import net.minecraft.world.level.material.Fluid;"))
-        assertTrue(transformed.contains("import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;"))
-        assertTrue(transformed.contains("import net.neoforged.neoforge.event.entity.living.LivingDamageEvent.Post;"))
-        assertFalse(transformed.contains("import net.neoforged.neoforge.event.entity.living.Post;"))
-        assertTrue(transformed.contains("DeferredHolder<ParticleType<?>, SimpleParticleType> LEAF"))
-        assertTrue(transformed.contains("DeferredHolder<Fluid, FlowingFluid> SAKE"))
-        assertTrue(transformed.contains("public void onLivingHurt(Post event"))
-        assertTrue(transformed.contains("player.hasEffect(EffectRegistry.FIRE_BLADE)"))
-        assertTrue(transformed.contains("player.getEffect(EffectRegistry.EXP_UP)"))
-        assertTrue(transformed.contains("instance.getEffect().value().isBeneficial()"))
-        assertTrue(transformed.contains("new MobEffectInstance(EffectRegistry.GOLDEN_HEART, 20, 0)"))
-        assertTrue(transformed.contains("new BucketItem(FluidRegistry.SAKE_STILL.get(), props)"))
-        assertTrue(transformed.contains("new LiquidBlock(FluidRegistry.SAKE_FLOWING.get(), props)"))
-        assertFalse(transformed.contains("DeferredHolder<SimpleParticleType, SimpleParticleType>"))
-        assertFalse(transformed.contains("EffectRegistry.FIRE_BLADE.get()"))
-        assertFalse(transformed.contains("getEffect().isBeneficial()"))
     }

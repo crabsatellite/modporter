@@ -1271,6 +1271,46 @@ class RealModBenchmarkTest {
     }
 
     @Test
+    fun `git source preparation checks out an exact commit ref`(@TempDir tempDir: Path) {
+        val origin = tempDir.resolve("origin")
+        git(tempDir, "init", origin.toString())
+        git(origin, "config", "user.email", "modporter@example.test")
+        git(origin, "config", "user.name", "ModPorter Test")
+        origin.resolve("version.txt").writeText("first\n")
+        git(origin, "add", ".")
+        git(origin, "commit", "-m", "first")
+        val firstCommit = git(origin, "rev-parse", "HEAD")
+        origin.resolve("version.txt").writeText("second\n")
+        git(origin, "add", ".")
+        git(origin, "commit", "-m", "second")
+
+        val reportsDir = tempDir.resolve("reports")
+        val prepared = prepareGitSource(
+            BenchmarkCase(
+                id = "exact",
+                displayName = "Exact Commit",
+                provider = "git",
+                location = origin.toString(),
+                ref = firstCommit,
+                subdir = ".",
+                required = true
+            ),
+            url = origin.toString(),
+            ref = firstCommit,
+            sourceRoot = tempDir.resolve("sources"),
+            reportsDir = reportsDir,
+            timeoutSeconds = 30
+        )
+
+        assertTrue(prepared.path?.resolve("version.txt")?.readText()?.trim() == "first", prepared.toString())
+        assertTrue(prepared.sourceLabel.endsWith("@$firstCommit"), prepared.sourceLabel)
+        assertTrue(
+            reportsDir.resolve("exact-fetch.log").readText().contains("resolvedCommit=$firstCommit"),
+            "fetch log should retain the exact checked-out commit"
+        )
+    }
+
+    @Test
     fun `client smoke world staging disables early display for deterministic runtime gate`(@TempDir tempDir: Path) {
         val fixtureWorld = tempDir.resolve("fixture-world")
         fixtureWorld.resolve("region").createDirectories()
@@ -1874,11 +1914,7 @@ class RealModBenchmarkTest {
         val cloneDir = sourceRoot.resolve(case.id)
         resetDirectory(cloneDir, sourceRoot)
         val logFile = reportsDir.resolve("${case.id}-fetch.log")
-        val command = mutableListOf("git", "clone", "--depth", "1")
-        if (ref != "-") command.addAll(listOf("--branch", ref))
-        command.addAll(listOf(url, cloneDir.toString()))
-
-        val result = runProcess(command, sourceRoot, logFile, timeoutSeconds)
+        val result = runGitSourceCheckout(url, ref, cloneDir, sourceRoot, logFile, timeoutSeconds)
         if (result.status != CheckStatus.PASS) {
             return PreparedSource(
                 path = null,
@@ -1901,6 +1937,46 @@ class RealModBenchmarkTest {
         } else {
             PreparedSource(null, sourceLabel, Status.FAIL, "Configured subdir missing: $subdir")
         }
+    }
+
+    private fun runGitSourceCheckout(
+        url: String,
+        ref: String,
+        cloneDir: Path,
+        sourceRoot: Path,
+        logFile: Path,
+        timeoutSeconds: Long
+    ): CheckResult {
+        val exactCommit = Regex("[0-9a-fA-F]{40}").matches(ref)
+        val commands = if (exactCommit) {
+            listOf(
+                listOf("git", "init", cloneDir.toString()),
+                listOf("git", "-C", cloneDir.toString(), "remote", "add", "origin", url),
+                listOf("git", "-C", cloneDir.toString(), "fetch", "--depth", "1", "origin", ref),
+                listOf("git", "-C", cloneDir.toString(), "checkout", "--detach", "FETCH_HEAD")
+            )
+        } else {
+            listOf(buildList {
+                addAll(listOf("git", "clone", "--depth", "1"))
+                if (ref != "-") addAll(listOf("--branch", ref))
+                addAll(listOf(url, cloneDir.toString()))
+            })
+        }
+
+        Files.deleteIfExists(logFile)
+        commands.forEachIndexed { index, command ->
+            val stepLog = logFile.resolveSibling("${logFile.fileName}.step-$index")
+            val result = runProcess(command, sourceRoot, stepLog, timeoutSeconds)
+            logFile.toFile().appendText("[ModPorterBenchmark] command=${command.joinToString(" ")}\n")
+            if (stepLog.exists()) {
+                logFile.toFile().appendText(stepLog.readText())
+                Files.deleteIfExists(stepLog)
+            }
+            if (result.status != CheckStatus.PASS) {
+                return CheckResult(result.status, "${result.note}; command=${command.joinToString(" ")}")
+            }
+        }
+        return CheckResult(CheckStatus.PASS, "Passed")
     }
 
     private fun resolvedGitCommit(repo: Path): String? =
@@ -3300,12 +3376,16 @@ class RealModBenchmarkTest {
     }
 
     private fun configureJavaHome(processBuilder: ProcessBuilder) {
-        val javaHome = System.getProperty("java.home")?.takeIf { it.isNotBlank() } ?: return
-        val javaBin = Path.of(javaHome, "bin")
-        if (!javaBin.exists()) return
+        val javaExecutable = Path.of(java21Executable()).toAbsolutePath().normalize()
+        val javaBin = requireNotNull(javaExecutable.parent) {
+            "Resolved Java 21 executable has no parent directory: $javaExecutable"
+        }
+        val javaHome = requireNotNull(javaBin.parent) {
+            "Resolved Java 21 executable has no Java home: $javaExecutable"
+        }
 
         val env = processBuilder.environment()
-        env["JAVA_HOME"] = javaHome
+        env["JAVA_HOME"] = javaHome.toString()
 
         val pathKey = env.keys.firstOrNull { it.equals("PATH", ignoreCase = true) } ?: "PATH"
         val existingPath = env[pathKey].orEmpty()
@@ -3323,12 +3403,11 @@ class RealModBenchmarkTest {
         return if (javaPath != null && javaPath.exists()) javaPath.toString() else "java"
     }
 
-    private fun java21Executable(): String {
+    private val resolvedJava21Executable: String by lazy {
         val executable = if (System.getProperty("os.name").lowercase().contains("win")) "java.exe" else "java"
         val directOverride = System.getenv("MODPORTER_BENCHMARK_JAVA21")
             ?.takeIf { it.isNotBlank() }
             ?.let { Path.of(it).toAbsolutePath().normalize() }
-        if (directOverride != null && directOverride.exists()) return directOverride.toString()
 
         val homeOverride = listOf("MODPORTER_BENCHMARK_JAVA21_HOME", "JAVA21_HOME", "JDK21_HOME")
             .asSequence()
@@ -3336,9 +3415,8 @@ class RealModBenchmarkTest {
             .map { Path.of(it).toAbsolutePath().normalize() }
             .map { it.resolve("bin").resolve(executable) }
             .firstOrNull { it.exists() }
-        if (homeOverride != null) return homeOverride.toString()
 
-        val candidates = sequenceOf(
+        val discoveredCandidates = sequenceOf(
             Path.of("C:/Program Files/Java"),
             Path.of("C:/Program Files/Eclipse Adoptium"),
             Path.of(System.getProperty("user.home"), ".jdks")
@@ -3347,7 +3425,31 @@ class RealModBenchmarkTest {
             files.asSequence()
         }.map { it.toPath().resolve("bin").resolve(executable) }
 
-        return candidates.firstOrNull { it.exists() }?.toString() ?: javaExecutable()
+        val candidates = sequenceOf(directOverride, homeOverride)
+            .filterNotNull()
+            .plus(discoveredCandidates)
+            .filter { it.exists() }
+            .distinct()
+
+        candidates.firstOrNull { isJava21(it) }?.toString()
+            ?: error(
+                "Strict real-mod benchmarks require Java 21. Set " +
+                    "MODPORTER_BENCHMARK_JAVA21 or MODPORTER_BENCHMARK_JAVA21_HOME."
+            )
+    }
+
+    private fun java21Executable(): String = resolvedJava21Executable
+
+    private fun isJava21(executable: Path): Boolean {
+        val process = ProcessBuilder(executable.toString(), "-XshowSettings:properties", "-version")
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        if (!process.waitFor(15, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            return false
+        }
+        return Regex("(?m)^\\s*java\\.specification\\.version\\s*=\\s*21\\s*$").containsMatchIn(output)
     }
 
     private fun locateMinecraftServerJar(): Path? {

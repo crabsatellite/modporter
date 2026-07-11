@@ -808,36 +808,6 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
-    fun `simplechannel cleanup removes legacy marker comments by cleanup shape`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("ExampleMod.java").writeText("""
-            package com.example;
-
-            public class ExampleMod {
-                private void commonSetup() {
-                    // TODO: [forge2neo] SimpleChannel field removed after payload migration
-                    // TODO: [forge2neo] registerMessage() removed - register via PayloadRegistrar
-                    int packetIndex = 0;
-                    keepRegistrationTail();
-                }
-
-                private void keepRegistrationTail() {
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-        val migrated = srcDir.resolve("ExampleMod.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "structural-simplechannel-cleanup" })
-        assertFalse(migrated.contains("[forge2neo]"), migrated)
-        assertFalse(migrated.contains("registerMessage() removed"), migrated)
-        assertFalse(migrated.contains("packetIndex"), migrated)
-        assertTrue(migrated.contains("keepRegistrationTail();"), migrated)
-    }
-
-    @Test
     fun `packet migration supports records client direction and IPayloadContext handlers`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         val networkDir = srcDir.resolve("network")
@@ -1145,4 +1115,85 @@ bus.addListener(ActualListenerRegistry::register);
         assertFalse(messages.contains("SimpleChannel"), messages)
         assertFalse(messages.contains("messageBuilder"), messages)
         assertTrue(main.contains("modEventBus.addListener(ModNetwork::register);"), main)
+    }
+
+    @Test
+    fun `packet migration maps reception side guards to payload direction`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val networkDir = srcDir.resolve("network")
+        srcDir.createDirectories()
+        networkDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus) {
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("ClientPacket.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.neoforged.neoforge.network.handling.IPayloadContext;
+            import java.util.function.Supplier;
+
+            public class ClientPacket {
+                public static void encode(ClientPacket packet, FriendlyByteBuf buf) {
+                }
+
+                public static ClientPacket decode(FriendlyByteBuf buf) {
+                    return new ClientPacket();
+                }
+
+                public static class Handler {
+                    public static void handle(ClientPacket packet, IPayloadContext ctx) {
+                        if(!ctx.get().getDirection().getReceptionSide().isClient()) return;
+                        ctx.get().setPacketHandled(true);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        networkDir.resolve("NetworkHandler.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraftforge.network.NetworkRegistry;
+            import net.minecraftforge.network.simple.SimpleChannel;
+
+            public class NetworkHandler {
+                private static final String PROTOCOL_VERSION = "1";
+                public static final SimpleChannel INSTANCE = NetworkRegistry.newSimpleChannel(
+                    new ResourceLocation("example", "main"),
+                    () -> PROTOCOL_VERSION,
+                    PROTOCOL_VERSION::equals,
+                    PROTOCOL_VERSION::equals
+                );
+
+                public static void register() {
+                    int id = 0;
+                    INSTANCE.registerMessage(id++, ClientPacket.class,
+                            ClientPacket::encode,
+                            ClientPacket::decode,
+                            ClientPacket.Handler::handle);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val packet = networkDir.resolve("ClientPacket.java").readText()
+        val modNetwork = networkDir.resolve("ModNetwork.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-packet-payload-context-cleanup" })
+        assertTrue(modNetwork.contains("registrar.playToClient("))
+        assertTrue(!packet.contains("ctx.get()"))
+        assertTrue(!packet.contains("setPacketHandled"))
+        assertTrue(!packet.contains("java.util.function.Supplier"))
     }

@@ -1051,12 +1051,16 @@
     }
 
     private fun configureJavaHome(processBuilder: ProcessBuilder) {
-        val javaHome = System.getProperty("java.home")?.takeIf { it.isNotBlank() } ?: return
-        val javaBin = Path.of(javaHome, "bin")
-        if (!javaBin.exists()) return
+        val javaExecutable = Path.of(java21Executable()).toAbsolutePath().normalize()
+        val javaBin = requireNotNull(javaExecutable.parent) {
+            "Resolved Java 21 executable has no parent directory: $javaExecutable"
+        }
+        val javaHome = requireNotNull(javaBin.parent) {
+            "Resolved Java 21 executable has no Java home: $javaExecutable"
+        }
 
         val env = processBuilder.environment()
-        env["JAVA_HOME"] = javaHome
+        env["JAVA_HOME"] = javaHome.toString()
 
         val pathKey = env.keys.firstOrNull { it.equals("PATH", ignoreCase = true) } ?: "PATH"
         val existingPath = env[pathKey].orEmpty()
@@ -1074,12 +1078,11 @@
         return if (javaPath != null && javaPath.exists()) javaPath.toString() else "java"
     }
 
-    private fun java21Executable(): String {
+    private val resolvedJava21Executable: String by lazy {
         val executable = if (System.getProperty("os.name").lowercase().contains("win")) "java.exe" else "java"
         val directOverride = System.getenv("MODPORTER_BENCHMARK_JAVA21")
             ?.takeIf { it.isNotBlank() }
             ?.let { Path.of(it).toAbsolutePath().normalize() }
-        if (directOverride != null && directOverride.exists()) return directOverride.toString()
 
         val homeOverride = listOf("MODPORTER_BENCHMARK_JAVA21_HOME", "JAVA21_HOME", "JDK21_HOME")
             .asSequence()
@@ -1087,9 +1090,8 @@
             .map { Path.of(it).toAbsolutePath().normalize() }
             .map { it.resolve("bin").resolve(executable) }
             .firstOrNull { it.exists() }
-        if (homeOverride != null) return homeOverride.toString()
 
-        val candidates = sequenceOf(
+        val discoveredCandidates = sequenceOf(
             Path.of("C:/Program Files/Java"),
             Path.of("C:/Program Files/Eclipse Adoptium"),
             Path.of(System.getProperty("user.home"), ".jdks")
@@ -1098,7 +1100,31 @@
             files.asSequence()
         }.map { it.toPath().resolve("bin").resolve(executable) }
 
-        return candidates.firstOrNull { it.exists() }?.toString() ?: javaExecutable()
+        val candidates = sequenceOf(directOverride, homeOverride)
+            .filterNotNull()
+            .plus(discoveredCandidates)
+            .filter { it.exists() }
+            .distinct()
+
+        candidates.firstOrNull { isJava21(it) }?.toString()
+            ?: error(
+                "Strict real-mod benchmarks require Java 21. Set " +
+                    "MODPORTER_BENCHMARK_JAVA21 or MODPORTER_BENCHMARK_JAVA21_HOME."
+            )
+    }
+
+    private fun java21Executable(): String = resolvedJava21Executable
+
+    private fun isJava21(executable: Path): Boolean {
+        val process = ProcessBuilder(executable.toString(), "-XshowSettings:properties", "-version")
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        if (!process.waitFor(15, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            return false
+        }
+        return Regex("(?m)^\\s*java\\.specification\\.version\\s*=\\s*21\\s*$").containsMatchIn(output)
     }
 
     private fun locateMinecraftServerJar(): Path? {
@@ -1151,28 +1177,4 @@
         }
 
         return RuntimeLogAudit(findings.take(12), summarizeAllowedRuntimeIssues(allowedIssues))
-    }
-
-    private fun summarizeAllowedRuntimeIssues(allowedIssues: List<String>): List<String> {
-        val grouped = linkedMapOf<String, MutableList<Int>>()
-        val unparsed = mutableListOf<String>()
-        val pattern = Regex("""^line\s+(\d+):\s+(.+)$""")
-        allowedIssues.distinct().forEach { issue ->
-            val match = pattern.matchEntire(issue)
-            if (match == null) {
-                unparsed.add(issue)
-            } else {
-                grouped.getOrPut(match.groupValues[2]) { mutableListOf() }
-                    .add(match.groupValues[1].toInt())
-            }
-        }
-
-        return grouped.map { (issue, lines) ->
-            val sortedLines = lines.distinct().sorted()
-            if (sortedLines.size == 1) {
-                "line ${sortedLines.single()}: $issue"
-            } else {
-                "${summarizeLineNumbers(sortedLines)}: $issue"
-            }
-        } + unparsed.distinct()
     }

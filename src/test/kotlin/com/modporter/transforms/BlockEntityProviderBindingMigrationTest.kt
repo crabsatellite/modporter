@@ -1,0 +1,259 @@
+package com.modporter.transforms
+
+import com.modporter.core.transforms.structural.StructuralRefactorPass
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.nio.file.Path
+import kotlin.io.path.createDirectories
+import kotlin.io.path.readText
+import kotlin.io.path.writeText
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+class BlockEntityProviderBindingMigrationTest {
+    @TempDir
+    lateinit var tempDir: Path
+
+    @Test
+    fun `block entity super serialization calls preserve the exact provider parameter name`() {
+        val file = javaFile(
+            "ExactProviderBlockEntity.java",
+            """
+            package com.example;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+            public class ExactProviderBlockEntity extends BlockEntity {
+                public ExactProviderBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+                protected void write(CompoundTag tag, HolderLookup.Provider exactLookup, boolean clientPacket) {
+                    super.saveAdditional(tag);
+                }
+                protected void read(CompoundTag tag, HolderLookup.Provider exactLookup, boolean clientPacket) {
+                    super.load(tag);
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("super.saveAdditional(tag, exactLookup);"), migrated)
+        assertTrue(migrated.contains("super.loadAdditional(tag, exactLookup);"), migrated)
+        assertFalse(Regex("""\bregistries\b""").containsMatchIn(migrated), migrated)
+    }
+
+    @Test
+    fun `final legacy block entity hooks retain modifiers while gaining providers`() {
+        val file = javaFile(
+            "FinalHookBlockEntity.java",
+            """
+            package com.example;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+            public class FinalHookBlockEntity extends BlockEntity {
+                public FinalHookBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+                protected void read(CompoundTag tag, boolean clientPacket) {
+                }
+                protected void write(CompoundTag tag, boolean clientPacket) {
+                }
+                @Override
+                public final void load(CompoundTag tag) {
+                    super.load(tag);
+                    read(tag, false);
+                }
+                @Override
+                public final void saveAdditional(CompoundTag tag) {
+                    super.saveAdditional(tag);
+                    write(tag, false);
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("protected final void loadAdditional(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("public final void saveAdditional(CompoundTag tag, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("super.loadAdditional(tag, registries);"), migrated)
+        assertTrue(migrated.contains("super.saveAdditional(tag, registries);"), migrated)
+        assertTrue(migrated.contains("read(tag, registries, false);"), migrated)
+        assertTrue(migrated.contains("write(tag, registries, false);"), migrated)
+    }
+
+    @Test
+    fun `minecraft client use in a sibling method is not registry provider evidence`() {
+        val file = javaFile(
+            "ClientImportIsNotEvidence.java",
+            """
+            package com.example;
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            public class ClientImportIsNotEvidence {
+                void render() {
+                    Minecraft.getInstance().execute(() -> {});
+                }
+                void encode(CompoundTag tag, ItemStack stack) {
+                    tag.put("Stack", stack.save(new CompoundTag()));
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(migrated.contains("Minecraft.getInstance().level.registryAccess()"), migrated)
+        assertFalse(migrated.contains("Minecraft.getInstance().modporterRegistries"), migrated)
+        assertTrue(migrated.contains("void encode(CompoundTag tag, ItemStack stack, HolderLookup.Provider registries)"), migrated)
+        assertTrue(migrated.contains("stack.saveOptional(registries)"), migrated)
+        assertFalse(migrated.contains("void render(HolderLookup.Provider"), migrated)
+    }
+
+    @Test
+    fun `unbound level registry rewrite does not consume a qualified receiver suffix`() {
+        val file = javaFile(
+            "QualifiedClientLevel.java",
+            """
+            package com.example;
+            import net.minecraft.client.Minecraft;
+            public class QualifiedClientLevel {
+                Object registries(Minecraft mc) {
+                    return mc.level.registryAccess();
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("mc.level.registryAccess()"), migrated)
+        assertFalse(migrated.contains("mc.registries"), migrated)
+    }
+
+    @Test
+    fun `provider added to nbt family is consumed by item stack serialization in the same pass`() {
+        val file = javaFile(
+            "ItemStackNbtBlockEntity.java",
+            """
+            package com.example;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.items.ItemStackHandler;
+            public class ItemStackNbtBlockEntity extends BlockEntity {
+                private ItemStack stored;
+                private SmartInventory inventory;
+                private static class SmartInventory extends ItemStackHandler {
+                }
+                public ItemStackNbtBlockEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+                protected void write(CompoundTag tag, boolean clientPacket) {
+                    tag.put("Stored", stored.serializeNBT());
+                    tag.put("Inventory", inventory.serializeNBT());
+                    inventory.deserializeNBT(tag.getCompound("Inventory"));
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("write(CompoundTag tag, net.minecraft.core.HolderLookup.Provider modporterRegistries, boolean clientPacket)"), migrated)
+        assertTrue(migrated.contains("stored.saveOptional(modporterRegistries)"), migrated)
+        assertTrue(migrated.contains("inventory.serializeNBT(modporterRegistries)"), migrated)
+        assertTrue(migrated.contains("inventory.deserializeNBT(modporterRegistries, tag.getCompound(\"Inventory\"))"), migrated)
+        assertFalse(migrated.contains("stored.serializeNBT()"), migrated)
+    }
+
+    @Test
+    fun `method parameters shadow same named item stack fields during receiver typing`() {
+        val file = javaFile(
+            "LexicalReceiverShadow.java",
+            """
+            package com.example;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.item.ItemStack;
+            public class LexicalReceiverShadow {
+                private ItemStack value;
+                void serialize(Entity value, HolderLookup.Provider provider) {
+                    value.serializeNBT();
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("value.serializeNBT();"), migrated)
+        assertFalse(migrated.contains("value.saveOptional("), migrated)
+    }
+
+    @Test
+    fun `later method locals do not shadow item handler fields at earlier call sites`() {
+        val source = javaFile("InventoryOwner.java", """
+            package example;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.items.ItemStackHandler;
+
+            class CustomInventory extends ItemStackHandler {}
+
+            public class InventoryOwner extends BlockEntity {
+                private CustomInventory inventory;
+                InventoryOwner(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+                void saveInventory(CompoundTag tag, HolderLookup.Provider provider) {
+                    tag.put("Inventory", inventory.serializeNBT());
+                }
+                void unrelated(Entity inventory) {
+                    inventory.serializeNBT();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = source.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(transformed.contains("inventory.serializeNBT(provider)"), transformed)
+        assertTrue(transformed.contains("inventory.serializeNBT();"), transformed)
+    }
+
+    private fun javaFile(name: String, source: String): Path {
+        val directory = tempDir.resolve("src/main/java/com/example").createDirectories()
+        return directory.resolve(name).also { it.writeText(source) }
+    }
+}

@@ -1,6 +1,11 @@
 package com.modporter.core.transforms.build
 
 import com.modporter.core.pipeline.*
+import com.modporter.core.transforms.shared.HolderLookupProviderPropagationMigration
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import mu.KotlinLogging
 import java.nio.file.Files
 import java.nio.file.Path
@@ -29,6 +34,10 @@ class BuildSystemPass(
     override val order = 4
 
     private val targetNeoForgeVersion = "21.1.230"
+    private val reflectionFieldMappings: List<ReflectionFieldMapping> by lazy(::loadReflectionFieldMappings)
+    private val accessTransformerMemberMappings: Map<String, AccessTransformerMemberMapping> by lazy(
+        ::loadAccessTransformerMemberMappings
+    )
 
     override fun analyze(projectDir: Path): PassResult = processBuildFiles(projectDir, dryRun = true)
     override fun apply(projectDir: Path): PassResult = processBuildFiles(projectDir, dryRun = false)
@@ -94,6 +103,12 @@ class BuildSystemPass(
             }
         }
 
+        try {
+            changes.addAll(GradleJavaVersionMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate Java targets in Gradle build scripts: ${e.message}")
+        }
+
         // Update Gradle wrapper if too old (ModDevGradle 2.x requires Gradle 8.8+).
         val wrapperProps = projectDir.resolve("gradle/wrapper/gradle-wrapper.properties")
         if (wrapperProps.exists()) {
@@ -138,6 +153,14 @@ class BuildSystemPass(
             changes.addAll(migrateDataGenerationApis(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Failed to migrate data generation APIs: ${e.message}")
+        }
+
+        if (!dryRun) {
+            try {
+                changes.addAll(HolderLookupProviderPropagationMigration().migrate(projectDir, dryRun = false))
+            } catch (e: Exception) {
+                errors.add("Failed to thread HolderLookup.Provider through data generation call graph: ${e.message}")
+            }
         }
 
         try {
@@ -190,12 +213,6 @@ class BuildSystemPass(
         }
 
         try {
-            changes.addAll(cleanupSplitTickPhaseChecks(projectDir, dryRun))
-        } catch (e: Exception) {
-            errors.add("Failed to cleanup split tick phase checks: ${e.message}")
-        }
-
-        try {
             changes.addAll(migrateStructureTemplatePoolReflectionFields(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Failed to migrate structure template pool reflection fields: ${e.message}")
@@ -229,6 +246,78 @@ class BuildSystemPass(
             changes.addAll(migrateObfuscationReflectionMethodHandles(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Failed to migrate obfuscation reflection method handles: ${e.message}")
+        }
+
+        try {
+            changes.addAll(PortalApiMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate portal provider pipelines: ${e.message}")
+        }
+
+        try {
+            changes.addAll(CopperDataMapMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate copper reflection injection to data maps: ${e.message}")
+        }
+
+        try {
+            changes.addAll(RecipeManagerApiMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate direct RecipeManager map access: ${e.message}")
+        }
+
+        try {
+            changes.addAll(FoodPropertiesCodecMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate complete legacy FoodProperties codecs: ${e.message}")
+        }
+
+        try {
+            changes.addAll(PotionBrewingApiMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate static PotionBrewing tables to level state: ${e.message}")
+        }
+
+        try {
+            changes.addAll(GameTestReflectionMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate reflective GameTest discovery: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateLivingBreatheRefillMethodHandles(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate LivingBreatheEvent refill method handles: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateVarHandleFieldAccesses(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate VarHandle field access: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateRemovedStairStateSupplierReflection(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate removed StairBlock stateSupplier reflection: ${e.message}")
+        }
+
+        try {
+            changes.addAll(ThirdPartyReflectionMixinMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate optional third-party reflection to Mixin accessors: ${e.message}")
+        }
+
+        try {
+            changes.addAll(RegistrateApiMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate Registrate and removed NeoForge functional APIs: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateObfuscationReflectionFieldAccesses(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Failed to migrate ObfuscationReflectionHelper field access: ${e.message}")
         }
 
         try {
@@ -752,20 +841,33 @@ class BuildSystemPass(
             "modApi" to "api",
         )
         for ((fromConfig, toConfig) in forgeModConfigurations) {
-            val configPattern = Regex("""^(\s*)${Regex.escape(fromConfig)}\b""", RegexOption.MULTILINE)
-            val configMatch = configPattern.find(content)
-            if (configMatch != null) {
-                changes.add(Change(
-                    file = file, line = content.lineNumberAt(configMatch.range.first),
-                    description = "Replace ForgeGradle dependency configuration $fromConfig",
-                    before = fromConfig,
-                    after = toConfig,
-                    confidence = Confidence.HIGH,
-                    ruleId = "build-mod-dependency-configuration"
-                ))
-                content = configPattern.replace(content) { match ->
-                    "${match.groupValues[1]}$toConfig"
+            val patterns = listOf(
+                Regex("""\b${Regex.escape(fromConfig)}\b(?=\s*\()"""),
+                Regex("""(?m)^(\s*)${Regex.escape(fromConfig)}\b""")
+            )
+            for (configPattern in patterns) {
+                val matches = configPattern.findAll(maskJavaCommentsAndLiterals(content)).toList()
+                if (matches.isEmpty()) continue
+                for (configMatch in matches.asReversed()) {
+                    val replacement = if (configMatch.groups.size > 1) {
+                        "${configMatch.groupValues[1]}$toConfig"
+                    } else {
+                        toConfig
+                    }
+                    changes.add(Change(
+                        file = file, line = content.lineNumberAt(configMatch.range.first),
+                        description = "Replace ForgeGradle dependency configuration $fromConfig",
+                        before = configMatch.value,
+                        after = replacement,
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-mod-dependency-configuration"
+                    ))
+                    content = content.replaceRange(configMatch.range, replacement)
                 }
+            }
+            if (Regex("""\b${Regex.escape(fromConfig)}\b""")
+                    .containsMatchIn(maskJavaCommentsAndLiterals(content))) {
+                errors += "Unmigrated ForgeGradle dependency configuration $fromConfig remains in $file"
             }
         }
 
@@ -814,8 +916,8 @@ class BuildSystemPass(
         }
         content = ensureGameTestDimensionDataPackTask(content, file.parent, changes, file)
 
-        // 13. Remove reobfJar references and related comments
-        content = content.replace(Regex("""^.*[Rr]eobf.*\n?""", RegexOption.MULTILINE), "")
+        // 13. ModDev remaps archive tasks itself; preserve publication semantics while removing ForgeGradle hooks.
+        content = migrateForgeGradleReobfuscationDsl(content, changes, errors, file)
 
         // 14. Replace old property references in build.gradle body
         content = content.replace(Regex("""\bproject\.mc_version\b"""), "project.minecraft_version")
@@ -860,6 +962,72 @@ class BuildSystemPass(
         }
 
         return changes to errors
+    }
+
+    private fun migrateForgeGradleReobfuscationDsl(
+        source: String,
+        changes: MutableList<Change>,
+        errors: MutableList<String>,
+        file: Path
+    ): String {
+        var result = source
+        val invocationPattern = Regex("""\bobfuscation\s*\.\s*reobfuscate\s*\(""")
+        while (true) {
+            val executable = maskJavaCommentsAndLiterals(result)
+            val invocation = invocationPattern.find(executable) ?: break
+            val openParen = executable.indexOf('(', invocation.range.first)
+            val closeParen = if (openParen >= 0) findMatchingParen(executable, openParen) else -1
+            if (closeParen <= openParen) {
+                errors += "Cannot parse ForgeGradle reobfuscation invocation in $file"
+                break
+            }
+            var end = closeParen + 1
+            while (end < result.length && result[end] in charArrayOf(' ', '\t')) end++
+            if (result.getOrNull(end) == ';') end++
+            while (end < result.length && result[end] in charArrayOf(' ', '\t')) end++
+            if (result.startsWith("\r\n", end)) end += 2 else if (result.getOrNull(end) == '\n') end++
+            val lineStart = result.lastIndexOf('\n', invocation.range.first - 1).let { it + 1 }
+            val before = result.substring(lineStart, end).trim()
+            changes += Change(
+                file = file,
+                line = result.lineNumberAt(lineStart),
+                description = "Remove ForgeGradle archive reobfuscation hook now provided by ModDev",
+                before = before,
+                after = "(ModDev remaps the archive task)",
+                confidence = Confidence.HIGH,
+                ruleId = "build-migrate-reobfuscation-dsl"
+            )
+            result = result.removeRange(lineStart, end)
+        }
+
+        val replacements = listOf(
+            Regex("""\bartifact\s*\(\s*tasks\.reobfJar\s*\)""") to "artifact(tasks.named(\"jar\"))",
+            Regex("""\btasks\.reobfJar\.archiveFile\b""") to "tasks.named(\"jar\").flatMap { it.archiveFile }",
+            Regex("""(?<![\w$.])reobfJar\.archiveFile\b""") to "tasks.named(\"jar\").flatMap { it.archiveFile }",
+            Regex("""\btasks\.reobfJar\b""") to "tasks.named(\"jar\")"
+        )
+        for ((pattern, replacement) in replacements) {
+            val matches = pattern.findAll(maskJavaCommentsAndLiterals(result)).toList()
+            for (match in matches.asReversed()) {
+                changes += Change(
+                    file = file,
+                    line = result.lineNumberAt(match.range.first),
+                    description = "Retarget ForgeGradle reobfuscated publication artifact to the ModDev jar task",
+                    before = result.substring(match.range),
+                    after = replacement,
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-migrate-reobfuscation-publication"
+                )
+                result = result.replaceRange(match.range, replacement)
+            }
+        }
+
+        val remaining = Regex("""\breobf(?:Jar|uscate)\b""")
+            .find(maskJavaCommentsAndLiterals(result))
+        if (remaining != null) {
+            errors += "Unmigrated ForgeGradle reobfuscation DSL remains in $file:${result.lineNumberAt(remaining.range.first)}"
+        }
+        return result
     }
 
     private fun removeUnsupportedJarJarTaskClassifier(
@@ -958,7 +1126,6 @@ tasks.register('sourceJar', Jar) {
     archiveClassifier = 'sources'
     from sourceSets.main.allSource
 }
-
 """.trimIndent() + System.lineSeparator()
         val insertAt = Regex("""(?m)^publishing\s*\{""").find(content)?.range?.first
             ?: Regex("""(?m)^curseforge\s*\{""").find(content)?.range?.first
@@ -2038,8 +2205,21 @@ ${fieldDeclaration.indent}}
     }
 
     private fun addDistClientValueToEventBusSubscriberAnnotation(annotation: String): String {
+        val openParen = annotation.indexOf('(')
         val closeParen = annotation.lastIndexOf(')')
-        if (closeParen < 0) return annotation
+        if (openParen < 0 || closeParen <= openParen) return annotation
+        val arguments = splitTopLevelArgs(annotation.substring(openParen + 1, closeParen))
+        val positionalIndex = arguments.indexOfFirst { argument ->
+            !Regex("""^[A-Za-z_$][\w$]*\s*=""").containsMatchIn(argument)
+        }
+        if (positionalIndex >= 0) {
+            val normalizedArguments = arguments.mapIndexed { index, argument ->
+                if (index == positionalIndex) "value = $argument" else argument
+            }
+            return annotation.substring(0, openParen + 1) +
+                normalizedArguments.joinToString(", ") +
+                annotation.substring(closeParen)
+        }
         val beforeClose = annotation.substring(0, closeParen).trimEnd()
         val separator = if (beforeClose.endsWith("(")) "" else ", "
         return if (!annotation.contains('\n')) {
@@ -2290,6 +2470,631 @@ public static void $methodName(EntityRenderersEvent.AddLayers $eventParam) {
                 }
             }
         return changes
+    }
+
+    private fun migrateLivingBreatheRefillMethodHandles(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val changes = mutableListOf<Change>()
+
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                val executableOriginal = maskJavaCommentsAndLiterals(original)
+                if (!executableOriginal.contains("LivingBreatheEvent.class") ||
+                    !original.contains("\"setCanRefillAir\"") ||
+                    !executableOriginal.contains("MethodHandle")) {
+                    return@forEach
+                }
+
+                val handleField = Regex(
+                    """(?m)^[ \t]*(?:(?://[^\r\n]*)\r?\n[ \t]*)*(?:@Nullable\s*)?private\s+static\s+final\s+MethodHandle\s+([A-Za-z_$][\w$]*)\s*;[ \t]*(?:\r?\n)?"""
+                ).find(executableOriginal)?.groupValues?.get(1) ?: return@forEach
+                val invocation = Regex(
+                    """try\s*\{\s*if\s*\(\s*${Regex.escape(handleField)}\s*!=\s*null\s*\)\s*${Regex.escape(handleField)}\.invokeExact\(\s*([A-Za-z_$][\w$]*)\s*,\s*(true|false)\s*\)\s*;\s*}\s*catch\s*\(\s*Throwable\s+[A-Za-z_$][\w$]*\s*\)\s*\{\s*}""",
+                    RegexOption.DOT_MATCHES_ALL
+                ).find(executableOriginal) ?: return@forEach
+                val eventName = invocation.groupValues[1]
+                val refillExpression = if (invocation.groupValues[2] == "true") {
+                    "$eventName.getEntity().getMaxAirSupply()"
+                } else {
+                    "0"
+                }
+
+                val staticBlocks = Regex("""\bstatic\s*\{""").findAll(executableOriginal).toList()
+                val bindingBlock = staticBlocks.firstNotNullOfOrNull { staticMatch ->
+                    val openBrace = executableOriginal.indexOf('{', staticMatch.range.first)
+                    val closeBrace = if (openBrace >= 0) findMatchingBrace(executableOriginal, openBrace) else -1
+                    if (closeBrace <= openBrace) return@firstNotNullOfOrNull null
+                    val block = executableOriginal.substring(staticMatch.range.first, closeBrace + 1)
+                    if (block.contains("LivingBreatheEvent.class") &&
+                        original.substring(staticMatch.range.first, closeBrace + 1).contains("\"setCanRefillAir\"") &&
+                        Regex("""\b${Regex.escape(handleField)}\s*=""").containsMatchIn(block)) {
+                        val currentLineStart = original.lastIndexOf('\n', (staticMatch.range.first - 1).coerceAtLeast(0)) + 1
+                        var start = currentLineStart
+                        var scanEnd = (currentLineStart - 1).coerceAtLeast(0)
+                        while (scanEnd > 0) {
+                            val lineStart = original.lastIndexOf('\n', (scanEnd - 1).coerceAtLeast(0)) + 1
+                            val line = original.substring(lineStart, scanEnd).trim()
+                            if (!line.startsWith("//")) break
+                            start = lineStart
+                            scanEnd = (lineStart - 1).coerceAtLeast(0)
+                        }
+                        start..closeBrace
+                    } else {
+                        null
+                    }
+                } ?: return@forEach
+
+                var modified = original.replaceRange(
+                    invocation.range,
+                    "$eventName.setRefillAirAmount($refillExpression);"
+                )
+                modified = modified.replaceRange(bindingBlock, "")
+                modified = Regex(
+                    """(?m)^[ \t]*(?:(?://[^\r\n]*)\r?\n[ \t]*)*(?:@Nullable\s*)?private\s+static\s+final\s+MethodHandle\s+${Regex.escape(handleField)}\s*;[ \t]*(?:\r?\n)?"""
+                ).replace(modified, "")
+                modified = removeJavaImport(modified, "java.lang.invoke.MethodHandle")
+                modified = removeJavaImport(modified, "java.lang.invoke.MethodHandles")
+                modified = removeJavaImport(modified, "java.lang.invoke.MethodType")
+                modified = removeJavaImportIfSimpleNameUnused(modified, "org.jetbrains.annotations.Nullable")
+
+                if (modified != original) {
+                    changes.add(Change(
+                        file = javaFile,
+                        line = 1,
+                        description = "Replace LivingBreatheEvent setCanRefillAir MethodHandle compatibility with the 1.21 refill amount API",
+                        before = "MethodHandle LivingBreatheEvent.setCanRefillAir(boolean)",
+                        after = "event.setRefillAirAmount(event.getEntity().getMaxAirSupply())",
+                        confidence = Confidence.HIGH,
+                        ruleId = "build-living-breathe-refill-direct-api"
+                    ))
+                    if (!dryRun) javaFile.writeText(modified)
+                }
+            }
+        return changes
+    }
+
+    private data class ReflectionFieldMapping(
+        val sourceOwner: String,
+        val sourceNames: Set<String>,
+        val targetOwner: String,
+        val targetName: String,
+        val targetType: String?
+    )
+
+    private data class VarHandleBinding(
+        val handleName: String,
+        val mapping: ReflectionFieldMapping,
+        val bindingRange: IntRange
+    )
+
+    private data class DirectFieldRewrite(
+        val content: String,
+        val changed: Boolean,
+        val writesField: Boolean,
+        val requiresAccessTransformer: Boolean = true
+    )
+
+    private fun loadReflectionFieldMappings(): List<ReflectionFieldMapping> {
+        val resourcePath = "$mappingsPrefix/reflection-fields.json"
+        val text = BuildSystemPass::class.java.getResourceAsStream(resourcePath)
+            ?.bufferedReader()
+            ?.use { it.readText() }
+            ?: error("Missing reflection field mapping resource: $resourcePath")
+        val fields = Json.parseToJsonElement(text).jsonObject.getValue("fields").jsonArray
+        return fields.map { element ->
+            val field = element.jsonObject
+            ReflectionFieldMapping(
+                sourceOwner = field.getValue("sourceOwner").jsonPrimitive.content,
+                sourceNames = field.getValue("sourceNames").jsonArray.map { it.jsonPrimitive.content }.toSet(),
+                targetOwner = field.getValue("targetOwner").jsonPrimitive.content,
+                targetName = field.getValue("targetName").jsonPrimitive.content,
+                targetType = field["targetType"]?.jsonPrimitive?.content
+            )
+        }
+    }
+
+    private fun migrateVarHandleFieldAccesses(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val changes = mutableListOf<Change>()
+
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                val codeWithStrings = maskJavaCommentsAndTextBlocks(original)
+                if (!codeWithStrings.contains("VarHandle") || !codeWithStrings.contains("findVarHandle(")) {
+                    return@forEach
+                }
+
+                val bindings = mutableListOf<VarHandleBinding>()
+                val declarationPattern = Regex(
+                    """(?m)^[ \t]*(?:public|protected|private)?\s*static\s+final\s+VarHandle\s+([A-Za-z_$][\w$]*)\s*;"""
+                )
+                for (declaration in declarationPattern.findAll(codeWithStrings)) {
+                    val handleName = declaration.groupValues[1]
+                    val bindingPattern = Regex(
+                        """\b${Regex.escape(handleName)}\s*=\s*[A-Za-z_$][\w$]*\.findVarHandle\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.class\s*,\s*"([^"]+)"\s*,\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.class\s*\)\s*;"""
+                    )
+                    val binding = bindingPattern.find(codeWithStrings) ?: continue
+                    val owner = resolveImportedJavaType(binding.groupValues[1], original) ?: continue
+                    val mapping = resolveReflectionFieldMapping(owner, binding.groupValues[2]) ?: continue
+                    bindings += VarHandleBinding(handleName, mapping, binding.range)
+                }
+                if (bindings.isEmpty()) return@forEach
+
+                var modified = original
+                val migratedBindings = mutableListOf<VarHandleBinding>()
+                val atEntries = linkedSetOf<String>()
+                for (binding in bindings) {
+                    val rewrite = if (
+                        binding.mapping.targetOwner == "net.neoforged.neoforge.client.model.generators.ModelBuilder" &&
+                        binding.mapping.targetName == "textures"
+                    ) {
+                        rewriteModelBuilderTextureVarHandleCalls(modified, binding)
+                    } else {
+                        rewriteVarHandleCalls(modified, binding)
+                    }
+                    if (!rewrite.changed) continue
+                    modified = rewrite.content
+                    migratedBindings += binding
+                    if (rewrite.requiresAccessTransformer) {
+                        val access = if (rewrite.writesField) "public-f" else "public"
+                        atEntries += "$access ${binding.mapping.targetOwner} ${binding.mapping.targetName}"
+                    }
+                }
+                if (migratedBindings.isEmpty()) return@forEach
+
+                for (binding in migratedBindings) {
+                    modified = Regex(
+                        """(?m)^[ \t]*(?:public|protected|private)?\s*static\s+final\s+VarHandle\s+${Regex.escape(binding.handleName)}\s*;[ \t]*(?:\r?\n)?"""
+                    ).replace(modified, "")
+                }
+                modified = removePureVarHandleBindingBlocks(modified, migratedBindings.map { it.handleName }.toSet())
+                modified = removeJavaImportIfSimpleNameUnused(modified, "java.lang.invoke.VarHandle")
+                modified = removeJavaImportIfSimpleNameUnused(modified, "java.lang.invoke.MethodHandles")
+                modified = removeJavaImportIfSimpleNameUnused(modified, "java.util.Map")
+
+                changes.add(Change(
+                    file = javaFile,
+                    line = 1,
+                    description = "Replace source-declared VarHandle field access with access-transformer-backed direct access",
+                    before = migratedBindings.joinToString { "${it.handleName}.get/set" },
+                    after = migratedBindings.joinToString { "receiver.${it.mapping.targetName}" },
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-varhandle-at-direct-field"
+                ))
+                if (!dryRun) javaFile.writeText(modified)
+                if (atEntries.isNotEmpty()) {
+                    changes.addAll(ensureAccessTransformerEntries(
+                        projectDir = projectDir,
+                        requiredEntries = atEntries.toList(),
+                        dryRun = dryRun,
+                        ruleId = "build-varhandle-at-entries",
+                        description = "Expose fields that were accessed through source-declared VarHandles"
+                    ))
+                }
+            }
+        return changes
+    }
+
+    private fun rewriteModelBuilderTextureVarHandleCalls(
+        source: String,
+        binding: VarHandleBinding
+    ): DirectFieldRewrite {
+        val executable = maskJavaCommentsAndLiterals(source)
+        val declaration = Regex(
+            """(?m)^[ \t]*Map\s*<\s*String\s*,\s*String\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*\(\s*Map\s*<\s*String\s*,\s*String\s*>\s*\)\s*${Regex.escape(binding.handleName)}\.get\(\s*([A-Za-z_$][\w$]*)\s*\)\s*;[ \t]*(?:\r?\n)?"""
+        ).find(executable) ?: return DirectFieldRewrite(source, false, false)
+        val textureMap = declaration.groupValues[1]
+        val modelBuilder = declaration.groupValues[2]
+        val replacements = mutableListOf<Pair<IntRange, String>>()
+        var searchFrom = 0
+        val token = "$textureMap.put"
+        while (true) {
+            val callStart = executable.indexOf(token, searchFrom)
+            if (callStart < 0) break
+            val openParen = executable.indexOf('(', callStart + token.length)
+            val closeParen = if (openParen >= 0) findMatchingParen(executable, openParen) else -1
+            if (closeParen <= openParen) return DirectFieldRewrite(source, false, false)
+            val arguments = splitTopLevelArgs(source.substring(openParen + 1, closeParen))
+            if (arguments.size != 2) return DirectFieldRewrite(source, false, false)
+            val resourceVariable = Regex("""^([A-Za-z_$][\w$]*)\.toString\(\)$""")
+                .matchEntire(arguments[1].trim())
+                ?.groupValues
+                ?.get(1)
+                ?: return DirectFieldRewrite(source, false, false)
+            if (!Regex("""\b(?:net\.minecraft\.resources\.)?ResourceLocation\s+${Regex.escape(resourceVariable)}\b""")
+                    .containsMatchIn(executable)) {
+                return DirectFieldRewrite(source, false, false)
+            }
+            replacements += (callStart..closeParen) to
+                "$modelBuilder.texture(${arguments[0].trim()}, $resourceVariable)"
+            searchFrom = closeParen + 1
+        }
+        if (replacements.isEmpty()) return DirectFieldRewrite(source, false, false)
+        var result = source
+        replacements.sortedByDescending { it.first.first }.forEach { (range, replacement) ->
+            result = result.replaceRange(range, replacement)
+        }
+        result = result.replaceRange(declaration.range, "")
+        if (Regex("""\b${Regex.escape(textureMap)}\b""")
+                .containsMatchIn(maskJavaCommentsAndLiterals(result))) {
+            return DirectFieldRewrite(source, false, false)
+        }
+        return DirectFieldRewrite(
+            content = result,
+            changed = true,
+            writesField = false,
+            requiresAccessTransformer = false
+        )
+    }
+
+    private fun rewriteVarHandleCalls(source: String, binding: VarHandleBinding): DirectFieldRewrite {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val replacements = mutableListOf<Pair<IntRange, String>>()
+        var writesField = false
+        for (operation in listOf("get", "set")) {
+            val token = "${binding.handleName}.$operation"
+            var searchFrom = 0
+            while (true) {
+                val callStart = executableCode.indexOf(token, searchFrom)
+                if (callStart < 0) break
+                val openParen = executableCode.indexOf('(', callStart + token.length)
+                if (openParen < 0) break
+                val closeParen = findMatchingParen(executableCode, openParen)
+                if (closeParen < 0) break
+                val args = splitTopLevelArgs(source.substring(openParen + 1, closeParen))
+                val replacement = when {
+                    operation == "get" && args.size == 1 -> "(${args[0]}).${binding.mapping.targetName}"
+                    operation == "set" && args.size == 2 -> {
+                        writesField = true
+                        "(${args[0]}).${binding.mapping.targetName} = ${args[1]}"
+                    }
+                    else -> null
+                }
+                if (replacement != null) replacements += (callStart..closeParen) to replacement
+                searchFrom = closeParen + 1
+            }
+        }
+        if (replacements.isEmpty()) return DirectFieldRewrite(source, changed = false, writesField = false)
+        var result = source
+        replacements.sortedByDescending { it.first.first }.forEach { (range, replacement) ->
+            result = result.replaceRange(range, replacement)
+        }
+        return DirectFieldRewrite(result, changed = true, writesField = writesField)
+    }
+
+    private fun removePureVarHandleBindingBlocks(source: String, migratedHandles: Set<String>): String {
+        val codeWithStrings = maskJavaCommentsAndTextBlocks(source)
+        val removals = mutableListOf<IntRange>()
+        for (staticMatch in Regex("""\bstatic\s*\{""").findAll(codeWithStrings)) {
+            val openBrace = codeWithStrings.indexOf('{', staticMatch.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(codeWithStrings, openBrace) else -1
+            if (closeBrace <= openBrace) continue
+            val block = source.substring(staticMatch.range.first, closeBrace + 1)
+            if (!block.contains("findVarHandle(")) continue
+            val referencedHandles = migratedHandles.filter { handle ->
+                Regex("""\b${Regex.escape(handle)}\s*=""").containsMatchIn(block)
+            }
+            if (referencedHandles.isEmpty()) continue
+
+            var residue = maskJavaCommentsAndTextBlocks(block)
+            residue = Regex("""\bstatic\s*\{""").replaceFirst(residue, "")
+            residue = Regex("""\btry\s*\{""").replace(residue, "")
+            residue = Regex("""}\s*catch\s*\([^)]*\)\s*\{""").replace(residue, "")
+            residue = Regex("""MethodHandles\.Lookup\s+[A-Za-z_$][\w$]*\s*=\s*MethodHandles\.privateLookupIn\([^;]+;""").replace(residue, "")
+            residue = Regex("""\b(?:${referencedHandles.joinToString("|") { Regex.escape(it) }})\s*=\s*[A-Za-z_$][\w$]*\.findVarHandle\([^;]+;""").replace(residue, "")
+            residue = Regex("""throw\s+new\s+RuntimeException\([^;]+;""").replace(residue, "")
+            residue = residue.replace("}", "").trim()
+            if (residue.isEmpty()) removals += staticMatch.range.first..closeBrace
+        }
+        var result = source
+        removals.asReversed().forEach { result = result.replaceRange(it, "") }
+        return result
+    }
+
+    private fun resolveImportedJavaType(reference: String, source: String): String? {
+        if ('.' in reference) return reference
+        return Regex("""(?m)^\s*import\s+([A-Za-z_$][\w$.]*\.${Regex.escape(reference)})\s*;""")
+            .find(maskJavaCommentsAndLiterals(source))
+            ?.groupValues
+            ?.get(1)
+    }
+
+    private fun resolveReflectionFieldMapping(owner: String, sourceFieldName: String): ReflectionFieldMapping? {
+        reflectionFieldMappings.firstOrNull { mapping ->
+            mapping.sourceOwner == owner && sourceFieldName in mapping.sourceNames
+        }?.let { return it }
+        if (owner.startsWith("net.minecraft.") ||
+            owner.startsWith("net.neoforged.") ||
+            owner.startsWith("net.minecraftforge.")) {
+            return null
+        }
+        return ReflectionFieldMapping(owner, setOf(sourceFieldName), owner, sourceFieldName, null)
+    }
+
+    private data class ReflectionFieldRewrite(
+        val content: String,
+        val entries: Set<String>,
+        val migratedCalls: Int
+    )
+
+    private fun migrateObfuscationReflectionFieldAccesses(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val changes = mutableListOf<Change>()
+
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                val executableOriginal = maskJavaCommentsAndLiterals(original)
+                if (!executableOriginal.contains("ObfuscationReflectionHelper.getPrivateValue") &&
+                    !executableOriginal.contains("ObfuscationReflectionHelper.setPrivateValue")) {
+                    return@forEach
+                }
+
+                val rewrite = rewriteObfuscationReflectionFieldCalls(original)
+                if (rewrite.migratedCalls == 0) return@forEach
+                var modified = rewrite.content
+                if (!maskJavaCommentsAndLiterals(modified).contains("ObfuscationReflectionHelper.")) {
+                    modified = removeJavaImport(modified, "net.neoforged.fml.util.ObfuscationReflectionHelper")
+                    modified = removeJavaImport(modified, "net.minecraftforge.fml.util.ObfuscationReflectionHelper")
+                }
+                changes.add(Change(
+                    file = javaFile,
+                    line = 1,
+                    description = "Replace typed ObfuscationReflectionHelper field access with access-transformer-backed direct access",
+                    before = "${rewrite.migratedCalls} reflection field call(s)",
+                    after = "direct owner field access",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-obfuscation-reflection-at-direct-field"
+                ))
+                if (!dryRun) javaFile.writeText(modified)
+                changes.addAll(ensureAccessTransformerEntries(
+                    projectDir = projectDir,
+                    requiredEntries = rewrite.entries.toList(),
+                    dryRun = dryRun,
+                    ruleId = "build-obfuscation-reflection-at-entries",
+                    description = "Expose fields previously accessed through ObfuscationReflectionHelper"
+                ))
+            }
+        return changes
+    }
+
+    private fun rewriteObfuscationReflectionFieldCalls(source: String): ReflectionFieldRewrite {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val replacements = mutableListOf<Pair<IntRange, String>>()
+        val atEntries = linkedSetOf<String>()
+
+        for (operation in listOf("getPrivateValue", "setPrivateValue")) {
+            val token = "ObfuscationReflectionHelper.$operation"
+            var searchFrom = 0
+            while (true) {
+                val callStart = executableCode.indexOf(token, searchFrom)
+                if (callStart < 0) break
+                val openParen = executableCode.indexOf('(', callStart + token.length)
+                if (openParen < 0) break
+                val closeParen = findMatchingParen(executableCode, openParen)
+                if (closeParen < 0) break
+                val args = splitTopLevelArgs(source.substring(openParen + 1, closeParen))
+                val requiredSize = if (operation == "getPrivateValue") 3 else 4
+                if (args.size != requiredSize) {
+                    searchFrom = closeParen + 1
+                    continue
+                }
+                val ownerReference = Regex(
+                    """^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.class$"""
+                ).matchEntire(args[0].trim())?.groupValues?.get(1)
+                val fieldName = Regex("""^"([A-Za-z_$][\w$]*)"$""")
+                    .matchEntire(args.last().trim())?.groupValues?.get(1)
+                if (ownerReference == null || fieldName == null) {
+                    searchFrom = closeParen + 1
+                    continue
+                }
+                val owner = resolveImportedJavaType(ownerReference, source)
+                val mapping = owner?.let { resolveReflectionFieldMapping(it, fieldName) }
+                if (mapping == null) {
+                    searchFrom = closeParen + 1
+                    continue
+                }
+
+                val receiver = args[1].trim()
+                val directField = "($receiver).${mapping.targetName}"
+                var replacementRange = callStart..closeParen
+                val replacement = if (operation == "getPrivateValue") {
+                    val primitiveTail = mapping.targetType?.let { primitiveType ->
+                        boxedPrimitiveType(primitiveType)?.let { boxedType ->
+                            val tail = source.substring(closeParen + 1)
+                            val tailPattern = Regex(
+                                """^\s+instanceof\s+${Regex.escape(boxedType)}\s+([A-Za-z_$][\w$]*)\s+&&\s+\1\s*>\s*0"""
+                            )
+                            tailPattern.find(tail)?.takeIf { it.range.first == 0 }
+                        }
+                    }
+                    if (primitiveTail != null) {
+                        replacementRange = callStart..(closeParen + primitiveTail.range.last + 1)
+                        "$directField > 0"
+                    } else {
+                        directField
+                    }
+                } else {
+                    "$directField = ${args[2].trim()}"
+                }
+                replacements += replacementRange to replacement
+                val access = if (operation == "setPrivateValue") "public-f" else "public"
+                atEntries += "$access ${mapping.targetOwner} ${mapping.targetName}"
+                searchFrom = closeParen + 1
+            }
+        }
+
+        if (replacements.isEmpty()) return ReflectionFieldRewrite(source, emptySet(), 0)
+        var result = source
+        replacements.sortedByDescending { it.first.first }.forEach { (range, replacement) ->
+            result = result.replaceRange(range, replacement)
+        }
+        return ReflectionFieldRewrite(result, atEntries, replacements.size)
+    }
+
+    private fun boxedPrimitiveType(type: String): String? = when (type) {
+        "boolean" -> "Boolean"
+        "byte" -> "Byte"
+        "short" -> "Short"
+        "int" -> "Integer"
+        "long" -> "Long"
+        "float" -> "Float"
+        "double" -> "Double"
+        "char" -> "Character"
+        else -> null
+    }
+
+    private fun migrateRemovedStairStateSupplierReflection(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val changes = mutableListOf<Change>()
+
+        Files.walk(srcDir)
+            .filter { it.toString().endsWith(".java") }
+            .forEach { javaFile ->
+                val original = javaFile.readText()
+                val codeWithStrings = maskJavaCommentsAndTextBlocks(original)
+                if (!codeWithStrings.contains("ObfuscationReflectionHelper.setPrivateValue") ||
+                    !codeWithStrings.contains("StairBlock.class") ||
+                    !original.contains("\"stateSupplier\"")) {
+                    return@forEach
+                }
+
+                val rewrite = rewriteRemovedStairStateSupplierReflection(original)
+                if (rewrite.second == 0) return@forEach
+                var modified = rewrite.first
+                if (!maskJavaCommentsAndLiterals(modified).contains("ObfuscationReflectionHelper.")) {
+                    modified = removeJavaImport(modified, "net.neoforged.fml.util.ObfuscationReflectionHelper")
+                    modified = removeJavaImport(modified, "net.minecraftforge.fml.util.ObfuscationReflectionHelper")
+                }
+                changes.add(Change(
+                    file = javaFile,
+                    line = 1,
+                    description = "Move removed StairBlock stateSupplier reflection semantics into 1.21 BlockState constructors",
+                    before = "construct stair with an intermediate state, then reflectively replace stateSupplier",
+                    after = "construct stair directly with the source-declared Supplier<BlockState>.get() value",
+                    confidence = Confidence.HIGH,
+                    ruleId = "build-stair-state-supplier-constructor"
+                ))
+                if (!dryRun) javaFile.writeText(modified)
+            }
+        return changes
+    }
+
+    private fun rewriteRemovedStairStateSupplierReflection(source: String): Pair<String, Int> {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val supplierNames = Regex(
+            """\b(?:java\.util\.function\.)?Supplier\s*<\s*BlockState\s*>\s+([A-Za-z_$][\w$]*)\s*="""
+        ).findAll(executableCode).map { it.groupValues[1] }.toSet()
+        if (supplierNames.isEmpty()) return source to 0
+
+        val replacements = mutableListOf<Pair<IntRange, String>>()
+        var migratedReflectionCalls = 0
+        val token = "ObfuscationReflectionHelper.setPrivateValue"
+        var searchFrom = 0
+        while (true) {
+            val callStart = executableCode.indexOf(token, searchFrom)
+            if (callStart < 0) break
+            val openParen = executableCode.indexOf('(', callStart + token.length)
+            if (openParen < 0) break
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) break
+            val args = splitTopLevelArgs(source.substring(openParen + 1, closeParen))
+            if (args.size != 4 || args[0].trim() != "StairBlock.class" ||
+                args[3].trim() != "\"stateSupplier\"") {
+                searchFrom = closeParen + 1
+                continue
+            }
+            val receiver = Regex("""^[A-Za-z_$][\w$]*$""").matchEntire(args[1].trim())?.value
+            val supplier = Regex("""^[A-Za-z_$][\w$]*$""").matchEntire(args[2].trim())?.value
+            if (receiver == null || supplier == null || supplier !in supplierNames) {
+                searchFrom = closeParen + 1
+                continue
+            }
+
+            val declarationPattern = Regex(
+                """\b[A-Za-z_$][\w$]*(?:\s*<[^;=]+>)?\s+${Regex.escape(receiver)}\s*=\s*new\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\("""
+            )
+            val declaration = declarationPattern.findAll(executableCode.substring(0, callStart)).lastOrNull()
+            if (declaration == null) {
+                searchFrom = closeParen + 1
+                continue
+            }
+            val constructorOpen = executableCode.indexOf('(', declaration.range.last)
+            val constructorClose = if (constructorOpen >= 0) findMatchingParen(executableCode, constructorOpen) else -1
+            if (constructorClose <= constructorOpen || constructorClose >= callStart) {
+                searchFrom = closeParen + 1
+                continue
+            }
+            val constructorArgs = splitTopLevelArgs(source.substring(constructorOpen + 1, constructorClose))
+            val stateIndexes = constructorArgs.indices.filter { index ->
+                Regex("""(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*\.defaultBlockState\(\)""")
+                    .matches(constructorArgs[index].trim())
+            }
+            if (stateIndexes.size != 1) {
+                searchFrom = closeParen + 1
+                continue
+            }
+            val migratedArgs = constructorArgs.toMutableList()
+            migratedArgs[stateIndexes.single()] = "$supplier.get()"
+            val constructorName = declaration.groupValues[1]
+            replacements += (executableCode.indexOf("new", declaration.range.first)..constructorClose) to
+                "new $constructorName(${migratedArgs.joinToString(", ")})"
+
+            var statementEnd = closeParen + 1
+            while (statementEnd < source.length && source[statementEnd].isWhitespace() && source[statementEnd] != '\n') {
+                statementEnd++
+            }
+            if (source.getOrNull(statementEnd) == ';') statementEnd++
+            if (source.getOrNull(statementEnd) == '\r') statementEnd++
+            if (source.getOrNull(statementEnd) == '\n') statementEnd++
+            val lineStart = source.lastIndexOf('\n', callStart).let { if (it < 0) 0 else it + 1 }
+            val removalStart = if (source.substring(lineStart, callStart).isBlank()) lineStart else callStart
+            replacements += (removalStart until statementEnd) to ""
+            migratedReflectionCalls++
+            searchFrom = closeParen + 1
+        }
+        if (migratedReflectionCalls == 0) return source to 0
+
+        var result = source
+        replacements.sortedByDescending { it.first.first }.forEach { (range, replacement) ->
+            result = result.replaceRange(range, replacement)
+        }
+        result = rewriteStairBlockSupplierConstructorCalls(result, supplierNames)
+        return result to migratedReflectionCalls
+    }
+
+    private fun rewriteStairBlockSupplierConstructorCalls(source: String, supplierNames: Set<String>): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val replacements = mutableListOf<Pair<IntRange, String>>()
+        val token = "new StairBlock"
+        var searchFrom = 0
+        while (true) {
+            val callStart = executableCode.indexOf(token, searchFrom)
+            if (callStart < 0) break
+            val openParen = executableCode.indexOf('(', callStart + token.length)
+            if (openParen < 0) break
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) break
+            val args = splitTopLevelArgs(source.substring(openParen + 1, closeParen))
+            val supplier = args.firstOrNull()?.trim()
+            if (args.size == 2 && supplier in supplierNames) {
+                replacements += (callStart..closeParen) to
+                    "new StairBlock($supplier.get(), ${args[1].trim()})"
+            }
+            searchFrom = closeParen + 1
+        }
+        var result = source
+        replacements.asReversed().forEach { (range, replacement) -> result = result.replaceRange(range, replacement) }
+        return result
     }
 
     private data class ObfuscationMethodHandleBinding(
@@ -3441,96 +4246,6 @@ config="$configName"
         }
     }
 
-    private fun cleanupSplitTickPhaseChecks(projectDir: Path, dryRun: Boolean): List<Change> {
-        val srcDir = projectDir.resolve("src/main/java")
-        if (!srcDir.exists()) return emptyList()
-
-        val changes = mutableListOf<Change>()
-        java.nio.file.Files.walk(srcDir)
-            .filter { it.toString().endsWith(".java") }
-            .forEach { javaFile ->
-                val original = javaFile.readText()
-                var modified = original
-                val executableOriginal = maskJavaCommentsAndLiterals(original)
-                val hadStartPhase = executableOriginal.contains("event.phase == TickEvent.Phase.START") ||
-                    executableOriginal.contains("event.phase != TickEvent.Phase.START")
-
-                if (hadStartPhase) {
-                    modified = replaceExecutableRegex(
-                        modified,
-                        Regex("""\bRenderFrameEvent\.Post\b""")
-                    ) { "RenderFrameEvent.Pre" }
-                }
-
-                modified = replaceExecutableRegex(
-                    modified,
-                    Regex("""(?m)^[ \t]*if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\)\s*return;\s*\r?\n""")
-                ) { "" }
-                modified = replaceExecutableRegex(
-                    modified,
-                    Regex("""(?m)^[ \t]*if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.START\s*\)\s*return;\s*\r?\n""")
-                ) { "" }
-                modified = replaceExecutableRegex(
-                    modified,
-                    Regex("""if\s*\(\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\|\|\s*([^{}\r\n;]+?)\s*\)\s*\{""")
-                ) { match -> "if (${match.groupValues[1].trim()}) {" }
-                modified = replaceExecutableRegex(
-                    modified,
-                    Regex("""if\s*\(\s*([^{}\r\n;]+?)\s*\|\|\s*event\.phase\s*!=\s*TickEvent\.Phase\.END\s*\)\s*\{""")
-                ) { match -> "if (${match.groupValues[1].trim()}) {" }
-                modified = replaceExecutableRegex(
-                    modified,
-                    Regex("""event\.phase\s*==\s*TickEvent\.Phase\.END\s*&&\s*""")
-                ) { "" }
-                modified = replaceExecutableRegex(
-                    modified,
-                    Regex("""\s*&&\s*event\.phase\s*==\s*TickEvent\.Phase\.END""")
-                ) { "" }
-                modified = replaceExecutableRegex(
-                    modified,
-                    Regex("""if\s*\(\s*event\.phase\s*==\s*TickEvent\.Phase\.START\s*\)\s*\{""")
-                ) { "{" }
-                modified = replaceExecutableRegex(
-                    modified,
-                    Regex("""event\.phase\s*==\s*TickEvent\.Phase\.START\s*&&\s*""")
-                ) { "" }
-                modified = replaceExecutableRegex(
-                    modified,
-                    Regex("""\s*&&\s*event\.phase\s*==\s*TickEvent\.Phase\.START""")
-                ) { "" }
-
-                val executableModified = maskJavaCommentsAndLiterals(modified)
-                if (!executableModified.contains("TickEvent.Phase") &&
-                    (containsJavaIdentifier(executableModified, "TickEvent") || hasTickEventImportLine(executableModified))) {
-                    modified = removeJavaImport(modified, "net.minecraftforge.event.TickEvent")
-                    modified = removeJavaImport(modified, "net.neoforged.neoforge.event.TickEvent")
-                    modified = removeJavaImport(modified, "net.neoforged.neoforge.event.tick.TickEvent")
-                    modified = modified.lines()
-                        .filterNot { line ->
-                            line.trim() == "import net.minecraftforge.event.TickEvent;" ||
-                                line.trim() == "import net.neoforged.neoforge.event.TickEvent;" ||
-                                line.trim() == "import net.neoforged.neoforge.event.tick.TickEvent;"
-                        }
-                        .joinToString(System.lineSeparator())
-                }
-
-                if (modified != original) {
-                    changes.add(Change(
-                        file = javaFile,
-                        line = 1,
-                        description = "Remove legacy TickEvent phase checks after NeoForge split tick events",
-                        before = "event.phase ==/!= TickEvent.Phase.*",
-                        after = "split Pre/Post event handlers without phase checks",
-                        confidence = Confidence.HIGH,
-                        ruleId = "build-cleanup-split-tick-phase"
-                    ))
-                    if (!dryRun) javaFile.writeText(modified)
-                }
-            }
-
-        return changes
-    }
-
     private fun containsJavaIdentifier(source: String, identifier: String): Boolean {
         var index = source.indexOf(identifier)
         while (index >= 0) {
@@ -3562,7 +4277,7 @@ config="$configName"
         val javaFiles = java.nio.file.Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .toList()
-        val changes = mutableListOf<Change>()
+        val changes = migrateRemovedTitleScreenPanoramaField(javaFiles, dryRun).toMutableList()
         val removedMethods = linkedSetOf<String>()
 
         for (javaFile in javaFiles) {
@@ -3610,6 +4325,50 @@ config="$configName"
         }
 
         changes.addAll(removeUnusedTitleScreenUpdateIndicatorClasses(javaFiles, removedMethods, dryRun))
+        return changes
+    }
+
+    private fun migrateRemovedTitleScreenPanoramaField(
+        javaFiles: List<Path>,
+        dryRun: Boolean
+    ): List<Change> {
+        val changes = mutableListOf<Change>()
+        for (javaFile in javaFiles) {
+            val original = javaFile.readText()
+            val executable = maskJavaCommentsAndLiterals(original)
+            val titleScreenVariables = linkedSetOf<String>()
+            Regex("""\bTitleScreen\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(executable)
+                .forEach { titleScreenVariables += it.groupValues[1] }
+            Regex("""\binstanceof\s+TitleScreen\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(executable)
+                .forEach { titleScreenVariables += it.groupValues[1] }
+            if (titleScreenVariables.isEmpty()) continue
+
+            var modified = original
+            var replacements = 0
+            for (variable in titleScreenVariables) {
+                val matches = Regex("""\b${Regex.escape(variable)}\s*\.\s*panorama\b""")
+                    .findAll(maskJavaCommentsAndLiterals(modified))
+                    .toList()
+                for (match in matches.asReversed()) {
+                    modified = modified.replaceRange(match.range, "Screen.PANORAMA")
+                    replacements++
+                }
+            }
+            if (replacements == 0) continue
+            modified = addJavaImportIfMissing(modified, "net.minecraft.client.gui.screens.Screen")
+            changes += Change(
+                file = javaFile,
+                line = 1,
+                description = "Replace removed TitleScreen panorama instance field with the shared Screen panorama renderer",
+                before = "typed TitleScreen.panorama access",
+                after = "Screen.PANORAMA",
+                confidence = Confidence.HIGH,
+                ruleId = "build-title-screen-panorama-screen-api"
+            )
+            if (!dryRun) javaFile.writeText(modified)
+        }
         return changes
     }
 
@@ -3769,7 +4528,7 @@ config="$configName"
 
     private fun migrateAccessTransformerLine(line: String): String {
         val entry = normalizeAccessTransformerEntry(line) ?: return line
-        val migrated = when (entry) {
+        val migrated = migrateMappedAccessTransformerEntry(entry) ?: when (entry) {
             "protected net.minecraft.world.level.levelgen.structure.StructurePiece f_73379_" ->
                 "protected net.minecraft.world.level.levelgen.structure.StructurePiece rotation"
             "protected net.minecraft.world.level.levelgen.structure.StructurePiece f_73378_" ->
@@ -3960,6 +4719,60 @@ config="$configName"
         val comment = line.substringAfter("#", "").trim()
         return if (comment.isNotEmpty()) "$finalized # $comment" else finalized
     }
+
+    private data class AccessTransformerMemberMapping(
+        val owner: String,
+        val sourceMember: String,
+        val sourceDescriptor: String,
+        val targetOwner: String,
+        val targetMember: String,
+        val targetDescriptor: String
+    )
+
+    private fun loadAccessTransformerMemberMappings(): Map<String, AccessTransformerMemberMapping> {
+        val resource = "$mappingsPrefix/access-transformer-members.json"
+        val stream = javaClass.getResourceAsStream(resource)
+            ?: error("Missing access transformer member mapping resource: $resource")
+        val root = Json.parseToJsonElement(stream.bufferedReader().readText()).jsonObject
+        return root.getValue("mappings").jsonArray.associate { element ->
+            val item = element.jsonObject
+            val owner = item.getValue("owner").jsonPrimitive.content
+            val sourceMember = item.getValue("sourceMember").jsonPrimitive.content
+            val sourceDescriptor = item["sourceDescriptor"]?.jsonPrimitive?.content.orEmpty()
+            val targetOwner = item["targetOwner"]?.jsonPrimitive?.content ?: owner
+            val targetMember = item.getValue("targetMember").jsonPrimitive.content
+            val targetDescriptor = item["targetDescriptor"]?.jsonPrimitive?.content ?: sourceDescriptor
+            val mapping = AccessTransformerMemberMapping(
+                owner,
+                sourceMember,
+                sourceDescriptor,
+                targetOwner,
+                targetMember,
+                targetDescriptor
+            )
+            accessTransformerMappingKey(owner, sourceMember, sourceDescriptor) to mapping
+        }
+    }
+
+    private fun migrateMappedAccessTransformerEntry(entry: String): String? {
+        val parsed = Regex(
+            """^(\S+)\s+(\S+)\s+([A-Za-z_$][\w$]*)(\(.*)?$"""
+        ).matchEntire(entry) ?: return null
+        val access = parsed.groupValues[1]
+        val owner = parsed.groupValues[2]
+        val member = parsed.groupValues[3]
+        val descriptor = parsed.groupValues[4]
+        val mapping = accessTransformerMemberMappings[
+            accessTransformerMappingKey(owner, member, descriptor)
+        ] ?: return null
+        return buildString {
+            append(access).append(' ').append(mapping.targetOwner).append(' ').append(mapping.targetMember)
+            append(mapping.targetDescriptor)
+        }
+    }
+
+    private fun accessTransformerMappingKey(owner: String, member: String, descriptor: String): String =
+        "$owner#$member#$descriptor"
 
     private fun finalizeAccessTransformerEntry(entry: String): String? {
         val descriptorAdjusted = entry
@@ -4616,26 +5429,13 @@ $insertion}
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return emptyList()
 
-        val forbiddenPatterns = listOf(
-            "ObfuscationReflectionHelper" to Regex("""\bObfuscationReflectionHelper\b"""),
-            "getDeclaredField" to Regex("""\bgetDeclaredField\s*\("""),
-            "getDeclaredMethod" to Regex("""\bgetDeclaredMethod\s*\("""),
-            "getDeclaredConstructor" to Regex("""\bgetDeclaredConstructor\s*\("""),
-            "getMethod" to Regex("""\.getMethod\s*\("""),
-            "setAccessible" to Regex("""\bsetAccessible\s*\("""),
-            "Class.forName" to Regex("""\bClass\.forName\s*\("""),
-            "MethodHandle" to Regex("""\bMethodHandle\b"""),
-            "MethodHandles" to Regex("""\bMethodHandles\b"""),
-            "java.lang.reflect member access" to Regex("""\bjava\.lang\.reflect\.(?:Field|Method|Constructor)\b"""),
-            "unreflect" to Regex("""\bunreflect(?:Getter|Setter)?\s*\(""")
-        )
         val errors = mutableListOf<String>()
         java.nio.file.Files.walk(srcDir)
             .filter { it.toString().endsWith(".java") }
             .forEach { javaFile ->
                 val code = maskJavaCommentsAndLiterals(javaFile.readText())
                 code.lines().forEachIndexed { index, line ->
-                    for ((label, pattern) in forbiddenPatterns) {
+                    for ((label, pattern) in LegacyReflectionSyntax.forbiddenPatterns) {
                         if (pattern.containsMatchIn(line)) {
                             val relative = projectDir.relativize(javaFile).toString().replace('\\', '/')
                             errors.add("Forbidden reflection in $relative:${index + 1}: $label")
@@ -5511,7 +6311,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
         changes: MutableList<Change>,
         file: Path
     ): String {
-        val depKeywords = listOf("compileOnly", "runtimeOnly", "implementation", "annotationProcessor", "def ")
+        val depKeywords = listOf("compileOnly", "runtimeOnly", "implementation", "annotationProcessor", "jarJar", "def ")
         val lines = content.lines().toMutableList()
         val emittedCoords = mutableSetOf<String>() // Track already-emitted NeoForge coords to avoid duplicates
         var i = 0
@@ -5695,12 +6495,17 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
     private fun renderResolvedDependency(indent: String, coord: NeoForgeCoord): String {
         val dependency = coord.coord.trim()
-        return if (dependency.startsWith("files(")) {
+        val declaration = if (dependency.startsWith("files(")) {
             "${indent}${coord.config} $dependency"
         } else if (!coord.transitive) {
             "${indent}${coord.config}(\"${coord.coord}\") { transitive = false }"
         } else {
             "${indent}${coord.config} \"${coord.coord}\""
+        }
+        return when (coord.wrapper) {
+            null -> declaration
+            "jarJar" -> "${indent}jarJar(${coord.config}(\"${coord.coord}\"))"
+            else -> error("Unsupported dependency wrapper '${coord.wrapper}' for ${coord.coord}")
         }
     }
 
@@ -5938,7 +6743,7 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
      * Dependency incompatibility must surface as a real resolution/compile failure.
      */
     private fun normalizeOldDependencyWrappers(content: String): String {
-        val depKeywords = listOf("compileOnly", "runtimeOnly", "implementation", "annotationProcessor", "def ")
+        val depKeywords = listOf("compileOnly", "runtimeOnly", "implementation", "annotationProcessor", "jarJar", "def ")
 
         val lines = content.lines().toMutableList()
         var i = 0
@@ -6135,24 +6940,15 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                         }
                     }
 
-                    val constructorCall = Regex("""new\s+${Regex.escape(providerClass)}\s*\(\s*packOutput\s*\)""")
-                    modified = constructorCall.replace(modified, "new $providerClass(packOutput, event.getLookupProvider())")
                 }
-
-                val lookupProviderExpr = Regex("""CompletableFuture\s*<\s*HolderLookup\.Provider\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*event\.getLookupProvider\(\)""")
-                    .find(modified)
-                    ?.groupValues
-                    ?.get(1)
-                    ?: "event.getLookupProvider()"
 
                 for (providerClass in abstractRecipeProviders) {
                     val constructorPattern = Regex(
                         """(?m)^([ \t]*)public\s+${Regex.escape(providerClass)}\s*\(\s*PackOutput\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*super\(\s*([A-Za-z_$][\w$]*)\s*\);\s*}"""
                     )
-                    val constructorCall = Regex("""new\s+${Regex.escape(providerClass)}\s*\(\s*packOutput\s*\)""")
                     val providerModIdExpr = abstractRecipeProviderModIds[providerClass]
                     if (providerModIdExpr == null) {
-                        if (constructorPattern.containsMatchIn(modified) || constructorCall.containsMatchIn(modified)) {
+                        if (constructorPattern.containsMatchIn(modified)) {
                             throw IllegalStateException(
                                 "Cannot derive mod id for AbstractRecipeProvider $providerClass from Java source, Gradle properties, or mod metadata"
                             )
@@ -6172,15 +6968,11 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                                 "$indent}"
                         }
                     }
-
-                    modified = constructorCall.replace(modified, "new $providerClass(packOutput, $lookupProviderExpr)")
                 }
 
                 for (providerClass in lootTableProviders) {
                     modified = migrateLootTableProviderConstructor(modified, providerClass)
 
-                    val constructorCall = Regex("""new\s+${Regex.escape(providerClass)}\s*\(\s*packOutput\s*\)""")
-                    modified = constructorCall.replace(modified, "new $providerClass(packOutput, $lookupProviderExpr)")
                 }
 
                 for (providerClass in lootModifierProviders) {
@@ -6200,16 +6992,6 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(21)
                                 "public $providerClass(PackOutput $outputParam, CompletableFuture<HolderLookup.Provider> lookupProvider, String $modidParam) {\n" +
                                 "$indent    super($outputParam, lookupProvider, $modidParam);\n" +
                                 "$indent}"
-                        }
-                    }
-
-                    val constructorCall = Regex("""new\s+${Regex.escape(providerClass)}\s*\(\s*packOutput\s*,\s*([^,()]+(?:\([^()]*\))?)\s*\)""")
-                    modified = constructorCall.replace(modified) { match ->
-                        val existingSecondArg = match.groupValues[1].trim()
-                        if (existingSecondArg == lookupProviderExpr || existingSecondArg.endsWith(".getLookupProvider()")) {
-                            match.value
-                        } else {
-                            "new $providerClass(packOutput, $lookupProviderExpr, $existingSecondArg)"
                         }
                     }
                 }
@@ -9836,4 +10618,30 @@ tasks.matching { it.name == 'prepareGameTestServerRun' }.configureEach {
             return this.substring(0, offset.coerceAtMost(this.length)).count { it == '\n' } + 1
         }
     }
+}
+
+internal object LegacyReflectionSyntax {
+    val forbiddenPatterns = listOf(
+        "ObfuscationReflectionHelper" to Regex("""\bObfuscationReflectionHelper\b"""),
+        "getDeclaredField" to Regex("""\bgetDeclaredField\s*\("""),
+        "getDeclaredMethod" to Regex("""\bgetDeclaredMethod\s*\("""),
+        "getDeclaredConstructor" to Regex("""\bgetDeclaredConstructor\s*\("""),
+        "getMethod" to Regex("""\.getMethod\s*\("""),
+        "setAccessible" to Regex("""\bsetAccessible\s*\("""),
+        "Class.forName" to Regex("""\bClass\.forName\s*\("""),
+        "MethodHandle" to Regex("""\bMethodHandle\b"""),
+        "MethodHandles" to Regex("""\bMethodHandles\b"""),
+        "java.lang.reflect member access" to Regex("""\bjava\.lang\.reflect\.(?:Field|Method|Constructor)\b"""),
+        "unreflect" to Regex("""\bunreflect(?:Getter|Setter)?\s*\(""")
+    )
+
+    fun containsForbiddenApi(executableSource: String): Boolean =
+        forbiddenPatterns.any { (_, pattern) -> pattern.containsMatchIn(executableSource) }
+
+    fun containsDeclaredFieldLookup(sourceWithStrings: String, fieldName: String): Boolean =
+        Regex("""\bgetDeclaredField\s*\(\s*"${Regex.escape(fieldName)}"\s*\)""")
+            .containsMatchIn(sourceWithStrings)
+
+    fun containsAccessibleEnable(sourceWithStrings: String): Boolean =
+        Regex("""\bsetAccessible\s*\(\s*true\s*\)""").containsMatchIn(sourceWithStrings)
 }

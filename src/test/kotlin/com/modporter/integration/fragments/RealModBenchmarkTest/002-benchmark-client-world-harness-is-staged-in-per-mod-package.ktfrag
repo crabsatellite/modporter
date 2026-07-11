@@ -98,6 +98,46 @@
     }
 
     @Test
+    fun `git source preparation checks out an exact commit ref`(@TempDir tempDir: Path) {
+        val origin = tempDir.resolve("origin")
+        git(tempDir, "init", origin.toString())
+        git(origin, "config", "user.email", "modporter@example.test")
+        git(origin, "config", "user.name", "ModPorter Test")
+        origin.resolve("version.txt").writeText("first\n")
+        git(origin, "add", ".")
+        git(origin, "commit", "-m", "first")
+        val firstCommit = git(origin, "rev-parse", "HEAD")
+        origin.resolve("version.txt").writeText("second\n")
+        git(origin, "add", ".")
+        git(origin, "commit", "-m", "second")
+
+        val reportsDir = tempDir.resolve("reports")
+        val prepared = prepareGitSource(
+            BenchmarkCase(
+                id = "exact",
+                displayName = "Exact Commit",
+                provider = "git",
+                location = origin.toString(),
+                ref = firstCommit,
+                subdir = ".",
+                required = true
+            ),
+            url = origin.toString(),
+            ref = firstCommit,
+            sourceRoot = tempDir.resolve("sources"),
+            reportsDir = reportsDir,
+            timeoutSeconds = 30
+        )
+
+        assertTrue(prepared.path?.resolve("version.txt")?.readText()?.trim() == "first", prepared.toString())
+        assertTrue(prepared.sourceLabel.endsWith("@$firstCommit"), prepared.sourceLabel)
+        assertTrue(
+            reportsDir.resolve("exact-fetch.log").readText().contains("resolvedCommit=$firstCommit"),
+            "fetch log should retain the exact checked-out commit"
+        )
+    }
+
+    @Test
     fun `client smoke world staging disables early display for deterministic runtime gate`(@TempDir tempDir: Path) {
         val fixtureWorld = tempDir.resolve("fixture-world")
         fixtureWorld.resolve("region").createDirectories()
@@ -701,11 +741,7 @@
         val cloneDir = sourceRoot.resolve(case.id)
         resetDirectory(cloneDir, sourceRoot)
         val logFile = reportsDir.resolve("${case.id}-fetch.log")
-        val command = mutableListOf("git", "clone", "--depth", "1")
-        if (ref != "-") command.addAll(listOf("--branch", ref))
-        command.addAll(listOf(url, cloneDir.toString()))
-
-        val result = runProcess(command, sourceRoot, logFile, timeoutSeconds)
+        val result = runGitSourceCheckout(url, ref, cloneDir, sourceRoot, logFile, timeoutSeconds)
         if (result.status != CheckStatus.PASS) {
             return PreparedSource(
                 path = null,
@@ -728,6 +764,46 @@
         } else {
             PreparedSource(null, sourceLabel, Status.FAIL, "Configured subdir missing: $subdir")
         }
+    }
+
+    private fun runGitSourceCheckout(
+        url: String,
+        ref: String,
+        cloneDir: Path,
+        sourceRoot: Path,
+        logFile: Path,
+        timeoutSeconds: Long
+    ): CheckResult {
+        val exactCommit = Regex("[0-9a-fA-F]{40}").matches(ref)
+        val commands = if (exactCommit) {
+            listOf(
+                listOf("git", "init", cloneDir.toString()),
+                listOf("git", "-C", cloneDir.toString(), "remote", "add", "origin", url),
+                listOf("git", "-C", cloneDir.toString(), "fetch", "--depth", "1", "origin", ref),
+                listOf("git", "-C", cloneDir.toString(), "checkout", "--detach", "FETCH_HEAD")
+            )
+        } else {
+            listOf(buildList {
+                addAll(listOf("git", "clone", "--depth", "1"))
+                if (ref != "-") addAll(listOf("--branch", ref))
+                addAll(listOf(url, cloneDir.toString()))
+            })
+        }
+
+        Files.deleteIfExists(logFile)
+        commands.forEachIndexed { index, command ->
+            val stepLog = logFile.resolveSibling("${logFile.fileName}.step-$index")
+            val result = runProcess(command, sourceRoot, stepLog, timeoutSeconds)
+            logFile.toFile().appendText("[ModPorterBenchmark] command=${command.joinToString(" ")}\n")
+            if (stepLog.exists()) {
+                logFile.toFile().appendText(stepLog.readText())
+                Files.deleteIfExists(stepLog)
+            }
+            if (result.status != CheckStatus.PASS) {
+                return CheckResult(result.status, "${result.note}; command=${command.joinToString(" ")}")
+            }
+        }
+        return CheckResult(CheckStatus.PASS, "Passed")
     }
 
     private fun resolvedGitCommit(repo: Path): String? =
