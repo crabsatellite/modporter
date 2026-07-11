@@ -389,6 +389,12 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            changes.addAll(LegacyProjectileDispenseAccessorMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Projectile dispense accessor migration error: ${e.message}")
+        }
+
+        try {
             changes.addAll(LegacyTrackingChunkPacketTargetMigration().migrate(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Tracking chunk packet target migration error: ${e.message}")
