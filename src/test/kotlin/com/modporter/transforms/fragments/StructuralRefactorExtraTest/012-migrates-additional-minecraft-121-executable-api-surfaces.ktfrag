@@ -1,239 +1,5 @@
 
     @Test
-    fun `migrates SimpleCriterionTrigger classes and CriteriaTriggers registry fields`() {
-        val textBlockDelimiter = "\"\"\""
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        val advancementDir = srcDir.resolve("advancements")
-        val blockDir = srcDir.resolve("block")
-        advancementDir.createDirectories()
-        blockDir.createDirectories()
-
-        srcDir.resolve("ExampleMod.java").writeText("""
-            package com.example;
-
-            import net.neoforged.bus.api.IEventBus;
-            import net.neoforged.fml.ModContainer;
-            import net.neoforged.fml.common.Mod;
-
-            @Mod(ExampleMod.MOD_ID)
-            public class ExampleMod {
-                public static final String MOD_ID = "example";
-
-                public ExampleMod(ModContainer modContainer) {
-                    IEventBus modbus = modContainer.getEventBus();
-                }
-            }
-        """.trimIndent())
-
-        advancementDir.resolve("TFAdvancements.java").writeText("""
-            package com.example.advancements;
-
-            import net.minecraft.advancements.CriteriaTriggers;
-
-            public class TFAdvancements {
-                private static final String DOC = $textBlockDelimiter
-                    import net.minecraft.advancements.CriteriaTriggers;
-                    $textBlockDelimiter;
-
-                public static final ActivateGhastTrapTrigger ACTIVATED_GHAST_TRAP = CriteriaTriggers.register(new ActivateGhastTrapTrigger());
-
-                public static void init() {}
-            }
-        """.trimIndent())
-
-        advancementDir.resolve("ActivateGhastTrapTrigger.java").writeText("""
-            package com.example.advancements;
-
-            import com.google.gson.JsonObject;
-            import net.minecraft.advancements.critereon.*;
-            import net.minecraft.resources.ResourceLocation;
-            import net.minecraft.server.level.ServerPlayer;
-            import com.example.ExampleMod;
-
-            public class ActivateGhastTrapTrigger extends SimpleCriterionTrigger<ActivateGhastTrapTrigger.Instance> {
-                public static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, "activate_ghast_trap");
-
-                @Override
-                public ResourceLocation getId() {
-                    return ID;
-                }
-
-                @Override
-                protected ActivateGhastTrapTrigger.Instance createInstance(JsonObject json, ContextAwarePredicate player, DeserializationContext ctx) {
-                    return new ActivateGhastTrapTrigger.Instance(player);
-                }
-
-                public void trigger(ServerPlayer player) {
-                    this.trigger(player, instance -> true);
-                }
-
-                public static class Instance extends AbstractCriterionTriggerInstance {
-                    public Instance(ContextAwarePredicate player) {
-                        super(ActivateGhastTrapTrigger.ID, player);
-                    }
-
-                    public static Instance activateTrap() {
-                        return new Instance(ContextAwarePredicate.ANY);
-                    }
-                }
-            }
-        """.trimIndent())
-
-        blockDir.resolve("GhastTrapBlock.java").writeText("""
-            package com.example.block;
-
-            import com.example.advancements.TFAdvancements;
-            import net.minecraft.server.level.ServerPlayer;
-
-            public class GhastTrapBlock {
-                public void award(ServerPlayer player) {
-                    TFAdvancements.ACTIVATED_GHAST_TRAP.trigger(player);
-                }
-            }
-        """.trimIndent())
-
-        val pass = StructuralRefactorPass()
-        val result = pass.apply(tempDir)
-        val registry = advancementDir.resolve("TFAdvancements.java").readText()
-        val trigger = advancementDir.resolve("ActivateGhastTrapTrigger.java").readText()
-        val mod = srcDir.resolve("ExampleMod.java").readText()
-        val block = blockDir.resolve("GhastTrapBlock.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-criterion-trigger-deferred-register" })
-        assertTrue(result.changes.any { it.ruleId == "struct-simple-criterion-trigger-codec" })
-        assertTrue(result.changes.any { it.ruleId == "struct-criterion-trigger-holder-get" })
-        assertTrue(result.changes.any { it.ruleId == "struct-criterion-trigger-main-register" })
-        assertTrue(registry.contains("DeferredRegister<CriterionTrigger<?>> TRIGGERS"))
-        assertTrue(registry.contains("DeferredHolder<CriterionTrigger<?>, ActivateGhastTrapTrigger> ACTIVATED_GHAST_TRAP"))
-        assertTrue(registry.contains("TRIGGERS.register(\"activate_ghast_trap\", ActivateGhastTrapTrigger::new)"))
-        assertFalse(Regex("""(?m)^import net\.minecraft\.advancements\.CriteriaTriggers;$""").containsMatchIn(registry), registry)
-        assertEquals(1, Regex("""import net\.minecraft\.advancements\.CriteriaTriggers;""").findAll(registry).count(), registry)
-        assertFalse(registry.contains("= CriteriaTriggers.register"), registry)
-        assertTrue(registry.contains("private static final String DOC = \"\"\""), registry)
-        assertTrue(trigger.contains("public record Instance(Optional<ContextAwarePredicate> player) implements SimpleInstance"))
-        assertTrue(trigger.contains("public Codec<ActivateGhastTrapTrigger.Instance> codec()"))
-        assertTrue(trigger.contains("public static Criterion<ActivateGhastTrapTrigger.Instance> activateTrap()"))
-        assertTrue(!trigger.contains("AbstractCriterionTriggerInstance"))
-        assertTrue(!trigger.contains("DeserializationContext"))
-        assertTrue(mod.contains("import com.example.advancements.TFAdvancements;"))
-        assertTrue(mod.contains("TFAdvancements.TRIGGERS.register(modbus);"))
-        assertTrue(block.contains("TFAdvancements.ACTIVATED_GHAST_TRAP.get().trigger(player);"))
-    }
-
-    @Test
-    fun `migrates singleton registered item SimpleCriterionTrigger without hardcoded factory names`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        val advancementDir = srcDir.resolve("advancement")
-        advancementDir.createDirectories()
-
-        srcDir.resolve("ExampleMod.java").writeText("""
-            package com.example;
-
-            import com.example.advancement.ExampleAdvancementTriggers;
-            import net.neoforged.bus.api.IEventBus;
-            import net.neoforged.fml.ModContainer;
-            import net.neoforged.fml.common.Mod;
-
-            @Mod(ExampleMod.MOD_ID)
-            public class ExampleMod {
-                public static final String MOD_ID = "example";
-
-                public ExampleMod(ModContainer modContainer) {
-                    IEventBus modEventBus = modContainer.getEventBus();
-                }
-
-                public void commonSetup() {
-                    ExampleAdvancementTriggers.init();
-                }
-            }
-        """.trimIndent())
-
-        advancementDir.resolve("ExampleAdvancementTriggers.java").writeText("""
-            package com.example.advancement;
-
-            import net.minecraft.advancements.CriteriaTriggers;
-
-            public class ExampleAdvancementTriggers {
-                public static void init() {
-                    CriteriaTriggers.register(IncubationTrigger.INSTANCE);
-                }
-            }
-        """.trimIndent())
-
-        advancementDir.resolve("IncubationTrigger.java").writeText("""
-            package com.example.advancement;
-
-            import com.example.ExampleMod;
-            import com.google.gson.JsonObject;
-            import net.minecraft.advancements.critereon.*;
-            import net.minecraft.resources.ResourceLocation;
-            import net.minecraft.server.level.ServerPlayer;
-            import net.minecraft.world.item.ItemStack;
-
-            public class IncubationTrigger extends SimpleCriterionTrigger<IncubationTrigger.Instance> {
-                private static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, "incubation_trigger");
-                public static final IncubationTrigger INSTANCE = new IncubationTrigger();
-
-                @Override
-                public ResourceLocation getId() {
-                    return ID;
-                }
-
-                @Override
-                public IncubationTrigger.Instance createInstance(JsonObject json, ContextAwarePredicate predicate, DeserializationContext context) {
-                    ItemPredicate itemPredicate = ItemPredicate.fromJson(json.get("item"));
-                    return new IncubationTrigger.Instance(predicate, itemPredicate);
-                }
-
-                public void trigger(ServerPlayer player, ItemStack stack) {
-                    this.trigger(player, instance -> instance.test(stack));
-                }
-
-                public static class Instance extends SimpleCriterionTrigger.SimpleInstance {
-                    private final ItemPredicate item;
-
-                    public Instance(ContextAwarePredicate predicate, ItemPredicate item) {
-                        super(IncubationTrigger.ID, predicate);
-                        this.item = item;
-                    }
-
-                    public static IncubationTrigger.Instance forItem(ItemPredicate item) {
-                        return new IncubationTrigger.Instance(ContextAwarePredicate.ANY, item);
-                    }
-
-                    public static IncubationTrigger.Instance forAny() {
-                        return forItem(ItemPredicate.ANY);
-                    }
-
-                    public boolean test(ItemStack stack) {
-                        return this.item.test(stack);
-                    }
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-        val registry = advancementDir.resolve("ExampleAdvancementTriggers.java").readText()
-        val trigger = advancementDir.resolve("IncubationTrigger.java").readText()
-        val mod = srcDir.resolve("ExampleMod.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-criterion-trigger-deferred-register" })
-        assertTrue(result.changes.any { it.ruleId == "struct-simple-criterion-trigger-codec" })
-        assertTrue(registry.contains("DeferredRegister<CriterionTrigger<?>> TRIGGERS"), registry)
-        assertTrue(registry.contains("DeferredHolder<CriterionTrigger<?>, IncubationTrigger> INCUBATION_TRIGGER"), registry)
-        assertTrue(registry.contains("TRIGGERS.register(\"incubation_trigger\", IncubationTrigger::new)"), registry)
-        assertTrue(!registry.contains("CriteriaTriggers"), registry)
-        assertTrue(!registry.contains("public static void init"), registry)
-        assertTrue(trigger.contains("public static Criterion<IncubationTrigger.Instance> forItem(ItemPredicate item)"), trigger)
-        assertTrue(trigger.contains("public static Criterion<IncubationTrigger.Instance> forAny()"), trigger)
-        assertTrue(trigger.contains("this.item.get().test(stack)"), trigger)
-        assertTrue(!trigger.contains("uncraftedItem"), trigger)
-        assertTrue(!trigger.contains("ItemPredicate.fromJson"), trigger)
-        assertTrue(mod.contains("ExampleAdvancementTriggers.TRIGGERS.register(modEventBus);"), mod)
-        assertTrue(!mod.contains("ExampleAdvancementTriggers.init();"), mod)
-    }
-
-    @Test
     fun `migrates additional Minecraft 121 executable API surfaces`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -1173,4 +939,231 @@
         assertTrue(migrated.contains("if (FMLLoader.getDist() == Dist.CLIENT) {"), migrated)
         assertTrue(migrated.contains("ClientMenu.open(packet);"), migrated)
         assertFalse(migrated.contains("DistExecutor.unsafeRunWhenOn"), migrated)
+    }
+
+    @Test
+    fun `migrates DistExecutor runForDist client block statement to dist guard`() {
+        val projectDir = createFile("ClientRegistration.java", """
+            package com.example;
+
+            import net.neoforged.fml.DistExecutor;
+
+            public class ClientRegistration {
+                public ClientRegistration(EventBus bus) {
+                    DistExecutor.unsafeRunForDist(() -> () -> {
+                        ClientMenus.register(bus);
+                        ClientTabs.register(bus);
+                        return true;
+                    }, () -> () -> false);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/ClientRegistration.java")
+            .readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-dist-executor-dist-guard" })
+        assertTrue(migrated.contains("import net.neoforged.api.distmarker.Dist;"))
+        assertTrue(migrated.contains("import net.neoforged.fml.loading.FMLLoader;"))
+        assertTrue(migrated.contains("if (FMLLoader.getDist() == Dist.CLIENT) {"))
+        assertTrue(migrated.contains("ClientMenus.register(bus);"))
+        assertTrue(migrated.contains("ClientTabs.register(bus);"))
+        assertTrue(!migrated.contains("DistExecutor"))
+        assertTrue(!migrated.contains("return true;"))
+    }
+
+    @Test
+    fun `DistExecutor guard import insertion ignores text block fake imports`() {
+        val textBlockDelimiter = "\"\"\""
+        val projectDir = createFile("ClientRegistration.java", """
+            package com.example;
+
+            import net.neoforged.fml.DistExecutor;
+
+            public class ClientRegistration {
+                private static final String DOC = $textBlockDelimiter
+                    import net.neoforged.api.distmarker.Dist;
+                    import net.neoforged.fml.loading.FMLLoader;
+                    $textBlockDelimiter;
+
+                public ClientRegistration(EventBus bus) {
+                    DistExecutor.unsafeRunForDist(() -> () -> {
+                        ClientMenus.register(bus);
+                        return true;
+                    }, () -> () -> false);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/ClientRegistration.java")
+            .readText()
+
+        assertTrue(Regex("""(?m)^import net\.neoforged\.api\.distmarker\.Dist;$""").containsMatchIn(migrated), migrated)
+        assertTrue(Regex("""(?m)^import net\.neoforged\.fml\.loading\.FMLLoader;$""").containsMatchIn(migrated), migrated)
+        assertEquals(2, Regex("""import net\.neoforged\.api\.distmarker\.Dist;""").findAll(migrated).count(), migrated)
+        assertEquals(2, Regex("""import net\.neoforged\.fml\.loading\.FMLLoader;""").findAll(migrated).count(), migrated)
+        assertTrue(migrated.contains("private static final String DOC = \"\"\""), migrated)
+        assertTrue(migrated.contains("if (FMLLoader.getDist() == Dist.CLIENT) {"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.fml.DistExecutor;"), migrated)
+        assertFalse(migrated.contains("DistExecutor.unsafeRunForDist"), migrated)
+    }
+
+    @Test
+    fun `remaining typed DistExecutor expressions use a generated FMLLoader adapter`() {
+        val projectDir = createFile("DeferredDistCalls.java", """
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.DistExecutor;
+
+            public class DeferredDistCalls {
+                Object clientValue() {
+                    return DistExecutor.unsafeCallWhenOn(Dist.CLIENT, () -> () -> ClientHooks.value());
+                }
+
+                void configure(Supplier<Runnable> supplied) {
+                    callback(value -> DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () -> ClientHooks.accept(value)));
+                    DistExecutor.unsafeRunWhenOn(Dist.CLIENT, supplied);
+                }
+
+                String documentation = "DistExecutor.unsafeRunWhenOn remains documentation";
+            }
+        """.trimIndent())
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+            import net.neoforged.fml.common.Mod;
+            @Mod("example")
+            public class ExampleMod {}
+        """.trimIndent())
+        srcDir.resolve("OrphanDistImport.java").writeText("""
+            package com.example;
+            import net.neoforged.fml.DistExecutor;
+            public class OrphanDistImport {}
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = srcDir.resolve("DeferredDistCalls.java").readText()
+        val orphan = srcDir.resolve("OrphanDistImport.java").readText()
+        val helper = projectDir.resolve(
+            "src/main/java/com/modporter/generated/example/compat/DistExecution.java"
+        )
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertFalse(migrated.contains("import net.neoforged.fml.DistExecutor;"), migrated)
+        assertEquals(1, Regex("""DistExecutor\.""").findAll(migrated).count(), migrated)
+        assertTrue(migrated.contains("com.modporter.generated.example.compat.DistExecution.callWhenOn"), migrated)
+        assertTrue(migrated.contains("com.modporter.generated.example.compat.DistExecution.runWhenOn"), migrated)
+        assertTrue(migrated.contains("\"DistExecutor.unsafeRunWhenOn remains documentation\""), migrated)
+        assertFalse(orphan.contains("import net.neoforged.fml.DistExecutor;"), orphan)
+        assertTrue(helper.exists(), helper.toString())
+        assertTrue(helper.readText().contains("if (FMLLoader.getDist() == dist)"), helper.readText())
+        assertTrue(helper.readText().contains("target.get().run();"), helper.readText())
+        assertTrue(result.changes.any { it.ruleId == "struct-dist-executor-typed-adapter" })
+        assertTrue(result.changes.any { it.ruleId == "struct-dist-executor-typed-adapter-source" })
+    }
+
+    @Test
+    fun `unknown DistExecutor members hard fail instead of using an adapter guess`() {
+        val projectDir = createFile("UnknownDistCall.java", """
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.fml.DistExecutor;
+
+            public class UnknownDistCall {
+                void run() {
+                    DistExecutor.futureRunWhenOn(Dist.CLIENT, () -> () -> ClientHooks.run());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+
+        assertTrue(result.errors.any { it.contains("unsupported DistExecutor members") }, result.errors.joinToString("\n"))
+        assertFalse(result.changes.any { it.ruleId == "struct-dist-executor-typed-adapter" })
+    }
+
+    @Test
+    fun `BaseEntityBlock codec is high confidence with Properties constructor`() {
+        val projectDir = createFile("LightBlock.java", """
+            package com.example;
+
+            import net.minecraft.world.level.block.BaseEntityBlock;
+
+            public class LightBlock extends BaseEntityBlock {
+                public LightBlock(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = projectDir
+            .resolve("src/main/java/com/example/LightBlock.java")
+            .readText()
+        val codecChange = result.changes.single { it.ruleId == "struct-base-entity-block-codec" }
+
+        assertEquals(Confidence.HIGH, codecChange.confidence)
+        assertTrue(migrated.contains("MapCodec<LightBlock> CODEC = simpleCodec(LightBlock::new);"))
+        assertTrue(migrated.contains("protected com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.BaseEntityBlock> codec()"))
+    }
+
+    @Test
+    fun `block codec generation honors crop and bush parent codec types`() {
+        val projectDir = createFile("RiceCrop.java", """
+            package com.example;
+
+            import net.minecraft.world.level.block.CropBlock;
+
+            public class RiceCrop extends CropBlock {
+                public RiceCrop(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+        val srcDir = projectDir.resolve("src/main/java/com/example")
+        srcDir.resolve("BambooShoot.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.BushBlock;
+            import net.minecraft.world.level.block.Blocks;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class BambooShoot extends BushBlock {
+                public BambooShoot() {
+                    super(BlockBehaviour.Properties.ofFullCopy(Blocks.BAMBOO_SAPLING));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("BambooBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.RotatedPillarBlock;
+
+            public class BambooBlock extends RotatedPillarBlock {
+                public BambooBlock(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        pass.apply(projectDir)
+        val crop = srcDir.resolve("RiceCrop.java").readText()
+        val bush = srcDir.resolve("BambooShoot.java").readText()
+        val pillar = srcDir.resolve("BambooBlock.java").readText()
+
+        assertTrue(crop.contains("public com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.CropBlock> codec()"))
+        assertTrue(bush.contains("public com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.BushBlock> codec()"))
+        assertTrue(bush.contains("public BambooShoot(net.minecraft.world.level.block.state.BlockBehaviour.Properties properties)"))
+        assertTrue(bush.contains("super(properties);"))
+        assertTrue(pillar.contains("public com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.RotatedPillarBlock> codec()"))
     }

@@ -991,6 +991,67 @@ class StructuralRefactorExtraTest {
     }
 
     @Test
+    fun `migrates write only NbtUtils block position calls and method references`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("WriteOnly.java").writeText("""
+            package com.example;
+
+            import java.util.function.Function;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.nbt.NbtUtils;
+
+            public class WriteOnly {
+                CompoundTag write(BlockPos pos) {
+                    return NbtUtils.writeBlockPos(pos);
+                }
+
+                Function<BlockPos, CompoundTag> writer() {
+                    return NbtUtils::writeBlockPos;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = srcDir.resolve("WriteOnly.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(transformed.contains("return modporterWriteLegacyBlockPos(pos);"), transformed)
+        assertTrue(transformed.contains("modporterPos -> modporterWriteLegacyBlockPos(modporterPos)"), transformed)
+        assertTrue(transformed.contains("private static CompoundTag modporterWriteLegacyBlockPos(BlockPos pos)"), transformed)
+        assertFalse(transformed.contains("modporterReadLegacyBlockPos"), transformed)
+        assertFalse(transformed.contains("NbtUtils.writeBlockPos"), transformed)
+        assertFalse(transformed.contains("NbtUtils::writeBlockPos"), transformed)
+    }
+
+    @Test
+    fun `legacy NbtUtils block position migration ignores literals comments and project owners`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val sourceFile = srcDir.resolve("Unrelated.java")
+        sourceFile.writeText("""
+            package com.example;
+
+            class NbtUtils {
+                static Object writeBlockPos(Object value) { return value; }
+            }
+
+            public class Unrelated {
+                // NbtUtils.writeBlockPos(value)
+                String example = "NbtUtils::writeBlockPos";
+                Object write(Object value) { return NbtUtils.writeBlockPos(value); }
+            }
+        """.trimIndent())
+        val original = sourceFile.readText()
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertEquals(original, sourceFile.readText())
+    }
+
+    @Test
     fun `migrates legacy pack resource APIs to resources supplier adapters`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

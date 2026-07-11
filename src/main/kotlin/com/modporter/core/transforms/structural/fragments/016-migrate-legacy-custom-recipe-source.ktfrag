@@ -1,4 +1,27 @@
 
+    private fun migrateLegacyCustomRecipeSource(source: String): String {
+        if (!source.contains("extends CustomRecipe")) return source
+        var result = source
+        result = result.replace("super(id, category);", "super(category);")
+        result = Regex(
+            """super\s*\(\s*id\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*;"""
+        ).replace(result) { match ->
+            "super(${match.groupValues[1]});"
+        }
+        result = removeImport(result, "net.minecraft.world.inventory.CraftingInput")
+        if (result.contains("CraftingContainer")) {
+            result = result.replace("CraftingContainer", "CraftingInput")
+            result = removeImport(result, "net.minecraft.world.inventory.CraftingInput")
+            result = addImportIfMissing(result, "net.minecraft.world.item.crafting.CraftingInput")
+            if (!result.contains("CraftingContainer")) {
+                result = removeImport(result, "net.minecraft.world.inventory.CraftingContainer")
+            }
+        }
+        result = Regex("""\b([A-Za-z_$][\w$]*)\.getContainerSize\(\)""")
+            .replace(result) { match -> "${match.groupValues[1]}.size()" }
+        return result
+    }
+
     private fun migrateLegacyMenuScreensRegistration(source: String): String {
         if (!source.contains("MenuScreens.register(") &&
             !source.contains(".renderScreens();") &&
@@ -2971,18 +2994,4 @@ ${indent}}""".trimStart('\n')
             val levelStorage = match.groupValues[4]
             "${match.groupValues[1]}(LevelStorageSource.LevelStorageAccess $levelStorage, Dynamic<?> levelData, boolean $safeMode, Runnable onFail, CallbackInfo $callback)"
         }
-    }
-
-    private fun applyStringEdits(source: String, edits: List<Pair<IntRange, String>>): String {
-        if (edits.isEmpty()) return source
-        val builder = StringBuilder()
-        var cursor = 0
-        for ((range, replacement) in edits.sortedBy { it.first.first }) {
-            if (range.first < cursor) continue
-            builder.append(source, cursor, range.first)
-            builder.append(replacement)
-            cursor = range.last + 1
-        }
-        builder.append(source, cursor, source.length)
-        return builder.toString()
     }

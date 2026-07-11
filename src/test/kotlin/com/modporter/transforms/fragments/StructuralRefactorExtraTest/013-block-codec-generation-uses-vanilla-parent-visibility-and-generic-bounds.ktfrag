@@ -1,232 +1,5 @@
 
     @Test
-    fun `migrates DistExecutor runForDist client block statement to dist guard`() {
-        val projectDir = createFile("ClientRegistration.java", """
-            package com.example;
-
-            import net.neoforged.fml.DistExecutor;
-
-            public class ClientRegistration {
-                public ClientRegistration(EventBus bus) {
-                    DistExecutor.unsafeRunForDist(() -> () -> {
-                        ClientMenus.register(bus);
-                        ClientTabs.register(bus);
-                        return true;
-                    }, () -> () -> false);
-                }
-            }
-        """.trimIndent())
-
-        val pass = StructuralRefactorPass()
-        val result = pass.apply(projectDir)
-        val migrated = projectDir
-            .resolve("src/main/java/com/example/ClientRegistration.java")
-            .readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-dist-executor-dist-guard" })
-        assertTrue(migrated.contains("import net.neoforged.api.distmarker.Dist;"))
-        assertTrue(migrated.contains("import net.neoforged.fml.loading.FMLLoader;"))
-        assertTrue(migrated.contains("if (FMLLoader.getDist() == Dist.CLIENT) {"))
-        assertTrue(migrated.contains("ClientMenus.register(bus);"))
-        assertTrue(migrated.contains("ClientTabs.register(bus);"))
-        assertTrue(!migrated.contains("DistExecutor"))
-        assertTrue(!migrated.contains("return true;"))
-    }
-
-    @Test
-    fun `DistExecutor guard import insertion ignores text block fake imports`() {
-        val textBlockDelimiter = "\"\"\""
-        val projectDir = createFile("ClientRegistration.java", """
-            package com.example;
-
-            import net.neoforged.fml.DistExecutor;
-
-            public class ClientRegistration {
-                private static final String DOC = $textBlockDelimiter
-                    import net.neoforged.api.distmarker.Dist;
-                    import net.neoforged.fml.loading.FMLLoader;
-                    $textBlockDelimiter;
-
-                public ClientRegistration(EventBus bus) {
-                    DistExecutor.unsafeRunForDist(() -> () -> {
-                        ClientMenus.register(bus);
-                        return true;
-                    }, () -> () -> false);
-                }
-            }
-        """.trimIndent())
-
-        StructuralRefactorPass().apply(projectDir)
-        val migrated = projectDir
-            .resolve("src/main/java/com/example/ClientRegistration.java")
-            .readText()
-
-        assertTrue(Regex("""(?m)^import net\.neoforged\.api\.distmarker\.Dist;$""").containsMatchIn(migrated), migrated)
-        assertTrue(Regex("""(?m)^import net\.neoforged\.fml\.loading\.FMLLoader;$""").containsMatchIn(migrated), migrated)
-        assertEquals(2, Regex("""import net\.neoforged\.api\.distmarker\.Dist;""").findAll(migrated).count(), migrated)
-        assertEquals(2, Regex("""import net\.neoforged\.fml\.loading\.FMLLoader;""").findAll(migrated).count(), migrated)
-        assertTrue(migrated.contains("private static final String DOC = \"\"\""), migrated)
-        assertTrue(migrated.contains("if (FMLLoader.getDist() == Dist.CLIENT) {"), migrated)
-        assertFalse(migrated.contains("import net.neoforged.fml.DistExecutor;"), migrated)
-        assertFalse(migrated.contains("DistExecutor.unsafeRunForDist"), migrated)
-    }
-
-    @Test
-    fun `remaining typed DistExecutor expressions use a generated FMLLoader adapter`() {
-        val projectDir = createFile("DeferredDistCalls.java", """
-            package com.example;
-
-            import java.util.function.Supplier;
-            import net.neoforged.api.distmarker.Dist;
-            import net.neoforged.fml.DistExecutor;
-
-            public class DeferredDistCalls {
-                Object clientValue() {
-                    return DistExecutor.unsafeCallWhenOn(Dist.CLIENT, () -> () -> ClientHooks.value());
-                }
-
-                void configure(Supplier<Runnable> supplied) {
-                    callback(value -> DistExecutor.unsafeRunWhenOn(Dist.CLIENT, () -> () -> ClientHooks.accept(value)));
-                    DistExecutor.unsafeRunWhenOn(Dist.CLIENT, supplied);
-                }
-
-                String documentation = "DistExecutor.unsafeRunWhenOn remains documentation";
-            }
-        """.trimIndent())
-        val srcDir = projectDir.resolve("src/main/java/com/example")
-        srcDir.resolve("ExampleMod.java").writeText("""
-            package com.example;
-            import net.neoforged.fml.common.Mod;
-            @Mod("example")
-            public class ExampleMod {}
-        """.trimIndent())
-        srcDir.resolve("OrphanDistImport.java").writeText("""
-            package com.example;
-            import net.neoforged.fml.DistExecutor;
-            public class OrphanDistImport {}
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(projectDir)
-        val migrated = srcDir.resolve("DeferredDistCalls.java").readText()
-        val orphan = srcDir.resolve("OrphanDistImport.java").readText()
-        val helper = projectDir.resolve(
-            "src/main/java/com/modporter/generated/example/compat/DistExecution.java"
-        )
-
-        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
-        assertFalse(migrated.contains("import net.neoforged.fml.DistExecutor;"), migrated)
-        assertEquals(1, Regex("""DistExecutor\.""").findAll(migrated).count(), migrated)
-        assertTrue(migrated.contains("com.modporter.generated.example.compat.DistExecution.callWhenOn"), migrated)
-        assertTrue(migrated.contains("com.modporter.generated.example.compat.DistExecution.runWhenOn"), migrated)
-        assertTrue(migrated.contains("\"DistExecutor.unsafeRunWhenOn remains documentation\""), migrated)
-        assertFalse(orphan.contains("import net.neoforged.fml.DistExecutor;"), orphan)
-        assertTrue(helper.exists(), helper.toString())
-        assertTrue(helper.readText().contains("if (FMLLoader.getDist() == dist)"), helper.readText())
-        assertTrue(helper.readText().contains("target.get().run();"), helper.readText())
-        assertTrue(result.changes.any { it.ruleId == "struct-dist-executor-typed-adapter" })
-        assertTrue(result.changes.any { it.ruleId == "struct-dist-executor-typed-adapter-source" })
-    }
-
-    @Test
-    fun `unknown DistExecutor members hard fail instead of using an adapter guess`() {
-        val projectDir = createFile("UnknownDistCall.java", """
-            package com.example;
-
-            import net.neoforged.api.distmarker.Dist;
-            import net.neoforged.fml.DistExecutor;
-
-            public class UnknownDistCall {
-                void run() {
-                    DistExecutor.futureRunWhenOn(Dist.CLIENT, () -> () -> ClientHooks.run());
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(projectDir)
-
-        assertTrue(result.errors.any { it.contains("unsupported DistExecutor members") }, result.errors.joinToString("\n"))
-        assertFalse(result.changes.any { it.ruleId == "struct-dist-executor-typed-adapter" })
-    }
-
-    @Test
-    fun `BaseEntityBlock codec is high confidence with Properties constructor`() {
-        val projectDir = createFile("LightBlock.java", """
-            package com.example;
-
-            import net.minecraft.world.level.block.BaseEntityBlock;
-
-            public class LightBlock extends BaseEntityBlock {
-                public LightBlock(Properties properties) {
-                    super(properties);
-                }
-            }
-        """.trimIndent())
-
-        val pass = StructuralRefactorPass()
-        val result = pass.apply(projectDir)
-        val migrated = projectDir
-            .resolve("src/main/java/com/example/LightBlock.java")
-            .readText()
-        val codecChange = result.changes.single { it.ruleId == "struct-base-entity-block-codec" }
-
-        assertEquals(Confidence.HIGH, codecChange.confidence)
-        assertTrue(migrated.contains("MapCodec<LightBlock> CODEC = simpleCodec(LightBlock::new);"))
-        assertTrue(migrated.contains("protected com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.BaseEntityBlock> codec()"))
-    }
-
-    @Test
-    fun `block codec generation honors crop and bush parent codec types`() {
-        val projectDir = createFile("RiceCrop.java", """
-            package com.example;
-
-            import net.minecraft.world.level.block.CropBlock;
-
-            public class RiceCrop extends CropBlock {
-                public RiceCrop(Properties properties) {
-                    super(properties);
-                }
-            }
-        """.trimIndent())
-        val srcDir = projectDir.resolve("src/main/java/com/example")
-        srcDir.resolve("BambooShoot.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.level.block.BushBlock;
-            import net.minecraft.world.level.block.Blocks;
-            import net.minecraft.world.level.block.state.BlockBehaviour;
-
-            public class BambooShoot extends BushBlock {
-                public BambooShoot() {
-                    super(BlockBehaviour.Properties.ofFullCopy(Blocks.BAMBOO_SAPLING));
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("BambooBlock.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.level.block.RotatedPillarBlock;
-
-            public class BambooBlock extends RotatedPillarBlock {
-                public BambooBlock(Properties properties) {
-                    super(properties);
-                }
-            }
-        """.trimIndent())
-
-        val pass = StructuralRefactorPass()
-        pass.apply(projectDir)
-        val crop = srcDir.resolve("RiceCrop.java").readText()
-        val bush = srcDir.resolve("BambooShoot.java").readText()
-        val pillar = srcDir.resolve("BambooBlock.java").readText()
-
-        assertTrue(crop.contains("public com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.CropBlock> codec()"))
-        assertTrue(bush.contains("public com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.BushBlock> codec()"))
-        assertTrue(bush.contains("public BambooShoot(net.minecraft.world.level.block.state.BlockBehaviour.Properties properties)"))
-        assertTrue(bush.contains("super(properties);"))
-        assertTrue(pillar.contains("public com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.block.RotatedPillarBlock> codec()"))
-    }
-
-    @Test
     fun `block codec generation uses vanilla parent visibility and generic bounds`() {
         val projectDir = createFile("AerogelSlab.java", """
             package com.example;
@@ -1088,4 +861,295 @@
         assertTrue(recipe.contains("buffer.writeVarInt(recipe.getCookingTime());"), recipe)
         assertFalse(recipe.contains("recipe.category"), recipe)
         assertFalse(recipe.contains("recipe.repairTime"), recipe)
+    }
+
+    @Test
+    fun `legacy recipe output adapters use codec defaults for omitted constructor parameters`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BookCategory.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+
+            public enum BookCategory {
+                UNKNOWN;
+
+                public static final Codec<BookCategory> CODEC = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("DefaultedRecipe.java").writeText("""
+            package com.example;
+
+            import com.mojang.serialization.Codec;
+            import com.mojang.serialization.MapCodec;
+            import com.mojang.serialization.codecs.RecordCodecBuilder;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class DefaultedRecipe {
+                public DefaultedRecipe(String group, BookCategory category, Ingredient ingredient, int time) {
+                }
+
+                public static class Serializer implements RecipeSerializer<DefaultedRecipe> {
+                    private static final MapCodec<DefaultedRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
+                            Codec.STRING.optionalFieldOf("group", "").forGetter((recipe) -> ""),
+                            BookCategory.CODEC.fieldOf("category").orElse(BookCategory.UNKNOWN).forGetter((recipe) -> BookCategory.UNKNOWN),
+                            Ingredient.CODEC_NONEMPTY.fieldOf("ingredient").forGetter((recipe) -> null),
+                            Codec.INT.fieldOf("time").orElse(200).forGetter((recipe) -> 200)
+                    ).apply(instance, DefaultedRecipe::new));
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("DefaultedRecipeBuilder.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class DefaultedRecipeBuilder {
+                private final Ingredient ingredient;
+                private final int time;
+                private final Advancement.Builder advancement;
+                private final ResourceLocation advancementId;
+
+                public DefaultedRecipeBuilder(Ingredient ingredient, int time, Advancement.Builder advancement, ResourceLocation advancementId) {
+                    this.ingredient = ingredient;
+                    this.time = time;
+                    this.advancement = advancement;
+                    this.advancementId = advancementId;
+                }
+
+                public void save(RecipeOutput output, ResourceLocation id) {
+                    output.accept(new DefaultedRecipeBuilder.Result(id, "", this.ingredient, this.time, this.advancement, this.advancementId));
+                }
+
+                public static class Result implements RecipeOutput {
+                    private final ResourceLocation id;
+                    private final String group;
+                    private final Ingredient ingredient;
+                    private final int time;
+                    private final Advancement.Builder advancement;
+                    private final ResourceLocation advancementId;
+
+                    public Result(ResourceLocation id, String group, Ingredient ingredient, int time, Advancement.Builder advancement, ResourceLocation advancementId) {
+                        this.id = id;
+                        this.group = group;
+                        this.ingredient = ingredient;
+                        this.time = time;
+                        this.advancement = advancement;
+                        this.advancementId = advancementId;
+                    }
+
+                    public RecipeSerializer<DefaultedRecipe> getType() {
+                        return ExampleSerializers.DEFAULTED.get();
+                    }
+
+                    public void serializeRecipeData(JsonObject json) {
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleSerializers.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleSerializers {
+                public static final DeferredHolder<RecipeSerializer<?>, DefaultedRecipe.Serializer> DEFAULTED = null;
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val builder = srcDir.resolve("DefaultedRecipeBuilder.java").readText()
+
+        assertTrue(builder.contains("output.accept(id, new DefaultedRecipe(\"\", com.example.BookCategory.UNKNOWN, this.ingredient, this.time), this.advancement.build(this.advancementId));"), builder)
+        assertFalse(builder.contains("class Result"), builder)
+        assertFalse(builder.contains("JsonObject"), builder)
+    }
+
+    @Test
+    fun `serializer backed cooking builders migrate to factory based recipe output`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("BookCategory.java").writeText("""
+            package com.example;
+
+            public enum BookCategory {
+                HEATED
+            }
+        """.trimIndent())
+        srcDir.resolve("SpecialCookingSerializer.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+
+            public class SpecialCookingSerializer<T extends AbstractCookingRecipe> implements RecipeSerializer<T> {
+                private final SpecialCookingSerializer.CookieBaker<T> factory;
+
+                public SpecialCookingSerializer(SpecialCookingSerializer.CookieBaker<T> factory, int defaultCookingTime) {
+                    this.factory = factory;
+                }
+
+                public interface CookieBaker<T extends AbstractCookingRecipe> {
+                    T create(String group, BookCategory category, Ingredient ingredient, ItemStack result, float experience, int cookingTime);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("HeatedRecipe.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeType;
+
+            public class HeatedRecipe extends AbstractCookingRecipe {
+                public HeatedRecipe(String group, BookCategory category, Ingredient ingredient, ItemStack result, float experience, int cookingTime) {
+                    super((RecipeType<?>) null, group, null, ingredient, result, experience, cookingTime);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleSerializers.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+
+            public class ExampleSerializers {
+                public static final DeferredHolder<RecipeSerializer<?>, SpecialCookingSerializer<HeatedRecipe>> HEATED = null;
+            }
+        """.trimIndent())
+        srcDir.resolve("SpecialCookingRecipeBuilder.java").writeText("""
+            package com.example;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.advancements.Advancement;
+            import net.minecraft.advancements.AdvancementRewards;
+            import net.minecraft.advancements.AdvancementRequirements;
+            import net.minecraft.advancements.Criterion;
+            import net.minecraft.advancements.critereon.RecipeUnlockedTrigger;
+            import net.minecraft.data.recipes.RecipeBuilder;
+            import net.minecraft.data.recipes.RecipeCategory;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.level.ItemLike;
+
+            import java.util.LinkedHashMap;
+            import java.util.Map;
+
+            public class SpecialCookingRecipeBuilder implements RecipeBuilder {
+                private final RecipeCategory recipeCategory;
+                private final BookCategory category;
+                private final Item result;
+                private final Ingredient ingredient;
+                private final float experience;
+                private final int cookingTime;
+                private final Map<String, Criterion<?>> criteria = new LinkedHashMap<>();
+                private String group;
+                private final RecipeSerializer<? extends AbstractCookingRecipe> serializer;
+
+                public SpecialCookingRecipeBuilder(RecipeCategory recipeCategory, BookCategory category, ItemLike result, Ingredient ingredient, float experience, int cookingTime, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
+                    this.recipeCategory = recipeCategory;
+                    this.category = category;
+                    this.result = result.asItem();
+                    this.ingredient = ingredient;
+                    this.experience = experience;
+                    this.cookingTime = cookingTime;
+                    this.serializer = serializer;
+                }
+
+                public static SpecialCookingRecipeBuilder generic(Ingredient ingredient, RecipeCategory recipeCategory, ItemLike result, float experience, int cookingTime, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
+                    return new SpecialCookingRecipeBuilder(recipeCategory, BookCategory.HEATED, result, ingredient, experience, cookingTime, serializer);
+                }
+
+                public RecipeBuilder unlockedBy(String name, Criterion<?> criterion) {
+                    this.criteria.put(name, criterion);
+                    return this;
+                }
+
+                public RecipeBuilder group(String group) {
+                    this.group = group;
+                    return this;
+                }
+
+                public Item getResult() {
+                    return this.result;
+                }
+
+                public void save(RecipeOutput output, ResourceLocation id) {
+                    Advancement.Builder advancement = output.advancement().addCriterion("has_the_recipe", RecipeUnlockedTrigger.unlocked(id)).rewards(AdvancementRewards.Builder.recipe(id)).requirements(AdvancementRequirements.Strategy.OR);
+                    this.criteria.forEach(advancement::addCriterion);
+                    output.accept(new SpecialCookingRecipeBuilder.Result(id, this.group == null ? "" : this.group, this.category, this.ingredient, this.result, this.experience, this.cookingTime, advancement, id.withPrefix("recipes/" + this.recipeCategory.getFolderName() + "/"), this.serializer));
+                }
+
+                static class Result implements RecipeOutput {
+                    private final ResourceLocation id;
+                    private final String group;
+                    private final BookCategory category;
+                    private final Ingredient ingredient;
+                    private final Item result;
+                    private final float experience;
+                    private final int cookingTime;
+                    private final Advancement.Builder advancement;
+                    private final ResourceLocation advancementId;
+                    private final RecipeSerializer<? extends AbstractCookingRecipe> serializer;
+
+                    public Result(ResourceLocation id, String group, BookCategory category, Ingredient ingredient, Item result, float experience, int cookingTime, Advancement.Builder advancement, ResourceLocation advancementId, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
+                        this.id = id;
+                        this.group = group;
+                        this.category = category;
+                        this.ingredient = ingredient;
+                        this.result = result;
+                        this.experience = experience;
+                        this.cookingTime = cookingTime;
+                        this.advancement = advancement;
+                        this.advancementId = advancementId;
+                        this.serializer = serializer;
+                    }
+
+                    public void serializeRecipeData(JsonObject json) {
+                    }
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExampleProvider.java").writeText("""
+            package com.example;
+
+            import net.minecraft.data.recipes.RecipeCategory;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.crafting.Ingredient;
+
+            public class ExampleProvider {
+                public void build() {
+                    SpecialCookingRecipeBuilder.generic(Ingredient.of(Items.BEEF), RecipeCategory.FOOD, Items.COOKED_BEEF, 0.3F, 200, ExampleSerializers.HEATED.get());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val builder = srcDir.resolve("SpecialCookingRecipeBuilder.java").readText()
+        val provider = srcDir.resolve("ExampleProvider.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-recipe-builder-factory-output" })
+        assertTrue(builder.contains("private final com.example.SpecialCookingSerializer.CookieBaker<?> factory;"), builder)
+        assertTrue(builder.contains("RecipeSerializer<? extends AbstractCookingRecipe> serializer, com.example.SpecialCookingSerializer.CookieBaker<?> serializerFactory"), builder)
+        assertTrue(builder.contains("this.factory = serializerFactory;"), builder)
+        assertTrue(builder.contains("AbstractCookingRecipe recipe = this.factory.create(this.group == null ? \"\" : this.group, this.category, this.ingredient, new ItemStack(this.result), this.experience, this.cookingTime);"), builder)
+        assertTrue(builder.contains("output.accept(id, recipe, advancement.build(id.withPrefix(\"recipes/\" + this.recipeCategory.getFolderName() + \"/\")));"), builder)
+        assertTrue(builder.contains("import net.minecraft.world.item.ItemStack;"), builder)
+        assertFalse(builder.contains("class Result"), builder)
+        assertTrue(provider.contains("ExampleSerializers.HEATED.get(), com.example.HeatedRecipe::new"), provider)
     }

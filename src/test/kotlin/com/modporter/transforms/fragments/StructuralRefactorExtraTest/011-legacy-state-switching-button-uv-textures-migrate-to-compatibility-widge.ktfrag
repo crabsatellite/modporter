@@ -1,482 +1,5 @@
 
     @Test
-    fun `nitrogen sync packet attachment getter ignores local AttachmentType suppliers`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("ExampleMod.java").writeText("""
-            package com.example;
-
-            import net.neoforged.fml.common.Mod;
-
-            @Mod("examplemod")
-            public class ExampleMod {
-            }
-        """.trimIndent())
-        srcDir.resolve("AttachmentType.java").writeText("""
-            package com.example;
-
-            public final class AttachmentType<T> {
-            }
-        """.trimIndent())
-        srcDir.resolve("LocalData.java").writeText("""
-            package com.example;
-
-            public interface LocalData {
-            }
-        """.trimIndent())
-        srcDir.resolve("LocalAttachments.java").writeText("""
-            package com.example;
-
-            import java.util.function.Supplier;
-
-            public final class LocalAttachments {
-                public static final Supplier<AttachmentType<LocalData>> LOCAL_DATA = null;
-            }
-        """.trimIndent())
-        srcDir.resolve("LocalDataSyncPacket.java").writeText("""
-            package com.example;
-
-            import com.aetherteam.nitrogen.capability.INBTSynchable;
-            import com.aetherteam.nitrogen.network.packet.SyncEntityPacket;
-            import net.minecraft.network.FriendlyByteBuf;
-            import oshi.util.tuples.Quartet;
-
-            public class LocalDataSyncPacket extends SyncEntityPacket<LocalData> {
-                public LocalDataSyncPacket(Quartet<Integer, String, INBTSynchable.Type, Object> values) {
-                    super(values);
-                }
-
-                public LocalDataSyncPacket(int entityID, String key, INBTSynchable.Type type, Object value) {
-                    super(entityID, key, type, value);
-                }
-
-                public static LocalDataSyncPacket decode(FriendlyByteBuf buf) {
-                    return new LocalDataSyncPacket(SyncEntityPacket.decodeEntityValues(buf));
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-        val packet = srcDir.resolve("LocalDataSyncPacket.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-nitrogen-attachment-api" })
-        assertTrue(packet.contains("CustomPacketPayload.Type<LocalDataSyncPacket> TYPE"), packet)
-        assertFalse(packet.contains("getAttachment()"), packet)
-        assertFalse(packet.contains("LocalAttachments.LOCAL_DATA"), packet)
-    }
-
-    @Test
-    fun `wraps attachment getData returns for legacy lazy optional getters`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("TimeData.java").writeText("""
-            package com.example;
-
-            import com.modporter.generated.example.compat.LazyOptional;
-            import net.minecraft.world.level.Level;
-
-            public interface TimeData {
-                static LazyOptional<TimeData> get(Level world) {
-                    return world.getData(ExampleCapabilities.TIME_DATA.get());
-                }
-            }
-        """.trimIndent())
-
-        StructuralRefactorPass().apply(tempDir)
-        val api = srcDir.resolve("TimeData.java").readText()
-
-        assertTrue(api.contains("return LazyOptional.ofNullable(world.getData(ExampleCapabilities.TIME_DATA.get()));"), api)
-        assertFalse(api.contains("return world.getData(ExampleCapabilities.TIME_DATA.get());"), api)
-    }
-
-    @Test
-    fun `attachment LazyOptional getData return migration ignores comments and strings`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("AttachmentDocs.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.level.Level;
-
-            public class AttachmentDocs {
-                /*
-                static LazyOptional<TimeData> get(Level world) {
-                    return world.getData(ExampleCapabilities.TIME_DATA.get());
-                }
-                */
-                private static final String SAMPLE = "static LazyOptional<TimeData> get(Level world) { return world.getData(ExampleCapabilities.TIME_DATA.get()); }";
-
-                static Object real(Level world) {
-                    return world.getData(ExampleCapabilities.TIME_DATA.get());
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-        val source = srcDir.resolve("AttachmentDocs.java").readText()
-
-        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertFalse(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
-        assertTrue(source.contains("return world.getData(ExampleCapabilities.TIME_DATA.get());"), source)
-        assertTrue(source.contains("static LazyOptional<TimeData> get(Level world)"), source)
-        assertFalse(source.contains("LazyOptional.ofNullable"), source)
-    }
-
-    @Test
-    fun `legacy jump from ground overrides keep target public visibility`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("RideableEntity.java").writeText("""
-            package com.example;
-
-            public class RideableEntity {
-                @Override
-                protected void jumpFromGround() {
-                    super.jumpFromGround();
-                }
-
-                protected void registerGoals() {
-                }
-            }
-        """.trimIndent())
-
-        StructuralRefactorPass().apply(tempDir)
-
-        val migrated = srcDir.resolve("RideableEntity.java").readText()
-        assertTrue(migrated.contains("public void jumpFromGround()"), migrated)
-        assertTrue(migrated.contains("protected void registerGoals()"), migrated)
-    }
-
-    @Test
-    fun `legacy recipe book category create calls migrate to enum extensions`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        val resourcesDir = tempDir.resolve("src/main/resources/META-INF")
-        srcDir.createDirectories()
-        resourcesDir.createDirectories()
-        tempDir.resolve("gradle.properties").writeText("mod_id=examplemod\n")
-        resourcesDir.resolve("neoforge.mods.toml").writeText("""
-            modLoader="javafml"
-
-            [[mods]]
-            modId="examplemod"
-        """.trimIndent())
-        srcDir.resolve("ExampleMod.java").writeText("""
-            package com.example;
-
-            import net.neoforged.fml.common.Mod;
-
-            @Mod("examplemod")
-            public class ExampleMod {
-            }
-        """.trimIndent())
-        srcDir.resolve("ExampleRecipeCategories.java").writeText("""
-            package com.example;
-
-            import com.example.registry.ExampleItems;
-            import com.google.common.base.Suppliers;
-            import net.minecraft.client.RecipeBookCategories;
-            import net.minecraft.world.item.ItemStack;
-            import net.minecraft.world.item.Items;
-            import java.util.function.Supplier;
-
-            public class ExampleRecipeCategories {
-                public static final Supplier<RecipeBookCategories> MAGIC_SEARCH = Suppliers.memoize(() -> RecipeBookCategories.create("MAGIC_SEARCH", new ItemStack(Items.COMPASS), new ItemStack(ExampleItems.WAND.get())));
-            }
-        """.trimIndent())
-        srcDir.resolve("ExampleRecipeBookTypes.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.inventory.RecipeBookType;
-
-            public class ExampleRecipeBookTypes {
-                public static final RecipeBookType ALTAR = RecipeBookType.create("ALTAR");
-                public static final RecipeBookType FREEZER = RecipeBookType.create("examplemod.freezer");
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-
-        val categories = srcDir.resolve("ExampleRecipeCategories.java").readText()
-        val types = srcDir.resolve("ExampleRecipeBookTypes.java").readText()
-        val helper = srcDir.resolve("NeoForgeEnumExtensions.java").readText()
-        val enumExtensions = resourcesDir.resolve("enumextensions.json").readText()
-        val toml = resourcesDir.resolve("neoforge.mods.toml").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-recipebook-category-enum-extension" })
-        assertTrue(result.changes.any { it.ruleId == "struct-recipebook-type-enum-extension" })
-        assertTrue(categories.contains("RecipeBookCategories.valueOf(\"EXAMPLEMOD_MAGIC_SEARCH\")"), categories)
-        assertFalse(categories.contains("RecipeBookCategories.create"), categories)
-        assertTrue(types.contains("RecipeBookType.valueOf(\"EXAMPLEMOD_ALTAR\")"), types)
-        assertTrue(types.contains("RecipeBookType.valueOf(\"EXAMPLEMOD_FREEZER\")"), types)
-        assertFalse(types.contains("RecipeBookType.create"), types)
-        assertTrue(helper.contains("public static Object RecipeBookCategory_EXAMPLEMOD_MAGIC_SEARCH(int idx, Class<?> type)"), helper)
-        assertFalse(helper.contains("type.cast("), helper)
-        assertTrue(helper.contains("(Supplier<List<ItemStack>>) () -> List.of(new ItemStack(Items.COMPASS), new ItemStack(ExampleItems.WAND.get()))"), helper)
-        assertTrue(helper.contains("import com.example.registry.ExampleItems;"), helper)
-        assertTrue(enumExtensions.contains("\"enum\": \"net/minecraft/client/RecipeBookCategories\""), enumExtensions)
-        assertTrue(enumExtensions.contains("\"name\": \"EXAMPLEMOD_MAGIC_SEARCH\""), enumExtensions)
-        assertTrue(enumExtensions.contains("\"constructor\": \"(Ljava/util/function/Supplier;)V\""), enumExtensions)
-        assertTrue(enumExtensions.contains("\"enum\": \"net/minecraft/world/inventory/RecipeBookType\""), enumExtensions)
-        assertTrue(enumExtensions.contains("\"name\": \"EXAMPLEMOD_ALTAR\""), enumExtensions)
-        assertTrue(enumExtensions.contains("\"name\": \"EXAMPLEMOD_FREEZER\""), enumExtensions)
-        assertTrue(enumExtensions.contains("\"constructor\": \"()V\""), enumExtensions)
-        assertTrue(enumExtensions.contains("\"parameters\": [ ]"), enumExtensions)
-        assertTrue(toml.contains("enumExtensions=\"META-INF/enumextensions.json\""), toml)
-    }
-
-    @Test
-    fun `custom crafting book recipes generate client recipe book category finders`() {
-        val rootSrc = tempDir.resolve("src/main/java/com/example")
-        val recipeSrc = rootSrc.resolve("recipes")
-        rootSrc.createDirectories()
-        recipeSrc.createDirectories()
-        tempDir.resolve("gradle.properties").writeText("mod_id=examplemod\n")
-        rootSrc.resolve("ExampleMod.java").writeText("""
-            package com.example;
-
-            import net.neoforged.bus.api.IEventBus;
-            import net.neoforged.fml.common.Mod;
-
-            @Mod("examplemod")
-            public class ExampleMod {
-                public ExampleMod(IEventBus modEventBus) {
-                    ExampleRegistration.RECIPE_TYPES.register(modEventBus);
-                }
-            }
-        """.trimIndent())
-        rootSrc.resolve("ExampleRegistration.java").writeText("""
-            package com.example;
-
-            import com.example.recipes.MagicRecipe;
-            import net.minecraft.core.registries.Registries;
-            import net.minecraft.world.item.crafting.RecipeType;
-            import net.neoforged.neoforge.registries.DeferredHolder;
-            import net.neoforged.neoforge.registries.DeferredRegister;
-
-            public class ExampleRegistration {
-                public static final DeferredRegister<RecipeType<?>> RECIPE_TYPES = DeferredRegister.create(Registries.RECIPE_TYPE, "examplemod");
-                public static final DeferredHolder<RecipeType<?>, RecipeType<MagicRecipe>> MAGIC_RECIPE_TYPE =
-                    RECIPE_TYPES.register("magic_recipe_type", () -> new RecipeType<>() {});
-            }
-        """.trimIndent())
-        recipeSrc.resolve("MagicRecipe.java").writeText("""
-            package com.example.recipes;
-
-            import com.example.ExampleRegistration;
-            import net.minecraft.core.HolderLookup;
-            import net.minecraft.world.item.ItemStack;
-            import net.minecraft.world.item.crafting.CraftingBookCategory;
-            import net.minecraft.world.item.crafting.Recipe;
-            import net.minecraft.world.item.crafting.RecipeSerializer;
-            import net.minecraft.world.item.crafting.RecipeType;
-            import net.minecraft.world.level.Level;
-
-            public class MagicRecipe implements Recipe<MagicInput> {
-                private final CraftingBookCategory category;
-
-                public MagicRecipe(CraftingBookCategory category) {
-                    this.category = category;
-                }
-
-                @Override
-                public RecipeType<?> getType() {
-                    return ExampleRegistration.MAGIC_RECIPE_TYPE.get();
-                }
-
-                @Override
-                public RecipeSerializer<?> getSerializer() {
-                    return null;
-                }
-
-                @Override
-                public boolean matches(MagicInput input, Level level) {
-                    return true;
-                }
-
-                @Override
-                public ItemStack assemble(MagicInput input, HolderLookup.Provider provider) {
-                    return ItemStack.EMPTY;
-                }
-
-                @Override
-                public boolean canCraftInDimensions(int width, int height) {
-                    return true;
-                }
-
-                @Override
-                public ItemStack getResultItem(HolderLookup.Provider provider) {
-                    return ItemStack.EMPTY;
-                }
-
-                public CraftingBookCategory category() {
-                    return this.category;
-                }
-            }
-        """.trimIndent())
-        recipeSrc.resolve("MagicInput.java").writeText("""
-            package com.example.recipes;
-
-            import net.minecraft.world.item.ItemStack;
-            import net.minecraft.world.item.crafting.RecipeInput;
-
-            public class MagicInput implements RecipeInput {
-                @Override
-                public ItemStack getItem(int index) {
-                    return ItemStack.EMPTY;
-                }
-
-                @Override
-                public int size() {
-                    return 1;
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-
-        val main = rootSrc.resolve("ExampleMod.java").readText()
-        val generated = tempDir.resolve("src/main/java/com/modporter/generated/examplemod/compat/ModRecipeBookCategories.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-custom-recipebook-category-finder" })
-        assertTrue(result.changes.any { it.ruleId == "struct-custom-recipebook-category-finder-registration" })
-        assertTrue(main.contains("if (net.neoforged.fml.loading.FMLLoader.getDist() == net.neoforged.api.distmarker.Dist.CLIENT)"), main)
-        assertTrue(main.contains("com.modporter.generated.examplemod.compat.ModRecipeBookCategories.register(modEventBus);"), main)
-        assertTrue(generated.contains("event.registerRecipeCategoryFinder(com.example.ExampleRegistration.MAGIC_RECIPE_TYPE.get(), recipe -> {"), generated)
-        assertTrue(generated.contains("if (recipe.value() instanceof com.example.recipes.MagicRecipe value)"), generated)
-        assertTrue(generated.contains("return fromCraftingCategory(value.category());"), generated)
-        assertTrue(generated.contains("throw new IllegalStateException(\"Recipe type com.example.ExampleRegistration.MAGIC_RECIPE_TYPE.get() produced \" + recipe.value().getClass().getName() + \" instead of com.example.recipes.MagicRecipe\");"), generated)
-        assertTrue(generated.contains("case BUILDING -> RecipeBookCategories.CRAFTING_BUILDING_BLOCKS;"), generated)
-        assertFalse(generated.contains("RecipeBookCategories.UNKNOWN"), generated)
-    }
-
-    @Test
-    fun `custom crafting book recipe finder requires proven mod bus registration point`() {
-        val rootSrc = tempDir.resolve("src/main/java/com/example")
-        val recipeSrc = rootSrc.resolve("recipes")
-        rootSrc.createDirectories()
-        recipeSrc.createDirectories()
-        tempDir.resolve("gradle.properties").writeText("mod_id=examplemod\n")
-        rootSrc.resolve("ExampleMod.java").writeText("""
-            package com.example;
-
-            import net.neoforged.fml.common.Mod;
-
-            @Mod("examplemod")
-            public class ExampleMod {
-            }
-        """.trimIndent())
-        rootSrc.resolve("ExampleRegistration.java").writeText("""
-            package com.example;
-
-            import com.example.recipes.MagicRecipe;
-            import net.minecraft.core.registries.Registries;
-            import net.minecraft.world.item.crafting.RecipeType;
-            import net.neoforged.neoforge.registries.DeferredHolder;
-            import net.neoforged.neoforge.registries.DeferredRegister;
-
-            public class ExampleRegistration {
-                public static final DeferredRegister<RecipeType<?>> RECIPE_TYPES = DeferredRegister.create(Registries.RECIPE_TYPE, "examplemod");
-                public static final DeferredHolder<RecipeType<?>, RecipeType<MagicRecipe>> MAGIC_RECIPE_TYPE =
-                    RECIPE_TYPES.register("magic_recipe_type", () -> new RecipeType<>() {});
-            }
-        """.trimIndent())
-        recipeSrc.resolve("MagicRecipe.java").writeText("""
-            package com.example.recipes;
-
-            import net.minecraft.world.item.crafting.CraftingBookCategory;
-            import net.minecraft.world.item.crafting.Recipe;
-
-            public class MagicRecipe implements Recipe<MagicInput> {
-                public CraftingBookCategory category() {
-                    return CraftingBookCategory.MISC;
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-
-        assertTrue(
-            result.errors.any {
-                it.contains("Custom recipe book category finder migration error") &&
-                    it.contains("Cannot derive mod event bus variable")
-            },
-            result.errors.joinToString("\n")
-        )
-        assertFalse(
-            tempDir.resolve("src/main/java/com/modporter/generated/examplemod/compat/ModRecipeBookCategories.java").exists(),
-            "Must not generate an unregistered recipe book helper"
-        )
-    }
-
-    @Test
-    fun `legacy image button UV constructors migrate to compatibility widget`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example/client")
-        srcDir.createDirectories()
-        srcDir.resolve("ExampleButtons.java").writeText("""
-            package com.example.client;
-
-            import net.minecraft.client.gui.GuiGraphics;
-            import net.minecraft.client.gui.components.ImageButton;
-            import net.minecraft.network.chat.Component;
-            import net.minecraft.resources.ResourceLocation;
-
-            public class ExampleButtons {
-                public ImageButton simple(ResourceLocation texture) {
-                    return new ImageButton(0, 0, 20, 18, 0, 0, 19, texture, button -> {});
-                }
-
-                public ImageButton messaged(ResourceLocation texture) {
-                    return new ImageButton(0, 0, 20, 20, 0, 0, 20, texture, 20, 40, button -> {}, Component.literal("Open")) {
-                        @Override
-                        public void renderWidget(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTicks) {
-                            super.renderWidget(guiGraphics, mouseX, mouseY, partialTicks);
-                        }
-                    };
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("InactiveButton.java").writeText("""
-            package com.example.client;
-
-            import net.minecraft.client.gui.GuiGraphics;
-            import net.minecraft.client.gui.components.ImageButton;
-            import net.minecraft.network.chat.Component;
-            import net.minecraft.resources.ResourceLocation;
-
-            public class InactiveButton extends ImageButton {
-                public InactiveButton(int x, int y, int width, int height, int xTexStart, int yTexStart, int yDiffTex, ResourceLocation texture, int textureWidth, int textureHeight, OnPress onPress, Component message) {
-                    super(x, y, width, height, xTexStart, yTexStart, yDiffTex, texture, textureWidth, textureHeight, onPress, message);
-                }
-
-                @Override
-                public void renderWidget(GuiGraphics guiGraphics, int mouseX, int mouseY, float partialTicks) {
-                    int v = this.yTexStart;
-                    guiGraphics.blit(this.resourceLocation, this.getX(), this.getY(), (float) this.xTexStart, (float) v, this.width, this.height, this.textureWidth, this.textureHeight);
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-
-        val buttons = srcDir.resolve("ExampleButtons.java").readText()
-        val inactive = srcDir.resolve("InactiveButton.java").readText()
-        val helper = srcDir.resolve("LegacyImageButton.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-legacy-imagebutton-constructors" })
-        assertTrue(buttons.contains("new LegacyImageButton(0, 0, 20, 18, 0, 0, 19, texture, button -> {})"), buttons)
-        assertTrue(buttons.contains("new LegacyImageButton(0, 0, 20, 20, 0, 0, 20, texture, 20, 40, button -> {}, Component.literal(\"Open\"))"), buttons)
-        assertFalse(buttons.contains("new ImageButton(0, 0, 20, 18, 0, 0, 19"), buttons)
-        assertTrue(inactive.contains("public class InactiveButton extends LegacyImageButton"), inactive)
-        assertTrue(inactive.contains("this.yTexStart"), inactive)
-        assertTrue(inactive.contains("this.resourceLocation"), inactive)
-        assertTrue(helper.contains("public class LegacyImageButton extends ImageButton"), helper)
-        assertTrue(helper.contains("new WidgetSprites(texture, texture)"), helper)
-        assertTrue(helper.contains("protected final int xTexStart;"), helper)
-        assertTrue(helper.contains("protected final ResourceLocation resourceLocation;"), helper)
-        assertTrue(helper.contains("guiGraphics.blit(this.resourceLocation"), helper)
-    }
-
-    @Test
     fun `legacy state switching button UV textures migrate to compatibility widget`() {
         val srcDir = tempDir.resolve("src/main/java/com/example/client")
         srcDir.createDirectories()
@@ -1116,4 +639,238 @@
         assertFalse(registrar.contains("WrongRegistrarFile"), registrar)
         assertTrue(mod.contains("HookRegistrar.register(modEventBus);"), mod)
         assertFalse(mod.contains("ExtraEventsRegister.register"), mod)
+    }
+
+    @Test
+    fun `migrates SimpleCriterionTrigger classes and CriteriaTriggers registry fields`() {
+        val textBlockDelimiter = "\"\"\""
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val advancementDir = srcDir.resolve("advancements")
+        val blockDir = srcDir.resolve("block")
+        advancementDir.createDirectories()
+        blockDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modbus = modContainer.getEventBus();
+                }
+            }
+        """.trimIndent())
+
+        advancementDir.resolve("TFAdvancements.java").writeText("""
+            package com.example.advancements;
+
+            import net.minecraft.advancements.CriteriaTriggers;
+
+            public class TFAdvancements {
+                private static final String DOC = $textBlockDelimiter
+                    import net.minecraft.advancements.CriteriaTriggers;
+                    $textBlockDelimiter;
+
+                public static final ActivateGhastTrapTrigger ACTIVATED_GHAST_TRAP = CriteriaTriggers.register(new ActivateGhastTrapTrigger());
+
+                public static void init() {}
+            }
+        """.trimIndent())
+
+        advancementDir.resolve("ActivateGhastTrapTrigger.java").writeText("""
+            package com.example.advancements;
+
+            import com.google.gson.JsonObject;
+            import net.minecraft.advancements.critereon.*;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.server.level.ServerPlayer;
+            import com.example.ExampleMod;
+
+            public class ActivateGhastTrapTrigger extends SimpleCriterionTrigger<ActivateGhastTrapTrigger.Instance> {
+                public static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, "activate_ghast_trap");
+
+                @Override
+                public ResourceLocation getId() {
+                    return ID;
+                }
+
+                @Override
+                protected ActivateGhastTrapTrigger.Instance createInstance(JsonObject json, ContextAwarePredicate player, DeserializationContext ctx) {
+                    return new ActivateGhastTrapTrigger.Instance(player);
+                }
+
+                public void trigger(ServerPlayer player) {
+                    this.trigger(player, instance -> true);
+                }
+
+                public static class Instance extends AbstractCriterionTriggerInstance {
+                    public Instance(ContextAwarePredicate player) {
+                        super(ActivateGhastTrapTrigger.ID, player);
+                    }
+
+                    public static Instance activateTrap() {
+                        return new Instance(ContextAwarePredicate.ANY);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        blockDir.resolve("GhastTrapBlock.java").writeText("""
+            package com.example.block;
+
+            import com.example.advancements.TFAdvancements;
+            import net.minecraft.server.level.ServerPlayer;
+
+            public class GhastTrapBlock {
+                public void award(ServerPlayer player) {
+                    TFAdvancements.ACTIVATED_GHAST_TRAP.trigger(player);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(tempDir)
+        val registry = advancementDir.resolve("TFAdvancements.java").readText()
+        val trigger = advancementDir.resolve("ActivateGhastTrapTrigger.java").readText()
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+        val block = blockDir.resolve("GhastTrapBlock.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-criterion-trigger-deferred-register" })
+        assertTrue(result.changes.any { it.ruleId == "struct-simple-criterion-trigger-codec" })
+        assertTrue(result.changes.any { it.ruleId == "struct-criterion-trigger-holder-get" })
+        assertTrue(result.changes.any { it.ruleId == "struct-criterion-trigger-main-register" })
+        assertTrue(registry.contains("DeferredRegister<CriterionTrigger<?>> TRIGGERS"))
+        assertTrue(registry.contains("DeferredHolder<CriterionTrigger<?>, ActivateGhastTrapTrigger> ACTIVATED_GHAST_TRAP"))
+        assertTrue(registry.contains("TRIGGERS.register(\"activate_ghast_trap\", ActivateGhastTrapTrigger::new)"))
+        assertFalse(Regex("""(?m)^import net\.minecraft\.advancements\.CriteriaTriggers;$""").containsMatchIn(registry), registry)
+        assertEquals(1, Regex("""import net\.minecraft\.advancements\.CriteriaTriggers;""").findAll(registry).count(), registry)
+        assertFalse(registry.contains("= CriteriaTriggers.register"), registry)
+        assertTrue(registry.contains("private static final String DOC = \"\"\""), registry)
+        assertTrue(trigger.contains("public record Instance(Optional<ContextAwarePredicate> player) implements SimpleInstance"))
+        assertTrue(trigger.contains("public Codec<ActivateGhastTrapTrigger.Instance> codec()"))
+        assertTrue(trigger.contains("public static Criterion<ActivateGhastTrapTrigger.Instance> activateTrap()"))
+        assertTrue(!trigger.contains("AbstractCriterionTriggerInstance"))
+        assertTrue(!trigger.contains("DeserializationContext"))
+        assertTrue(mod.contains("import com.example.advancements.TFAdvancements;"))
+        assertTrue(mod.contains("TFAdvancements.TRIGGERS.register(modbus);"))
+        assertTrue(block.contains("TFAdvancements.ACTIVATED_GHAST_TRAP.get().trigger(player);"))
+    }
+
+    @Test
+    fun `migrates singleton registered item SimpleCriterionTrigger without hardcoded factory names`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val advancementDir = srcDir.resolve("advancement")
+        advancementDir.createDirectories()
+
+        srcDir.resolve("ExampleMod.java").writeText("""
+            package com.example;
+
+            import com.example.advancement.ExampleAdvancementTriggers;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MOD_ID)
+            public class ExampleMod {
+                public static final String MOD_ID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                }
+
+                public void commonSetup() {
+                    ExampleAdvancementTriggers.init();
+                }
+            }
+        """.trimIndent())
+
+        advancementDir.resolve("ExampleAdvancementTriggers.java").writeText("""
+            package com.example.advancement;
+
+            import net.minecraft.advancements.CriteriaTriggers;
+
+            public class ExampleAdvancementTriggers {
+                public static void init() {
+                    CriteriaTriggers.register(IncubationTrigger.INSTANCE);
+                }
+            }
+        """.trimIndent())
+
+        advancementDir.resolve("IncubationTrigger.java").writeText("""
+            package com.example.advancement;
+
+            import com.example.ExampleMod;
+            import com.google.gson.JsonObject;
+            import net.minecraft.advancements.critereon.*;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.item.ItemStack;
+
+            public class IncubationTrigger extends SimpleCriterionTrigger<IncubationTrigger.Instance> {
+                private static final ResourceLocation ID = ResourceLocation.fromNamespaceAndPath(ExampleMod.MOD_ID, "incubation_trigger");
+                public static final IncubationTrigger INSTANCE = new IncubationTrigger();
+
+                @Override
+                public ResourceLocation getId() {
+                    return ID;
+                }
+
+                @Override
+                public IncubationTrigger.Instance createInstance(JsonObject json, ContextAwarePredicate predicate, DeserializationContext context) {
+                    ItemPredicate itemPredicate = ItemPredicate.fromJson(json.get("item"));
+                    return new IncubationTrigger.Instance(predicate, itemPredicate);
+                }
+
+                public void trigger(ServerPlayer player, ItemStack stack) {
+                    this.trigger(player, instance -> instance.test(stack));
+                }
+
+                public static class Instance extends SimpleCriterionTrigger.SimpleInstance {
+                    private final ItemPredicate item;
+
+                    public Instance(ContextAwarePredicate predicate, ItemPredicate item) {
+                        super(IncubationTrigger.ID, predicate);
+                        this.item = item;
+                    }
+
+                    public static IncubationTrigger.Instance forItem(ItemPredicate item) {
+                        return new IncubationTrigger.Instance(ContextAwarePredicate.ANY, item);
+                    }
+
+                    public static IncubationTrigger.Instance forAny() {
+                        return forItem(ItemPredicate.ANY);
+                    }
+
+                    public boolean test(ItemStack stack) {
+                        return this.item.test(stack);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val registry = advancementDir.resolve("ExampleAdvancementTriggers.java").readText()
+        val trigger = advancementDir.resolve("IncubationTrigger.java").readText()
+        val mod = srcDir.resolve("ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-criterion-trigger-deferred-register" })
+        assertTrue(result.changes.any { it.ruleId == "struct-simple-criterion-trigger-codec" })
+        assertTrue(registry.contains("DeferredRegister<CriterionTrigger<?>> TRIGGERS"), registry)
+        assertTrue(registry.contains("DeferredHolder<CriterionTrigger<?>, IncubationTrigger> INCUBATION_TRIGGER"), registry)
+        assertTrue(registry.contains("TRIGGERS.register(\"incubation_trigger\", IncubationTrigger::new)"), registry)
+        assertTrue(!registry.contains("CriteriaTriggers"), registry)
+        assertTrue(!registry.contains("public static void init"), registry)
+        assertTrue(trigger.contains("public static Criterion<IncubationTrigger.Instance> forItem(ItemPredicate item)"), trigger)
+        assertTrue(trigger.contains("public static Criterion<IncubationTrigger.Instance> forAny()"), trigger)
+        assertTrue(trigger.contains("this.item.get().test(stack)"), trigger)
+        assertTrue(!trigger.contains("uncraftedItem"), trigger)
+        assertTrue(!trigger.contains("ItemPredicate.fromJson"), trigger)
+        assertTrue(mod.contains("ExampleAdvancementTriggers.TRIGGERS.register(modEventBus);"), mod)
+        assertTrue(!mod.contains("ExampleAdvancementTriggers.init();"), mod)
     }

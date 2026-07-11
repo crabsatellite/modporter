@@ -1,303 +1,5 @@
 
     @Test
-    fun `vanilla 121 small API rewrites ignore comments and strings`() {
-        val projectDir = createFile("SmallVanillaApiSurface.java", """
-            package com.example;
-
-            import net.minecraft.core.BlockPos;
-            import net.minecraft.tags.Tags;
-            import net.minecraft.world.entity.Entity;
-            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
-            import net.minecraft.world.item.ItemStack;
-            import net.minecraft.world.level.Level;
-            import net.minecraft.world.level.block.state.BlockState;
-            import net.neoforged.neoforge.common.NeoForgeMod;
-
-            public class SmallVanillaApiSurface {
-                private static final String DOC = "stack.hasCustomHoverName() Tags.Items.HEADS NeoForgeMod.BLOCK_REACH.get()";
-                private static final String HOLDER_DOC = "thing.VALUE.getHolder().orElseThrow() effect.getEffect().isInstantenous(source)";
-
-                /*
-                boolean docs(ItemStack stack, BlockState state, Level level, BlockPos pos, Entity entity) {
-                    return stack.hasCustomHoverName()
-                            && state.is(Tags.Items.HEADS)
-                            && level.getBiome(pos).get().toString().isEmpty()
-                            && entity.getAttribute(NeoForgeMod.ENTITY_REACH.get()) != null;
-                }
-
-                boolean holderDocs(RegistryThing thing, EffectInstance effect, Object source) {
-                    return thing.VALUE.getHolder().orElseThrow() != null
-                            && effect.getEffect().isInstantenous(source);
-                }
-                */
-                boolean real(ItemStack stack, BlockState state, Level level, BlockPos pos, Entity entity) {
-                    return stack.hasCustomHoverName()
-                            && state.is(Tags.Items.HEADS)
-                            && level.getBiome(pos).get().toString().isEmpty()
-                            && entity.getAttribute(NeoForgeMod.BLOCK_REACH.get()) != null
-                            && entity.getAttribute(NeoForgeMod.ENTITY_REACH.get()) != null;
-                }
-
-                boolean bareAttributeConstants(Entity entity) {
-                    return entity.getAttribute(NeoForgeMod.BLOCK_REACH) != null
-                            && entity.getAttribute(net.neoforged.neoforge.common.NeoForgeMod.ENTITY_REACH) != null
-                            && entity.getAttribute(net.neoforged.neoforge.common.NeoForgeMod.ENTITY_GRAVITY) != null;
-                }
-
-                boolean holderReal(RegistryThing thing, EffectInstance effect, Object source) {
-                    return thing.VALUE.getHolder().orElseThrow() != null
-                            && effect.getEffect().isInstantenous(source);
-                }
-            }
-        """.trimIndent())
-
-        StructuralRefactorPass().apply(projectDir)
-
-        val migrated = projectDir.resolve("src/main/java/com/example/SmallVanillaApiSurface.java").readText()
-        assertTrue(migrated.contains("stack.has(DataComponents.CUSTOM_NAME)"), migrated)
-        assertTrue(migrated.contains("state.is(ItemTags.SKULLS)"), migrated)
-        assertTrue(migrated.contains("level.getBiome(pos).value().toString().isEmpty()"), migrated)
-        assertTrue(migrated.contains("entity.getAttribute(Attributes.BLOCK_INTERACTION_RANGE) != null"), migrated)
-        assertTrue(migrated.contains("entity.getAttribute(Attributes.ENTITY_INTERACTION_RANGE) != null"), migrated)
-        assertTrue(migrated.contains("entity.getAttribute(Attributes.GRAVITY) != null"), migrated)
-        assertTrue(migrated.contains("thing.VALUE.getDelegate() != null"), migrated)
-        assertTrue(migrated.contains("effect.getEffect().value().isInstantenous(source)"), migrated)
-        assertTrue(migrated.contains("import net.minecraft.core.component.DataComponents;"), migrated)
-        assertTrue(migrated.contains("import net.minecraft.tags.ItemTags;"), migrated)
-        assertTrue(migrated.contains("import net.minecraft.world.entity.ai.attributes.Attributes;"), migrated)
-        assertFalse(migrated.contains("import net.neoforged.neoforge.common.NeoForgeMod;"), migrated)
-        assertTrue(migrated.contains("""private static final String DOC = "stack.hasCustomHoverName() Tags.Items.HEADS NeoForgeMod.BLOCK_REACH.get()";"""), migrated)
-        assertTrue(migrated.contains("""private static final String HOLDER_DOC = "thing.VALUE.getHolder().orElseThrow() effect.getEffect().isInstantenous(source)";"""), migrated)
-        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
-        assertTrue(commentBlock.contains("stack.hasCustomHoverName()"), migrated)
-        assertTrue(commentBlock.contains("state.is(Tags.Items.HEADS)"), migrated)
-        assertTrue(commentBlock.contains("level.getBiome(pos).get().toString().isEmpty()"), migrated)
-        assertTrue(commentBlock.contains("entity.getAttribute(NeoForgeMod.ENTITY_REACH.get()) != null"), migrated)
-        assertTrue(commentBlock.contains("thing.VALUE.getHolder().orElseThrow() != null"), migrated)
-        assertTrue(commentBlock.contains("effect.getEffect().isInstantenous(source)"), migrated)
-        assertFalse(commentBlock.contains("DataComponents.CUSTOM_NAME"), migrated)
-        assertFalse(commentBlock.contains("ItemTags.SKULLS"), migrated)
-        assertFalse(commentBlock.contains("Attributes.ENTITY_INTERACTION_RANGE"), migrated)
-        assertFalse(commentBlock.contains("getDelegate()"), migrated)
-        assertFalse(commentBlock.contains("getEffect().value().isInstantenous"), migrated)
-    }
-
-    @Test
-    fun `legacy registry utility rewrites ignore comments and strings`() {
-        val projectDir = createFile("LegacyRegistryUtilitySurface.java", """
-            package com.example;
-
-            import com.mojang.serialization.Codec;
-            import net.minecraft.core.Registry;
-            import net.minecraft.util.ExtraCodecs;
-            import net.neoforged.neoforge.registries.RegistryObject;
-
-            public class LegacyRegistryUtilitySurface {
-                private static final String DOC = "ExtraCodecs.lazyInitializedCodec(() -> REGISTRY.byNameCodec()) RegistryObject::get";
-
-                /*
-                public static final Codec<Thing> COMMENT_CODEC = ExtraCodecs.lazyInitializedCodec(() -> REGISTRY.byNameCodec());
-
-                public Object comment(java.util.stream.Stream<RegistryObject<String>> stream) {
-                    return stream.map(RegistryObject::get);
-                }
-                */
-                public static final Registry<Thing> REGISTRY = null;
-                public static final Codec<Thing> CODEC = ExtraCodecs.lazyInitializedCodec(() -> REGISTRY.byNameCodec());
-
-                public Object real(java.util.stream.Stream<RegistryObject<String>> stream) {
-                    return stream.map(RegistryObject::get);
-                }
-            }
-        """.trimIndent())
-
-        StructuralRefactorPass().apply(projectDir)
-
-        val migrated = projectDir.resolve("src/main/java/com/example/LegacyRegistryUtilitySurface.java").readText()
-        assertTrue(migrated.contains("public static final Codec<Thing> CODEC = REGISTRY.byNameCodec();"), migrated)
-        assertTrue(migrated.contains("return stream.map(DeferredHolder::get);"), migrated)
-        assertTrue(migrated.contains("import net.neoforged.neoforge.registries.DeferredHolder;"), migrated)
-        assertFalse(migrated.contains("import net.minecraft.util.ExtraCodecs;"), migrated)
-        assertTrue(migrated.contains("""private static final String DOC = "ExtraCodecs.lazyInitializedCodec(() -> REGISTRY.byNameCodec()) RegistryObject::get";"""), migrated)
-        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
-        assertTrue(commentBlock.contains("COMMENT_CODEC = ExtraCodecs.lazyInitializedCodec(() -> REGISTRY.byNameCodec())"), migrated)
-        assertTrue(commentBlock.contains("return stream.map(RegistryObject::get);"), migrated)
-        assertFalse(commentBlock.contains("DeferredHolder::get"), migrated)
-    }
-
-    @Test
-    fun `common vanilla 121 rewrites ignore comments and strings`() {
-        val projectDir = createFile("CommonVanillaApiSurface.java", """
-            package com.example;
-
-            public class CommonVanillaApiSurface extends Mob {
-                private static final String DOC = "player.getBlockReach() EventHooks.canCreateFluidSource(level, neighborPos, neighborState, true) ResourceLocation.CODEC.codec(). pose.mulPoseMatrix(matrix) Tags.Items.TOOLS_BOWS EquipmentSlot.Type.ARMOR CauldronInteraction.EMPTY.put(item, interaction) shield.disableShield(false) wolf.setTame(true); Items.GRASS properties.defaultDurability(10) Mob.getEquipmentSlotForItem(stack)";
-
-                /*
-                void docs(Player player, Level level, BlockPos neighborPos, BlockState neighborState, PoseStack pose, Matrix4f matrix, Item.Properties properties, ItemStack stack, Wolf wolf, ShieldItem shield, Item item, CauldronInteraction.Interaction interaction) {
-                    player.getBlockReach();
-                    EventHooks.canCreateFluidSource(level, neighborPos, neighborState, true);
-                    ResourceLocation.CODEC.codec().fieldOf("id");
-                    pose.mulPoseMatrix(matrix);
-                    Object bow = Tags.Items.TOOLS_BOWS;
-                    Object armor = EquipmentSlot.Type.ARMOR;
-                    CauldronInteraction.EMPTY.put(item, interaction);
-                    shield.disableShield(false);
-                    wolf.setTame(true);
-                    Object grass = Items.GRASS;
-                    properties.defaultDurability(10);
-                    Mob.getEquipmentSlotForItem(stack);
-                }
-                */
-                void real(Player player, Level level, BlockPos neighborPos, BlockState neighborState, PoseStack pose, Matrix4f matrix, Item.Properties properties, ItemStack stack, Wolf wolf, ShieldItem shield, Item item, CauldronInteraction.Interaction interaction) {
-                    player.getBlockReach();
-                    EventHooks.canCreateFluidSource(level, neighborPos, neighborState, true);
-                    ResourceLocation.CODEC.codec().fieldOf("id");
-                    pose.mulPoseMatrix(matrix);
-                    Object bow = Tags.Items.TOOLS_BOWS;
-                    Object crossbow = Tags.Items.TOOLS_CROSSBOWS;
-                    Object fishingRod = Tags.Items.TOOLS_FISHING_RODS;
-                    Object armor = EquipmentSlot.Type.ARMOR;
-                    CauldronInteraction.EMPTY.put(item, interaction);
-                    shield.disableShield(false);
-                    wolf.setTame(true);
-                    Object grass = Items.GRASS;
-                    properties.defaultDurability(10);
-                    Mob.getEquipmentSlotForItem(stack);
-                }
-            }
-        """.trimIndent())
-
-        StructuralRefactorPass().apply(projectDir)
-
-        val migrated = projectDir.resolve("src/main/java/com/example/CommonVanillaApiSurface.java").readText()
-        assertTrue(migrated.contains("player.blockInteractionRange();"), migrated)
-        assertTrue(migrated.contains("EventHooks.canCreateFluidSource(level, neighborPos, neighborState);"), migrated)
-        assertTrue(migrated.contains("ResourceLocation.CODEC.fieldOf(\"id\");"), migrated)
-        assertTrue(migrated.contains("pose.mulPose(matrix);"), migrated)
-        assertTrue(migrated.contains("Object bow = Tags.Items.TOOLS_BOW;"), migrated)
-        assertTrue(migrated.contains("Object crossbow = Tags.Items.TOOLS_CROSSBOW;"), migrated)
-        assertTrue(migrated.contains("Object fishingRod = Tags.Items.TOOLS_FISHING_ROD;"), migrated)
-        assertTrue(migrated.contains("Object armor = EquipmentSlot.Type.HUMANOID_ARMOR;"), migrated)
-        assertTrue(migrated.contains("CauldronInteraction.EMPTY.map().put(item, interaction);"), migrated)
-        assertTrue(migrated.contains("shield.disableShield();"), migrated)
-        assertTrue(migrated.contains("wolf.setTame(true, true);"), migrated)
-        assertTrue(migrated.contains("Object grass = Items.SHORT_GRASS;"), migrated)
-        assertTrue(migrated.contains("properties.durability(10);"), migrated)
-        assertTrue(migrated.contains("player.getEquipmentSlotForItem(stack);"), migrated)
-        assertTrue(migrated.contains("player.getBlockReach() EventHooks.canCreateFluidSource(level, neighborPos, neighborState, true) ResourceLocation.CODEC.codec()."), migrated)
-        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
-        assertTrue(commentBlock.contains("player.getBlockReach();"), migrated)
-        assertTrue(commentBlock.contains("EventHooks.canCreateFluidSource(level, neighborPos, neighborState, true);"), migrated)
-        assertTrue(commentBlock.contains("ResourceLocation.CODEC.codec().fieldOf(\"id\");"), migrated)
-        assertTrue(commentBlock.contains("pose.mulPoseMatrix(matrix);"), migrated)
-        assertTrue(commentBlock.contains("Object bow = Tags.Items.TOOLS_BOWS;"), migrated)
-        assertTrue(commentBlock.contains("Object armor = EquipmentSlot.Type.ARMOR;"), migrated)
-        assertTrue(commentBlock.contains("CauldronInteraction.EMPTY.put(item, interaction);"), migrated)
-        assertTrue(commentBlock.contains("shield.disableShield(false);"), migrated)
-        assertTrue(commentBlock.contains("wolf.setTame(true);"), migrated)
-        assertTrue(commentBlock.contains("Object grass = Items.GRASS;"), migrated)
-        assertTrue(commentBlock.contains("properties.defaultDurability(10);"), migrated)
-        assertTrue(commentBlock.contains("Mob.getEquipmentSlotForItem(stack);"), migrated)
-        assertFalse(commentBlock.contains("blockInteractionRange"), migrated)
-        assertFalse(commentBlock.contains("HUMANOID_ARMOR"), migrated)
-        assertFalse(commentBlock.contains("SHORT_GRASS"), migrated)
-    }
-
-    @Test
-    fun `equipment slot receiver migration uses current method owner evidence`() {
-        val projectDir = createFile("EquipmentSlotOwnerSurface.java", """
-            package com.example;
-
-            import net.minecraft.world.entity.LivingEntity;
-            import net.minecraft.world.entity.Mob;
-            import net.minecraft.world.entity.player.Player;
-            import net.minecraft.world.item.ItemStack;
-
-            public class EquipmentSlotOwnerSurface extends Mob {
-                void playerOwner(Player player, ItemStack stack) {
-                    this.getEquipmentSlotForItem(stack);
-                }
-
-                void livingOwner(LivingEntity wearer, ItemStack stack) {
-                    this.getEquipmentSlotForItem(stack);
-                }
-
-                void ambiguous(Player left, Player right, ItemStack stack) {
-                    this.getEquipmentSlotForItem(stack);
-                }
-
-                void docs(Player player, ItemStack stack) {
-                    String doc = "this.getEquipmentSlotForItem(stack);";
-                    // this.getEquipmentSlotForItem(stack);
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(projectDir)
-        val migrated = projectDir.resolve("src/main/java/com/example/EquipmentSlotOwnerSurface.java").readText()
-
-        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertTrue(migrated.contains("player.getEquipmentSlotForItem(stack);"), migrated)
-        assertTrue(migrated.contains("wearer.getEquipmentSlotForItem(stack);"), migrated)
-        assertTrue(
-            migrated.contains(
-                "void ambiguous(Player left, Player right, ItemStack stack) {\n        this.getEquipmentSlotForItem(stack);"
-            ),
-            migrated
-        )
-        assertTrue(migrated.contains("""String doc = "this.getEquipmentSlotForItem(stack);";"""), migrated)
-        assertTrue(migrated.contains("// this.getEquipmentSlotForItem(stack);"), migrated)
-        assertFalse(migrated.contains("left.getEquipmentSlotForItem(stack);"), migrated)
-        assertFalse(migrated.contains("right.getEquipmentSlotForItem(stack);"), migrated)
-    }
-
-    @Test
-    fun `record codec witness rewrites ignore comments and strings`() {
-        val projectDir = createFile("RecordCodecWitnessSurface.java", """
-            package com.example;
-
-            import com.mojang.serialization.Codec;
-            import com.mojang.serialization.codecs.RecordCodecBuilder;
-            import java.util.List;
-            import net.minecraft.resources.ResourceLocation;
-
-            public class RecordCodecWitnessSurface {
-                private static final String DOC = "ResourceLocation.CODEC.codec().listOf() RecordCodecBuilder.create";
-
-                /*
-                public static final Codec<List<ResourceLocation>> COMMENT_IDS = ResourceLocation.CODEC.codec().listOf();
-                public static final Codec<RecordCodecWitnessSurface> COMMENT_CODEC = RecordCodecBuilder.create(instance -> instance.group(
-                        ResourceLocation.CODEC.fieldOf("id").forGetter(surface -> surface.id)
-                ).apply(instance, RecordCodecWitnessSurface::new));
-                */
-                public static final Codec<List<ResourceLocation>> IDS = ResourceLocation.CODEC.codec().listOf();
-                public static final Codec<RecordCodecWitnessSurface> CODEC = RecordCodecBuilder.create(instance -> instance.group(
-                        ResourceLocation.CODEC.fieldOf("id").forGetter(surface -> surface.id)
-                ).apply(instance, RecordCodecWitnessSurface::new));
-
-                private final ResourceLocation id;
-
-                public RecordCodecWitnessSurface(ResourceLocation id) {
-                    this.id = id;
-                }
-            }
-        """.trimIndent())
-
-        StructuralRefactorPass().apply(projectDir)
-
-        val migrated = projectDir.resolve("src/main/java/com/example/RecordCodecWitnessSurface.java").readText()
-        assertTrue(migrated.contains("public static final Codec<List<ResourceLocation>> IDS = ResourceLocation.CODEC.listOf();"), migrated)
-        assertTrue(migrated.contains("RecordCodecBuilder.<RecordCodecWitnessSurface>create("), migrated)
-        assertTrue(migrated.contains("""private static final String DOC = "ResourceLocation.CODEC.codec().listOf() RecordCodecBuilder.create";"""), migrated)
-        val commentBlock = migrated.substringAfter("/*").substringBefore("*/")
-        assertTrue(commentBlock.contains("COMMENT_IDS = ResourceLocation.CODEC.codec().listOf();"), migrated)
-        assertTrue(commentBlock.contains("COMMENT_CODEC = RecordCodecBuilder.create"), migrated)
-        assertFalse(commentBlock.contains("ResourceLocation.CODEC.listOf()"), migrated)
-        assertFalse(commentBlock.contains("RecordCodecBuilder.<RecordCodecWitnessSurface>create"), migrated)
-    }
-
-    @Test
     fun `migrates block entity fluid capability override to RegisterCapabilitiesEvent`() {
         val projectDir = createFile("ExampleMod.java", """
             package com.example;
@@ -1153,4 +855,329 @@
         assertTrue(result.changes.none { it.ruleId == "struct-blockentity-capability-provider" })
         assertTrue(blockEntity.contains("getCapability("), blockEntity)
         assertTrue(blockEntity.contains("makeHandler(capability, side)"), blockEntity)
+    }
+
+    @Test
+    fun `migrates sided inventory wrapper arrays to direct block entity capability providers`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+
+                public ExampleMod(ModContainer modContainer) {
+                    IEventBus modEventBus = modContainer.getEventBus();
+                    BlockEntityRegistry.BLOCK_ENTITIES.register(modEventBus);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/IncubatorBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.Capability;
+            import com.modporter.generated.example.compat.LazyOptional;
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.Direction;
+            import net.minecraft.world.level.block.entity.BaseContainerBlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            import net.neoforged.neoforge.items.IItemHandler;
+            import net.neoforged.neoforge.items.wrapper.SidedInvWrapper;
+            import javax.annotation.Nullable;
+
+            public class IncubatorBlockEntity extends BaseContainerBlockEntity {
+                private LazyOptional<? extends IItemHandler>[] handlers = SidedInvWrapper.create(this, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST);
+
+                public IncubatorBlockEntity(BlockPos pos, BlockState state) {
+                    super(BlockEntityRegistry.INCUBATOR.get(), pos, state);
+                }
+
+                @Override
+                public <T> LazyOptional<T> getCapability(Capability<T> capability, @Nullable Direction direction) {
+                    if (!this.remove && direction != null && capability == Capabilities.ItemHandler.BLOCK) {
+                        if (direction == Direction.NORTH) {
+                            return handlers[0].cast();
+                        } else if (direction == Direction.SOUTH) {
+                            return handlers[1].cast();
+                        } else if (direction == Direction.EAST) {
+                            return handlers[2].cast();
+                        } else {
+                            return handlers[3].cast();
+                        }
+                    }
+                    return super.getCapability(capability, direction);
+                }
+
+                public void invalidateCaps() {
+                    super.invalidateCapabilities();
+                    for (LazyOptional<? extends IItemHandler> handler : this.handlers) {
+                        handler.invalidate();
+                    }
+                }
+
+                @Override
+                public void reviveCaps() {
+                    super.reviveCaps();
+                    this.handlers = SidedInvWrapper.create(this, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/BlockEntityRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class BlockEntityRegistry {
+                public static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES = null;
+                public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<IncubatorBlockEntity>> INCUBATOR = null;
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val blockEntity = tempDir.resolve("src/main/java/com/example/IncubatorBlockEntity.java").readText()
+        val mod = tempDir.resolve("src/main/java/com/example/ExampleMod.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-blockentity-capability-provider" })
+        assertTrue(blockEntity.contains("(!blockEntity.isRemoved() && side != null) ?"), blockEntity)
+        assertTrue(blockEntity.contains("side == Direction.NORTH ? new SidedInvWrapper(blockEntity, Direction.NORTH)"), blockEntity)
+        assertTrue(blockEntity.contains("side == Direction.SOUTH ? new SidedInvWrapper(blockEntity, Direction.SOUTH)"), blockEntity)
+        assertTrue(blockEntity.contains("side == Direction.EAST ? new SidedInvWrapper(blockEntity, Direction.EAST)"), blockEntity)
+        assertTrue(blockEntity.contains("new SidedInvWrapper(blockEntity, Direction.WEST)"), blockEntity)
+        assertFalse(blockEntity.contains("getCapability("), blockEntity)
+        assertFalse(blockEntity.contains("LazyOptional"), blockEntity)
+        assertFalse(blockEntity.contains("handlers"), blockEntity)
+        assertFalse(blockEntity.contains("reviveCaps"), blockEntity)
+        assertTrue(mod.contains("modEventBus.addListener(IncubatorBlockEntity::registerCapabilities);"))
+    }
+
+    @Test
+    fun `migrates additional NeoForge 121 block entity and client API surfaces`() {
+        val projectDir = createFile("BaseInventoryEntity.java", """
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.entity.player.Inventory;
+            import net.minecraft.world.inventory.AbstractContainerMenu;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.block.entity.BaseContainerBlockEntity;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public abstract class BaseInventoryEntity extends BaseContainerBlockEntity {
+                protected NonNullList<ItemStack> items;
+                public BaseInventoryEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                    this.items = NonNullList.withSize(1, ItemStack.EMPTY);
+                }
+                @Override
+                protected Component getDefaultName() { return Component.literal("x"); }
+                @Override
+                protected AbstractContainerMenu createMenu(int id, Inventory inventory) { return null; }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/SyncEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.Connection;
+            import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
+            import net.minecraft.world.level.block.entity.BlockEntityType;
+            import net.minecraft.world.level.block.state.BlockState;
+
+            public class SyncEntity extends BaseInventoryEntity {
+                public SyncEntity(BlockEntityType<?> type, BlockPos pos, BlockState state) {
+                    super(type, pos, state);
+                }
+                @Override
+                public CompoundTag getUpdateTag() {
+                    CompoundTag tag = super.getUpdateTag();
+                    saveAdditional(tag);
+                    return tag;
+                }
+                @Override
+                public net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket getUpdatePacket() {
+                    return net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket.create(this);
+                }
+                @Override
+                public void onDataPacket(net.minecraft.network.Connection net, net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket pkt) {
+                    net.minecraft.nbt.CompoundTag tag = pkt.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
+                    if (tag != null) {
+                        this.load(tag);
+                    }
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/TooltipBlock.java").writeText("""
+            package com.example;
+
+            import java.util.List;
+            import javax.annotation.Nullable;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.TooltipFlag;
+            import net.minecraft.world.level.BlockGetter;
+
+            public class TooltipBlock {
+                public void appendHoverText(ItemStack stack, @Nullable BlockGetter level, List<Component> tooltip, TooltipFlag flag) {
+                    CompoundTag tag = BlockItem.getBlockEntityData(stack);
+                    super.appendHoverText(stack, level, tooltip, flag);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/WaterRenderer.java").writeText("""
+            package com.example;
+
+            import com.mojang.blaze3d.vertex.VertexConsumer;
+            import org.joml.Matrix4f;
+
+            public class WaterRenderer {
+                void add(VertexConsumer builder, Matrix4f matrix, int packedLight, float r, float g, float b, float a, float nx, float ny, float nz) {
+                    builder.addVertex(matrix, 0, 0, 0)
+                           .color(r, g, b, a)
+                           .setUv(0, 0)
+                           .overlayCoords(0, 10)
+                           .uv2(packedLight)
+                           .normal(nx, ny, nz);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/SeatEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.protocol.Packet;
+            import net.minecraft.network.protocol.game.ClientGamePacketListener;
+            import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
+            import net.minecraft.world.entity.Entity;
+
+            public class SeatEntity extends Entity {
+                @Override
+                public Packet<ClientGamePacketListener> getAddEntityPacket() {
+                    return new ClientboundAddEntityPacket(this);
+                }
+            }
+        """.trimIndent())
+        tempDir.resolve("src/main/java/com/example/FacingBlock.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.level.block.HorizontalDirectionalBlock;
+
+            public class FacingBlock extends HorizontalDirectionalBlock {
+                public FacingBlock(Properties properties) {
+                    super(properties);
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val inventory = tempDir.resolve("src/main/java/com/example/BaseInventoryEntity.java").readText()
+        val sync = tempDir.resolve("src/main/java/com/example/SyncEntity.java").readText()
+        val tooltip = tempDir.resolve("src/main/java/com/example/TooltipBlock.java").readText()
+        val renderer = tempDir.resolve("src/main/java/com/example/WaterRenderer.java").readText()
+        val entity = tempDir.resolve("src/main/java/com/example/SeatEntity.java").readText()
+        val block = tempDir.resolve("src/main/java/com/example/FacingBlock.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-base-container-items-accessors" })
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(result.changes.any { it.ruleId == "struct-remove-legacy-entity-spawn-packet" })
+        assertTrue(result.changes.any { it.ruleId == "struct-base-entity-block-codec" })
+        assertTrue(inventory.contains("protected NonNullList<ItemStack> getItems()"))
+        assertTrue(inventory.contains("protected void setItems(NonNullList<ItemStack> items)"))
+        assertTrue(sync.contains("getUpdateTag(HolderLookup.Provider registries)"))
+        assertTrue(sync.contains("saveAdditional(tag, registries);"))
+        assertTrue(sync.contains("onDataPacket(net.minecraft.network.Connection net, net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket pkt, HolderLookup.Provider lookupProvider)"))
+        assertTrue(sync.contains("CompoundTag tag = pkt.getTag();"))
+        assertTrue(sync.contains("loadWithComponents(tag, lookupProvider);"), sync)
+        assertTrue(tooltip.contains("Item.TooltipContext level"))
+        assertTrue(tooltip.contains("stack.getOrDefault(net.minecraft.core.component.DataComponents.BLOCK_ENTITY_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()"))
+        assertTrue(renderer.contains(".setColor(r, g, b, a)"))
+        assertTrue(renderer.contains(".setOverlay(OverlayTexture.NO_OVERLAY)"))
+        assertTrue(renderer.contains(".setLight(packedLight)"))
+        assertTrue(renderer.contains(".setNormal(nx, ny, nz)"))
+        assertTrue(!entity.contains("getAddEntityPacket"))
+        assertTrue(block.contains("MapCodec<FacingBlock> CODEC = simpleCodec(FacingBlock::new);"))
+        assertTrue(block.contains("MapCodec<? extends net.minecraft.world.level.block.HorizontalDirectionalBlock> codec()"))
+    }
+
+    @Test
+    fun `obsolete entity method cleanup ignores comments strings and text blocks`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("LegacyEntity.java").writeText("""
+            package com.example;
+
+            import net.minecraft.network.protocol.Packet;
+            import net.minecraft.network.protocol.game.ClientGamePacketListener;
+            import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
+            import net.minecraft.world.entity.Entity;
+
+            public class LegacyEntity extends Entity {
+                private static final String DOC = "super.onAddedToWorld(); this.onRemovedFromWorld(); getAddEntityPacket";
+                private static final String SAMPLE = ""${'"'}
+                    public void onAddedToWorld() {
+                        super.onAddedToWorld();
+                    }
+
+                    public Packet<ClientGamePacketListener> getAddEntityPacket() {
+                        return new ClientboundAddEntityPacket(this);
+                    }
+                ""${'"'};
+
+                /*
+                public void onRemovedFromWorld() {
+                    super.onRemovedFromWorld();
+                }
+
+                public Packet<ClientGamePacketListener> getAddEntityPacket() {
+                    return new ClientboundAddEntityPacket(this);
+                }
+                */
+
+                @Override
+                public void onAddedToWorld() {
+                    super.onAddedToWorld();
+                    this.onRemovedFromWorld();
+                }
+
+                @Override
+                public void onRemovedFromWorld() {
+                    super.onRemovedFromWorld();
+                }
+
+                @Override
+                public Packet<ClientGamePacketListener> getAddEntityPacket() {
+                    return new ClientboundAddEntityPacket(this);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val entity = srcDir.resolve("LegacyEntity.java").readText().replace("\r\n", "\n")
+
+        assertTrue(result.changes.any { it.ruleId == "struct-rename-lifecycle-method" })
+        assertTrue(result.changes.any { it.ruleId == "struct-remove-legacy-entity-spawn-packet" })
+        assertTrue(entity.contains("public void onAddedToLevel()"), entity)
+        assertTrue(entity.contains("super.onAddedToLevel();"), entity)
+        assertTrue(entity.contains("this.onRemovedFromLevel();"), entity)
+        assertTrue(entity.contains("public void onRemovedFromLevel()"), entity)
+        assertFalse(Regex("""(?s)@Override\s+public Packet<ClientGamePacketListener> getAddEntityPacket\(""").containsMatchIn(entity), entity)
+        assertTrue(entity.contains("private static final String DOC = \"super.onAddedToWorld(); this.onRemovedFromWorld(); getAddEntityPacket\";"), entity)
+        assertTrue(Regex("""(?s)public void onAddedToWorld\(\)\s*\{\s*super\.onAddedToWorld\(\);""").containsMatchIn(entity), entity)
+        assertTrue(Regex("""(?s)public void onRemovedFromWorld\(\)\s*\{\s*super\.onRemovedFromWorld\(\);""").containsMatchIn(entity), entity)
+        assertFalse(entity.contains("import net.minecraft.network.protocol.Packet;"), entity)
+        assertFalse(entity.contains("import net.minecraft.network.protocol.game.ClientGamePacketListener;"), entity)
+        assertFalse(entity.contains("import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;"), entity)
     }

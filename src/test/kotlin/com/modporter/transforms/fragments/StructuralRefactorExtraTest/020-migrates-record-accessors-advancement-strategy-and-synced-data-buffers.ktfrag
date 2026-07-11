@@ -1,325 +1,5 @@
 
     @Test
-    fun `migrates potion components and complex spawn data without placeholders`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("PotionItem.java").writeText("""
-            package com.example;
-
-            import java.util.List;
-            import net.minecraft.network.chat.Component;
-            import net.minecraft.world.effect.MobEffectInstance;
-            import net.minecraft.world.item.Item;
-            import net.minecraft.world.item.ItemStack;
-            import net.minecraft.world.item.TooltipFlag;
-            import net.minecraft.world.item.alchemy.PotionUtils;
-            import net.minecraft.world.item.alchemy.Potions;
-
-            class PotionItem {
-                boolean visible(ItemStack stack) {
-                    return PotionUtils.getPotion(stack) != Potions.EMPTY;
-                }
-
-                int color(ItemStack stack) {
-                    return PotionUtils.getColor(stack);
-                }
-
-                boolean empty(ItemStack stack) {
-                    return PotionUtils.getMobEffects(stack).isEmpty();
-                }
-
-                void apply(ItemStack stack) {
-                    for (MobEffectInstance effect : PotionUtils.getMobEffects(stack)) {
-                        effect.getAmplifier();
-                    }
-                }
-
-                void set(ItemStack stack) {
-                    PotionUtils.setPotion(stack, Potions.EMPTY);
-                }
-
-                void appendHoverText(ItemStack stack, Item.TooltipContext context, List<Component> tooltip, TooltipFlag flag) {
-                    PotionUtils.addPotionTooltip(stack, tooltip, 1.0F);
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("SpawnEntity.java").writeText("""
-            package com.example;
-
-            import net.minecraft.network.FriendlyByteBuf;
-            import net.neoforged.neoforge.entity.IEntityAdditionalSpawnData;
-
-            class SpawnEntity implements IEntityAdditionalSpawnData {
-                @Override
-                public void writeSpawnData(FriendlyByteBuf buffer) {
-                }
-
-                @Override
-                public void readSpawnData(FriendlyByteBuf additionalData) {
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("ProjectileEntity.java").writeText("""
-            package com.example;
-
-            import net.minecraft.network.protocol.Packet;
-            import net.minecraft.network.protocol.game.ClientGamePacketListener;
-            import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;
-            import net.neoforged.neoforge.network.NetworkHooks;
-
-            class ProjectileEntity {
-                public Packet<ClientGamePacketListener> getAddEntityPacket() {
-                    return NetworkHooks.getEntitySpawningPacket(this);
-                }
-
-                public void recreateFromPacket(ClientboundAddEntityPacket packet) {
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-        val potion = srcDir.resolve("PotionItem.java").readText()
-        val spawn = srcDir.resolve("SpawnEntity.java").readText()
-        val projectile = srcDir.resolve("ProjectileEntity.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
-        assertTrue(potion.contains("stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().isPresent()"))
-        assertTrue(potion.contains("stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"))
-        assertTrue(potion.contains("!stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects().iterator().hasNext()"))
-        assertTrue(potion.contains("for (MobEffectInstance effect : stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getAllEffects())"))
-        assertTrue(potion.contains("stack.set(DataComponents.POTION_CONTENTS, PotionContents.EMPTY)"))
-        assertTrue(potion.contains("stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).addPotionTooltip(tooltip::add, 1.0F, 20.0F)"))
-        assertTrue(!potion.contains("PotionUtils"))
-        assertTrue(!potion.contains("TODO"))
-        assertTrue(!potion.contains("[forge2neo]"))
-
-        assertTrue(spawn.contains("import net.minecraft.network.RegistryFriendlyByteBuf;"))
-        assertTrue(spawn.contains("import net.neoforged.neoforge.entity.IEntityWithComplexSpawn;"))
-        assertTrue(spawn.contains("class SpawnEntity implements IEntityWithComplexSpawn"))
-        assertTrue(spawn.contains("writeSpawnData(RegistryFriendlyByteBuf buffer)"))
-        assertTrue(spawn.contains("readSpawnData(RegistryFriendlyByteBuf additionalData)"))
-        assertTrue(!spawn.contains("import net.minecraft.network.FriendlyByteBuf;"))
-        assertTrue(!spawn.contains("IEntityAdditionalSpawnData"))
-
-        assertTrue(projectile.contains("import net.minecraft.network.protocol.game.ClientboundAddEntityPacket;"))
-        assertTrue(projectile.contains("recreateFromPacket(ClientboundAddEntityPacket packet)"))
-        assertTrue(!projectile.contains("getAddEntityPacket"))
-        assertTrue(!projectile.contains("NetworkHooks"))
-        assertTrue(!projectile.contains("ClientGamePacketListener"))
-        assertTrue(!projectile.contains("import net.minecraft.network.protocol.Packet;"))
-    }
-
-    @Test
-    fun `potion component migration ignores comments and strings`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("PotionDocs.java").writeText("""
-            package com.example;
-
-            import net.minecraft.nbt.CompoundTag;
-            import net.minecraft.world.item.ItemStack;
-            import net.minecraft.world.item.alchemy.PotionUtils;
-            import net.minecraft.world.item.alchemy.Potions;
-
-            class PotionDocs {
-                private static final String DOC = "PotionUtils.getPotion(stack) != Potions.EMPTY";
-
-                /*
-                boolean docs(ItemStack stack, CompoundTag tag) {
-                    return PotionUtils.getPotion(stack) != Potions.EMPTY
-                        || tag.getString("Potion").equals(Potions.EMPTY.toString());
-                }
-                */
-
-                boolean real(ItemStack stack, CompoundTag tag) {
-                    return PotionUtils.getPotion(stack) != Potions.EMPTY
-                        || tag.getString("Potion").equals(Potions.EMPTY.toString());
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-        val potion = srcDir.resolve("PotionDocs.java").readText()
-
-        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertTrue(potion.contains("""private static final String DOC = "PotionUtils.getPotion(stack) != Potions.EMPTY";"""), potion)
-        assertTrue(
-            Regex("""/\*\s*boolean docs\(ItemStack stack, CompoundTag tag\)\s*\{\s*return PotionUtils\.getPotion\(stack\) != Potions\.EMPTY\s*\|\| tag\.getString\("Potion"\)\.equals\(Potions\.EMPTY\.toString\(\)\);""", RegexOption.DOT_MATCHES_ALL)
-                .containsMatchIn(potion),
-            potion
-        )
-        assertTrue(potion.contains("return stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).potion().isPresent()"), potion)
-        assertTrue(potion.contains("""|| "minecraft:empty".equals(tag.getString("Potion"));"""), potion)
-        assertTrue(!potion.contains("import net.minecraft.world.item.alchemy.PotionUtils;"), potion)
-    }
-
-    @Test
-    fun `migrates removed entity riding offset center expression`() {
-        val projectDir = createFile("EntityCenter.java", """
-            package com.example;
-
-            import net.minecraft.world.entity.Entity;
-            import net.minecraft.world.phys.Vec3;
-
-            public class EntityCenter {
-                public Vec3 center(Entity entity) {
-                    return new Vec3(entity.getX(), entity.getY() - entity.getMyRidingOffset() + entity.getBbHeight() / 2, entity.getZ());
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(projectDir)
-        val transformed = tempDir.resolve("src/main/java/com/example/EntityCenter.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
-        assertTrue(transformed.contains("return entity.getBoundingBox().getCenter();"))
-        assertTrue(!transformed.contains("getMyRidingOffset"))
-    }
-
-    @Test
-    fun `migrates entity riding offset call sites only with explicit vehicle context`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("Whirlwind.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.entity.Entity;
-            import net.minecraft.world.entity.EntityType;
-            import net.minecraft.world.entity.Mob;
-            import net.minecraft.world.level.Level;
-
-            public class Whirlwind extends Mob {
-                protected Whirlwind(EntityType<? extends Mob> type, Level level) {
-                    super(type, level);
-                }
-
-                public double lift(Entity entity) {
-                    return (float) entity.getY() - entity.getMyRidingOffset() * 0.6F;
-                }
-
-                public double seat(Entity passenger) {
-                    return this.getY() + this.getPassengersRidingOffset() + passenger.getMyRidingOffset();
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("Renderer.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.entity.Entity;
-
-            public class Renderer {
-                public float offset(Entity entity) {
-                    return (float) entity.getMyRidingOffset();
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-        val entity = srcDir.resolve("Whirlwind.java").readText()
-        val renderer = srcDir.resolve("Renderer.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" }, "changes=${result.changes}")
-        assertTrue(entity.contains("return (float) entity.getY() + entity.getVehicleAttachmentPoint(this).y * 0.6F;"), entity)
-        assertTrue(entity.contains("return this.getPassengerRidingPosition(passenger).y - passenger.getVehicleAttachmentPoint(this).y;"), entity)
-        assertFalse(entity.contains("getMyRidingOffset"), entity)
-        assertFalse(entity.contains("getPassengersRidingOffset() + passenger"), entity)
-        assertTrue(renderer.contains("entity.getMyRidingOffset()"), renderer)
-    }
-
-    @Test
-    fun `legacy passenger attachment migration ignores comments and strings`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("PassengerDocsEntity.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.entity.Entity;
-            import net.minecraft.world.entity.EntityType;
-            import net.minecraft.world.level.Level;
-
-            public class PassengerDocsEntity extends Entity {
-                /*
-                @Override
-                public double getPassengersRidingOffset() {
-                    return 9.0D;
-                }
-
-                private Vec3 getRiderPosition(Entity passenger) {
-                    float distance = 0.9F;
-                    return new Vec3(0.0F, 9.0D, distance);
-                }
-                */
-                private static final String DOC = "float distance = 0.9F;";
-
-                public PassengerDocsEntity(EntityType<?> type, Level level) {
-                    super(type, level);
-                }
-
-                @Override
-                public double getPassengersRidingOffset() {
-                    return 1.25D;
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-        val migrated = srcDir.resolve("PassengerDocsEntity.java").readText()
-        val realMethod = migrated.substring(
-            migrated.indexOf("protected Vec3 getPassengerAttachmentPoint"),
-            migrated.lastIndexOf("}")
-        )
-
-        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertTrue(realMethod.contains("return new Vec3(0.0F, 1.25D, 0.0F);"), migrated)
-        assertFalse(realMethod.contains("0.9F"), migrated)
-        assertTrue(migrated.contains("public double getPassengersRidingOffset() {\n        return 9.0D;"), migrated)
-        assertTrue(migrated.contains("private static final String DOC = \"float distance = 0.9F;\";"), migrated)
-    }
-
-    @Test
-    fun `legacy passenger attachment migration does not guess between overloaded rider helpers`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("AmbiguousPassengerEntity.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.entity.Entity;
-            import net.minecraft.world.entity.EntityType;
-            import net.minecraft.world.level.Level;
-            import net.minecraft.world.phys.Vec3;
-
-            public class AmbiguousPassengerEntity extends Entity {
-                public AmbiguousPassengerEntity(EntityType<?> type, Level level) {
-                    super(type, level);
-                }
-
-                @Override
-                public double getPassengersRidingOffset() {
-                    return 1.25D;
-                }
-
-                private Vec3 getRiderPosition(Entity passenger) {
-                    float distance = 0.35F;
-                    return new Vec3(0.0F, 1.25D, distance);
-                }
-
-                private Vec3 getRiderPosition(Entity passenger, float scale) {
-                    float distance = 0.75F;
-                    return new Vec3(0.0F, 1.25D, distance * scale);
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-        val migrated = srcDir.resolve("AmbiguousPassengerEntity.java").readText()
-
-        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertFalse(migrated.contains("getPassengerAttachmentPoint("), migrated)
-        assertTrue(migrated.contains("public double getPassengersRidingOffset()"), migrated)
-        assertTrue(migrated.contains("private Vec3 getRiderPosition(Entity passenger, float scale)"), migrated)
-    }
-
-    @Test
     fun `migrates record accessors advancement strategy and synced data buffers`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -1187,4 +867,281 @@
         assertTrue(blocked.contains("boolean matches(Container container, Level level)"), blocked)
         assertTrue(blocked.contains("container.setChanged();"), blocked)
         assertFalse(blocked.contains("RecipeInput"), blocked)
+    }
+
+    @Test
+    fun `migrates cached check container recipes to single stack recipe holders`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("IncubatorBlockEntity.java").writeText("""
+            package com.example;
+
+            import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.inventory.RecipeCraftingHolder;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeManager;
+            import net.minecraft.world.item.crafting.RecipeType;
+            import net.minecraft.world.level.Level;
+            import javax.annotation.Nullable;
+            import java.util.List;
+
+            public class IncubatorBlockEntity implements Container, RecipeCraftingHolder {
+                private final Object2IntOpenHashMap<ResourceLocation> recipesUsed = new Object2IntOpenHashMap<>();
+                private final RecipeManager.CachedCheck<Container, IncubationRecipe> quickCheck;
+                private NonNullList<ItemStack> items = NonNullList.withSize(2, ItemStack.EMPTY);
+
+                public IncubatorBlockEntity(RecipeType<IncubationRecipe> recipeType) {
+                    this.quickCheck = RecipeManager.createCheck(recipeType);
+                }
+
+                public static void serverTick(Level level, IncubatorBlockEntity blockEntity) {
+                    IncubationRecipe recipe;
+                    if (!blockEntity.items.get(0).isEmpty()) {
+                        recipe = blockEntity.quickCheck.getRecipeFor(blockEntity, level).orElse(null);
+                    } else {
+                        recipe = null;
+                    }
+                    if (blockEntity.canIncubate(recipe, blockEntity.items)) {
+                        if (blockEntity.incubate(recipe, blockEntity.items)) {
+                            blockEntity.setRecipeUsed(recipe);
+                        }
+                    }
+                }
+
+                private boolean incubate(@Nullable IncubationRecipe recipe, NonNullList<ItemStack> stacks) {
+                    return recipe != null && recipe.getEntity() != null && recipe.getTag() != null;
+                }
+
+                private boolean canIncubate(@Nullable IncubationRecipe recipe, NonNullList<ItemStack> stacks) {
+                    return !stacks.get(0).isEmpty() && recipe != null;
+                }
+
+                private static int getTotalIncubationTime(Level level, IncubatorBlockEntity blockEntity) {
+                    return blockEntity.quickCheck.getRecipeFor(blockEntity, level).map(IncubationRecipe::getIncubationTime).orElse(5700);
+                }
+
+                @Override
+                public void setRecipeUsed(@Nullable Recipe<?> recipe) {
+                    if (recipe != null) {
+                        ResourceLocation resourcelocation = recipe.getId();
+                        this.recipesUsed.addTo(resourcelocation, 1);
+                    }
+                }
+
+                @Nullable
+                @Override
+                public Recipe<?> getRecipeUsed() {
+                    return null;
+                }
+
+                @Override
+                public void awardUsedRecipes(Player player, List<ItemStack> items) {}
+            }
+        """.trimIndent())
+        srcDir.resolve("ItemStackTags.java").writeText("""
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+
+            public class ItemStackTags {
+                CompoundTag stackTag(ItemStack stack, IncubationRecipe recipe) {
+                    CompoundTag fromStack = stack.getTag();
+                    CompoundTag fromRecipe = recipe.getTag();
+                    return fromRecipe == null ? fromStack : fromRecipe;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val blockEntity = srcDir.resolve("IncubatorBlockEntity.java").readText()
+        val tags = srcDir.resolve("ItemStackTags.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(blockEntity.contains("RecipeManager.CachedCheck<SingleRecipeInput, IncubationRecipe> quickCheck"), blockEntity)
+        assertTrue(blockEntity.contains("RecipeHolder<IncubationRecipe> recipe;"), blockEntity)
+        assertTrue(blockEntity.contains("quickCheck.getRecipeFor(new SingleRecipeInput(blockEntity.getItem(0)), level).orElse(null)"), blockEntity)
+        assertTrue(blockEntity.contains("private boolean incubate(@Nullable RecipeHolder<IncubationRecipe> recipe"), blockEntity)
+        assertTrue(blockEntity.contains("recipe.value().getEntity()"), blockEntity)
+        assertTrue(blockEntity.contains("recipe.value().getTag()"), blockEntity)
+        assertTrue(blockEntity.contains("map(RecipeHolder::value).map(IncubationRecipe::getIncubationTime)"), blockEntity)
+        assertTrue(blockEntity.contains("setRecipeUsed(@Nullable RecipeHolder<?> recipe)"), blockEntity)
+        assertTrue(blockEntity.contains("ResourceLocation resourcelocation = recipe.id();"), blockEntity)
+        assertTrue(blockEntity.contains("public RecipeHolder<?> getRecipeUsed()"), blockEntity)
+        assertTrue(blockEntity.contains("import net.minecraft.world.item.crafting.RecipeHolder;"), blockEntity)
+        assertTrue(blockEntity.contains("import net.minecraft.world.item.crafting.SingleRecipeInput;"), blockEntity)
+        assertFalse(blockEntity.contains("CachedCheck<Container"), blockEntity)
+        assertTrue(tags.contains("stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag()"), tags)
+        assertTrue(tags.contains("CompoundTag fromRecipe = recipe.getTag();"), tags)
+    }
+
+    @Test
+    fun `migrates furnace quick check accessors to recipe holder single stack boundaries`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val accessorDir = srcDir.resolve("mixin")
+        srcDir.createDirectories()
+        accessorDir.createDirectories()
+        accessorDir.resolve("AbstractFurnaceBlockEntityAccessor.java").writeText("""
+            package com.example.mixin;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.world.Container;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.crafting.RecipeManager;
+            import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.gen.Accessor;
+            import org.spongepowered.asm.mixin.gen.Invoker;
+            import javax.annotation.Nullable;
+
+            @Mixin(AbstractFurnaceBlockEntity.class)
+            public interface AbstractFurnaceBlockEntityAccessor {
+                @Accessor("quickCheck")
+                RecipeManager.CachedCheck<Container, ? extends AbstractCookingRecipe> example${'$'}getQuickCheck();
+
+                @Invoker
+                boolean callCanBurn(RegistryAccess registryAccess, @Nullable Recipe<?> recipe, NonNullList<ItemStack> stacks, int stackSize);
+
+                @Accessor("items")
+                NonNullList<ItemStack> example${'$'}getItems();
+            }
+        """.trimIndent())
+        srcDir.resolve("FurnaceHookBlockEntity.java").writeText("""
+            package com.example;
+
+            import com.example.mixin.AbstractFurnaceBlockEntityAccessor;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.world.WorldlyContainer;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
+            import net.minecraft.world.item.crafting.Ingredient;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.item.enchantment.EnchantmentHelper;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
+            import javax.annotation.Nullable;
+            import java.util.Optional;
+
+            public class FurnaceHookBlockEntity extends AbstractFurnaceBlockEntity {
+                public static void tick(Level level, FurnaceHookBlockEntity blockEntity) {
+                    AbstractFurnaceBlockEntityAccessor accessor = (AbstractFurnaceBlockEntityAccessor) blockEntity;
+                    Recipe<?> recipe;
+                    if (!accessor.example${'$'}getItems().get(0).isEmpty()) {
+                        recipe = accessor.example${'$'}getQuickCheck().getRecipeFor(blockEntity, level).orElse(null);
+                    } else {
+                        recipe = null;
+                    }
+                    int maxStackSize = blockEntity.getMaxStackSize();
+                    if (accessor.callCanBurn(level.registryAccess(), recipe, accessor.example${'$'}getItems(), maxStackSize)) {
+                        if (blockEntity.burn(level.registryAccess(), recipe, accessor.example${'$'}getItems(), maxStackSize)) {
+                            blockEntity.setRecipeUsed(recipe);
+                        }
+                    }
+                }
+
+                @SuppressWarnings("unchecked")
+                private boolean burn(RegistryAccess registryAccess, @Nullable Recipe<?> recipe, NonNullList<ItemStack> stacks, int stackSize) {
+                    AbstractFurnaceBlockEntityAccessor accessor = (AbstractFurnaceBlockEntityAccessor) this;
+                    if (recipe != null && accessor.callCanBurn(registryAccess, recipe, stacks, stackSize)) {
+                        ItemStack inputSlotStack = stacks.get(0);
+                        ItemStack resultStack = ((Recipe<WorldlyContainer>) recipe).assemble(this, registryAccess);
+                        EnchantmentHelper.setEnchantments(EnchantmentHelper.getEnchantments(inputSlotStack), resultStack);
+                        EnchantmentHelper.setEnchantments(EnchantmentHelper.getEnchantments(this.getItem(1)), resultStack);
+                    }
+                    return true;
+                }
+
+                public boolean canTakeItemThroughFace(int index, ItemStack stack) {
+                    AbstractFurnaceBlockEntityAccessor accessor = (AbstractFurnaceBlockEntityAccessor) this;
+                    Optional<NonNullList<Ingredient>> ingredient = accessor.example${'$'}getQuickCheck().getRecipeFor(this, this.level).map(AbstractCookingRecipe::getIngredients);
+                    return ingredient.isPresent();
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val accessor = accessorDir.resolve("AbstractFurnaceBlockEntityAccessor.java").readText()
+        val blockEntity = srcDir.resolve("FurnaceHookBlockEntity.java").readText()
+
+        assertTrue(accessor.contains("RecipeManager.CachedCheck<SingleRecipeInput, ? extends AbstractCookingRecipe> example${'$'}getQuickCheck()"), accessor)
+        assertTrue(accessor.contains("static boolean callCanBurn(RegistryAccess registryAccess, @Nullable RecipeHolder<?> recipe, NonNullList<ItemStack> stacks, int stackSize, AbstractFurnaceBlockEntity furnace)"), accessor)
+        assertTrue(accessor.contains("throw new AssertionError();"), accessor)
+        assertTrue(blockEntity.contains("RecipeHolder<?> recipe;"), blockEntity)
+        assertTrue(blockEntity.contains("example${'$'}getQuickCheck().getRecipeFor(new SingleRecipeInput(blockEntity.getItem(0)), level).orElse(null)"), blockEntity)
+        assertTrue(blockEntity.contains("AbstractFurnaceBlockEntityAccessor.callCanBurn(level.registryAccess(), recipe, accessor.example${'$'}getItems(), maxStackSize, blockEntity)"), blockEntity)
+        assertTrue(blockEntity.contains("private boolean burn(RegistryAccess registryAccess, @Nullable RecipeHolder<?> recipe"), blockEntity)
+        assertTrue(blockEntity.contains("AbstractFurnaceBlockEntityAccessor.callCanBurn(registryAccess, recipe, stacks, stackSize, this)"), blockEntity)
+        assertTrue(blockEntity.contains("((Recipe<SingleRecipeInput>) recipe.value()).assemble(new SingleRecipeInput(inputSlotStack), registryAccess)"), blockEntity)
+        assertTrue(blockEntity.contains(".map(RecipeHolder::value).map(AbstractCookingRecipe::getIngredients)"), blockEntity)
+        assertTrue(blockEntity.contains("EnchantmentHelper.setEnchantments(resultStack, EnchantmentHelper.getEnchantmentsForCrafting(inputSlotStack))"), blockEntity)
+        assertTrue(blockEntity.contains("EnchantmentHelper.setEnchantments(resultStack, EnchantmentHelper.getEnchantmentsForCrafting(this.getItem(1)))"), blockEntity)
+        assertFalse(accessor.contains("CachedCheck<Container"), accessor)
+        assertFalse(blockEntity.contains("accessor.callCanBurn"), blockEntity)
+        assertFalse(blockEntity.contains("Recipe<WorldlyContainer>"), blockEntity)
+    }
+
+    @Test
+    fun `furnace can burn accessor migration uses latest executable cast binding`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        val accessorDir = srcDir.resolve("mixin")
+        srcDir.createDirectories()
+        accessorDir.createDirectories()
+        accessorDir.resolve("AbstractFurnaceBlockEntityAccessor.java").writeText("""
+            package com.example.mixin;
+
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
+            import org.spongepowered.asm.mixin.Mixin;
+            import org.spongepowered.asm.mixin.gen.Invoker;
+
+            @Mixin(AbstractFurnaceBlockEntity.class)
+            public interface AbstractFurnaceBlockEntityAccessor {
+                @Invoker
+                boolean callCanBurn(RegistryAccess registryAccess, Recipe<?> recipe, NonNullList<ItemStack> stacks, int stackSize);
+            }
+        """.trimIndent())
+        srcDir.resolve("FurnaceHook.java").writeText("""
+            package com.example;
+
+            import com.example.mixin.AbstractFurnaceBlockEntityAccessor;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.crafting.Recipe;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.AbstractFurnaceBlockEntity;
+
+            public class FurnaceHook {
+                public static boolean check(Level level, AbstractFurnaceBlockEntity first, AbstractFurnaceBlockEntity second, Recipe<?> recipe, NonNullList<ItemStack> stacks, int stackSize) {
+                    AbstractFurnaceBlockEntityAccessor accessor = (AbstractFurnaceBlockEntityAccessor) first;
+                    /*
+                     accessor = (AbstractFurnaceBlockEntityAccessor) ignoredCommentFurnace;
+                     */
+                    accessor = (AbstractFurnaceBlockEntityAccessor) second;
+                    return accessor.callCanBurn(level.registryAccess(), recipe, stacks, stackSize);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val hook = srcDir.resolve("FurnaceHook.java").readText()
+
+        assertTrue(
+            hook.contains("AbstractFurnaceBlockEntityAccessor.callCanBurn(level.registryAccess(), recipe, stacks, stackSize, second)"),
+            hook
+        )
+        assertFalse(hook.contains("first)"), hook)
+        assertFalse(hook.contains("callCanBurn(level.registryAccess(), recipe, stacks, stackSize, ignoredCommentFurnace)"), hook)
+        assertFalse(hook.contains("accessor.callCanBurn"), hook)
     }

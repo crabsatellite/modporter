@@ -1,303 +1,5 @@
 
     @Test
-    fun `does not infer an instance registry provider inside a static field initializer`() {
-        val projectDir = createFile("StaticBlockEntityText.java", """
-            package com.example;
-
-            import net.minecraft.core.BlockPos;
-            import net.minecraft.network.chat.Component;
-            import net.minecraft.world.level.block.entity.BlockEntity;
-            import net.minecraft.world.level.block.state.BlockState;
-
-            public class StaticBlockEntityText extends BlockEntity {
-                private static final String EMPTY_JSON =
-                    Component.Serializer.toJson(Component.literal(""));
-
-                public StaticBlockEntityText(BlockPos pos, BlockState state) {
-                    super(null, pos, state);
-                }
-            }
-        """.trimIndent())
-
-        StructuralRefactorPass().apply(projectDir)
-        val migrated = tempDir.resolve("src/main/java/com/example/StaticBlockEntityText.java").readText()
-
-        assertFalse(migrated.contains("this.getLevel().registryAccess()"), migrated)
-        assertFalse(migrated.contains("Component.Serializer.toJson("), migrated)
-        assertTrue(migrated.contains("ComponentSerialization.CODEC.encodeStart"), migrated)
-    }
-
-    @Test
-    fun `custom data child tag migration ignores comments and strings`() {
-        val projectDir = createFile("CustomDataDocsOnly.java", """
-            package com.example;
-
-            import net.minecraft.resources.ResourceLocation;
-            import net.minecraft.world.item.ItemStack;
-            import net.neoforged.neoforge.fluids.FluidStack;
-
-            public class CustomDataDocsOnly {
-                private static final String ITEM_DOC = "CompoundTag tag = stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag().getCompound(TAG_CUSTOM_FLUID); stack.getTagElement(TAG_CUSTOM_FLUID); stack.removeTagKey(TAG_CUSTOM_FLUID);";
-                private static final String FLUID_DOC = "CompoundTag customFluidTag = stack.getChildTag(CustomFluidNBTHelper.TAG_CUSTOM_FLUID);";
-
-                /*
-                CompoundTag tag = stack.getTagElement(TAG_CUSTOM_FLUID);
-                stack.removeTagKey(TAG_CUSTOM_FLUID);
-                CompoundTag customFluidTag = stack.getChildTag(CustomFluidNBTHelper.TAG_CUSTOM_FLUID);
-                */
-
-                public static void setFluidId(ItemStack stack, ResourceLocation fluidId) {
-                    stack.toString();
-                }
-
-                public static void setFluidId(FluidStack stack, ResourceLocation fluidId) {
-                    stack.toString();
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(projectDir)
-        val migrated = tempDir.resolve("src/main/java/com/example/CustomDataDocsOnly.java").readText()
-
-        assertFalse(result.changes.any { it.ruleId == "struct-custom-data-components" }, result.changes.toString())
-        assertFalse(migrated.contains("import net.minecraft.core.component.DataComponents;"), migrated)
-        assertFalse(migrated.contains("import net.minecraft.world.item.component.CustomData;"), migrated)
-        assertFalse(migrated.contains("import java.util.function.Consumer;"), migrated)
-        assertFalse(migrated.contains("updateCustomDataChild("), migrated)
-        assertFalse(migrated.contains("updateFluidCustomDataChild("), migrated)
-        assertFalse(migrated.contains("getCustomDataChild(ItemStack stack"), migrated)
-        assertFalse(migrated.contains("getFluidCustomDataChild(FluidStack stack"), migrated)
-        assertTrue(migrated.contains("public static void setFluidId(ItemStack stack, ResourceLocation fluidId) {\n        stack.toString();\n    }"), migrated)
-        assertTrue(migrated.contains("public static void setFluidId(FluidStack stack, ResourceLocation fluidId) {\n        stack.toString();\n    }"), migrated)
-        assertTrue(migrated.contains("private static final String ITEM_DOC"), migrated)
-        assertTrue(migrated.contains("CompoundTag tag = stack.getTagElement(TAG_CUSTOM_FLUID);"), migrated)
-        assertTrue(migrated.contains("CompoundTag customFluidTag = stack.getChildTag(CustomFluidNBTHelper.TAG_CUSTOM_FLUID);"), migrated)
-    }
-
-    @Test
-    fun `migrates brewing registration to NeoForge brewing event`() {
-        val textBlockDelimiter = "\"\"\""
-        val projectDir = createFile("BrewingSurface.java", """
-            package com.example;
-
-            import net.minecraft.world.item.Items;
-            import net.minecraft.world.item.crafting.Ingredient;
-            import net.neoforged.bus.api.SubscribeEvent;
-            import net.neoforged.neoforge.common.brewing.BrewingRecipeRegistry;
-            import net.neoforged.neoforge.common.NeoForge;
-            import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
-
-            public class BrewingSurface {
-                private static final String DOC = "BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.DOC.get()), Ingredient.EMPTY, ExampleItems.DOC_RESULT.get())";
-                private static final String METHOD_DOC = $textBlockDelimiter
-                    private void registerBrewingRecipes(final FMLCommonSetupEvent fakeEvent) {
-                        BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.DOC.get()), Ingredient.EMPTY, ExampleItems.DOC_RESULT.get());
-                    }
-                    $textBlockDelimiter;
-
-                public BrewingSurface() {
-                    NeoForge.EVENT_BUS.register(this);
-                }
-
-                private void commonSetup(final FMLCommonSetupEvent event) {
-                    registerBrewingRecipes(event);
-                }
-
-                private void registerBrewingRecipes(final FMLCommonSetupEvent event) {
-                    event.enqueueWork(() -> {
-                        BrewingRecipeRegistry.addRecipe(Ingredient.of(ItemRegister.HOT_WATER_BOTTLE.get()), Ingredient.of(Items.GUNPOWDER), ItemRegister.SPLASH_HOT_WATER_BOTTLE.get().getDefaultInstance());
-                        BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.BASE.get()), Ingredient.of(ExampleItems.BOOST.get()), ExampleItems.RESULT.get().getDefaultInstance());
-                        BrewingRecipeRegistry.addRecipe(new CustomFluidBrewingRecipe());
-                    });
-                }
-
-                /*
-                @SubscribeEvent
-                public void onBrewingRecipeRegister(net.neoforged.neoforge.event.brewing.RegisterBrewingRecipesEvent event) {
-                    event.getBuilder().addRecipe(recipe);
-                }
-                */
-            }
-        """.trimIndent())
-
-        val pass = StructuralRefactorPass()
-        val result = pass.apply(projectDir)
-        val migrated = tempDir.resolve("src/main/java/com/example/BrewingSurface.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-brewing-recipes-event" })
-        assertTrue(migrated.contains("import net.neoforged.neoforge.event.brewing.RegisterBrewingRecipesEvent;"))
-        assertFalse(migrated.contains("import net.neoforged.neoforge.common.brewing.BrewingRecipeRegistry;"))
-        assertTrue(!migrated.contains("registerBrewingRecipes(event);"))
-        assertTrue(migrated.contains("@SubscribeEvent"))
-        assertTrue(migrated.contains("public void registerBrewingRecipes(final RegisterBrewingRecipesEvent event)"))
-        assertTrue(migrated.contains("event.getBuilder().addRecipe(Ingredient.of(ItemRegister.HOT_WATER_BOTTLE.get()), Ingredient.of(Items.GUNPOWDER), ItemRegister.SPLASH_HOT_WATER_BOTTLE.get().getDefaultInstance());"))
-        assertTrue(migrated.contains("event.getBuilder().addRecipe(Ingredient.of(ExampleItems.BASE.get()), Ingredient.of(ExampleItems.BOOST.get()), ExampleItems.RESULT.get().getDefaultInstance());"))
-        assertTrue(migrated.contains("event.getBuilder().addRecipe(new CustomFluidBrewingRecipe());"))
-        assertTrue(migrated.contains("""private static final String DOC = "BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.DOC.get()), Ingredient.EMPTY, ExampleItems.DOC_RESULT.get())";"""))
-        assertTrue(migrated.contains("private static final String METHOD_DOC = \"\"\""))
-        assertTrue(migrated.contains("private void registerBrewingRecipes(final FMLCommonSetupEvent fakeEvent)"))
-        assertTrue(migrated.contains("BrewingRecipeRegistry.addRecipe(Ingredient.of(ExampleItems.DOC.get()), Ingredient.EMPTY, ExampleItems.DOC_RESULT.get());"))
-        assertFalse(migrated.contains("event.getBuilder().addRecipe(Ingredient.of(ExampleItems.DOC.get())"))
-        assertFalse(migrated.contains("HONEY_BATH_BOTTLE"))
-        assertFalse(migrated.contains("MILK_BATH_BOTTLE"))
-        assertTrue(!migrated.contains("onBrewingRecipeRegister"))
-    }
-
-    @Test
-    fun `migrates common Minecraft 121 vanilla API changes`() {
-        val projectDir = createFile("VanillaApiUse.java", """
-            package com.example;
-
-            import net.minecraft.client.player.AbstractClientPlayer;
-            import net.minecraft.client.renderer.entity.player.PlayerRenderer;
-            import net.minecraft.core.Holder;
-            import net.minecraft.core.particles.ParticleTypes;
-            import net.minecraft.resources.ResourceLocation;
-            import net.minecraft.world.effect.MobEffect;
-            import net.minecraft.world.effect.MobEffectInstance;
-            import net.minecraft.world.effect.MobEffects;
-            import net.minecraft.world.entity.MobType;
-            import net.minecraft.world.entity.ai.attributes.Attribute;
-            import net.minecraft.world.entity.ai.attributes.AttributeInstance;
-            import net.minecraft.world.entity.ai.attributes.AttributeModifier;
-            import net.minecraft.world.entity.ai.attributes.Attributes;
-            import net.minecraft.world.entity.EquipmentSlot;
-            import net.minecraft.world.entity.player.Player;
-            import net.minecraft.world.item.ItemStack;
-            import net.minecraft.world.item.Items;
-            import net.minecraft.world.item.enchantment.EnchantmentHelper;
-            import net.minecraft.world.item.trading.MerchantOffer;
-            import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;
-
-            public class VanillaApiUse {
-                void player(Player player) {
-                    ItemStack stack = new ItemStack(Items.POTION);
-                    double reach = player.getBlockReach();
-                    if (player.getMobType() == MobType.UNDEAD) {}
-                    new MerchantOffer(new ItemStack(Items.EMERALD, 10), new ItemStack(Items.DIRT), 16, 2, 0.05F);
-                    int emeraldCost = 3;
-                    ItemStack itemstack = new ItemStack(Items.COD, emeraldCost);
-                    new MerchantOffer(itemstack, new ItemStack(Items.EMERALD), 16, 2, 0.05F);
-                    new MerchantOffer(new ItemStack(Items.EMERALD, emeraldCost), new ItemStack(Items.DIRT, 2), 16, 2, 0.05F);
-                    new MerchantOffer(
-                        new ItemStack(Items.EMERALD, 10),
-                        new ItemStack(Items.DIRT),
-                        16, // maxUses
-                        2, // xpValue
-                        0.05F // priceMultiplier
-                    );
-                    int color = net.minecraft.world.item.alchemy.PotionUtils.getColor(stack);
-                    boolean locked = EnchantmentHelper.hasBindingCurse(stack);
-                    boolean retained = EnchantmentHelper.hasVanishingCurse(stack);
-                    if (EquipmentSlot.CHEST.getType() == EquipmentSlot.Type.ARMOR) {}
-                }
-
-                void attr(Player player, Attribute attribute, ResourceLocation modifierName, boolean add, double value, AttributeModifier.Operation operation) {
-                    AttributeInstance attributeInstance = player.getAttribute(attribute);
-                    java.util.UUID uuid = java.util.UUID.nameUUIDFromBytes(modifierName.toString().getBytes());
-                    AttributeModifier modifier = new AttributeModifier(uuid, modifierName.toString(), value, AttributeModifier.Operation.MULTIPLY_TOTAL);
-                    if (!attributeInstance.hasModifier(modifier)) {}
-                    attributeInstance.removeModifier(uuid);
-                }
-
-                void effect(Holder<MobEffect> effectHolder) {
-                    MobEffect effect = effectHolder;
-                    if (effectHolder != MobEffects.UNLUCK) {}
-                }
-
-                Holder<MobEffect> remap(MobEffectInstance instance) {
-                    MobEffect effect = instance.getEffect();
-                    return changeEffect(effect);
-                }
-
-                private MobEffect changeEffect(MobEffect effect) {
-                    if (effect == MobEffects.POISON) {
-                        return MobEffects.REGENERATION;
-                    } else if (!effect.isBeneficial()) {
-                        return null;
-                    }
-                    return effect;
-                }
-
-                void model(AbstractClientPlayer client, TrophyType trophyType) {
-                    if (client.getModelName().equals("slim")) {}
-                    String modelName = trophyType.getModelName();
-                }
-
-                public static void onPlayerHurt(LivingDamageEvent event) {
-                    if (!event.isCanceled()) {
-                        Object entity = event.getEntity();
-                    }
-                }
-
-                public static void clampPlayerHurt(LivingDamageEvent event) {
-                    float amount = event.getAmount();
-                    event.setAmount(Math.min(amount, 10.0F));
-                }
-
-                public static void cancelPlayerHurt(LivingDamageEvent event) {
-                    if (event.getAmount() > 20.0F) {
-                        event.setCanceled(true);
-                    }
-                }
-
-                static class TrophyType {
-                    String getModelName() {
-                        return "trophy";
-                    }
-                }
-            }
-        """.trimIndent())
-
-        val pass = StructuralRefactorPass()
-        val result = pass.apply(projectDir)
-        val migrated = tempDir.resolve("src/main/java/com/example/VanillaApiUse.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
-        assertTrue(migrated.contains("player.blockInteractionRange()"))
-        assertTrue(migrated.contains("player.getType().is(EntityTypeTags.UNDEAD)"))
-        assertTrue(
-            migrated.contains("new ItemCost(Items.EMERALD, 10)") ||
-                migrated.contains("new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 10)"),
-            migrated
-        )
-        assertTrue(migrated.contains("new MerchantOffer(new net.minecraft.world.item.trading.ItemCost(Items.COD, emeraldCost), new ItemStack(Items.EMERALD), 16, 2, 0.05F)"), migrated)
-        assertTrue(migrated.contains("new MerchantOffer(new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, emeraldCost), new ItemStack(Items.DIRT, 2), 16, 2, 0.05F)"), migrated)
-        assertTrue(migrated.contains("new MerchantOffer(new net.minecraft.world.item.trading.ItemCost(Items.EMERALD, 10), new ItemStack(Items.DIRT), 16, 2, 0.05F)"), migrated)
-        assertFalse(migrated.contains("priceMultiplier);"), migrated)
-        assertTrue(migrated.contains("stack.getOrDefault(DataComponents.POTION_CONTENTS, PotionContents.EMPTY).getColor()"))
-        assertTrue(migrated.contains("EnchantmentHelper.has(stack, EnchantmentEffectComponents.PREVENT_ARMOR_CHANGE)"))
-        assertTrue(migrated.contains("EnchantmentHelper.has(stack, EnchantmentEffectComponents.PREVENT_EQUIPMENT_DROP)"))
-        assertTrue(migrated.contains("import net.minecraft.world.item.enchantment.EnchantmentEffectComponents;"))
-        assertTrue(migrated.contains("EquipmentSlot.CHEST.getType() == EquipmentSlot.Type.HUMANOID_ARMOR"))
-        assertTrue(!migrated.contains("EquipmentSlot.Type.ARMOR"))
-        assertTrue(migrated.contains("Holder<Attribute> attribute"))
-        assertTrue(migrated.contains("new AttributeModifier(modifierName, value, AttributeModifier.Operation.ADD_MULTIPLIED_TOTAL)"), migrated)
-        assertTrue(migrated.contains("attributeInstance.hasModifier(modifier.id())"))
-        assertTrue(migrated.contains("attributeInstance.removeModifier(modifierName)"))
-        assertTrue(migrated.contains("MobEffect effect = effectHolder.value();"))
-        assertTrue(migrated.contains("Holder<MobEffect> effect = instance.getEffect();"), migrated)
-        assertTrue(migrated.contains("private Holder<MobEffect> changeEffect(Holder<MobEffect> effect)"), migrated)
-        assertTrue(
-            migrated.contains("if (effect.is(MobEffects.POISON))") ||
-                migrated.contains("if (effect.is(MobEffects.POISON.unwrapKey().orElseThrow()))"),
-            migrated
-        )
-        assertTrue(migrated.contains("return MobEffects.REGENERATION;"), migrated)
-        assertTrue(migrated.contains("!effect.value().isBeneficial()"), migrated)
-        assertTrue(migrated.contains("client.getSkin().model().id().equals(\"slim\")"))
-        assertTrue(migrated.contains("String modelName = trophyType.getModelName();"))
-        assertTrue(migrated.contains("onPlayerHurt(LivingDamageEvent.Post event)"))
-        assertTrue(migrated.contains("clampPlayerHurt(LivingDamageEvent.Pre event)"))
-        assertTrue(migrated.contains("cancelPlayerHurt(LivingIncomingDamageEvent event)"))
-        assertTrue(migrated.contains("Object entity = event.getEntity();"))
-        assertTrue(migrated.contains("float amount = event.getNewDamage();"))
-        assertTrue(migrated.contains("event.setNewDamage(Math.min(amount, 10.0F));"))
-        assertTrue(migrated.contains("import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;"))
-        assertFalse(migrated.contains("if (!event.isCanceled())"))
-    }
-
-    @Test
     fun `aligns living damage helper call sites across split NeoForge damage phases`() {
         val eventDir = tempDir.resolve("src/main/java/com/example/event")
         val bindingDir = tempDir.resolve("src/main/java/com/example/binding")
@@ -1171,4 +873,323 @@
         assertTrue(migrated.contains("modContainer.registerConfig(ModConfig.Type.CLIENT, ClientConfig.SPEC);"))
         assertTrue(!migrated.contains("ModLoadingContext.get()"))
         assertTrue(!migrated.contains("import net.neoforged.fml.ModLoadingContext;"))
+    }
+
+    @Test
+    fun `mod loading context config migration ignores comments and string literals`() {
+        val projectDir = createFile("ExampleMod.java", """
+            package com.example;
+
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.ModLoadingContext;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.config.ModConfig;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+                private static final String DOC = "ModLoadingContext.get().registerConfig(";
+
+                /*
+                 ModContainer fakeContainer;
+                 ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.SERVER, FakeConfig.SPEC);
+                 */
+
+                public ExampleMod(ModContainer modContainer) {
+                    ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, ExampleConfig.SPEC);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = tempDir.resolve("src/main/java/com/example/ExampleMod.java").readText()
+
+        assertTrue(migrated.contains("modContainer.registerConfig(ModConfig.Type.COMMON, ExampleConfig.SPEC);"), migrated)
+        assertFalse(migrated.contains("fakeContainer.registerConfig"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "ModLoadingContext.get().registerConfig(";"""), migrated)
+        assertTrue(migrated.contains("ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.SERVER, FakeConfig.SPEC);"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.fml.ModLoadingContext;"), migrated)
+    }
+
+    @Test
+    fun `migrates MobEffect helper parameters to Holder without deleting effect logic`() {
+        val projectDir = createFile("EffectHelper.java", """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.effect.MobEffectInstance;
+            import net.minecraft.world.effect.MobEffects;
+            import net.minecraft.world.entity.LivingEntity;
+
+            public class EffectHelper {
+                private static void applyEffects(LivingEntity entity) {
+                    addStackingEffect(entity, MobEffects.REGENERATION, 400, 1);
+                    entity.removeEffect(MobEffects.POISON);
+                }
+
+                private static void addStackingEffect(LivingEntity entity, MobEffect effect, int durationIncrement, int amplifier) {
+                    CompoundTag data = entity.getPersistentData();
+                    String key = "example.last_stack." + effect.getDescriptionId();
+                    if (data.getLong(key) > 0) return;
+                    MobEffectInstance current = entity.getEffect(effect);
+                    int currentDuration = (current != null) ? current.getDuration() : 0;
+                    entity.addEffect(new MobEffectInstance(effect, currentDuration + durationIncrement, amplifier, true, false));
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/EffectHelper.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-mobeffect-holder-direct" })
+        assertTrue(migrated.contains("import net.minecraft.core.Holder;"))
+        assertTrue(migrated.contains("private static void addStackingEffect(LivingEntity entity, Holder<MobEffect> effect, int durationIncrement, int amplifier)"))
+        assertTrue(migrated.contains("effect.value().getDescriptionId()"))
+        assertTrue(migrated.contains("MobEffectInstance current = entity.getEffect(effect);"))
+        assertTrue(migrated.contains("entity.addEffect(new MobEffectInstance(effect, currentDuration + durationIncrement, amplifier, true, false));"))
+        assertTrue(migrated.contains("entity.removeEffect(MobEffects.POISON);"))
+    }
+
+    @Test
+    fun `migrates FlowerBlock constructors and call sites to MobEffect holders`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("FlowerEntityBlock.java").writeText("""
+            package com.example;
+
+            import java.util.function.Supplier;
+            import net.minecraft.world.effect.MobEffect;
+            import net.minecraft.world.level.block.EntityBlock;
+            import net.minecraft.world.level.block.FlowerBlock;
+
+            public class FlowerEntityBlock extends FlowerBlock implements EntityBlock {
+                /*
+                public FlowerEntityBlock(Supplier<MobEffect> documentedEffect, int documentedDuration, Properties documentedProperties) {
+                    super(documentedEffect, documentedDuration, documentedProperties);
+                }
+                */
+                public FlowerEntityBlock(Supplier<MobEffect> effectSupplier, int effectDuration, Properties properties) {
+                    super(effectSupplier, effectDuration, properties);
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("FlowerRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.world.effect.MobEffects;
+            import net.minecraft.world.level.block.FlowerBlock;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+
+            public class FlowerRegistry {
+                /*
+                Object commented = new FlowerEntityBlock(() -> MobEffects.HEAL, 3, BlockBehaviour.Properties.of());
+                */
+                private static final String DOC = "new FlowerEntityBlock(() -> MobEffects.HARM, 4, BlockBehaviour.Properties.of())";
+
+                public Object vanilla() {
+                    return new FlowerBlock(() -> MobEffects.POISON, 7, BlockBehaviour.Properties.of());
+                }
+
+                public Object customVanillaEffect() {
+                    return new FlowerEntityBlock(() -> MobEffects.REGENERATION, 5, BlockBehaviour.Properties.of());
+                }
+
+                public Object customDeferredEffect() {
+                    return new FlowerEntityBlock(() -> ModEffects.COMFORT.get(), 6, BlockBehaviour.Properties.of());
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val block = srcDir.resolve("FlowerEntityBlock.java").readText()
+        val registry = srcDir.resolve("FlowerRegistry.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-flower-block-holder-constructor" })
+        assertTrue(block.contains("import net.minecraft.core.Holder;"), block)
+        assertTrue(!block.contains("import java.util.function.Supplier;"), block)
+        assertTrue(block.contains("public FlowerEntityBlock(Holder<MobEffect> effectSupplier, float effectDuration, Properties properties)"), block)
+        assertTrue(block.contains("super(effectSupplier, effectDuration, properties);"), block)
+        assertTrue(block.contains("public FlowerEntityBlock(Supplier<MobEffect> documentedEffect, int documentedDuration, Properties documentedProperties)"), block)
+        assertTrue(registry.contains("new FlowerBlock(MobEffects.POISON, 7, BlockBehaviour.Properties.of())"), registry)
+        assertTrue(registry.contains("new FlowerEntityBlock(MobEffects.REGENERATION, 5, BlockBehaviour.Properties.of())"), registry)
+        assertTrue(registry.contains("new FlowerEntityBlock(ModEffects.COMFORT, 6, BlockBehaviour.Properties.of())"), registry)
+        assertTrue(registry.contains("new FlowerEntityBlock(() -> MobEffects.HEAL, 3, BlockBehaviour.Properties.of())"), registry)
+        assertTrue(registry.contains("new FlowerEntityBlock(() -> MobEffects.HARM, 4, BlockBehaviour.Properties.of())"), registry)
+        assertFalse(registry.contains("return new FlowerBlock(() -> MobEffects"), registry)
+        assertFalse(registry.contains("return new FlowerEntityBlock(() -> MobEffects"), registry)
+        assertFalse(registry.contains("return new FlowerEntityBlock(() -> ModEffects"), registry)
+        assertTrue(!registry.contains("ModEffects.COMFORT.get()"), registry)
+    }
+
+    @Test
+    fun `migrates DeferredHolder registry base generics for entity types and multiline block item helpers`() {
+        val textBlockDelimiter = "\"\"\""
+        val projectDir = createFile("RegistryUse.java", """
+            package com.example;
+
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.MobCategory;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.level.block.Block;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            import java.util.function.Supplier;
+
+            public class RegistryUse {
+                public static final DeferredRegister<Block> BLOCKS = null;
+                public static final DeferredRegister<EntityType<?>> ENTITY_TYPES = null;
+                private static final String GENERIC_DOC = $textBlockDelimiter
+                    public static final DeferredHolder<EntityType<RubberDuckEntity>, EntityType<RubberDuckEntity>> DOC_DUCK =
+                            ENTITY_TYPES.register("doc_duck", () -> EntityType.Builder.<RubberDuckEntity>of(RubberDuckEntity::new, MobCategory.MISC).build("doc_duck"));
+                    $textBlockDelimiter;
+
+                public static final DeferredHolder<EntityType<RubberDuckEntity>, EntityType<RubberDuckEntity>> RUBBER_DUCK =
+                        ENTITY_TYPES.register("rubber_duck", () -> EntityType.Builder.<RubberDuckEntity>of(RubberDuckEntity::new, MobCategory.MISC).build("rubber_duck"));
+
+                private static <T extends Block> DeferredHolder<T, T> registerBlock(String name, Supplier<T> block) {
+                    DeferredHolder<Block, T> toReturn = BLOCKS.register(name, block);
+                    registerBlockItem(name, toReturn);
+                    return toReturn;
+                }
+
+                private static <T extends Block> DeferredHolder<Item, Item> registerBlockItem(
+                        String name, DeferredHolder<T, T> block) {
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/RegistryUse.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredholder-generics" })
+        assertTrue(migrated.contains("DeferredHolder<EntityType<?>, EntityType<RubberDuckEntity>> RUBBER_DUCK"))
+        assertTrue(migrated.contains("DeferredHolder<Block, T> registerBlock(String name, Supplier<T> block)"))
+        assertTrue(migrated.contains("registerBlockItem(String name, DeferredHolder<Block, T> block)"))
+        assertTrue(migrated.contains("DeferredHolder<EntityType<RubberDuckEntity>, EntityType<RubberDuckEntity>> DOC_DUCK"))
+        assertFalse(migrated.contains("DeferredHolder<EntityType<RubberDuckEntity>, EntityType<RubberDuckEntity>> RUBBER_DUCK"))
+        assertTrue(!migrated.contains("DeferredHolder<T, T> block"))
+    }
+
+    @Test
+    fun `migrates Sakura registry and vanilla 121 API compile surfaces`() {
+        val projectDir = createFile("ContentRegistry.java", """
+            package com.example;
+
+            import cn.mcmod_mmf.mmlib.item.ItemFoodBase;
+            import cn.mcmod_mmf.mmlib.registry.ItemRegistryUtil;
+            import com.google.common.collect.ImmutableSet;
+            import java.util.Map;
+            import java.util.function.Supplier;
+            import net.minecraft.data.recipes.RecipeOutput;
+            import net.minecraft.world.entity.npc.VillagerProfession;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.Items;
+            import net.minecraft.world.item.Tier;
+            import net.minecraft.world.entity.ai.village.poi.PoiType;
+            import net.minecraft.sounds.SoundEvents;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class ContentRegistry {
+                public static final DeferredRegister<Item> ITEMS = null;
+                public static final DeferredHolder<ItemFoodBase, ItemFoodBase> FOOD =
+                        register("food", () -> new ItemFoodBase(new Item.Properties(), null));
+                public static final Map<TeaSet, DeferredHolder<Item, Item>> TEAS =
+                        ItemRegistryUtil.mapOfKeys(TeaSet.class, tea -> drink(tea.effects()));
+                public static final DeferredHolder<PoiType, PoiType> FARMER_POI = null;
+
+                public static Item axe(Tier tier) {
+                    return new net.minecraft.world.item.AxeItem(tier, 9.0F, -3.3F, new Item.Properties());
+                }
+
+                public static Item shovel(Tier tier, Item.Properties properties) {
+                    return new net.minecraft.world.item.ShovelItem(tier, 1.5F, -3.0F, properties.stacksTo(1));
+                }
+
+                public static VillagerProfession profession() {
+                    return new VillagerProfession("example:farmer",
+                            x -> x.get() == FARMER_POI.get(),
+                            x -> x.get() == FARMER_POI.get(),
+                            ImmutableSet.of(), ImmutableSet.of(),
+                            SoundEvents.VILLAGER_WORK_FARMER);
+                }
+
+                public static void recipe(RecipeOutput output) {
+                    CookingBuilder.cooking().requires(Items.GRASS).save(output);
+                }
+
+                private static Item drink(Object effects) {
+                    return new Item(new Item.Properties());
+                }
+
+                private static <V extends Item> DeferredHolder<V, V> register(String name, Supplier<V> item) {
+                    return ITEMS.register(name, item);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/ContentRegistry.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-vanilla-121-api" })
+        assertTrue(result.changes.any { it.ruleId == "struct-deferredholder-generics" })
+        assertTrue(migrated.contains("DeferredHolder<Item, ItemFoodBase> FOOD"))
+        assertTrue(migrated.contains("private static <V extends Item> DeferredHolder<Item, V> register"))
+        assertTrue(migrated.contains("(DeferredHolder<Item, V>) (DeferredHolder<?, ?>) ITEMS.register(name, item)"))
+        assertTrue(migrated.contains("tea.getEffects()"))
+        assertTrue(migrated.contains("new net.minecraft.world.item.AxeItem(tier, new Item.Properties().attributes(net.minecraft.world.item.DiggerItem.createAttributes(tier, 9.0F, -3.3F)))"))
+        assertTrue(migrated.contains("new net.minecraft.world.item.ShovelItem(tier, properties.stacksTo(1).attributes(net.minecraft.world.item.DiggerItem.createAttributes(tier, 1.5F, -3.0F)))"))
+        assertTrue(migrated.contains("x -> x.value() == FARMER_POI.get()"))
+        assertTrue(migrated.contains("Items.SHORT_GRASS"))
+        assertTrue(!migrated.contains("Items.GRASS"))
+    }
+
+    @Test
+    fun `aligns deferred holder base generic with owning deferred register`() {
+        val projectDir = createFile("TypedRegistries.java", """
+            package com.example;
+
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.minecraft.world.item.crafting.SimpleCraftingRecipeSerializer;
+            import net.minecraft.world.level.levelgen.structure.templatesystem.PosRuleTestType;
+            import net.minecraft.world.level.storage.loot.functions.LootItemFunctionType;
+            import net.neoforged.neoforge.registries.DeferredHolder;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class TypedRegistries {
+                public static final DeferredRegister<LootItemFunctionType> LOOT_FUNCTION_TYPES =
+                        DeferredRegister.create(Registries.LOOT_FUNCTION_TYPE, "example");
+                public static final DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<DoubleDrops>> DOUBLE_DROPS =
+                        LOOT_FUNCTION_TYPES.register("double_drops", () -> new LootItemFunctionType<>(DoubleDrops.CODEC));
+
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS =
+                        DeferredRegister.create(Registries.RECIPE_SERIALIZER, "example");
+                public static final DeferredHolder<AetherCookingSerializer<EnchantingRecipe>, AetherCookingSerializer<EnchantingRecipe>> ENCHANTING =
+                        RECIPE_SERIALIZERS.register("enchanting", EnchantingRecipe.Serializer::new);
+                public static final DeferredHolder<RecipeSerializer<?>, SwetBannerRecipe> SWET_BANNER =
+                        RECIPE_SERIALIZERS.register("swet_banner", () -> new SimpleCraftingRecipeSerializer<>(SwetBannerRecipe::new));
+
+                public static final DeferredRegister<PosRuleTestType<?>> POS_RULE_TESTS =
+                        DeferredRegister.create(Registries.POS_RULE_TEST, "example");
+                public static final DeferredHolder<PosRuleTestType<BorderBoxPosTest>, PosRuleTestType<BorderBoxPosTest>> BORDER_BOX =
+                        POS_RULE_TESTS.register("border_box", () -> () -> BorderBoxPosTest.CODEC);
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(projectDir)
+
+        val migrated = projectDir.resolve("src/main/java/com/example/TypedRegistries.java").readText()
+        assertTrue(migrated.contains("DeferredRegister<LootItemFunctionType<?>> LOOT_FUNCTION_TYPES"))
+        assertTrue(migrated.contains("DeferredHolder<LootItemFunctionType<?>, LootItemFunctionType<DoubleDrops>> DOUBLE_DROPS"))
+        assertTrue(migrated.contains("DeferredHolder<RecipeSerializer<?>, AetherCookingSerializer<EnchantingRecipe>> ENCHANTING"))
+        assertTrue(migrated.contains("DeferredHolder<RecipeSerializer<?>, SimpleCraftingRecipeSerializer<SwetBannerRecipe>> SWET_BANNER"))
+        assertTrue(migrated.contains("DeferredHolder<PosRuleTestType<?>, PosRuleTestType<BorderBoxPosTest>> BORDER_BOX"))
     }

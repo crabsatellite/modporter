@@ -13,8 +13,8 @@
 013-private-method-declaration-line.ktfrag
 014-migrate-legacy-explosion-position-calls.ktfrag
 015-migrate-legacy-eye-height-overrides.ktfrag
-016-migrate-legacy-menu-screens-registration.ktfrag
-017-wrap-void-level-storage-data-tag-reads.ktfrag
+016-migrate-legacy-custom-recipe-source.ktfrag
+017-apply-string-edits.ktfrag
 018-migrate-legacy-authlib-profile-fetch-source.ktfrag
 019-add-suppress-warning-to-methods-containing.ktfrag
 020-migrate-recipe-holder-inline-instanceof-conditions.ktfrag

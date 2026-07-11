@@ -41624,13 +41624,37 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
     }
 
     private fun migrateLegacyNbtUtilsBlockPosCompoundSource(source: String): String {
-        if (!source.contains("NbtUtils.readBlockPos(")) return source
+        val executable = maskJavaCommentsAndLiterals(source)
+        val importsVanillaNbtUtils = Regex(
+            """(?m)^\s*import\s+net\.minecraft\.nbt\.(?:NbtUtils|\*)\s*;"""
+        ).containsMatchIn(executable)
+        if (!importsVanillaNbtUtils) return source
+        if (listOf(
+                "NbtUtils.readBlockPos(",
+                "NbtUtils.writeBlockPos(",
+                "NbtUtils::readBlockPos",
+                "NbtUtils::writeBlockPos"
+            ).none(executable::contains)
+        ) return source
 
-        val readMigrated = replaceNbtUtilsBlockPosCall(source, "readBlockPos", "modporterReadLegacyBlockPos")
-        if (readMigrated == source) return source
+        var result = replaceNbtUtilsBlockPosCall(source, "readBlockPos", "modporterReadLegacyBlockPos")
+        val afterReadCalls = result
+        result = replaceNbtUtilsBlockPosCall(result, "writeBlockPos", "modporterWriteLegacyBlockPos")
+        val afterWriteCalls = result
+        val readLambdaName = uniqueJavaLocalName(result, "modporterTag")
+        result = replaceExecutableRegex(result, Regex("""\bNbtUtils::readBlockPos\b""")) {
+            "$readLambdaName -> modporterReadLegacyBlockPos($readLambdaName)"
+        }
+        val afterReadReferences = result
+        val writeLambdaName = uniqueJavaLocalName(result, "modporterPos")
+        result = replaceExecutableRegex(result, Regex("""\bNbtUtils::writeBlockPos\b""")) {
+            "$writeLambdaName -> modporterWriteLegacyBlockPos($writeLambdaName)"
+        }
+        val needsReadHelper = afterReadCalls != source || afterReadReferences != afterWriteCalls
+        val needsWriteHelper = afterWriteCalls != afterReadCalls || result != afterReadReferences
+        if (!needsReadHelper && !needsWriteHelper) return source
 
-        val writeMigrated = replaceNbtUtilsBlockPosCall(readMigrated, "writeBlockPos", "modporterWriteLegacyBlockPos")
-        var result = addLegacyBlockPosNbtHelpers(writeMigrated, needsWriteHelper = writeMigrated != readMigrated)
+        result = addLegacyBlockPosNbtHelpers(result, needsReadHelper, needsWriteHelper)
         result = addImportIfMissing(result, "net.minecraft.core.BlockPos")
         if (!Regex("""(?m)^[ \t]*import\s+net\.minecraft\.nbt\.\*;\s*$""").containsMatchIn(result)) {
             result = addImportIfMissing(result, "net.minecraft.nbt.CompoundTag")
@@ -41644,14 +41668,15 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
 
     private fun replaceNbtUtilsBlockPosCall(source: String, methodName: String, replacementName: String): String {
         val token = "NbtUtils.$methodName("
+        val executable = maskJavaCommentsAndLiterals(source)
         val migrated = StringBuilder()
         var cursor = 0
         var changed = false
         while (cursor < source.length) {
-            val tokenIndex = source.indexOf(token, cursor)
+            val tokenIndex = executable.indexOf(token, cursor)
             if (tokenIndex < 0) break
             val openParen = tokenIndex + "NbtUtils.$methodName".length
-            val closeParen = findMatchingParen(source, openParen)
+            val closeParen = findMatchingParen(executable, openParen)
             if (closeParen < 0) {
                 break
             }
@@ -41671,10 +41696,22 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         return migrated.toString()
     }
 
-    private fun addLegacyBlockPosNbtHelpers(source: String, needsWriteHelper: Boolean): String {
-        if (source.contains("modporterReadLegacyBlockPos(CompoundTag tag)")) return source
+    private fun addLegacyBlockPosNbtHelpers(
+        source: String,
+        needsReadHelper: Boolean,
+        needsWriteHelper: Boolean
+    ): String {
+        val readHelper = if (needsReadHelper &&
+            !source.contains("modporterReadLegacyBlockPos(CompoundTag tag)")
+        ) """
 
-        val writeHelper = if (needsWriteHelper) """
+    private static BlockPos modporterReadLegacyBlockPos(CompoundTag tag) {
+        return new BlockPos(tag.getInt("X"), tag.getInt("Y"), tag.getInt("Z"));
+    }
+""".trimEnd() else ""
+        val writeHelper = if (needsWriteHelper &&
+            !source.contains("modporterWriteLegacyBlockPos(BlockPos pos)")
+        ) """
 
     private static CompoundTag modporterWriteLegacyBlockPos(BlockPos pos) {
         CompoundTag tag = new CompoundTag();
@@ -41684,12 +41721,8 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
         return tag;
     }
 """.trimEnd() else ""
-        val helpers = """
-
-    private static BlockPos modporterReadLegacyBlockPos(CompoundTag tag) {
-        return new BlockPos(tag.getInt("X"), tag.getInt("Y"), tag.getInt("Z"));
-    }$writeHelper
-""".trimEnd()
+        val helpers = readHelper + writeHelper
+        if (helpers.isEmpty()) return source
         return insertBeforeLastClassBrace(source, helpers)
     }
 

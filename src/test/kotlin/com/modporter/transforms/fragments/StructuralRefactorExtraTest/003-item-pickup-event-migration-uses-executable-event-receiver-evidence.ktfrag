@@ -1,5 +1,94 @@
 
     @Test
+    fun `item pickup event migration uses executable event receiver evidence`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("PickupHooks.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.neoforge.event.entity.player.ItemEntityPickupEvent;
+            import net.neoforged.neoforge.event.entity.player.ItemEntityPickupEvent.Pre;
+
+            public class PickupHooks {
+                @SubscribeEvent
+                public static void explicit(ItemEntityPickupEvent.Pre event, Other other) {
+                    String doc = "event.setCanceled(true); event.getEntity();";
+                    // event.setCanceled(true);
+                    other.getEntity();
+                    event.setCanceled(true);
+                    Object player = event.getEntity();
+                }
+
+                @SubscribeEvent
+                static void imported(Pre pickup) {
+                    pickup.setCanceled(true);
+                    Object player = pickup.getEntity();
+                }
+
+                static class Other {
+                    Object getEntity() {
+                        return new Object();
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-pickup-event-setcanpickup" })
+        assertTrue(result.changes.any { it.ruleId == "struct-pickup-event-getplayer" })
+        assertTrue(migrated.contains("import net.neoforged.neoforge.common.util.TriState;"), migrated)
+        assertTrue(migrated.contains("event.setCanPickup(TriState.FALSE);"), migrated)
+        assertTrue(migrated.contains("Object player = event.getPlayer();"), migrated)
+        assertTrue(migrated.contains("pickup.setCanPickup(TriState.FALSE);"), migrated)
+        assertTrue(migrated.contains("Object player = pickup.getPlayer();"), migrated)
+        assertTrue(migrated.contains("""String doc = "event.setCanceled(true); event.getEntity();";"""), migrated)
+        assertTrue(migrated.contains("// event.setCanceled(true);"), migrated)
+        assertTrue(migrated.contains("other.getEntity();"), migrated)
+    }
+
+    @Test
+    fun `empty subscriber cleanup ignores braces inside literals and comments`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ExampleMod.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.SubscribeEvent;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.neoforge.data.event.GatherDataEvent;
+
+            public class ExampleMod {
+                @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+                public static class EmptySubscriber {
+                    private static final String DOC = "{";
+                    // { old migration marker text, not Java structure
+
+                    @SubscribeEvent
+                    public static void gatherData(GatherDataEvent event) {
+                    }
+                }
+
+                public void stillHere() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val transformed = file.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString())
+        assertTrue(result.changes.any { it.ruleId == "struct-remove-empty-subscriber-class" })
+        assertFalse(transformed.contains("EmptySubscriber"), transformed)
+        assertTrue(transformed.contains("public void stillHere()"), transformed)
+        assertTrue(transformed.trimEnd().endsWith("}"), transformed)
+    }
+
+    @Test
     fun `common bus mod event listener migration matches declared handler type names`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -893,307 +982,4 @@ bus.addListener(ActualListenerRegistry::register);
         assertTrue(!packet.contains("NetworkEvent.Context"))
         assertTrue(!packet.contains("setPacketHandled"))
         assertTrue(modNetwork.contains("registrar.playToClient("))
-    }
-
-    @Test
-    fun `packet migration supports channel builder messageBuilder chains and nested registered payloads`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        val networkDir = srcDir.resolve("network")
-        val blockDir = srcDir.resolve("block")
-        srcDir.createDirectories()
-        networkDir.createDirectories()
-        blockDir.createDirectories()
-
-        srcDir.resolve("ExampleMod.java").writeText("""
-            package com.example;
-
-            import com.example.network.Messages;
-            import net.neoforged.bus.api.IEventBus;
-            import net.neoforged.fml.common.Mod;
-
-            @Mod(ExampleMod.ID)
-            public class ExampleMod {
-                public static final String ID = "example";
-
-                public ExampleMod(IEventBus modEventBus) {
-                    Messages.register();
-                }
-            }
-        """.trimIndent())
-
-        networkDir.resolve("Messages.java").writeText("""
-            package com.example.network;
-
-            import com.example.ExampleMod;
-            import com.example.block.ShelfBlock;
-            import net.minecraft.resources.ResourceKey;
-            import net.minecraft.resources.ResourceLocation;
-            import net.minecraft.server.level.ServerPlayer;
-            import net.minecraft.world.entity.Entity;
-            import net.minecraft.world.entity.player.Player;
-            import net.minecraft.world.level.Level;
-            import net.minecraftforge.network.NetworkDirection;
-            import net.minecraftforge.network.NetworkRegistry;
-            import net.minecraftforge.network.PacketDistributor;
-            import net.minecraftforge.network.simple.SimpleChannel;
-
-            public class Messages {
-                public static SimpleChannel INSTANCE;
-                private static int packetId = 0;
-
-                private static int id() {
-                    return packetId++;
-                }
-
-                public static void register() {
-                    SimpleChannel net = NetworkRegistry.ChannelBuilder
-                            .named(ResourceLocation.fromNamespaceAndPath(ExampleMod.ID, "messages"))
-                            .networkProtocolVersion(() -> "1")
-                            .clientAcceptedVersions(s -> true)
-                            .serverAcceptedVersions(s -> true)
-                            .simpleChannel();
-                    INSTANCE = net;
-                    net.messageBuilder(PingPacket.class, id(), NetworkDirection.PLAY_TO_SERVER)
-                            .decoder(PingPacket::new)
-                            .encoder(PingPacket::toBytes)
-                            .consumerNetworkThread(PingPacket::handle)
-                            .add();
-                    net.messageBuilder(OuterPacket.Client.class, id(), NetworkDirection.PLAY_TO_CLIENT)
-                            .decoder(OuterPacket.Client::new)
-                            .encoder(OuterPacket.Client::toBytes)
-                            .consumerNetworkThread(OuterPacket.Client::handle)
-                            .add();
-                    net.messageBuilder(OuterPacket.Server.class, id(), NetworkDirection.PLAY_TO_SERVER)
-                            .decoder(OuterPacket.Server::new)
-                            .encoder(OuterPacket.Server::toBytes)
-                            .consumerNetworkThread(OuterPacket.Server::handle)
-                            .add();
-                    net.messageBuilder(ShelfBlock.BreakMessage.class, id(), NetworkDirection.PLAY_TO_SERVER)
-                            .decoder(ShelfBlock.BreakMessage::new)
-                            .encoder(ShelfBlock.BreakMessage::toBytes)
-                            .consumerNetworkThread(ShelfBlock.BreakMessage::handle)
-                            .add();
-                }
-
-                public static <MSG> void sendToServer(MSG message) {
-                    INSTANCE.sendToServer(message);
-                }
-
-                public static <MSG> void sendToPlayer(MSG message, ServerPlayer player) {
-                    INSTANCE.send(PacketDistributor.PLAYER.with(() -> player), message);
-                }
-
-                public static <MSG> void sendToDimension(MSG message, ResourceKey<Level> dimension) {
-                    INSTANCE.send(PacketDistributor.DIMENSION.with(() -> dimension), message);
-                }
-
-                public static <MSG> void sendToTracking(MSG message, Entity entity) {
-                    INSTANCE.send(PacketDistributor.TRACKING_ENTITY.with(() -> entity), message);
-                }
-
-                public static <MSG> void sendToTrackingAndSelf(MSG message, Player player) {
-                    INSTANCE.send(PacketDistributor.TRACKING_ENTITY_AND_SELF.with(() -> player), message);
-                }
-
-                public static void sendObjectToPlayer(Object packet, ServerPlayer player) {
-                    INSTANCE.send(PacketDistributor.PLAYER.with(() -> player), packet);
-                }
-            }
-        """.trimIndent())
-
-        networkDir.resolve("PingPacket.java").writeText("""
-            package com.example.network;
-
-            import net.minecraft.network.FriendlyByteBuf;
-            import net.neoforged.neoforge.network.handling.IPayloadContext;
-
-            public class PingPacket {
-                public PingPacket(int value) {
-                }
-
-                public PingPacket(FriendlyByteBuf buf) {
-                }
-
-                public void write(FriendlyByteBuf buf) {
-                }
-
-                public boolean handle(IPayloadContext ctx) {
-                    return true;
-                }
-            }
-        """.trimIndent())
-
-        networkDir.resolve("OuterPacket.java").writeText("""
-            package com.example.network;
-
-            import net.minecraft.network.FriendlyByteBuf;
-            import net.neoforged.neoforge.network.handling.IPayloadContext;
-
-            public class OuterPacket {
-                public void write(FriendlyByteBuf buf) {
-                }
-
-                public boolean handle(IPayloadContext ctx) {
-                    return true;
-                }
-
-                public static class Client extends OuterPacket {
-                    public Client(String text) {
-                    }
-
-                    public Client(FriendlyByteBuf buf) {
-                    }
-                }
-
-                public static class Server extends OuterPacket {
-                    public Server(String text) {
-                    }
-
-                    public Server(FriendlyByteBuf buf) {
-                    }
-                }
-            }
-        """.trimIndent())
-
-        blockDir.resolve("ShelfBlock.java").writeText("""
-            package com.example.block;
-
-            import net.minecraft.network.FriendlyByteBuf;
-            import net.neoforged.neoforge.network.handling.IPayloadContext;
-
-            public class ShelfBlock {
-                public static class BreakMessage {
-                    public BreakMessage(double x) {
-                    }
-
-                    public BreakMessage(FriendlyByteBuf buf) {
-                    }
-
-                    public void write(FriendlyByteBuf buf) {
-                    }
-
-                    public boolean handle(IPayloadContext ctx) {
-                        return true;
-                    }
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-        val messages = networkDir.resolve("Messages.java").readText()
-        val ping = networkDir.resolve("PingPacket.java").readText()
-        val outer = networkDir.resolve("OuterPacket.java").readText()
-        val shelf = blockDir.resolve("ShelfBlock.java").readText()
-        val modNetwork = networkDir.resolve("ModNetwork.java").readText()
-        val main = srcDir.resolve("ExampleMod.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-packet-payload" }, "changes=${result.changes}")
-        assertTrue(result.changes.any { it.ruleId == "struct-generate-mod-network" }, "changes=${result.changes}")
-        assertTrue(ping.contains("public class PingPacket implements CustomPacketPayload"), ping)
-        assertTrue(ping.contains("StreamCodec.of((buf, packet) -> packet.write(buf), PingPacket::new)"), ping)
-        assertTrue(outer.contains("public static class Client extends OuterPacket implements CustomPacketPayload"), outer)
-        assertTrue(outer.contains("CustomPacketPayload.Type<Client> TYPE"), outer)
-        assertTrue(outer.contains("public static class Server extends OuterPacket implements CustomPacketPayload"), outer)
-        assertTrue(outer.contains("CustomPacketPayload.Type<Server> TYPE"), outer)
-        assertTrue(shelf.contains("public static class BreakMessage implements CustomPacketPayload"), shelf)
-        assertTrue(modNetwork.contains("registrar.playToServer("), modNetwork)
-        assertTrue(modNetwork.contains("PingPacket.TYPE"), modNetwork)
-        assertTrue(modNetwork.contains("OuterPacket.Client.TYPE"), modNetwork)
-        assertTrue(modNetwork.contains("OuterPacket.Server.TYPE"), modNetwork)
-        assertTrue(modNetwork.contains("com.example.block.ShelfBlock.BreakMessage.TYPE"), modNetwork)
-        assertTrue(modNetwork.contains("(payload, context) -> payload.handle(context)"), modNetwork)
-        assertTrue(messages.contains("PacketDistributor.sendToPlayersInDimension(level, msg);"), messages)
-        assertTrue(messages.contains("PacketDistributor.sendToPlayersTrackingEntity(entity, msg);"), messages)
-        assertTrue(messages.contains("public static <T extends CustomPacketPayload> void sendToTrackingAndSelf(T message, Player player)"), messages)
-        assertTrue(messages.contains("PacketDistributor.sendToPlayersTrackingEntityAndSelf(player, message);"), messages)
-        assertTrue(messages.contains("public static <T extends CustomPacketPayload> void sendObjectToPlayer(T packet, ServerPlayer player)"), messages)
-        assertTrue(messages.contains("NetworkRegistry.hasChannel(player.connection, packet.type().id())"), messages)
-        assertTrue(messages.contains("PacketDistributor.sendToPlayer(player, packet);"), messages)
-        assertFalse(messages.contains("public static <T extends CustomPacketPayload> void sendToTrackingAndSelf(T msg, Entity entity)"), messages)
-        assertFalse(messages.contains("<MSG>"), messages)
-        assertFalse(messages.contains("Object packet"), messages)
-        assertFalse(messages.contains("SimpleChannel"), messages)
-        assertFalse(messages.contains("messageBuilder"), messages)
-        assertTrue(main.contains("modEventBus.addListener(ModNetwork::register);"), main)
-    }
-
-    @Test
-    fun `packet migration maps reception side guards to payload direction`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        val networkDir = srcDir.resolve("network")
-        srcDir.createDirectories()
-        networkDir.createDirectories()
-
-        srcDir.resolve("ExampleMod.java").writeText("""
-            package com.example;
-
-            import net.neoforged.bus.api.IEventBus;
-            import net.neoforged.fml.common.Mod;
-
-            @Mod("example")
-            public class ExampleMod {
-                public ExampleMod(IEventBus modEventBus) {
-                }
-            }
-        """.trimIndent())
-
-        networkDir.resolve("ClientPacket.java").writeText("""
-            package com.example.network;
-
-            import net.minecraft.network.FriendlyByteBuf;
-            import net.neoforged.neoforge.network.handling.IPayloadContext;
-            import java.util.function.Supplier;
-
-            public class ClientPacket {
-                public static void encode(ClientPacket packet, FriendlyByteBuf buf) {
-                }
-
-                public static ClientPacket decode(FriendlyByteBuf buf) {
-                    return new ClientPacket();
-                }
-
-                public static class Handler {
-                    public static void handle(ClientPacket packet, IPayloadContext ctx) {
-                        if(!ctx.get().getDirection().getReceptionSide().isClient()) return;
-                        ctx.get().setPacketHandled(true);
-                    }
-                }
-            }
-        """.trimIndent())
-
-        networkDir.resolve("NetworkHandler.java").writeText("""
-            package com.example.network;
-
-            import net.minecraft.resources.ResourceLocation;
-            import net.minecraftforge.network.NetworkRegistry;
-            import net.minecraftforge.network.simple.SimpleChannel;
-
-            public class NetworkHandler {
-                private static final String PROTOCOL_VERSION = "1";
-                public static final SimpleChannel INSTANCE = NetworkRegistry.newSimpleChannel(
-                    new ResourceLocation("example", "main"),
-                    () -> PROTOCOL_VERSION,
-                    PROTOCOL_VERSION::equals,
-                    PROTOCOL_VERSION::equals
-                );
-
-                public static void register() {
-                    int id = 0;
-                    INSTANCE.registerMessage(id++, ClientPacket.class,
-                            ClientPacket::encode,
-                            ClientPacket::decode,
-                            ClientPacket.Handler::handle);
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-        val packet = networkDir.resolve("ClientPacket.java").readText()
-        val modNetwork = networkDir.resolve("ModNetwork.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-packet-payload-context-cleanup" })
-        assertTrue(modNetwork.contains("registrar.playToClient("))
-        assertTrue(!packet.contains("ctx.get()"))
-        assertTrue(!packet.contains("setPacketHandled"))
-        assertTrue(!packet.contains("java.util.function.Supplier"))
     }

@@ -1,5 +1,342 @@
 
     @Test
+    fun `abstract packet bases with nested payload implementations keep fluent return types sendable`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/network")
+        srcDir.createDirectories()
+        srcDir.resolve("SyncPacket.java").writeText("""
+            package com.example.network;
+
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.network.codec.StreamCodec;
+            import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+            import net.minecraft.resources.ResourceLocation;
+
+            public abstract class SyncPacket {
+                public static SyncPacket toServer(String key) {
+                    return new ToServer(key);
+                }
+
+                public final SyncPacket setBoolean(boolean value) {
+                    return this;
+                }
+
+                public static class ToServer extends SyncPacket implements CustomPacketPayload {
+                    public static final CustomPacketPayload.Type<ToServer> TYPE =
+                            new CustomPacketPayload.Type<>(ResourceLocation.fromNamespaceAndPath("example", "sync_to_server"));
+                    public static final StreamCodec<FriendlyByteBuf, ToServer> STREAM_CODEC =
+                            StreamCodec.of((buf, packet) -> {}, ToServer::new);
+
+                    public ToServer(String key) {
+                    }
+
+                    public ToServer(FriendlyByteBuf buf) {
+                    }
+
+                    @Override
+                    public CustomPacketPayload.Type<? extends CustomPacketPayload> type() {
+                        return TYPE;
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val packet = srcDir.resolve("SyncPacket.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(packet.contains("public abstract class SyncPacket implements CustomPacketPayload"), packet)
+        assertTrue(packet.contains("public final SyncPacket setBoolean(boolean value)"), packet)
+        assertTrue(packet.contains("public static class ToServer extends SyncPacket implements CustomPacketPayload"), packet)
+    }
+
+    @Test
+    fun `migrates Sakura gametest resource assertions to NeoForge resources`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("ResourceIntegrityTest.java").writeText("""
+            package com.example;
+
+            import net.minecraft.gametest.framework.GameTest;
+            import net.minecraft.gametest.framework.GameTestHelper;
+
+            public class ResourceIntegrityTest {
+                @GameTest
+                public static void loot_modifiers_have_scoped_conditions(GameTestHelper helper) {
+                    String global = resourceText("data/forge/loot_modifiers/global_loot_modifiers.json");
+                    assertModifierHasCondition(helper, "fishing", "forge:loot_table_id", "minecraft:gameplay/fishing");
+                    assertModifierTargetsBlock(helper, "grass_seeds", "minecraft:grass");
+                }
+
+                @GameTest
+                public static void terrablender_dependency_is_optional(GameTestHelper helper) {
+                    String modsToml = resourceTextContaining("META-INF/mods.toml", "modId=\"sakura\"");
+                    String block = dependencyBlock(modsToml, "terrablender");
+                    SakuraTestBase.assertTrue(helper, block.contains("mandatory=false"),
+                            "TerraBlender must be optional, not a hard dependency");
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val content = srcDir.resolve("ResourceIntegrityTest.java").readText()
+        assertTrue(content.contains("data/neoforge/loot_modifiers/global_loot_modifiers.json"))
+        assertTrue(content.contains("META-INF/neoforge.mods.toml"))
+        assertTrue(content.contains("""block.contains("type=\"optional\"")"""))
+        assertTrue(content.contains("neoforge:loot_table_id"))
+        assertTrue(content.contains("minecraft:short_grass"))
+        assertTrue(!content.contains("data/forge/loot_modifiers/global_loot_modifiers.json"))
+        assertTrue(!content.contains("META-INF/mods.toml"))
+        assertTrue(!content.contains("mandatory=false"))
+        assertTrue(!content.contains("\"forge:loot_table_id\""))
+        assertTrue(!content.contains("minecraft:grass"))
+    }
+
+    @Test
+    fun `recipe serializer registry key is only migrated in DeferredRegister create`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("RecipeRegistry.java").writeText("""
+            package com.example;
+
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.resources.ResourceLocation;
+            import net.minecraft.world.item.crafting.RecipeSerializer;
+            import net.neoforged.neoforge.registries.DeferredRegister;
+
+            public class RecipeRegistry {
+                public static final DeferredRegister<RecipeSerializer<?>> RECIPE_SERIALIZERS =
+                        DeferredRegister.create(BuiltInRegistries.RECIPE_SERIALIZER, "example");
+
+                public static ResourceLocation key(RecipeSerializer<?> serializer) {
+                    return BuiltInRegistries.RECIPE_SERIALIZER.getKey(serializer);
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+
+        val content = srcDir.resolve("RecipeRegistry.java").readText()
+        assertTrue(content.contains("DeferredRegister.create(Registries.RECIPE_SERIALIZER, \"example\")"))
+        assertTrue(content.contains("BuiltInRegistries.RECIPE_SERIALIZER.getKey(serializer)"))
+        assertTrue(content.contains("import net.minecraft.core.registries.BuiltInRegistries;"))
+        assertTrue(content.contains("import net.minecraft.core.registries.Registries;"))
+    }
+
+    @Test
+    fun `migrates remaining FMLJavaModLoadingContext static getter calls`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ExampleMod.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.ModLoadingContext;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.config.ModConfig;
+
+            @Mod("example")
+            public class ExampleMod {
+                public ExampleMod(ModContainer modContainer) {
+                    FMLJavaModLoadingContext
+                        .get()
+                        .getModEventBus().addListener(this::setup);
+                    ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.SERVER, ExampleConfig.SPEC);
+                }
+
+                private void setup(Object event) {
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-fml-context-to-eventbus" })
+        assertTrue(migrated.contains("public ExampleMod(IEventBus modEventBus, ModContainer modContainer)"))
+        assertTrue(migrated.contains("modEventBus.addListener(this::setup);"))
+        assertTrue(migrated.contains("modContainer.registerConfig(ModConfig.Type.SERVER, ExampleConfig.SPEC);"))
+        assertTrue(!migrated.contains("FMLJavaModLoadingContext"))
+        assertTrue(!migrated.contains("ModLoadingContext"))
+    }
+
+    @Test
+    fun `static FML mod event bus helper initializers receive constructor event bus at call sites`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val main = srcDir.resolve("ExampleMod.java")
+        val helper = srcDir.resolve("Registration.java")
+        main.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.common.Mod;
+
+            @Mod("example")
+            public class ExampleMod {
+                public ExampleMod(IEventBus modEventBus, ModContainer modContainer) {
+                    Registration.init();
+                }
+            }
+        """.trimIndent())
+        helper.writeText("""
+            package com.example;
+
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;
+
+            public class Registration {
+                public static void init() {
+                    IEventBus bus = FMLJavaModLoadingContext.get().getModEventBus();
+                    Blocks.init(bus);
+                    Items.init(bus);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val mainText = main.readText()
+        val helperText = helper.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-static-fml-helper-eventbus" })
+        assertTrue(result.changes.any { it.ruleId == "struct-static-fml-helper-callsite" })
+        assertTrue(mainText.contains("Registration.init(modEventBus);"), mainText)
+        assertTrue(helperText.contains("public static void init(IEventBus bus)"), helperText)
+        assertTrue(helperText.contains("Blocks.init(bus);"), helperText)
+        assertFalse(helperText.contains("FMLJavaModLoadingContext"), helperText)
+    }
+
+    @Test
+    fun `static FML mod event bus helper keeps signature when call sites are not proven`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val helper = srcDir.resolve("Registration.java")
+        helper.writeText("""
+            package com.example;
+
+            import net.neoforged.api.distmarker.Dist;
+            import net.neoforged.bus.api.IEventBus;
+            import net.neoforged.fml.common.EventBusSubscriber;
+            import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;
+
+            @EventBusSubscriber(value = Dist.CLIENT, modid = ExampleMod.ID)
+            public class Registration {
+                public static void init() {
+                    IEventBus bus = FMLJavaModLoadingContext.get().getModEventBus();
+                    Blocks.init(bus);
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val helperText = helper.readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertFalse(result.changes.any { it.ruleId == "struct-static-fml-helper-eventbus" })
+        assertTrue(helperText.contains("public static void init()"), helperText)
+        assertTrue(helperText.contains("net.neoforged.fml.ModList.get().getModContainerById(ExampleMod.ID).orElseThrow().getEventBus()"), helperText)
+        assertFalse(helperText.contains("FMLJavaModLoadingContext"), helperText)
+    }
+
+    @Test
+    fun `FMLJavaModLoadingContext constructor migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ExampleMod.java")
+        file.writeText("""
+            package com.example;
+
+            // import net.neoforged.fml.ModContainer;
+            import net.neoforged.fml.ModLoadingContext;
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.config.ModConfig;
+            import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;
+
+            @Mod("example")
+            public class ExampleMod {
+                private static final String DOC = "FMLJavaModLoadingContext.get().getModEventBus()";
+
+                /*
+                 public ExampleMod(FMLJavaModLoadingContext fakeContext) {
+                     fakeContext.registerConfig(ModConfig.Type.CLIENT, FakeConfig.SPEC);
+                     ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.SERVER, FakeConfig.SPEC);
+                 }
+                 */
+
+                public ExampleMod(FMLJavaModLoadingContext context) {
+                    context.getModEventBus().addListener(this::setup);
+                    context.registerConfig(ModConfig.Type.COMMON, ExampleConfig.SPEC);
+                }
+
+                private void setup(Object event) {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-fml-context-to-eventbus" })
+        assertTrue(migrated.contains("import net.neoforged.bus.api.IEventBus;"), migrated)
+        assertTrue(migrated.contains("import net.neoforged.fml.ModContainer;"), migrated)
+        assertTrue(migrated.contains("public ExampleMod(IEventBus modEventBus, ModContainer modContainer)"), migrated)
+        assertTrue(migrated.contains("modEventBus.addListener(this::setup);"), migrated)
+        assertTrue(migrated.contains("modContainer.registerConfig(ModConfig.Type.COMMON, ExampleConfig.SPEC);"), migrated)
+        assertTrue(migrated.contains("""private static final String DOC = "FMLJavaModLoadingContext.get().getModEventBus()";"""), migrated)
+        assertTrue(migrated.contains("public ExampleMod(FMLJavaModLoadingContext fakeContext)"), migrated)
+        assertTrue(migrated.contains("fakeContext.registerConfig(ModConfig.Type.CLIENT, FakeConfig.SPEC);"), migrated)
+        assertTrue(migrated.contains("ModLoadingContext.get().getActiveContainer().registerConfig(ModConfig.Type.SERVER, FakeConfig.SPEC);"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;"), migrated)
+    }
+
+    @Test
+    fun `legacy static FML mod event bus migration ignores comments and string literals`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        val file = srcDir.resolve("ExampleMod.java")
+        file.writeText("""
+            package com.example;
+
+            import net.neoforged.fml.common.Mod;
+            import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;
+
+            @Mod(ExampleMod.MODID)
+            public class ExampleMod {
+                public static final String MODID = "example";
+                private static final String DOC = "FMLJavaModLoadingContext.get().getModEventBus()";
+
+                /*
+                 FMLJavaModLoadingContext.get().getModEventBus().addListener(ExampleMod::fakeSetup);
+                 */
+
+                public void init() {
+                    FMLJavaModLoadingContext.get().getModEventBus().addListener(this::setup);
+                }
+
+                private void setup(Object event) {
+                }
+            }
+        """.trimIndent())
+
+        StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(
+            migrated.contains(
+                "net.neoforged.fml.ModList.get().getModContainerById(ExampleMod.MODID).orElseThrow().getEventBus().addListener(this::setup);"
+            ),
+            migrated
+        )
+        assertTrue(migrated.contains("""private static final String DOC = "FMLJavaModLoadingContext.get().getModEventBus()";"""), migrated)
+        assertTrue(migrated.contains("FMLJavaModLoadingContext.get().getModEventBus().addListener(ExampleMod::fakeSetup);"), migrated)
+        assertFalse(migrated.contains("import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;"), migrated)
+    }
+
+    @Test
     fun `migrates delegated FMLJavaModLoadingContext constructor to single NeoForge constructor`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -841,253 +1178,4 @@
         assertTrue(migrated.contains("// user.curePotionEffects(new ItemStack(Items.MILK_BUCKET));"), migrated)
         assertTrue(migrated.contains("""private static final String DOC = "user.curePotionEffects(new ItemStack(Items.HONEY_BOTTLE));";"""), migrated)
         assertTrue(migrated.contains("user.curePotionEffects(dynamicStack);"), migrated)
-    }
-
-    @Test
-    fun `migrates custom fluid item capabilities to RegisterCapabilitiesEvent`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        val customDir = srcDir.resolve("vessel")
-        customDir.createDirectories()
-
-        srcDir.resolve("ExampleMod.java").writeText("""
-            package com.example;
-
-            import com.example.vessel.FluidVesselItems;
-            import net.neoforged.bus.api.IEventBus;
-            import net.neoforged.fml.common.Mod;
-
-            @Mod("example")
-            public class ExampleMod {
-                public ExampleMod(IEventBus modEventBus) {
-                    FluidVesselItems.register(modEventBus);
-                }
-            }
-        """.trimIndent())
-
-        customDir.resolve("FluidVesselItems.java").writeText("""
-            package com.example.vessel;
-
-            import net.minecraft.world.item.Item;
-            import net.neoforged.bus.api.IEventBus;
-            import net.neoforged.neoforge.registries.DeferredHolder;
-            import net.neoforged.neoforge.registries.DeferredRegister;
-
-            public class FluidVesselItems {
-                public static final DeferredRegister<Item> ITEMS = null;
-                public static final DeferredHolder<Item, FluidVesselBucketItem> WOODEN_PAIL =
-                        ITEMS.register("wooden_pail", () -> new FluidVesselBucketItem(new Item.Properties()));
-                public static final DeferredHolder<Item, FluidVesselBottleItem> GLASS_FLASK =
-                        ITEMS.register("glass_flask", () -> new FluidVesselBottleItem(new Item.Properties()));
-                public static void register(IEventBus eventBus) {
-                    ITEMS.register(eventBus);
-                }
-            }
-        """.trimIndent())
-
-        customDir.resolve("FluidVesselCapabilities.java").writeText("""
-            package com.example.vessel;
-
-            import com.crabmod.hotbath.HotBath;
-            import net.minecraft.core.Direction;
-            import net.minecraft.resources.ResourceLocation;
-            import net.minecraft.world.item.ItemStack;
-            import net.minecraft.world.item.Items;
-            import com.modporter.compat.Capability;
-            import net.neoforged.neoforge.capabilities.Capabilities;
-            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
-            import com.modporter.compat.LazyOptional;
-            import net.neoforged.neoforge.event.AttachCapabilitiesEvent;
-            import net.neoforged.bus.api.SubscribeEvent;
-            import net.neoforged.neoforge.fluids.FluidStack;
-            import net.neoforged.neoforge.fluids.capability.IFluidHandlerItem;
-            import org.jetbrains.annotations.Nullable;
-            import javax.annotation.Nonnull;
-            import net.neoforged.fml.common.EventBusSubscriber;
-
-            @EventBusSubscriber(modid = HotBath.MOD_ID)
-            public final class FluidVesselCapabilities {
-                public static final ResourceLocation CAPABILITY_ID = ResourceLocation.fromNamespaceAndPath(HotBath.MOD_ID, "fluid_vessel");
-
-                private FluidVesselCapabilities() {
-                }
-
-                @SubscribeEvent
-                public static void attachCapabilities(AttachCapabilitiesEvent<ItemStack> event) {
-                    ItemStack stack = event.getObject();
-                    if (stack.is(Items.BUCKET)) {
-                        event.addCapability(CAPABILITY_ID, createProvider(stack, VesselKind.BUCKET));
-                    }
-                }
-
-                public static ICapabilityProvider createProvider(ItemStack stack, boolean bucket) {
-                    return createProvider(stack, bucket ? VesselKind.BUCKET : VesselKind.BOTTLE);
-                }
-
-                private static ICapabilityProvider createProvider(ItemStack stack, VesselKind kind) {
-                    return new FluidVesselProvider(new FluidVesselHandler(stack, kind));
-                }
-
-                private enum VesselKind {
-                    BUCKET(1000),
-                    BOTTLE(250);
-                    final int amount;
-                    VesselKind(int amount) { this.amount = amount; }
-                }
-
-                private static final class FluidVesselProvider implements ICapabilityProvider {
-                    private final LazyOptional<IFluidHandlerItem> handler;
-                    private FluidVesselProvider(IFluidHandlerItem handler) {
-                        this.handler = LazyOptional.of(() -> handler);
-                    }
-                    @Nonnull
-                    public <T> LazyOptional<T> getCapability(@Nonnull Capability<T> cap, @Nullable Direction side) {
-                        if (cap == Capabilities.FLUID_HANDLER_ITEM) return handler.cast();
-                        return LazyOptional.empty();
-                    }
-                }
-
-                private static final class FluidVesselHandler implements IFluidHandlerItem {
-                    private ItemStack container;
-                    private final VesselKind kind;
-                    private FluidVesselHandler(ItemStack container, VesselKind kind) {
-                        this.container = container;
-                        this.kind = kind;
-                    }
-                    public int getTanks() { return 1; }
-                    public FluidStack getFluidInTank(int tank) { return FluidStack.EMPTY; }
-                    public int getTankCapacity(int tank) { return kind.amount; }
-                    public boolean isFluidValid(int tank, FluidStack stack) { return true; }
-                    public int fill(FluidStack resource, FluidAction action) { return 0; }
-                    public FluidStack drain(FluidStack resource, FluidAction action) { return FluidStack.EMPTY; }
-                    public FluidStack drain(int maxDrain, FluidAction action) { return FluidStack.EMPTY; }
-                    public ItemStack getContainer() { return container; }
-                }
-            }
-        """.trimIndent())
-
-        customDir.resolve("FluidVesselBucketItem.java").writeText("""
-            package com.example.vessel;
-
-            import net.minecraft.nbt.CompoundTag;
-            import net.minecraft.world.item.Item;
-            import net.minecraft.world.item.ItemStack;
-            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
-            import org.jetbrains.annotations.Nullable;
-
-            public class FluidVesselBucketItem extends Item {
-                public FluidVesselBucketItem(Properties properties) { super(properties); }
-
-                @Override
-                public ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
-                    return FluidVesselCapabilities.createProvider(stack, true);
-                }
-            }
-        """.trimIndent())
-
-        customDir.resolve("FluidVesselBottleItem.java").writeText("""
-            package com.example.vessel;
-
-            import net.minecraft.nbt.CompoundTag;
-            import net.minecraft.world.item.Item;
-            import net.minecraft.world.item.ItemStack;
-            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
-            import org.jetbrains.annotations.Nullable;
-
-            public class FluidVesselBottleItem extends Item {
-                public FluidVesselBottleItem(Properties properties) { super(properties); }
-
-                @Override
-                public ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
-                    return FluidVesselCapabilities.createProvider(stack, false);
-                }
-            }
-        """.trimIndent())
-
-        val pass = StructuralRefactorPass()
-        val result = pass.apply(tempDir)
-        val capabilities = customDir.resolve("FluidVesselCapabilities.java").readText()
-        val bucket = customDir.resolve("FluidVesselBucketItem.java").readText()
-        val bottle = customDir.resolve("FluidVesselBottleItem.java").readText()
-        val mod = srcDir.resolve("ExampleMod.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-custom-fluid-item-capabilities" })
-        assertTrue(result.changes.any { it.ruleId == "struct-custom-fluid-item-initcapabilities" })
-        assertTrue(result.changes.any { it.ruleId == "struct-custom-fluid-capability-listener" })
-        assertTrue(capabilities.contains("public static void registerCapabilities(RegisterCapabilitiesEvent event)"))
-        assertTrue(capabilities.contains("Capabilities.FluidHandler.ITEM"))
-        assertTrue(capabilities.contains("FluidVesselItems.WOODEN_PAIL.get()"))
-        assertTrue(capabilities.contains("FluidVesselItems.GLASS_FLASK.get()"))
-        assertTrue(capabilities.contains("(stack, context) -> new FluidVesselHandler(stack, VesselKind.BUCKET)"), capabilities)
-        assertTrue(capabilities.contains("(stack, context) -> new FluidVesselHandler(stack, VesselKind.BOTTLE)"), capabilities)
-        assertTrue(!capabilities.contains("AttachCapabilitiesEvent"))
-        assertTrue(!capabilities.contains("ICapabilityProvider"))
-        assertTrue(!capabilities.contains("LazyOptional"))
-        assertTrue(!bucket.contains("initCapabilities"))
-        assertTrue(!bottle.contains("initCapabilities"))
-        assertTrue(mod.contains("modEventBus.addListener(FluidVesselCapabilities::registerCapabilities);"))
-    }
-
-    @Test
-    fun `fluid item capability migration ignores provider calls in comments and strings`() {
-        val customDir = tempDir.resolve("src/main/java/com/example/vessel")
-        customDir.createDirectories()
-
-        customDir.resolve("FluidVesselCapabilities.java").writeText("""
-            package com.example.vessel;
-
-            import net.minecraft.world.item.ItemStack;
-            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
-            import net.neoforged.neoforge.fluids.capability.IFluidHandlerItem;
-
-            public final class FluidVesselCapabilities {
-                private FluidVesselCapabilities() {}
-
-                public static ICapabilityProvider createProvider(ItemStack stack, boolean bucket) {
-                    return new FluidVesselProvider(new FluidVesselHandler(stack));
-                }
-
-                private static final class FluidVesselProvider implements ICapabilityProvider {
-                }
-
-                private static final class FluidVesselHandler implements IFluidHandlerItem {
-                    private FluidVesselHandler(ItemStack container) {}
-                }
-            }
-        """.trimIndent())
-
-        customDir.resolve("FluidVesselBucketItem.java").writeText("""
-            package com.example.vessel;
-
-            import net.minecraft.nbt.CompoundTag;
-            import net.minecraft.world.item.Item;
-            import net.minecraft.world.item.ItemStack;
-            import net.neoforged.neoforge.capabilities.ICapabilityProvider;
-            import org.jetbrains.annotations.Nullable;
-
-            public class FluidVesselBucketItem extends Item {
-                public FluidVesselBucketItem(Properties properties) { super(properties); }
-
-                @Override
-                public ICapabilityProvider initCapabilities(ItemStack stack, @Nullable CompoundTag nbt) {
-                    // return FluidVesselCapabilities.createProvider(stack, true);
-                    String ignored = "FluidVesselCapabilities.createProvider(stack, true)";
-                    return super.initCapabilities(stack, nbt);
-                }
-            }
-        """.trimIndent())
-
-        val pass = StructuralRefactorPass()
-        val result = pass.apply(tempDir)
-        val capabilities = customDir.resolve("FluidVesselCapabilities.java").readText()
-        val bucket = customDir.resolve("FluidVesselBucketItem.java").readText()
-
-        assertFalse(
-            result.changes.any {
-                it.ruleId == "struct-custom-fluid-item-capabilities" ||
-                    it.ruleId == "struct-custom-fluid-item-initcapabilities"
-            },
-            result.changes.joinToString("\n") { "${it.ruleId}: ${it.description}" }
-        )
-        assertFalse(capabilities.contains("RegisterCapabilitiesEvent"), capabilities)
-        assertTrue(bucket.contains("initCapabilities"))
     }

@@ -1,296 +1,5 @@
 
     @Test
-    fun `legacy recipe output adapters use codec defaults for omitted constructor parameters`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("BookCategory.java").writeText("""
-            package com.example;
-
-            import com.mojang.serialization.Codec;
-
-            public enum BookCategory {
-                UNKNOWN;
-
-                public static final Codec<BookCategory> CODEC = null;
-            }
-        """.trimIndent())
-        srcDir.resolve("DefaultedRecipe.java").writeText("""
-            package com.example;
-
-            import com.mojang.serialization.Codec;
-            import com.mojang.serialization.MapCodec;
-            import com.mojang.serialization.codecs.RecordCodecBuilder;
-            import net.minecraft.world.item.crafting.Ingredient;
-            import net.minecraft.world.item.crafting.RecipeSerializer;
-
-            public class DefaultedRecipe {
-                public DefaultedRecipe(String group, BookCategory category, Ingredient ingredient, int time) {
-                }
-
-                public static class Serializer implements RecipeSerializer<DefaultedRecipe> {
-                    private static final MapCodec<DefaultedRecipe> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
-                            Codec.STRING.optionalFieldOf("group", "").forGetter((recipe) -> ""),
-                            BookCategory.CODEC.fieldOf("category").orElse(BookCategory.UNKNOWN).forGetter((recipe) -> BookCategory.UNKNOWN),
-                            Ingredient.CODEC_NONEMPTY.fieldOf("ingredient").forGetter((recipe) -> null),
-                            Codec.INT.fieldOf("time").orElse(200).forGetter((recipe) -> 200)
-                    ).apply(instance, DefaultedRecipe::new));
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("DefaultedRecipeBuilder.java").writeText("""
-            package com.example;
-
-            import com.google.gson.JsonObject;
-            import net.minecraft.advancements.Advancement;
-            import net.minecraft.data.recipes.RecipeOutput;
-            import net.minecraft.resources.ResourceLocation;
-            import net.minecraft.world.item.crafting.Ingredient;
-            import net.minecraft.world.item.crafting.RecipeSerializer;
-
-            public class DefaultedRecipeBuilder {
-                private final Ingredient ingredient;
-                private final int time;
-                private final Advancement.Builder advancement;
-                private final ResourceLocation advancementId;
-
-                public DefaultedRecipeBuilder(Ingredient ingredient, int time, Advancement.Builder advancement, ResourceLocation advancementId) {
-                    this.ingredient = ingredient;
-                    this.time = time;
-                    this.advancement = advancement;
-                    this.advancementId = advancementId;
-                }
-
-                public void save(RecipeOutput output, ResourceLocation id) {
-                    output.accept(new DefaultedRecipeBuilder.Result(id, "", this.ingredient, this.time, this.advancement, this.advancementId));
-                }
-
-                public static class Result implements RecipeOutput {
-                    private final ResourceLocation id;
-                    private final String group;
-                    private final Ingredient ingredient;
-                    private final int time;
-                    private final Advancement.Builder advancement;
-                    private final ResourceLocation advancementId;
-
-                    public Result(ResourceLocation id, String group, Ingredient ingredient, int time, Advancement.Builder advancement, ResourceLocation advancementId) {
-                        this.id = id;
-                        this.group = group;
-                        this.ingredient = ingredient;
-                        this.time = time;
-                        this.advancement = advancement;
-                        this.advancementId = advancementId;
-                    }
-
-                    public RecipeSerializer<DefaultedRecipe> getType() {
-                        return ExampleSerializers.DEFAULTED.get();
-                    }
-
-                    public void serializeRecipeData(JsonObject json) {
-                    }
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("ExampleSerializers.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.item.crafting.RecipeSerializer;
-            import net.neoforged.neoforge.registries.DeferredHolder;
-
-            public class ExampleSerializers {
-                public static final DeferredHolder<RecipeSerializer<?>, DefaultedRecipe.Serializer> DEFAULTED = null;
-            }
-        """.trimIndent())
-
-        StructuralRefactorPass().apply(tempDir)
-        val builder = srcDir.resolve("DefaultedRecipeBuilder.java").readText()
-
-        assertTrue(builder.contains("output.accept(id, new DefaultedRecipe(\"\", com.example.BookCategory.UNKNOWN, this.ingredient, this.time), this.advancement.build(this.advancementId));"), builder)
-        assertFalse(builder.contains("class Result"), builder)
-        assertFalse(builder.contains("JsonObject"), builder)
-    }
-
-    @Test
-    fun `serializer backed cooking builders migrate to factory based recipe output`() {
-        val srcDir = tempDir.resolve("src/main/java/com/example")
-        srcDir.createDirectories()
-        srcDir.resolve("BookCategory.java").writeText("""
-            package com.example;
-
-            public enum BookCategory {
-                HEATED
-            }
-        """.trimIndent())
-        srcDir.resolve("SpecialCookingSerializer.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.item.ItemStack;
-            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
-            import net.minecraft.world.item.crafting.Ingredient;
-            import net.minecraft.world.item.crafting.RecipeSerializer;
-
-            public class SpecialCookingSerializer<T extends AbstractCookingRecipe> implements RecipeSerializer<T> {
-                private final SpecialCookingSerializer.CookieBaker<T> factory;
-
-                public SpecialCookingSerializer(SpecialCookingSerializer.CookieBaker<T> factory, int defaultCookingTime) {
-                    this.factory = factory;
-                }
-
-                public interface CookieBaker<T extends AbstractCookingRecipe> {
-                    T create(String group, BookCategory category, Ingredient ingredient, ItemStack result, float experience, int cookingTime);
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("HeatedRecipe.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.item.ItemStack;
-            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
-            import net.minecraft.world.item.crafting.Ingredient;
-            import net.minecraft.world.item.crafting.RecipeType;
-
-            public class HeatedRecipe extends AbstractCookingRecipe {
-                public HeatedRecipe(String group, BookCategory category, Ingredient ingredient, ItemStack result, float experience, int cookingTime) {
-                    super((RecipeType<?>) null, group, null, ingredient, result, experience, cookingTime);
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("ExampleSerializers.java").writeText("""
-            package com.example;
-
-            import net.minecraft.world.item.crafting.RecipeSerializer;
-            import net.neoforged.neoforge.registries.DeferredHolder;
-
-            public class ExampleSerializers {
-                public static final DeferredHolder<RecipeSerializer<?>, SpecialCookingSerializer<HeatedRecipe>> HEATED = null;
-            }
-        """.trimIndent())
-        srcDir.resolve("SpecialCookingRecipeBuilder.java").writeText("""
-            package com.example;
-
-            import com.google.gson.JsonObject;
-            import net.minecraft.advancements.Advancement;
-            import net.minecraft.advancements.AdvancementRewards;
-            import net.minecraft.advancements.AdvancementRequirements;
-            import net.minecraft.advancements.Criterion;
-            import net.minecraft.advancements.critereon.RecipeUnlockedTrigger;
-            import net.minecraft.data.recipes.RecipeBuilder;
-            import net.minecraft.data.recipes.RecipeCategory;
-            import net.minecraft.data.recipes.RecipeOutput;
-            import net.minecraft.resources.ResourceLocation;
-            import net.minecraft.world.item.Item;
-            import net.minecraft.world.item.crafting.AbstractCookingRecipe;
-            import net.minecraft.world.item.crafting.Ingredient;
-            import net.minecraft.world.item.crafting.RecipeSerializer;
-            import net.minecraft.world.level.ItemLike;
-
-            import java.util.LinkedHashMap;
-            import java.util.Map;
-
-            public class SpecialCookingRecipeBuilder implements RecipeBuilder {
-                private final RecipeCategory recipeCategory;
-                private final BookCategory category;
-                private final Item result;
-                private final Ingredient ingredient;
-                private final float experience;
-                private final int cookingTime;
-                private final Map<String, Criterion<?>> criteria = new LinkedHashMap<>();
-                private String group;
-                private final RecipeSerializer<? extends AbstractCookingRecipe> serializer;
-
-                public SpecialCookingRecipeBuilder(RecipeCategory recipeCategory, BookCategory category, ItemLike result, Ingredient ingredient, float experience, int cookingTime, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
-                    this.recipeCategory = recipeCategory;
-                    this.category = category;
-                    this.result = result.asItem();
-                    this.ingredient = ingredient;
-                    this.experience = experience;
-                    this.cookingTime = cookingTime;
-                    this.serializer = serializer;
-                }
-
-                public static SpecialCookingRecipeBuilder generic(Ingredient ingredient, RecipeCategory recipeCategory, ItemLike result, float experience, int cookingTime, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
-                    return new SpecialCookingRecipeBuilder(recipeCategory, BookCategory.HEATED, result, ingredient, experience, cookingTime, serializer);
-                }
-
-                public RecipeBuilder unlockedBy(String name, Criterion<?> criterion) {
-                    this.criteria.put(name, criterion);
-                    return this;
-                }
-
-                public RecipeBuilder group(String group) {
-                    this.group = group;
-                    return this;
-                }
-
-                public Item getResult() {
-                    return this.result;
-                }
-
-                public void save(RecipeOutput output, ResourceLocation id) {
-                    Advancement.Builder advancement = output.advancement().addCriterion("has_the_recipe", RecipeUnlockedTrigger.unlocked(id)).rewards(AdvancementRewards.Builder.recipe(id)).requirements(AdvancementRequirements.Strategy.OR);
-                    this.criteria.forEach(advancement::addCriterion);
-                    output.accept(new SpecialCookingRecipeBuilder.Result(id, this.group == null ? "" : this.group, this.category, this.ingredient, this.result, this.experience, this.cookingTime, advancement, id.withPrefix("recipes/" + this.recipeCategory.getFolderName() + "/"), this.serializer));
-                }
-
-                static class Result implements RecipeOutput {
-                    private final ResourceLocation id;
-                    private final String group;
-                    private final BookCategory category;
-                    private final Ingredient ingredient;
-                    private final Item result;
-                    private final float experience;
-                    private final int cookingTime;
-                    private final Advancement.Builder advancement;
-                    private final ResourceLocation advancementId;
-                    private final RecipeSerializer<? extends AbstractCookingRecipe> serializer;
-
-                    public Result(ResourceLocation id, String group, BookCategory category, Ingredient ingredient, Item result, float experience, int cookingTime, Advancement.Builder advancement, ResourceLocation advancementId, RecipeSerializer<? extends AbstractCookingRecipe> serializer) {
-                        this.id = id;
-                        this.group = group;
-                        this.category = category;
-                        this.ingredient = ingredient;
-                        this.result = result;
-                        this.experience = experience;
-                        this.cookingTime = cookingTime;
-                        this.advancement = advancement;
-                        this.advancementId = advancementId;
-                        this.serializer = serializer;
-                    }
-
-                    public void serializeRecipeData(JsonObject json) {
-                    }
-                }
-            }
-        """.trimIndent())
-        srcDir.resolve("ExampleProvider.java").writeText("""
-            package com.example;
-
-            import net.minecraft.data.recipes.RecipeCategory;
-            import net.minecraft.world.item.Items;
-            import net.minecraft.world.item.crafting.Ingredient;
-
-            public class ExampleProvider {
-                public void build() {
-                    SpecialCookingRecipeBuilder.generic(Ingredient.of(Items.BEEF), RecipeCategory.FOOD, Items.COOKED_BEEF, 0.3F, 200, ExampleSerializers.HEATED.get());
-                }
-            }
-        """.trimIndent())
-
-        val result = StructuralRefactorPass().apply(tempDir)
-        val builder = srcDir.resolve("SpecialCookingRecipeBuilder.java").readText()
-        val provider = srcDir.resolve("ExampleProvider.java").readText()
-
-        assertTrue(result.changes.any { it.ruleId == "struct-recipe-builder-factory-output" })
-        assertTrue(builder.contains("private final com.example.SpecialCookingSerializer.CookieBaker<?> factory;"), builder)
-        assertTrue(builder.contains("RecipeSerializer<? extends AbstractCookingRecipe> serializer, com.example.SpecialCookingSerializer.CookieBaker<?> serializerFactory"), builder)
-        assertTrue(builder.contains("this.factory = serializerFactory;"), builder)
-        assertTrue(builder.contains("AbstractCookingRecipe recipe = this.factory.create(this.group == null ? \"\" : this.group, this.category, this.ingredient, new ItemStack(this.result), this.experience, this.cookingTime);"), builder)
-        assertTrue(builder.contains("output.accept(id, recipe, advancement.build(id.withPrefix(\"recipes/\" + this.recipeCategory.getFolderName() + \"/\")));"), builder)
-        assertTrue(builder.contains("import net.minecraft.world.item.ItemStack;"), builder)
-        assertFalse(builder.contains("class Result"), builder)
-        assertTrue(provider.contains("ExampleSerializers.HEATED.get(), com.example.HeatedRecipe::new"), provider)
-    }
-
-    @Test
     fun `recipe serializer factory generic call migration ignores comments and string literals`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
@@ -1190,4 +899,297 @@
         assertTrue(migrated.contains("\"Event.Result.DENY Result.ALLOW DENY\""), migrated)
         assertTrue(migrated.contains("// Event.Result.ALLOW and Result.DEFAULT stay documentation."), migrated)
         assertTrue(migrated.contains("public TriState unrelated(TriState value)"), migrated)
+    }
+
+    @Test
+    fun `legacy particle factory graph bridges real network serialization to stream codecs`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/particle")
+        srcDir.createDirectories()
+        srcDir.resolve("LegacyParticleData.java").writeText("""
+            package com.example.particle;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.client.particle.ParticleProvider;
+            import net.minecraft.core.particles.ParticleOptions;
+            import net.minecraft.core.particles.ParticleOptions.Deserializer;
+            import net.minecraft.core.particles.ParticleType;
+
+            public interface LegacyParticleData<T extends ParticleOptions> {
+                Deserializer<T> getDeserializer();
+                Codec<T> getCodec(ParticleType<T> type);
+
+                default ParticleType<T> createType() {
+                    return new ParticleType<>(false, getDeserializer()) {
+                        @Override
+                        public Codec<T> codec() {
+                            return LegacyParticleData.this.getCodec(this);
+                        }
+                    };
+                }
+
+                ParticleProvider<T> getFactory();
+            }
+        """.trimIndent())
+        srcDir.resolve("SpriteParticleData.java").writeText("""
+            package com.example.particle;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.core.particles.ParticleOptions;
+            import net.minecraft.core.particles.ParticleType;
+
+            public interface SpriteParticleData<T extends ParticleOptions> extends LegacyParticleData<T> {
+                Deserializer<T> getDeserializer();
+
+                default ParticleType<T> createType() {
+                    return new ParticleType<>(false, getDeserializer()) {
+                        @Override
+                        public Codec<T> codec() {
+                            return SpriteParticleData.this.getCodec(this);
+                        }
+                    };
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("SampleParticleData.java").writeText("""
+            package com.example.particle;
+
+            import com.mojang.brigadier.StringReader;
+            import com.mojang.serialization.Codec;
+            import net.minecraft.client.particle.ParticleProvider;
+            import net.minecraft.core.particles.ParticleOptions;
+            import net.minecraft.core.particles.ParticleType;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.neoforged.neoforge.fluids.FluidStack;
+
+            public class SampleParticleData implements ParticleOptions, SpriteParticleData<SampleParticleData> {
+                public static final Codec<SampleParticleData> CODEC = Codec.unit(new SampleParticleData());
+
+                @Override
+                public Deserializer<SampleParticleData> getDeserializer() {
+                    return new ParticleOptions.Deserializer<>() {
+                        @Override
+                        public SampleParticleData fromCommand(ParticleType<SampleParticleData> type, StringReader reader) {
+                            return new SampleParticleData();
+                        }
+
+                        @Override
+                        public SampleParticleData fromNetwork(ParticleType<SampleParticleData> type, FriendlyByteBuf buffer) {
+                            SampleParticleData data = new SampleParticleData();
+                            data.value = buffer.readVarInt();
+                            data.fluid = buffer.readFluidStack();
+                            return data;
+                        }
+                    };
+                }
+
+                private int value;
+                private FluidStack fluid;
+
+                @Override
+                public Codec<SampleParticleData> getCodec(ParticleType<SampleParticleData> type) {
+                    return CODEC;
+                }
+
+                @Override
+                public void writeToNetwork(FriendlyByteBuf buffer) {
+                    buffer.writeVarInt(value);
+                    buffer.writeFluidStack(fluid);
+                }
+
+                @Override
+                public String writeToString() {
+                    return Integer.toString(value);
+                }
+
+                @Override
+                public ParticleType<?> getType() {
+                    return null;
+                }
+
+                @Override
+                public ParticleProvider<SampleParticleData> getFactory() {
+                    return null;
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val root = srcDir.resolve("LegacyParticleData.java").readText()
+        val child = srcDir.resolve("SpriteParticleData.java").readText()
+        val data = srcDir.resolve("SampleParticleData.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(result.changes.any { it.ruleId == "struct-legacy-particle-serialization" })
+        assertTrue(root.contains("interface Deserializer<P extends ParticleOptions>"), root)
+        assertTrue(root.contains("StreamCodec.ofMember"), root)
+        assertTrue(root.contains("getDeserializer().fromNetwork(type, buffer)"), root)
+        assertTrue(root.contains("public StreamCodec<? super RegistryFriendlyByteBuf, T> streamCodec()"), root)
+        assertTrue(child.contains("public MapCodec<T> codec()"), child)
+        assertTrue(child.contains("SpriteParticleData.this.getStreamCodec(this)"), child)
+        assertTrue(data.contains("public static final MapCodec<SampleParticleData> CODEC = MapCodec.unit"), data)
+        assertTrue(data.contains("public MapCodec<SampleParticleData> getCodec"), data)
+        assertTrue(data.contains("new Deserializer<>()"), data)
+        assertTrue(data.contains("buffer.writeVarInt(value);"), data)
+        assertTrue(data.contains("FluidStack.STREAM_CODEC.decode(buffer)"), data)
+        assertTrue(data.contains("FluidStack.STREAM_CODEC.encode(buffer, fluid)"), data)
+        assertTrue(data.contains("writeToNetwork(RegistryFriendlyByteBuf buffer)"), data)
+        assertFalse(root.contains("ParticleOptions.Deserializer"), root)
+        assertFalse(data.contains("ParticleOptions.Deserializer"), data)
+    }
+
+    @Test
+    fun `legacy particle factory with external data type hard fails instead of casting blindly`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example/particle")
+        srcDir.createDirectories()
+        srcDir.resolve("LegacyParticleData.java").writeText("""
+            package com.example.particle;
+
+            import com.mojang.serialization.Codec;
+            import net.minecraft.core.particles.ParticleOptions;
+            import net.minecraft.core.particles.ParticleOptions.Deserializer;
+            import net.minecraft.core.particles.ParticleType;
+
+            public interface LegacyParticleData<T extends ParticleOptions> {
+                Deserializer<T> getDeserializer();
+                Codec<T> getCodec(ParticleType<T> type);
+                default ParticleType<T> createType() {
+                    return new ParticleType<>(false, getDeserializer()) {
+                        public Codec<T> codec() { return LegacyParticleData.this.getCodec(this); }
+                    };
+                }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExternalData.java").writeText("""
+            package com.example.particle;
+            public class ExternalData implements net.minecraft.core.particles.ParticleOptions {
+                public net.minecraft.core.particles.ParticleType<?> getType() { return null; }
+            }
+        """.trimIndent())
+        srcDir.resolve("ExternalFactory.java").writeText("""
+            package com.example.particle;
+
+            import net.minecraft.network.FriendlyByteBuf;
+
+            public class ExternalFactory implements LegacyParticleData<ExternalData> {
+                public Deserializer<ExternalData> getDeserializer() { return null; }
+                public com.mojang.serialization.Codec<ExternalData> getCodec(net.minecraft.core.particles.ParticleType<ExternalData> type) { return null; }
+                public void writeToNetwork(FriendlyByteBuf buffer) {}
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+
+        assertTrue(result.errors.any { it.contains("uses external data type ExternalData") }, "errors=${result.errors}")
+    }
+
+    @Test
+    fun `migrates BlockEntity provider signatures and packet update tag loading`() {
+        val projectDir = createFile("CustomBE.java", """
+            package com.example;
+
+            import net.minecraft.core.BlockPos;
+            import net.minecraft.core.NonNullList;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.network.Connection;
+            import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
+            import net.minecraft.world.ContainerHelper;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.minecraft.world.level.block.state.BlockState;
+            import org.jetbrains.annotations.NotNull;
+
+            public class CustomBE extends BlockEntity {
+                private final NonNullList<ItemStack> items = NonNullList.withSize(1, ItemStack.EMPTY);
+                private Component name;
+
+                public CustomBE(BlockPos pos, BlockState state) {
+                    super(null, pos, state);
+                }
+
+                @Override
+                protected void saveAdditional(@NotNull CompoundTag tag) {
+                    super.saveAdditional(tag);
+                    ContainerHelper.saveAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);
+                    String serializerDoc = "Component.Serializer.toJson(this.name)";
+                    // Component.Serializer.toJson(this.name);
+                    tag.putString("Name", Component.Serializer.toJson(this.name));
+                }
+
+                @Override
+                public void load(@NotNull CompoundTag tag) {
+                    super.load(tag);
+                    ContainerHelper.loadAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);
+                    String parserDoc = "Component.Serializer.fromJson(tag.getString(\"Name\"))";
+                    // Component.Serializer.fromJson(tag.getString("Name"));
+                    this.name = Component.Serializer.fromJson(tag.getString("Name"));
+                }
+
+                @Override
+                public @NotNull CompoundTag getUpdateTag() {
+                    String updateDoc = "super.getUpdateTag() saveAdditional(tag) saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY)";
+                    String updateBlock = ${"\"\"\""}
+                        super.getUpdateTag()
+                        saveAdditional(tag);
+                        this.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY)
+                        ${"\"\"\""};
+                    // super.getUpdateTag();
+                    // saveAdditional(tag);
+                    // this.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY);
+                    CompoundTag tag = super.getUpdateTag();
+                    saveAdditional(tag);
+                    CompoundTag copy = this.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY);
+                    return tag;
+                }
+
+                @Override
+                public void handleUpdateTag(@NotNull CompoundTag tag) {
+                    super.handleUpdateTag(tag);
+                    this.load(tag);
+                }
+
+                @Override
+                public void onDataPacket(@NotNull Connection net, @NotNull ClientboundBlockEntityDataPacket pkt) {
+                    CompoundTag tag = pkt.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
+                    if (tag != null) {
+                        this.handleUpdateTag(tag);
+                    }
+                }
+            }
+        """.trimIndent())
+
+        val pass = StructuralRefactorPass()
+        val result = pass.apply(projectDir)
+        val migrated = tempDir.resolve("src/main/java/com/example/CustomBE.java").readText()
+
+        assertTrue(result.changes.any { it.ruleId == "struct-blockentity-holderlookup" })
+        assertTrue(migrated.contains("import net.minecraft.core.HolderLookup;"))
+        assertTrue(migrated.contains("protected void saveAdditional(@NotNull CompoundTag tag, HolderLookup.Provider registries)"))
+        assertTrue(migrated.contains("protected void loadAdditional(@NotNull CompoundTag tag, HolderLookup.Provider registries)"))
+        assertTrue(migrated.contains("public @NotNull CompoundTag getUpdateTag(HolderLookup.Provider registries)"))
+        assertTrue(migrated.contains("public void handleUpdateTag(@NotNull CompoundTag tag, HolderLookup.Provider lookupProvider)"))
+        assertTrue(migrated.contains("public void onDataPacket(@NotNull Connection net, @NotNull ClientboundBlockEntityDataPacket pkt, HolderLookup.Provider lookupProvider)"))
+        assertTrue(migrated.contains("CompoundTag tag = pkt.getTag();"))
+        assertTrue(migrated.contains("ContainerHelper.saveAllItems(tag, this.items, registries);"))
+        assertTrue(migrated.contains("ContainerHelper.loadAllItems(tag, this.items, registries);"))
+        assertTrue(migrated.contains("super.saveAdditional(tag, registries);"), migrated)
+        assertTrue(migrated.contains("super.loadAdditional(tag, registries);"), migrated)
+        assertTrue(migrated.contains("CompoundTag tag = super.getUpdateTag(registries);"), migrated)
+        assertTrue(migrated.contains("saveAdditional(tag, registries);"), migrated)
+        assertTrue(migrated.contains("CompoundTag copy = this.saveWithoutMetadata(registries);"), migrated)
+        assertTrue(migrated.contains("Component.Serializer.toJson(this.name, registries)"))
+        assertTrue(migrated.contains("Component.Serializer.fromJson(tag.getString(\"Name\"), registries)"))
+        assertTrue(migrated.contains("""String serializerDoc = "Component.Serializer.toJson(this.name)";"""), migrated)
+        assertTrue(migrated.contains("// Component.Serializer.toJson(this.name);"), migrated)
+        assertTrue(migrated.contains("""String parserDoc = "Component.Serializer.fromJson(tag.getString(\"Name\"))";"""), migrated)
+        assertTrue(migrated.contains("// Component.Serializer.fromJson(tag.getString(\"Name\"));"), migrated)
+        assertTrue(migrated.contains("""String updateDoc = "super.getUpdateTag() saveAdditional(tag) saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY)";"""), migrated)
+        assertTrue(migrated.contains("super.getUpdateTag()\n            saveAdditional(tag);\n            this.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY)"), migrated)
+        assertTrue(migrated.contains("// super.getUpdateTag();"), migrated)
+        assertTrue(migrated.contains("// saveAdditional(tag);"), migrated)
+        assertTrue(migrated.contains("// this.saveWithoutMetadata(net.minecraft.core.RegistryAccess.EMPTY);"), migrated)
+        assertTrue(migrated.contains("this.loadAdditional(tag, lookupProvider);"))
+        assertTrue(migrated.contains("this.handleUpdateTag(tag, lookupProvider);"))
+        assertFalse(migrated.contains("ContainerHelper.saveAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);"))
+        assertFalse(migrated.contains("ContainerHelper.loadAllItems(tag, this.items, net.minecraft.core.RegistryAccess.EMPTY);"))
     }

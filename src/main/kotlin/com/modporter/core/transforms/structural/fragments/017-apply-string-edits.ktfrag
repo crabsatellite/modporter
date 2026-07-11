@@ -1,4 +1,18 @@
 
+    private fun applyStringEdits(source: String, edits: List<Pair<IntRange, String>>): String {
+        if (edits.isEmpty()) return source
+        val builder = StringBuilder()
+        var cursor = 0
+        for ((range, replacement) in edits.sortedBy { it.first.first }) {
+            if (range.first < cursor) continue
+            builder.append(source, cursor, range.first)
+            builder.append(replacement)
+            cursor = range.last + 1
+        }
+        builder.append(source, cursor, source.length)
+        return builder.toString()
+    }
+
     private fun wrapVoidLevelStorageDataTagReads(
         source: String,
         levelStorageAccessVariables: Set<String>
