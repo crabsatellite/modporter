@@ -8982,6 +8982,37 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
+    fun `mixin generated capability provider superclass removes private delegate constructor and import`() {
+        val srcDir = tempDir.resolve("src/main/java/com/example")
+        srcDir.createDirectories()
+        srcDir.resolve("EntityMixin.java").writeText("""
+            package com.example;
+
+            import com.modporter.generated.example.compat.CapabilityProvider;
+            import net.minecraft.world.entity.Entity;
+            import org.spongepowered.asm.mixin.Mixin;
+
+            @Mixin(Entity.class)
+            public abstract class EntityMixin extends CapabilityProvider<Entity> {
+                private EntityMixin(Class<Entity> baseClass) {
+                    super(baseClass);
+                }
+
+                public void touch() {
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = srcDir.resolve("EntityMixin.java").readText()
+
+        assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
+        assertTrue(migrated.contains("public abstract class EntityMixin {"), migrated)
+        assertFalse(migrated.contains("CapabilityProvider"), migrated)
+        assertFalse(migrated.contains("EntityMixin(Class<Entity> baseClass)"), migrated)
+    }
+
+    @Test
     fun `entity effect particle rgb velocity migrates to color particle option`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()

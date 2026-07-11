@@ -33660,7 +33660,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         val closeBrace = if (openBrace >= 0) findMatchingBrace(executableCode, openBrace) else -1
         if (openBrace < 0 || closeBrace < 0) return source
         val constructorPattern = Regex(
-            """(?s)\n[ \t]*protected\s+${Regex.escape(className)}\s*\(\s*Class\s*<[^>]+>\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*super\s*\(\s*\1\s*\)\s*;\s*\}\s*"""
+            """(?s)\n[ \t]*(?:public|protected|private)\s+${Regex.escape(className)}\s*\(\s*Class\s*<[^>]+>\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*super\s*\(\s*\1\s*\)\s*;\s*\}\s*"""
         )
         val constructor = constructorPattern.find(source, openBrace) ?: return source
         if (constructor.range.first > closeBrace) return source
@@ -33677,6 +33677,9 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         )
         result = removeImport(result, "net.minecraftforge.common.capabilities.CapabilityProvider")
         result = removeImport(result, "net.neoforged.neoforge.capabilities.CapabilityProvider")
+        result = Regex(
+            """(?m)^[ \t]*import\s+com\.modporter\.generated\.[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.compat\.CapabilityProvider\s*;\s*\r?\n"""
+        ).replace(result, "")
         return result
     }
 
