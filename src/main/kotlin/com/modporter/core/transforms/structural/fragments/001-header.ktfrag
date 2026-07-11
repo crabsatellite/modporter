@@ -383,6 +383,12 @@ class StructuralRefactorPass : Pass {
         }
 
         try {
+            changes.addAll(LegacyPositionImplMigration().migrate(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("PositionImpl value migration error: ${e.message}")
+        }
+
+        try {
             changes.addAll(LegacyTrackingChunkPacketTargetMigration().migrate(projectDir, dryRun))
         } catch (e: Exception) {
             errors.add("Tracking chunk packet target migration error: ${e.message}")
