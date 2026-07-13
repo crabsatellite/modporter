@@ -1,4 +1,67 @@
 
+    private fun migrateGenericRecipeInputImplementations(source: String): String {
+        if (!source.contains("Recipe<Container>") || source.contains("implements CraftingRecipe")) return source
+
+        val id = """[A-Za-z_$][\w$]*"""
+        val parameterPrefix = """(?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*)*(?:final\s+)?"""
+        val methodPattern = Regex(
+            """(?m)^([ \t]*(?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:public|protected|private)\s+(?:boolean|ItemStack)\s+(?:matches|assemble)\s*\(\s*$parameterPrefix)(Container)(\s+($id)\s*,\s*(?:Level|HolderLookup\.Provider)\s+$id\s*\)\s*(?:throws\s+[^{;]+)?\{)"""
+        )
+
+        val replacements = mutableListOf<Pair<IntRange, String>>()
+        methodPattern.findAll(source).forEach { match ->
+            val openBrace = source.indexOf('{', match.range.last)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) return source
+            val body = source.substring(openBrace + 1, closeBrace)
+            val parameterName = match.groupValues[4]
+            if (!recipeInputCompatibleContainerParameterUsage(body, parameterName)) return source
+            replacements.add((match.groups[2]?.range ?: return source) to "RecipeInput")
+            Regex("""(?<![\w$])${Regex.escape(parameterName)}\s*\.\s*getContainerSize\s*\(\s*\)""")
+                .findAll(body)
+                .forEach { call ->
+                    val start = openBrace + 1 + call.range.first
+                    val end = openBrace + 1 + call.range.last
+                    replacements.add((start..end) to "$parameterName.size()")
+                }
+        }
+
+        if (replacements.isEmpty()) return source
+
+        var result = source
+        for ((range, replacement) in replacements.sortedByDescending { it.first.first }) {
+            result = result.substring(0, range.first) + replacement + result.substring(range.last + 1)
+        }
+
+        result = Regex("""Recipe\s*<\s*Container\s*>""").replace(result, "Recipe<RecipeInput>")
+        result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeInput")
+        val withoutContainerImport = removeImport(result, "net.minecraft.world.Container")
+        if (!hasSimpleTypeReference(withoutContainerImport, "Container")) {
+            result = withoutContainerImport
+        }
+        return result
+    }
+
+    private fun collectCustomRecipeInputTypes(javaFiles: List<Path>): Set<String> {
+        val excluded = setOf(
+            "Container",
+            "CraftingContainer",
+            "RecipeInput",
+            "SingleRecipeInput",
+            "CraftingInput"
+        )
+        return javaFiles.flatMap { javaFile ->
+            val source = maskJavaCommentsAndLiterals(javaFile.readText())
+            Regex("""\bimplements\b[^{;]*\bRecipe\s*<\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>""")
+                .findAll(source)
+                .mapNotNull { match ->
+                    val type = match.groupValues[1].substringAfterLast('.')
+                    type.takeIf { it !in excluded }
+                }
+                .toList()
+        }.toSet()
+    }
+
     private fun migrateCustomRecipeInputTypeSource(
         source: String,
         customRecipeInputTypes: Set<String>
@@ -2913,81 +2976,4 @@ $body
         if (!changed) return source
         result = addImportIfMissing(result, "net.minecraft.server.level.ServerLevel")
         return result
-    }
-
-    private fun migrateMobSpawnEquipmentSignatures(source: String): String {
-        if (!source.contains("populateDefaultEquipmentSlots") &&
-            !source.contains("populateDefaultEquipmentEnchantments") &&
-            !source.contains("finalizeSpawn(")) {
-            return source
-        }
-
-        var result = source
-        result = Regex("""super\.finalizeSpawn\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,\)]+)\s*,\s*dataTag\s*\)""")
-            .replace(result) { match ->
-                "super.finalizeSpawn(${match.groupValues[1].trim()}, ${match.groupValues[2].trim()}, ${match.groupValues[3].trim()}, ${match.groupValues[4].trim()})"
-            }
-        result = rewriteLegacyFinalizeSpawnCalls(result)
-        result = Regex("""\b(this\.)?populateDefaultEquipmentSlots\(\s*([A-Za-z_$][\w$]*)\s*,\s*\2\.getRandom\(\)\s*,\s*([^)]+)\)""")
-            .replace(result) { match ->
-                "${match.groupValues[1]}populateDefaultEquipmentSlots(${match.groupValues[2]}.getRandom(), ${match.groupValues[3].trim()})"
-            }
-        result = Regex("""\b(this\.)?populateDefaultEquipmentSlots\(\s*([A-Za-z_$][\w$]*)\.getRandom\(\)\s*,\s*([^)]+)\)""")
-            .replace(result) { match ->
-                "${match.groupValues[1]}populateDefaultEquipmentSlots(${match.groupValues[2]}.getRandom(), ${match.groupValues[3].trim()})"
-            }
-        result = Regex("""\b(this\.)?populateDefaultEquipmentEnchantments\(\s*([A-Za-z_$][\w$]*)\.getRandom\(\)\s*,\s*([^)]+)\)""")
-            .replace(result) { match ->
-                "${match.groupValues[1]}populateDefaultEquipmentEnchantments(${match.groupValues[2]}, ${match.groupValues[2]}.getRandom(), ${match.groupValues[3].trim()})"
-            }
-        result = Regex(
-            """protected\s+void\s+populateDefaultEquipmentSlots\(\s*RandomSource\s+([A-Za-z_$][\w$]*)\s*,\s*DifficultyInstance\s+([A-Za-z_$][\w$]*)\s*\)"""
-        ).replace(result) { match ->
-            "protected void populateDefaultEquipmentSlots(RandomSource ${match.groupValues[1]}, DifficultyInstance ${match.groupValues[2]})"
-        }
-        result = Regex(
-            """protected\s+void\s+populateDefaultEquipmentSlots\(\s*ServerLevelAccessor\s+[A-Za-z_$][\w$]*\s*,\s*RandomSource\s+([A-Za-z_$][\w$]*)\s*,\s*DifficultyInstance\s+([A-Za-z_$][\w$]*)\s*\)"""
-        ).replace(result) { match ->
-            "protected void populateDefaultEquipmentSlots(RandomSource ${match.groupValues[1]}, DifficultyInstance ${match.groupValues[2]})"
-        }
-        result = Regex(
-            """protected\s+void\s+populateDefaultEquipmentEnchantments\(\s*RandomSource\s+([A-Za-z_$][\w$]*)\s*,\s*DifficultyInstance\s+([A-Za-z_$][\w$]*)\s*\)"""
-        ).replace(result) { match ->
-            "protected void populateDefaultEquipmentEnchantments(ServerLevelAccessor accessor, RandomSource ${match.groupValues[1]}, DifficultyInstance ${match.groupValues[2]})"
-        }
-        if (result.contains("ServerLevelAccessor accessor")) {
-            result = addImportIfMissing(result, "net.minecraft.world.level.ServerLevelAccessor")
-        }
-        return result
-    }
-
-    private fun migrateLegacyFinalizeSpawnEquipmentRandomSource(source: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains("finalizeSpawn(") ||
-            !executableCode.contains("populateDefaultEquipmentSlots(this.random")) {
-            return source
-        }
-        val id = """[A-Za-z_$][\w$]*"""
-        val signature = Regex(
-            """finalizeSpawn\s*\(\s*ServerLevelAccessor\s+($id)\s*,\s*DifficultyInstance\s+($id)\b"""
-        )
-        val edits = mutableListOf<Pair<IntRange, String>>()
-        javaMethodRangesIncludingDefault(executableCode).forEach { method ->
-            if (method.name != "finalizeSpawn") return@forEach
-            val methodText = executableCode.substring(method.range)
-            val signatureMatch = signature.find(methodText) ?: return@forEach
-            val levelName = signatureMatch.groupValues[1]
-            val difficultyName = signatureMatch.groupValues[2]
-            val equipmentCalls = Regex(
-                """([ \t]*)populateDefaultEquipmentSlots\(this\.random,\s*${Regex.escape(difficultyName)}\);\s*\r?\n[ \t]*populateDefaultEquipmentEnchantments\(this\.random,\s*${Regex.escape(difficultyName)}\);"""
-            )
-            equipmentCalls.findAll(methodText).forEach { match ->
-                val indent = match.groupValues[1]
-                edits += (method.range.first + match.range.first)..(method.range.first + match.range.last) to
-                    "${indent}RandomSource randomsource = $levelName.getRandom();\n" +
-                    "${indent}populateDefaultEquipmentSlots(randomsource, $difficultyName);\n" +
-                    "${indent}populateDefaultEquipmentEnchantments($levelName, randomsource, $difficultyName);"
-            }
-        }
-        return applyStringEdits(source, edits)
     }

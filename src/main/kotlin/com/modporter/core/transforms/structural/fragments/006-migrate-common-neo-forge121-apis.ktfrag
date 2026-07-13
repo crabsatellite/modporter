@@ -70,7 +70,13 @@
         val placementModifierTypeHolderFields = collectPlacementModifierTypeRegistryFields(javaFiles)
         val legacyLootTableResourceLocationReferences = collectLegacyLootTableResourceLocationReferences(javaFiles)
         val inbtSerializableTypeFqns = collectProjectINBTSerializableTypes(javaFiles)
-        val itemStackNbtMethods = collectItemStackNbtMethodsNeedingHolderLookup(javaFiles, javaInheritanceIndex)
+        val providerAwareNbtMethods = collectProviderAwareNbtMethodContracts(
+            javaFiles,
+            inbtSerializableTypeFqns,
+            javaInheritanceIndex
+        )
+        val itemStackNbtMethods = collectItemStackNbtMethodsNeedingHolderLookup(javaFiles, javaInheritanceIndex) +
+            providerAwareNbtMethods
         val itemStackNbtConstructors = collectItemStackNbtConstructorsNeedingHolderLookup(javaFiles, itemStackNbtMethods, javaInheritanceIndex)
         val constructorFactoryMethods = collectHolderLookupConstructorFactoryMethods(javaFiles, itemStackNbtConstructors, javaInheritanceIndex)
         val savedDataHolderLookupMethods = collectSavedDataHolderLookupMethods(javaFiles, savedDataClassNames)
@@ -80,6 +86,10 @@
             savedDataHolderLookupMethods +
             existingHolderLookupNbtMethods
         val entityCapabilityTypes = collectEntityCapabilityValueTypes(javaFiles)
+        val entityDataValueTypes = mergeEntityDataValueTypes(
+            entityCapabilityTypes,
+            collectEntityAttachmentValueTypes(javaFiles)
+        )
 
         javaFiles.forEach { javaFile ->
                 val original = javaFile.readText()
@@ -579,6 +589,7 @@
                     itemStackNbtConstructors = itemStackNbtConstructors,
                     mobEffectDeferredHolderFields = mobEffectDeferredHolderFields,
                     entityCapabilityTypes = entityCapabilityTypes,
+                    entityDataValueTypes = entityDataValueTypes,
                     projectModIdExpression = explicitModIdReferenceForGeneratedClass(
                         mainClass,
                         mainText,
@@ -2976,19 +2987,4 @@ public final class $helperClass {
 $methods
 }
 """
-    }
-
-    private fun mobCategoryEnumExtensionMethod(extension: LegacyMobCategoryExtension): String {
-        return """
-	public static Object ${extension.methodName}(int idx, Class<?> type) {
-		return switch (idx) {
-			case 0 -> "${extension.serializedName}";
-			case 1 -> ${extension.maxInstances};
-			case 2 -> ${extension.friendly};
-			case 3 -> ${extension.persistent};
-			case 4 -> ${extension.despawnDistance};
-			default -> throw new IllegalArgumentException("Unexpected parameter index: " + idx);
-		};
-	}
-        """.trimEnd()
     }

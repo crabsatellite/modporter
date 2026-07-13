@@ -1,4 +1,19 @@
 
+    private fun mobCategoryEnumExtensionMethod(extension: LegacyMobCategoryExtension): String {
+        return """
+	public static Object ${extension.methodName}(int idx, Class<?> type) {
+		return switch (idx) {
+			case 0 -> "${extension.serializedName}";
+			case 1 -> ${extension.maxInstances};
+			case 2 -> ${extension.friendly};
+			case 3 -> ${extension.persistent};
+			case 4 -> ${extension.despawnDistance};
+			default -> throw new IllegalArgumentException("Unexpected parameter index: " + idx);
+		};
+	}
+        """.trimEnd()
+    }
+
     private fun mergeMobCategoryEnumExtensionHelperMethods(
         existing: String,
         extensions: List<LegacyMobCategoryExtension>
@@ -2964,23 +2979,4 @@ ${entries.joinToString(",\n")}
             result = addImportIfMissing(result, "net.minecraft.core.HolderLookup")
         }
         return result
-    }
-
-    private fun collectHolderLookupCompoundTagMethods(javaFiles: List<Path>): Set<String> {
-        val id = """[A-Za-z_$][\w$]*"""
-        val pattern = Regex(
-            """(?m)^[ \t]*(?:@[^\r\n]+\r?\n[ \t]*)*(?:(?:public|protected|private|default|static|final|abstract)\s+)*void\s+($id)\s*\(\s*(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*(?:net\.minecraft\.nbt\.)?CompoundTag\s+$id\s*,\s*(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*(?:net\.minecraft\.core\.)?HolderLookup\.Provider\s+$id\s*\)"""
-        )
-        val texts = javaFiles.asSequence()
-            .map { runCatching { it.readText() }.getOrDefault("") }
-            .toList()
-        val projectDeclared = texts.asSequence()
-            .flatMap { pattern.findAll(it).map { match -> match.groupValues[1] } }
-            .toSet()
-        val nitrogenBossMobMethods = if (texts.any { it.contains("com.aetherteam.nitrogen.entity.BossMob") }) {
-            setOf("addBossSaveData", "readBossSaveData")
-        } else {
-            emptySet()
-        }
-        return projectDeclared + nitrogenBossMobMethods
     }

@@ -1,4 +1,584 @@
 
+    private fun collectNitrogenPropertyMapParameterPositions(source: String): Map<String, Set<Int>> {
+        val positionsByMethod = linkedMapOf<String, MutableSet<Int>>()
+        val methodPattern = Regex(
+            """(?m)^[ \t]*(?:public|protected|private)\s+([\w<>\[\].?,\s]+?)\s+([A-Za-z_$][\w$]*)\s*\("""
+        )
+        methodPattern.findAll(source).forEach { match ->
+            val openParen = source.indexOf('(', match.range.last - 1)
+            if (openParen < 0) return@forEach
+            val closeParen = findMatchingParen(source, openParen)
+            if (closeParen < 0) return@forEach
+            val returnType = match.groupValues[1].trim()
+            val methodName = match.groupValues[2]
+            if (returnType.substringAfterLast('.').contains("BlockPropertyPair")) return@forEach
+            val params = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            params.forEachIndexed { index, param ->
+                if (Regex("""\b(?:Map|Reference2ObjectArrayMap)\s*<\s*Property\s*<\s*\?\s*>\s*,\s*Comparable\s*<\s*\?\s*>\s*>""").containsMatchIn(param)) {
+                    positionsByMethod.getOrPut(methodName) { linkedSetOf() }.add(index)
+                }
+            }
+        }
+        return positionsByMethod.mapValues { it.value.toSet() }
+    }
+
+    private fun collectNitrogenPropertyMapParameterPositions(sources: Iterable<String>): Map<String, Set<Int>> {
+        val positionsByMethod = linkedMapOf<String, MutableSet<Int>>()
+        sources.forEach { source ->
+            collectNitrogenPropertyMapParameterPositions(source).forEach { (methodName, positions) ->
+                positionsByMethod.getOrPut(methodName) { linkedSetOf() }.addAll(positions)
+            }
+        }
+        return positionsByMethod.mapValues { it.value.toSet() }
+    }
+
+    private fun mergeNitrogenPropertyMapParameterPositions(
+        first: Map<String, Set<Int>>,
+        second: Map<String, Set<Int>>
+    ): Map<String, Set<Int>> {
+        if (first.isEmpty()) return second
+        if (second.isEmpty()) return first
+        val merged = linkedMapOf<String, MutableSet<Int>>()
+        listOf(first, second).forEach { map ->
+            map.forEach { (methodName, positions) ->
+                merged.getOrPut(methodName) { linkedSetOf() }.addAll(positions)
+            }
+        }
+        return merged.mapValues { it.value.toSet() }
+    }
+
+    private fun nitrogenPropertyMapOptionalExpression(expression: String, propertyVariables: Set<String>): String? {
+        val trimmed = expression.trim()
+        if (trimmed in propertyVariables) return "Optional.of($trimmed)"
+        val mapCall = Regex("""Map\.of\s*\((.*)\)\s*""", RegexOption.DOT_MATCHES_ALL).matchEntire(trimmed) ?: return null
+        val args = splitTopLevelJavaArgs(mapCall.groupValues[1]).map { it.trim() }.filter { it.isNotEmpty() }
+        if (args.isEmpty()) return "Optional.empty()"
+        if (args.size % 2 != 0) return null
+        val keys = args.filterIndexed { index, _ -> index % 2 == 0 }.joinToString(", ")
+        val values = args.filterIndexed { index, _ -> index % 2 == 1 }.joinToString(", ")
+        return "Optional.of(new Reference2ObjectArrayMap<>(new Property<?>[]{$keys}, new Comparable<?>[]{$values}))"
+    }
+
+    private fun nitrogenPropertyMapDirectExpression(expression: String, propertyVariables: Set<String>): String? {
+        val trimmed = expression.trim()
+        if (trimmed in propertyVariables) return trimmed
+        val optionalExpression = nitrogenPropertyMapOptionalExpression(trimmed, propertyVariables) ?: return null
+        if (optionalExpression == "Optional.empty()") return "new Reference2ObjectArrayMap<>()"
+        return optionalExpression.removePrefix("Optional.of(").removeSuffix(")")
+    }
+
+    private fun migrateLegacyRecipeOutputBuilders(projectDir: Path, dryRun: Boolean): List<Change> {
+        val changes = mutableListOf<Change>()
+        val javaFiles = Files.walk(projectDir)
+            .filter { it.extension == "java" }
+            .filter { !projectDir.relativize(it).toString().replace('\\', '/').let { rel ->
+                rel.startsWith("build/") || rel.contains("/build/")
+            }}
+            .toList()
+        val recipeConstructors = collectRecipeConstructors(javaFiles)
+        val recipeSerializerFactoryHints = collectRecipeSerializerFactoryHints(projectDir)
+        val recipeBuilderFactoryInterfaces = collectRecipeBuilderFactoryInterfaceHints(
+            javaFiles,
+            recipeSerializerFactoryHints
+        )
+
+        for (file in javaFiles) {
+            val original = file.readText()
+            var content = migrateRecipeSerializerFactoryCallSites(original, recipeSerializerFactoryHints)
+            content = migrateGenericCookingRecipeOutputBuilderSource(
+                content,
+                recipeSerializerFactoryHints,
+                recipeBuilderFactoryInterfaces
+            )
+            if (content != original) {
+                changes.add(Change(
+                    file = file,
+                    line = 0,
+                    description = "Migrate serializer-backed cooking builders to explicit recipe factories",
+                    before = "builder methods keep only a RecipeSerializer and emit Result adapters",
+                    after = "builder methods accept a serializer-derived factory and emit RecipeOutput recipe instances",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-recipe-builder-factory-output"
+                ))
+                if (!dryRun) {
+                    file.writeText(content)
+                }
+            }
+        }
+
+        val acceptPattern = Regex(
+            """(?s)([ \t]*)consumer\.accept\(\s*new\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.Result)\((.*?)\)\s*\);"""
+        )
+        for (file in javaFiles) {
+            var content = file.readText()
+            if (!content.contains("class Result") || !content.contains("RecipeOutput")) continue
+            val original = content
+            content = migrateConstructableRecipeOutputResultAdapters(content, recipeConstructors)
+            if (content != original) {
+                changes.add(Change(
+                    file = file,
+                    line = 0,
+                    description = "Migrate constructable legacy Result adapters to RecipeOutput recipe instances",
+                    before = "output.accept(new Builder.Result(...)); class Result implements RecipeOutput",
+                    after = "output.accept(id, new Recipe(...), advancement); Result adapter removed",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-legacy-recipe-output-result-instance"
+                ))
+                if (!dryRun) {
+                    file.writeText(content)
+                }
+                continue
+            }
+            val resultClassText = legacyRecipeOutputResultClassText(content) ?: continue
+            if (!Regex("""\bprivate\s+final\s+[A-Za-z_$][\w$]*(?:\s*<[^;]+>)?\s+recipe\s*(?:=|;)""").containsMatchIn(resultClassText)) {
+                continue
+            }
+            content = acceptPattern.replace(content) { match ->
+                val indent = match.groupValues[1]
+                val resultType = match.groupValues[2]
+                val args = match.groupValues[3]
+                "${indent}$resultType result = new $resultType($args);\n${indent}consumer.accept(result.getId(), result.recipe, null);"
+            }
+            content = content.replace("class Result implements RecipeOutput", "class Result")
+            content = Regex("""(?m)^[ \t]*@Override\r?\n""").replace(content, "")
+
+            if (content != original) {
+                changes.add(Change(
+                    file = file,
+                    line = 0,
+                    description = "Migrate FinishedRecipe-style Result adapter to RecipeOutput.accept(id, recipe, advancement)",
+                    before = "consumer.accept(new Builder.Result(...)); class Result implements RecipeOutput",
+                    after = "consumer.accept(result.getId(), result.recipe, null); class Result",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-legacy-recipe-output-builder"
+                ))
+                if (!dryRun) {
+                    file.writeText(content)
+                }
+            }
+        }
+
+        changes.addAll(removeUnusedLegacyRecipeOutputResultClasses(javaFiles, dryRun))
+        return changes
+    }
+
+    private data class RecipeConstructorSignature(
+        val className: String,
+        val params: List<JavaParameterInfo>,
+        val defaultsByParam: Map<String, String> = emptyMap()
+    )
+
+    private fun collectRecipeConstructors(javaFiles: List<Path>): Map<String, List<RecipeConstructorSignature>> {
+        val constructors = linkedMapOf<String, MutableList<RecipeConstructorSignature>>()
+        javaFiles.forEach { file ->
+            val source = file.readText()
+            val className = javaTopLevelTypeName(source) ?: return@forEach
+            if (!className.endsWith("Recipe")) return@forEach
+            val constructorDefaults = recipeConstructorDefaults(source)
+            Regex("""(?m)^[ \t]*public\s+${Regex.escape(className)}\s*\(([^()]*)\)""")
+                .findAll(source)
+                .forEach { match ->
+                    val params = parseJavaParameters(match.groupValues[1])
+                    constructors.getOrPut(className) { mutableListOf() }
+                        .add(RecipeConstructorSignature(className, params, constructorDefaults.filterKeys { key ->
+                            params.any { it.name == key }
+                        }))
+                }
+        }
+        return constructors
+    }
+
+    private fun recipeConstructorDefaults(source: String): Map<String, String> {
+        val imports = javaImportsBySimpleName(source)
+        val packageName = packageNameOf(source)
+        val defaults = linkedMapOf<String, String>()
+        Regex("""\.fieldOf\(\s*"([^"]+)"\s*\)\.orElse\(\s*([^)\r\n]+)\s*\)""")
+            .findAll(source)
+            .forEach { match ->
+                defaults[match.groupValues[1]] = qualifyJavaStaticExpression(
+                    match.groupValues[2].trim(),
+                    imports,
+                    packageName
+                )
+            }
+        return defaults
+    }
+
+    private fun javaImportsBySimpleName(source: String): Map<String, String> =
+        Regex("""(?m)^\s*import\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+            .findAll(source)
+            .associate { match -> match.groupValues[1].substringAfterLast('.') to match.groupValues[1] }
+
+    private fun qualifyJavaStaticExpression(
+        expression: String,
+        imports: Map<String, String>,
+        packageName: String?
+    ): String {
+        val match = Regex("""^([A-Za-z_$][\w$]*)\.(.+)$""").find(expression) ?: return expression
+        val owner = match.groupValues[1]
+        val member = match.groupValues[2]
+        val qualifiedOwner = imports[owner] ?: packageName?.let { "$it.$owner" } ?: return expression
+        return "$qualifiedOwner.$member"
+    }
+
+    private fun migrateRecipeSerializerFactoryCallSites(
+        source: String,
+        recipeSerializerFactoryHints: RecipeSerializerFactoryHints
+    ): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (recipeSerializerFactoryHints.fieldToFactory.isEmpty() || !executableCode.contains(".generic(")) return source
+        var changed = false
+        val result = rewriteExecutableJavaCall(source, "generic") { receiver, args ->
+            if (receiver.isBlank() || receiver == "SimpleCookingRecipeBuilder" || args.size < 2) {
+                return@rewriteExecutableJavaCall null
+            }
+            val serializerExpression = normalizeRecipeSerializerExpression(args.last())
+            val factory = recipeSerializerFactoryHints.fieldToFactory[serializerExpression] ?: return@rewriteExecutableJavaCall null
+            changed = true
+            "$receiver.generic(${args.joinToString(", ") { it.trim() }}, $factory)"
+        }
+        return if (changed) result else source
+    }
+
+    private fun migrateGenericCookingRecipeOutputBuilderSource(
+        source: String,
+        recipeSerializerFactoryHints: RecipeSerializerFactoryHints,
+        recipeBuilderFactoryInterfaces: Map<String, Set<RecipeFactoryInterfaceHint>>
+    ): String {
+        if (!source.contains("implements RecipeBuilder") ||
+            !source.contains("RecipeSerializer<? extends AbstractCookingRecipe>") ||
+            !source.contains("class Result implements RecipeOutput") ||
+            !source.contains(".accept(new ")) {
+            return source
+        }
+        val className = javaTopLevelTypeName(source) ?: return source
+        val serializerField = Regex(
+            """private\s+final\s+RecipeSerializer\s*<\s*\?\s+extends\s+AbstractCookingRecipe\s*>\s+([A-Za-z_$][\w$]*)\s*;"""
+        ).find(source)?.groupValues?.get(1) ?: return source
+        val resultClassText = legacyRecipeOutputResultClassText(source) ?: return source
+        val resultConstructor = Regex("""public\s+Result\s*\(([^()]*)\)""")
+            .find(resultClassText)
+            ?: return source
+        val resultParams = parseJavaParameters(resultConstructor.groupValues[1])
+        val factoryHint = referencedRecipeFactoryInterfaces(source, recipeSerializerFactoryHints).singleOrNull()
+            ?: recipeBuilderFactoryInterfaces[className]?.singleOrNull()
+            ?: return source
+        val resultParamTypes = resultParams.associate { it.name to it.type }
+        val outputRecipeArgs = factoryHint.params.map { param ->
+            val resultParam = resultParams.firstOrNull { it.name == param.name } ?: return source
+            val sourceType = resultParamTypes[resultParam.name].orEmpty()
+            RecipeFactoryArgument(resultParam.name, migrateRecipeOutputResultArgument(resultParam.name, sourceType, param.type))
+        }
+
+        var result = source
+        result = Regex(
+            """private\s+final\s+RecipeSerializer\s*<\s*\?\s+extends\s+AbstractCookingRecipe\s*>\s+${Regex.escape(serializerField)}\s*;"""
+        ).replace(result, "private final ${factoryHint.type} factory;")
+
+        result = addFactoryParameterToBuilderConstructor(result, className, serializerField, factoryHint.type)
+        result = addFactoryParameterToStaticBuilderMethods(result, className, serializerField, factoryHint.type)
+        result = result.replace("this.$serializerField = $serializerField;", "this.factory = ${serializerField}Factory;")
+
+        val acceptPattern = Regex("""(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.accept\(\s*new\s+(?:${Regex.escape(className)}\.)?Result\s*\(""")
+        var cursor = 0
+        var changed = false
+        while (true) {
+            val match = acceptPattern.find(result, cursor) ?: break
+            val openParen = result.indexOf('(', match.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(result, openParen) else -1
+            if (openParen < 0 || closeParen < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val acceptClose = nextNonWhitespaceIndex(result, closeParen + 1)
+            if (acceptClose < 0 || result[acceptClose] != ')') {
+                cursor = closeParen + 1
+                continue
+            }
+            val semicolon = nextNonWhitespaceIndex(result, acceptClose + 1)
+            if (semicolon < 0 || result[semicolon] != ';') {
+                cursor = closeParen + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen)).map { it.trim() }
+            if (args.size != resultParams.size) {
+                cursor = closeParen + 1
+                continue
+            }
+            val argsByName = resultParams.mapIndexed { index, param -> param.name to args[index] }.toMap()
+            val idExpression = argsByName["id"] ?: argsByName["recipeId"]
+            if (idExpression == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            val advancement = argsByName["advancement"]
+            val advancementId = argsByName["advancementId"]
+            val advancementExpression = if (advancement != null && advancementId != null) {
+                "$advancement.build($advancementId)"
+            } else {
+                "null"
+            }
+            val factoryArgs = outputRecipeArgs.joinToString(", ") { argument ->
+                val expression = argsByName[argument.sourceName] ?: return@joinToString argument.expression
+                Regex("""\b${Regex.escape(argument.sourceName)}\b""").replace(argument.expression, expression)
+            }
+            val indent = match.groupValues[1]
+            val output = match.groupValues[2]
+            val replacement = "${indent}AbstractCookingRecipe recipe = this.factory.create($factoryArgs);\n" +
+                "${indent}$output.accept($idExpression, recipe, $advancementExpression);"
+            result = result.substring(0, match.range.first) + replacement + result.substring(semicolon + 1)
+            cursor = match.range.first + replacement.length
+            changed = true
+        }
+        if (!changed) return source
+        result = removeLegacyResultClass(result)
+        var withoutJsonObjectImport = removeImport(result, "com.google.gson.JsonObject")
+        if (!Regex("""\bJsonObject\b""").containsMatchIn(withoutJsonObjectImport)) {
+            result = withoutJsonObjectImport
+        }
+        var withoutJsonOpsImport = removeImport(result, "com.mojang.serialization.JsonOps")
+        if (!Regex("""\bJsonOps\b""").containsMatchIn(withoutJsonOpsImport)) {
+            result = withoutJsonOpsImport
+        }
+        result = removeImport(result, "java.util.function.Consumer")
+        if (result.contains("new ItemStack(")) {
+            result = addImportIfMissing(result, "net.minecraft.world.item.ItemStack")
+        }
+        return result
+    }
+
+    private data class RecipeFactoryArgument(
+        val sourceName: String,
+        val expression: String
+    )
+
+    private fun referencedRecipeFactoryInterfaces(
+        source: String,
+        recipeSerializerFactoryHints: RecipeSerializerFactoryHints
+    ): Set<RecipeFactoryInterfaceHint> =
+        Regex("""\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\.get\s*\(\s*\)""")
+            .findAll(source)
+            .mapNotNull { match ->
+                recipeSerializerFactoryHints.fieldToFactoryInterface[match.groupValues[1]]
+            }
+            .toSet()
+
+    private fun collectRecipeBuilderFactoryInterfaceHints(
+        javaFiles: List<Path>,
+        recipeSerializerFactoryHints: RecipeSerializerFactoryHints
+    ): Map<String, Set<RecipeFactoryInterfaceHint>> {
+        if (recipeSerializerFactoryHints.fieldToFactoryInterface.isEmpty()) return emptyMap()
+        val hintsByBuilder = linkedMapOf<String, MutableSet<RecipeFactoryInterfaceHint>>()
+        val callPattern = Regex("""\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.generic\s*\(""")
+        for (javaFile in javaFiles) {
+            val source = maskJavaCommentsAndLiterals(javaFile.readText())
+            if (!source.contains(".generic(")) continue
+            var cursor = 0
+            while (true) {
+                val match = callPattern.find(source, cursor) ?: break
+                val openParen = source.indexOf('(', match.range.last - 1)
+                val closeParen = if (openParen >= 0) findMatchingParen(source, openParen) else -1
+                if (openParen < 0 || closeParen < 0) {
+                    cursor = match.range.last + 1
+                    continue
+                }
+                val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                val serializerExpression = args.lastOrNull()?.let(::normalizeRecipeSerializerExpression)
+                val hint = serializerExpression
+                    ?.let { recipeSerializerFactoryHints.fieldToFactoryInterface[it] }
+                if (hint != null) {
+                    val builderClass = match.groupValues[1].substringAfterLast('.')
+                    hintsByBuilder.getOrPut(builderClass) { linkedSetOf() }.add(hint)
+                }
+                cursor = closeParen + 1
+            }
+        }
+        return hintsByBuilder.mapValues { it.value.toSet() }
+    }
+
+    private fun addFactoryParameterToBuilderConstructor(
+        source: String,
+        className: String,
+        serializerParam: String,
+        factoryType: String
+    ): String =
+        Regex("""(?s)(public\s+${Regex.escape(className)}\s*\((?:[^()]|\([^()]*\))*RecipeSerializer\s*<\s*\?\s+extends\s+AbstractCookingRecipe\s*>\s+${Regex.escape(serializerParam)})(\s*\))""")
+            .replace(source) { match ->
+                if (match.groupValues[1].contains("${serializerParam}Factory")) {
+                    match.value
+                } else {
+                    "${match.groupValues[1]}, $factoryType ${serializerParam}Factory${match.groupValues[2]}"
+                }
+            }
+
+    private fun addFactoryParameterToStaticBuilderMethods(
+        source: String,
+        className: String,
+        serializerParam: String,
+        factoryType: String
+    ): String {
+        var result = source
+        val methodPattern = Regex(
+            """(?s)(public\s+static\s+${Regex.escape(className)}\s+[A-Za-z_$][\w$]*\s*\((?:[^()]|\([^()]*\))*RecipeSerializer\s*<\s*\?\s+extends\s+AbstractCookingRecipe\s*>\s+${Regex.escape(serializerParam)})(\s*\))"""
+        )
+        result = methodPattern.replace(result) { match ->
+            if (match.groupValues[1].contains("${serializerParam}Factory")) {
+                match.value
+            } else {
+                "${match.groupValues[1]}, $factoryType ${serializerParam}Factory${match.groupValues[2]}"
+            }
+        }
+        return addFactoryArgumentToConstructorCalls(result, className, serializerParam)
+    }
+
+    private fun addFactoryArgumentToConstructorCalls(
+        source: String,
+        className: String,
+        serializerParam: String
+    ): String {
+        var result = source
+        var cursor = 0
+        val token = "new $className("
+        while (true) {
+            val tokenIndex = result.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + "new $className".length
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            val serializerIndex = args.indexOfFirst { it.trim() == serializerParam }
+            if (serializerIndex < 0 || args.any { it.trim() == "${serializerParam}Factory" }) {
+                cursor = closeParen + 1
+                continue
+            }
+            val migrated = args.toMutableList()
+            migrated.add(serializerIndex + 1, "${serializerParam}Factory")
+            val replacement = "new $className(${migrated.joinToString(", ") { it.trim() }})"
+            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
+            cursor = tokenIndex + replacement.length
+        }
+        return result
+    }
+
+    private fun normalizeRecipeSerializerExpression(expression: String): String =
+        expression.trim()
+            .removeSuffix(".get()")
+
+    private fun migrateConstructableRecipeOutputResultAdapters(
+        source: String,
+        recipeConstructors: Map<String, List<RecipeConstructorSignature>>
+    ): String {
+        if (!source.contains("RecipeOutput") || !source.contains(".accept(new ")) return source
+        val resultClassText = legacyRecipeOutputResultClassText(source) ?: return source
+        val resultConstructor = Regex("""public\s+Result\s*\(([^()]*)\)""")
+            .find(resultClassText)
+            ?: return source
+        val resultParams = parseJavaParameters(resultConstructor.groupValues[1])
+        if (resultParams.isEmpty()) return source
+        val recipeCandidates = legacyResultRecipeClassCandidates(source, resultClassText, recipeConstructors)
+        if (recipeCandidates.isEmpty()) return source
+
+        var result = source
+        var changed = false
+        var cursor = 0
+        val acceptPattern = Regex("""(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.accept\(\s*new\s+((?:[A-Za-z_$][\w$]*\.)*Result)\s*\(""")
+        while (true) {
+            val match = acceptPattern.find(result, cursor) ?: break
+            val openParen = result.indexOf('(', match.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(result, openParen) else -1
+            if (openParen < 0 || closeParen < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val acceptClose = nextNonWhitespaceIndex(result, closeParen + 1)
+            if (acceptClose < 0 || result[acceptClose] != ')') {
+                cursor = closeParen + 1
+                continue
+            }
+            val semicolon = nextNonWhitespaceIndex(result, acceptClose + 1)
+            if (semicolon < 0 || result[semicolon] != ';') {
+                cursor = closeParen + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen)).map { it.trim() }
+            if (args.size != resultParams.size) {
+                cursor = closeParen + 1
+                continue
+            }
+            val argsByName = resultParams.mapIndexed { index, param -> param.name to args[index] }.toMap()
+            val migration = recipeCandidates.asSequence()
+                .flatMap { candidate -> recipeConstructors[candidate].orEmpty().asSequence() }
+                .mapNotNull { constructor -> recipeOutputResultRecipeConstruction(constructor, resultParams, argsByName) }
+                .firstOrNull()
+            if (migration == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            val output = match.groupValues[2]
+            val replacement = "${match.groupValues[1]}$output.accept(${migration.idExpression}, ${migration.recipeExpression}, ${migration.advancementExpression});"
+            result = result.substring(0, match.range.first) + replacement + result.substring(semicolon + 1)
+            cursor = match.range.first + replacement.length
+            changed = true
+        }
+        if (!changed) return source
+        result = removeLegacyResultClass(result)
+        val withoutJsonObjectImport = removeImport(result, "com.google.gson.JsonObject")
+        if (!Regex("""\bJsonObject\b""").containsMatchIn(withoutJsonObjectImport)) {
+            result = withoutJsonObjectImport
+        }
+        val withoutJsonOpsImport = removeImport(result, "com.mojang.serialization.JsonOps")
+        if (!Regex("""\bJsonOps\b""").containsMatchIn(withoutJsonOpsImport)) {
+            result = withoutJsonOpsImport
+        }
+        if (result.contains("Optional.ofNullable(")) {
+            result = addImportIfMissing(result, "java.util.Optional")
+        }
+        return result
+    }
+
+    private data class RecipeOutputResultConstruction(
+        val idExpression: String,
+        val recipeExpression: String,
+        val advancementExpression: String
+    )
+
+    private fun recipeOutputResultRecipeConstruction(
+        constructor: RecipeConstructorSignature,
+        resultParams: List<JavaParameterInfo>,
+        argsByName: Map<String, String>
+    ): RecipeOutputResultConstruction? {
+        val resultParamTypes = resultParams.associate { it.name to it.type }
+        val constructorArgs = constructor.params.map { param ->
+            val expression = argsByName[param.name]
+                ?: constructor.defaultsByParam[param.name]
+                ?: return null
+            val sourceType = resultParamTypes[param.name].orEmpty()
+            if (param.name in argsByName) {
+                migrateRecipeOutputResultArgument(expression, sourceType, param.type)
+            } else {
+                expression
+            }
+        }
+        val idExpression = argsByName["id"] ?: argsByName["recipeId"] ?: return null
+        val advancement = argsByName["advancement"]
+        val advancementId = argsByName["advancementId"]
+        val advancementExpression = if (advancement != null && advancementId != null) {
+            "$advancement.build($advancementId)"
+        } else {
+            "null"
+        }
+        return RecipeOutputResultConstruction(
+            idExpression = idExpression,
+            recipeExpression = "new ${constructor.className}(${constructorArgs.joinToString(", ")})",
+            advancementExpression = advancementExpression
+        )
+    }
+
     private fun migrateRecipeOutputResultArgument(expression: String, sourceType: String, targetType: String): String {
         val targetSimple = targetType.substringBefore('<').substringAfterLast('.').trim()
         val sourceSimple = sourceType.substringBefore('<').substringAfterLast('.').trim()

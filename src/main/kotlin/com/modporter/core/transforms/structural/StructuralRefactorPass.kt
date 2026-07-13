@@ -14617,7 +14617,13 @@ $fields
         val placementModifierTypeHolderFields = collectPlacementModifierTypeRegistryFields(javaFiles)
         val legacyLootTableResourceLocationReferences = collectLegacyLootTableResourceLocationReferences(javaFiles)
         val inbtSerializableTypeFqns = collectProjectINBTSerializableTypes(javaFiles)
-        val itemStackNbtMethods = collectItemStackNbtMethodsNeedingHolderLookup(javaFiles, javaInheritanceIndex)
+        val providerAwareNbtMethods = collectProviderAwareNbtMethodContracts(
+            javaFiles,
+            inbtSerializableTypeFqns,
+            javaInheritanceIndex
+        )
+        val itemStackNbtMethods = collectItemStackNbtMethodsNeedingHolderLookup(javaFiles, javaInheritanceIndex) +
+            providerAwareNbtMethods
         val itemStackNbtConstructors = collectItemStackNbtConstructorsNeedingHolderLookup(javaFiles, itemStackNbtMethods, javaInheritanceIndex)
         val constructorFactoryMethods = collectHolderLookupConstructorFactoryMethods(javaFiles, itemStackNbtConstructors, javaInheritanceIndex)
         val savedDataHolderLookupMethods = collectSavedDataHolderLookupMethods(javaFiles, savedDataClassNames)
@@ -14627,6 +14633,10 @@ $fields
             savedDataHolderLookupMethods +
             existingHolderLookupNbtMethods
         val entityCapabilityTypes = collectEntityCapabilityValueTypes(javaFiles)
+        val entityDataValueTypes = mergeEntityDataValueTypes(
+            entityCapabilityTypes,
+            collectEntityAttachmentValueTypes(javaFiles)
+        )
 
         javaFiles.forEach { javaFile ->
                 val original = javaFile.readText()
@@ -15126,6 +15136,7 @@ $fields
                     itemStackNbtConstructors = itemStackNbtConstructors,
                     mobEffectDeferredHolderFields = mobEffectDeferredHolderFields,
                     entityCapabilityTypes = entityCapabilityTypes,
+                    entityDataValueTypes = entityDataValueTypes,
                     projectModIdExpression = explicitModIdReferenceForGeneratedClass(
                         mainClass,
                         mainText,
@@ -20735,7 +20746,11 @@ ${entries.joinToString(",\n")}
                 if (type.fqn in serializableFqns) continue
                 val inheritsSerializable = type.superTypeRefs.any { reference ->
                     val resolved = resolveJavaTypeReference(reference, type.source, type.packageName, knownFqns)
-                    resolved == "net.neoforged.neoforge.common.util.INBTSerializable" ||
+                    isCompoundTagINBTSerializableReference(
+                        reference,
+                        resolved,
+                        type.source
+                    ) ||
                         (resolved != null && resolved in serializableFqns) ||
                         (resolved != null && byFqn[resolved]?.fqn in serializableFqns)
                 }
@@ -20746,6 +20761,26 @@ ${entries.joinToString(",\n")}
             }
         } while (changed)
         return serializableFqns
+    }
+
+    private fun isCompoundTagINBTSerializableReference(
+        reference: String,
+        resolvedReference: String?,
+        ownerSource: String
+    ): Boolean {
+        if (resolvedReference != "net.neoforged.neoforge.common.util.INBTSerializable") return false
+        val genericStart = reference.indexOf('<')
+        val genericEnd = reference.lastIndexOf('>')
+        if (genericStart < 0 || genericEnd <= genericStart) return false
+        val arguments = splitTopLevelJavaArgs(reference.substring(genericStart + 1, genericEnd))
+        if (arguments.size != 1) return false
+        val tagType = arguments.single().trim()
+        if (tagType == "net.minecraft.nbt.CompoundTag") return true
+        if (tagType != "CompoundTag") return false
+        return Regex("""(?m)^[ \t]*import\s+net\.minecraft\.nbt\.CompoundTag\s*;""")
+            .containsMatchIn(ownerSource) ||
+            Regex("""(?m)^[ \t]*import\s+net\.minecraft\.nbt\.\*\s*;""")
+                .containsMatchIn(ownerSource)
     }
 
     private fun javaTypeContracts(source: String): List<JavaTypeContract> {
@@ -22118,6 +22153,7 @@ $migratedRecipes
         itemStackNbtConstructors: Set<HolderLookupNbtConstructor> = emptySet(),
         mobEffectDeferredHolderFields: Set<String> = emptySet(),
         entityCapabilityTypes: Map<String, String> = emptyMap(),
+        entityDataValueTypes: Map<String, String> = emptyMap(),
         projectModIdExpression: String? = null
     ): String {
         var result = source
@@ -22201,9 +22237,9 @@ $migratedRecipes
         result = migrateLegacyClientGuiUtilityApis(result)
         result = migrateLegacyOptionsScreenMixinInitLocalCapture(result)
         result = migrateGeometryLoaderResourceLocationKeys(result)
-        result = migrateProjectItemStackNbtMethods(result, itemStackNbtMethods, javaInheritanceIndex, entityCapabilityTypes, javaMethodReturnTypes)
+        result = migrateProjectItemStackNbtMethods(result, itemStackNbtMethods, javaInheritanceIndex, entityDataValueTypes, javaMethodReturnTypes)
         result = migrateProjectItemStackNbtConstructors(result, itemStackNbtConstructors, itemStackNbtMethods, javaInheritanceIndex)
-        result = migrateProjectItemStackNbtMethods(result, itemStackNbtMethods, javaInheritanceIndex, entityCapabilityTypes, javaMethodReturnTypes)
+        result = migrateProjectItemStackNbtMethods(result, itemStackNbtMethods, javaInheritanceIndex, entityDataValueTypes, javaMethodReturnTypes)
         result = migrateLegacyWalkNodeEvaluatorBlockPathTypeStatic(result)
         result = migrateLegacyItemStackRegistrySerialization(result, javaInheritanceIndex)
         result = migrateFluidTankNbtProviderCalls(result, javaInheritanceIndex)
@@ -33689,7 +33725,8 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
     private data class HolderLookupNbtMethod(
         val owner: String,
         val methodName: String,
-        val parameterCount: Int? = null
+        val parameterCount: Int? = null,
+        val providerParameterIndex: Int? = null
     )
 
     private data class HolderLookupNbtConstructor(
@@ -33703,6 +33740,89 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         if (openParen < 0 || closeParen <= openParen) return 0
         val parameters = methodHeader.substring(openParen + 1, closeParen).trim()
         return if (parameters.isBlank()) 0 else splitTopLevelJavaArgs(parameters).size
+    }
+
+    private fun resolveHolderLookupNbtMethodContract(
+        methods: Collection<HolderLookupNbtMethod>,
+        owner: String?,
+        methodName: String,
+        legacyArgumentCount: Int
+    ): HolderLookupNbtMethod? {
+        if (owner == null) return null
+        val matches = methods.filter { method ->
+            method.owner == owner &&
+                method.methodName == methodName &&
+                (method.parameterCount == null || method.parameterCount == legacyArgumentCount)
+        }
+        if (matches.isEmpty()) return null
+        val providerIndices = matches.map { method ->
+            method.providerParameterIndex ?: legacyArgumentCount
+        }.distinct()
+        if (providerIndices.size != 1) {
+            throw IllegalStateException(
+                "Conflicting HolderLookup.Provider parameter positions for " +
+                    "$owner.$methodName/$legacyArgumentCount: $providerIndices"
+            )
+        }
+        val providerIndex = providerIndices.single()
+        if (providerIndex !in 0..legacyArgumentCount) {
+            throw IllegalStateException(
+                "Invalid HolderLookup.Provider parameter position $providerIndex for " +
+                    "$owner.$methodName/$legacyArgumentCount"
+            )
+        }
+        return matches.first()
+    }
+
+    private fun insertHolderLookupProviderArgument(
+        arguments: List<String>,
+        providerExpression: String,
+        method: HolderLookupNbtMethod
+    ): List<String> {
+        val providerIndex = method.providerParameterIndex ?: arguments.size
+        if (providerIndex !in 0..arguments.size) {
+            throw IllegalStateException(
+                "Invalid HolderLookup.Provider parameter position $providerIndex for " +
+                    "${method.owner}.${method.methodName}/${arguments.size}"
+            )
+        }
+        return arguments.map { it.trim() }.toMutableList().also {
+            it.add(providerIndex, providerExpression.trim())
+        }
+    }
+
+    private fun collectProviderAwareNbtMethodContracts(
+        javaFiles: List<Path>,
+        projectSerializableTypeFqns: Set<String>,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): Set<HolderLookupNbtMethod> {
+        val providerAwareTypeFqns = projectSerializableTypeFqns.toMutableSet()
+        javaFiles.forEach { javaFile ->
+            val source = runCatching { javaFile.readText() }.getOrDefault("")
+            val packageName = packageNameOf(source)
+            val declarations = collectJavaClassDeclarations(source).associateBy { it.name }
+            javaTypeContracts(source).forEach { type ->
+                val declaration = declarations[type.simpleName] ?: return@forEach
+                if (javaClassExtendsAny(declaration, setOf("ItemStackHandler"), javaInheritanceIndex)) {
+                    providerAwareTypeFqns += if (packageName.isBlank()) type.simpleName else "$packageName.${type.simpleName}"
+                }
+            }
+        }
+        val simpleNameCollisions = providerAwareTypeFqns
+            .groupBy { it.substringAfterLast('.') }
+            .filterValues { fqns -> fqns.distinct().size > 1 }
+        if (simpleNameCollisions.isNotEmpty()) {
+            throw IllegalStateException(
+                "Provider-aware NBT type names are ambiguous across packages: $simpleNameCollisions"
+            )
+        }
+        return providerAwareTypeFqns.flatMapTo(linkedSetOf()) { fqn ->
+            val owner = fqn.substringAfterLast('.')
+            listOf(
+                HolderLookupNbtMethod(owner, "serializeNBT", 0, 0),
+                HolderLookupNbtMethod(owner, "deserializeNBT", 1, 0)
+            )
+        }
     }
 
     private fun collectSavedDataHolderLookupMethods(
@@ -33722,7 +33842,8 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                     if (method.range.first !in type.bodyStart..type.end) return@forEach
                     if (method.name != "load" && method.name != "save") return@forEach
                     if (!method.header.contains("CompoundTag") || method.header.contains("HolderLookup.Provider")) return@forEach
-                    result += HolderLookupNbtMethod(type.name, method.name, javaMethodParameterCount(method.header))
+                    val parameterCount = javaMethodParameterCount(method.header)
+                    result += HolderLookupNbtMethod(type.name, method.name, parameterCount, parameterCount)
                 }
             }
         }
@@ -33744,7 +33865,10 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         )
         val candidates = mutableListOf<Candidate>()
         val projectSerializableTypeFqns = collectProjectINBTSerializableTypes(javaFiles)
-        val entityCapabilityTypes = collectEntityCapabilityValueTypes(javaFiles)
+        val entityDataValueTypes = mergeEntityDataValueTypes(
+            collectEntityCapabilityValueTypes(javaFiles),
+            collectEntityAttachmentValueTypes(javaFiles)
+        )
         for (javaFile in javaFiles) {
             val source = runCatching { javaFile.readText() }.getOrDefault("")
             if (!source.contains("CompoundTag")) continue
@@ -33895,8 +34019,20 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 legacyINBTSerializableProviderCallSite(source, offset) ||
                 enclosingProviderAwareConstructorCallSite(source, offset) ||
                 (
-                    capabilityLambdaReceiverOwner(source, offset, receiver.trim(), entityCapabilityTypes) == targetOwner &&
-                        capabilityLambdaRegistryAccess(source, offset, receiver.trim()) != null
+                    entityDataLambdaReceiverOwner(
+                        source,
+                        offset,
+                        receiver.trim(),
+                        entityDataValueTypes,
+                        javaInheritanceIndex
+                    ) == targetOwner &&
+                        entityDataLambdaRegistryAccess(
+                            source,
+                            offset,
+                            receiver.trim(),
+                            entityDataValueTypes,
+                            javaInheritanceIndex
+                        ) != null
                     )
 
         fun hasProviderAwareProjectCallSite(target: Candidate): Boolean {
@@ -33931,7 +34067,13 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                     }
                     val receiver = source.substring(receiverStart, tokenIndex)
                     val receiverOwner = receiverOwnerAt(source, executableCode, receiver, tokenIndex)
-                        ?: capabilityLambdaReceiverOwner(source, tokenIndex, receiver.trim(), entityCapabilityTypes)
+                        ?: entityDataLambdaReceiverOwner(
+                            source,
+                            tokenIndex,
+                            receiver.trim(),
+                            entityDataValueTypes,
+                            javaInheritanceIndex
+                        )
                     if (receiverOwner == target.owner &&
                         providerEvidenceAtCallSite(source, tokenIndex, receiver, target.owner)
                     ) {
@@ -33948,12 +34090,19 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 it.directItemStack &&
                     (isPrivateOrPackagePrivateJavaMethodHeader(it.header) || hasProviderAwareProjectCallSite(it))
             }
-            .mapTo(linkedSetOf()) { HolderLookupNbtMethod(it.owner, it.methodName, it.parameterCount) }
+            .mapTo(linkedSetOf()) {
+                HolderLookupNbtMethod(it.owner, it.methodName, it.parameterCount, it.parameterCount)
+            }
         var changed: Boolean
         do {
             changed = false
             for (candidate in candidates) {
-                val method = HolderLookupNbtMethod(candidate.owner, candidate.methodName, candidate.parameterCount)
+                val method = HolderLookupNbtMethod(
+                    candidate.owner,
+                    candidate.methodName,
+                    candidate.parameterCount,
+                    candidate.parameterCount
+                )
                 if (method in result) continue
                 val methodText = candidate.source.substring(candidate.range)
                 val methodParameters = callableParameters(candidate.source, candidate.range)
@@ -34121,7 +34270,8 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                     missingProvider
                 }
                 if (callsConstructorWithoutProvider) {
-                    result += HolderLookupNbtMethod(owner.name, method.name, javaMethodParameterCount(method.header))
+                    val parameterCount = javaMethodParameterCount(method.header)
+                    result += HolderLookupNbtMethod(owner.name, method.name, parameterCount, parameterCount)
                 }
             }
         }
@@ -34241,6 +34391,56 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         return result
     }
 
+    private fun collectEntityAttachmentValueTypes(javaFiles: List<Path>): Map<String, String> {
+        val result = linkedMapOf<String, String>()
+        val declaration = Regex(
+            """\b(?:java\.util\.function\.)?Supplier\s*<\s*(?:net\.neoforged\.neoforge\.attachment\.)?AttachmentType\s*<\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>\s*>\s+([A-Z][A-Z0-9_]*)\b"""
+        )
+        fun record(key: String, valueType: String) {
+            val previous = result[key]
+            if (previous != null && previous != valueType) {
+                throw IllegalStateException(
+                    "Conflicting entity attachment value types for '$key': $previous and $valueType"
+                )
+            }
+            result[key] = valueType
+        }
+        for (javaFile in javaFiles) {
+            val source = runCatching { javaFile.readText() }.getOrDefault("")
+            val packageName = packageNameOf(source)
+            val topLevel = classNameOfJavaSource(source)
+            declaration.findAll(maskJavaCommentsAndLiterals(source)).forEach { match ->
+                val valueType = match.groupValues[1].substringAfterLast('.')
+                val fieldName = match.groupValues[2]
+                record(fieldName, valueType)
+                if (topLevel != null) {
+                    record("$topLevel.$fieldName", valueType)
+                    if (packageName.isNotBlank()) {
+                        record("$packageName.$topLevel.$fieldName", valueType)
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    private fun mergeEntityDataValueTypes(
+        capabilities: Map<String, String>,
+        attachments: Map<String, String>
+    ): Map<String, String> {
+        val result = linkedMapOf<String, String>()
+        (capabilities.entries + attachments.entries).forEach { (key, valueType) ->
+            val previous = result[key]
+            if (previous != null && previous != valueType) {
+                throw IllegalStateException(
+                    "Conflicting entity data value types for '$key': $previous and $valueType"
+                )
+            }
+            result[key] = valueType
+        }
+        return result
+    }
+
     private fun migrateProjectItemStackNbtConstructors(
         source: String,
         constructors: Set<HolderLookupNbtConstructor>,
@@ -34259,7 +34459,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         val methodOwnerAlternation = methodOwnerNames.joinToString("|") { Regex.escape(it) }
         fun variableTypesIn(text: String): Map<String, String> =
             if (methodOwnerAlternation.isBlank()) emptyMap() else {
-                Regex("""\b($methodOwnerAlternation)\s+([A-Za-z_$][\w$]*)\b""")
+                Regex("""\b(?:[A-Za-z_$][\w$]*\.)*($methodOwnerAlternation)\s+([A-Za-z_$][\w$]*)\b""")
                     .findAll(maskJavaCommentsAndLiterals(text))
                     .associate { it.groupValues[2] to it.groupValues[1] }
         }
@@ -34301,10 +34501,23 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         }
         for (methodName in methodsByName.keys) {
             result = rewriteExecutableJavaCallWithOffset(result, methodName) { receiver, args, offset ->
-                if (args.size != 1 || targetConstructorAt(offset) == null) return@rewriteExecutableJavaCallWithOffset null
+                if (targetConstructorAt(offset) == null) return@rewriteExecutableJavaCallWithOffset null
                 val owner = receiverOwner(receiver) ?: return@rewriteExecutableJavaCallWithOffset null
-                if (methodsByName[methodName].orEmpty().none { it.owner == owner }) return@rewriteExecutableJavaCallWithOffset null
-                "$receiver.$methodName(${args[0].trim()}, registries)"
+                val contract = resolveHolderLookupNbtMethodContract(
+                    methodsByName[methodName].orEmpty(),
+                    owner,
+                    methodName,
+                    args.size
+                ) ?: return@rewriteExecutableJavaCallWithOffset null
+                val providerNames = holderLookupProviderNamesAt(result, offset)
+                if (providerNames.size != 1) {
+                    throw IllegalStateException(
+                        "Constructor call to $owner.$methodName requires exactly one HolderLookup.Provider; " +
+                            "found ${providerNames.size}"
+                    )
+                }
+                val migratedArgs = insertHolderLookupProviderArgument(args, providerNames.single(), contract)
+                "$receiver.$methodName(${migratedArgs.joinToString(", ")})"
             }
         }
 
@@ -34483,7 +34696,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         source: String,
         methods: Set<HolderLookupNbtMethod>,
         javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY,
-        entityCapabilityTypes: Map<String, String> = emptyMap(),
+        entityDataValueTypes: Map<String, String> = emptyMap(),
         javaMethodReturnTypes: Map<String, String> = emptyMap()
     ): String {
         if (methods.isEmpty() || !source.contains("CompoundTag")) return source
@@ -34499,14 +34712,8 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         fun ownerAt(offset: Int): String? =
             typeBlocks.lastOrNull { offset in it.bodyStart..it.end }?.name
 
-        fun isTarget(owner: String?, methodName: String): Boolean =
-            owner != null && methodsByName[methodName]?.any { it.owner == owner } == true
-
-        fun isTarget(owner: String?, methodName: String, argumentCount: Int): Boolean =
-            owner != null && methodsByName[methodName]?.any { target ->
-                target.owner == owner &&
-                    (target.parameterCount == null || target.parameterCount == argumentCount)
-            } == true
+        fun targetContract(owner: String?, methodName: String, argumentCount: Int): HolderLookupNbtMethod? =
+            resolveHolderLookupNbtMethodContract(methodsByName[methodName].orEmpty(), owner, methodName, argumentCount)
 
         var result = source
         var changedSignature = false
@@ -34522,16 +34729,20 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 return@replaceExecutableRegex match.value
             }
             val owner = ownerAt(match.range.first)
-            if (!isTarget(owner, methodName, splitTopLevelJavaArgs(match.groupValues[3]).size)) {
+            val params = match.groupValues[3].trim().let { parameterText ->
+                if (parameterText.isBlank()) emptyList() else splitTopLevelJavaArgs(parameterText)
+            }
+            val contract = targetContract(owner, methodName, params.size)
+            if (contract == null) {
                 return@replaceExecutableRegex match.value
             }
             changedSignature = true
-            val params = match.groupValues[3].trim()
-            val migratedParams = if (params.isBlank()) {
-                "HolderLookup.Provider registries"
-            } else {
-                "$params, HolderLookup.Provider registries"
-            }
+            val providerName = uniqueHolderLookupProviderNameForMethodAt(result, match.range.first, "registries")
+            val migratedParams = insertHolderLookupProviderArgument(
+                params,
+                "HolderLookup.Provider $providerName",
+                contract
+            ).joinToString(", ")
             "${match.groupValues[1]}($migratedParams)"
         }
 
@@ -34539,13 +34750,8 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             registryAccessExpressionAt(result, offset, javaInheritanceIndex)
 
         val ownerAlternation = ownerNames.joinToString("|") { Regex.escape(it) }
-        val variableTypes = if (ownerAlternation.isBlank()) emptyMap() else {
-            Regex("""\b($ownerAlternation)\s+([A-Za-z_$][\w$]*)\b""")
-                .findAll(maskJavaCommentsAndLiterals(result))
-                .associate { it.groupValues[2] to it.groupValues[1] }
-        }
         val getterTypes = if (ownerAlternation.isBlank()) emptyMap() else {
-            Regex("""(?m)\b(?:public|protected|private)\s+($ownerAlternation)\s+([A-Za-z_$][\w$]*)\s*\(\s*\)""")
+            Regex("""(?m)\b(?:public|protected|private)\s+(?:[A-Za-z_$][\w$]*\.)*($ownerAlternation)\s+([A-Za-z_$][\w$]*)\s*\(\s*\)""")
                 .findAll(maskJavaCommentsAndLiterals(result))
                 .associate { "${it.groupValues[2]}()" to it.groupValues[1] }
         }
@@ -34553,6 +34759,19 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             Regex("""\b(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.)?LazyOptional\s*<\s*($ownerAlternation)\s*>\s+([A-Za-z_$][\w$]*)\b""")
                 .findAll(maskJavaCommentsAndLiterals(result))
                 .associate { it.groupValues[2] to it.groupValues[1] }
+        }
+        val fieldTypesByName = JavaParser(
+            ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
+        ).parse(result).let { parsed ->
+            val compilationUnit = parsed.result.orElseThrow {
+                IllegalStateException(
+                    "Cannot parse provider-aware NBT receiver types: ${parsed.problems.joinToString()}"
+                )
+            }
+            compilationUnit.findAll(FieldDeclaration::class.java)
+                .flatMap { it.variables }
+                .groupBy({ it.nameAsString }, { it.typeAsString.substringAfterLast('.') })
+                .mapValues { (_, types) -> types.distinct() }
         }
         val mapEntryValueTypes = if (ownerAlternation.isBlank()) emptyMap() else {
             Regex("""\b(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.)?Map\.Entry\s*<\s*[^,<>]+(?:<[^<>]*>)?\s*,\s*($ownerAlternation)\s*>\s+([A-Za-z_$][\w$]*)\b""")
@@ -34577,44 +34796,117 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         fun receiverOwner(receiver: String, offset: Int): String? {
             val normalized = receiver.trim()
             if (normalized == "this") return ownerAt(offset)
-            capabilityLambdaReceiverOwner(result, offset, normalized, entityCapabilityTypes)?.let { return it }
+            if (normalized == "super") return ownerAt(offset)
+            entityDataLambdaReceiverOwner(
+                result,
+                offset,
+                normalized,
+                entityDataValueTypes,
+                javaInheritanceIndex
+            )?.let { return it }
             staticFactoryReceiverOwner(normalized, methodsByName.values.flatten().map { it.owner }.toSet(), javaMethodReturnTypes)?.let { return it }
             if (normalized in ownerNames) return normalized
-            variableTypes[normalized]?.let { return it }
             lazyOptionalUnwrappedOwner(normalized)?.let { return it }
             mapEntryValueOwner(normalized)?.let { return it }
-            val simpleReceiver = normalized.substringAfterLast('.')
             getterTypes[normalized]?.let { return it }
-            getterTypes[simpleReceiver]?.let { return it }
+            val explicitThisField = Regex("""^this\.([A-Za-z_$][\w$]*)$""").find(normalized)
+            val simpleReceiver = when {
+                explicitThisField != null -> explicitThisField.groupValues[1]
+                Regex("""^[A-Za-z_$][\w$]*$""").matches(normalized) -> normalized
+                else -> return null
+            }
+            fun targetOwner(type: String): String? = type.substringAfterLast('.').takeIf { it in ownerNames }
+            if (explicitThisField == null) {
+                val matchingParameters = currentMethodParametersBeforeOffset(result, offset)
+                    .mapNotNull(::parseJavaParameter)
+                    .filter { (_, name) -> name == simpleReceiver }
+                if (matchingParameters.isNotEmpty()) {
+                    val types = matchingParameters.map { it.first }.distinct()
+                    if (types.size != 1) {
+                        throw IllegalStateException(
+                            "Ambiguous parameter types for provider-aware NBT receiver '$simpleReceiver': $types"
+                        )
+                    }
+                    return targetOwner(types.single())
+                }
+                val method = javaMethodRangesIncludingDefault(result)
+                    .filter { offset in it.range }
+                    .minByOrNull { it.range.last - it.range.first }
+                if (method != null) {
+                    val visiblePrefix = result.substring(method.range.first, offset.coerceAtMost(method.range.last + 1))
+                    val localTypes = javaLocalVariableTypes(visiblePrefix)
+                    if (simpleReceiver in localTypes) {
+                        return targetOwner(localTypes.getValue(simpleReceiver))
+                    }
+                }
+            }
+            val fieldTypes = fieldTypesByName[simpleReceiver].orEmpty()
+            if (fieldTypes.size > 1) {
+                throw IllegalStateException(
+                    "Ambiguous field types for provider-aware NBT receiver '$simpleReceiver': $fieldTypes"
+                )
+            }
+            fieldTypes.singleOrNull()?.let { return targetOwner(it) }
             return null
         }
 
         for (methodName in methodsByName.keys) {
             result = rewriteExecutableJavaCallWithOffset(result, methodName) { receiver, args, offset ->
                 val providerNames = holderLookupProviderNamesAt(result, offset)
-                if (args.isEmpty() || args.any { isHolderLookupProviderExpression(it, providerNames) }) {
+                if (providerNames.size > 1) {
+                    throw IllegalStateException(
+                        "${receiver.trim()}.$methodName requires an unambiguous HolderLookup.Provider; " +
+                            "found ${providerNames.size} in the enclosing method"
+                    )
+                }
+                if (args.any { isHolderLookupProviderExpression(it, providerNames) }) {
                     return@rewriteExecutableJavaCallWithOffset null
                 }
                 val owner = receiverOwner(receiver, offset)
-                if (!isTarget(owner, methodName, args.size)) return@rewriteExecutableJavaCallWithOffset null
-                val registryAccess = capabilityLambdaRegistryAccess(result, offset, receiver)
+                val contract = targetContract(owner, methodName, args.size)
+                    ?: return@rewriteExecutableJavaCallWithOffset null
+                val registryAccess = providerNames.singleOrNull()
+                    ?: entityDataLambdaRegistryAccess(
+                        result,
+                        offset,
+                        receiver.trim(),
+                        entityDataValueTypes,
+                        javaInheritanceIndex
+                    )
                     ?: registryAccessAt(offset)
                     ?: return@rewriteExecutableJavaCallWithOffset null
-                "$receiver.$methodName(${(args.map { it.trim() } + holderLookupProviderArgumentExpression(registryAccess)).joinToString(", ")})"
+                val migratedArgs = insertHolderLookupProviderArgument(
+                    args,
+                    holderLookupProviderArgumentExpression(registryAccess),
+                    contract
+                )
+                "$receiver.$methodName(${migratedArgs.joinToString(", ")})"
             }
             result = rewriteExecutableJavaInvocationArgumentsWithOffset(result, methodName) { args, offset ->
                 val executable = maskJavaCommentsAndLiterals(result)
                 if (offset > 0 && executable[offset - 1] == '.') return@rewriteExecutableJavaInvocationArgumentsWithOffset null
                 if (isJavaCallableDeclarationAt(result, offset, methodName)) return@rewriteExecutableJavaInvocationArgumentsWithOffset null
                 val providerNames = holderLookupProviderNamesAt(result, offset)
+                if (providerNames.size > 1) {
+                    throw IllegalStateException(
+                        "$methodName requires an unambiguous HolderLookup.Provider; " +
+                            "found ${providerNames.size} in the enclosing method"
+                    )
+                }
                 if (args.any { isHolderLookupProviderExpression(it, providerNames) }) {
                     return@rewriteExecutableJavaInvocationArgumentsWithOffset null
                 }
                 val owner = ownerAt(offset)
-                if (!isTarget(owner, methodName, args.size)) return@rewriteExecutableJavaInvocationArgumentsWithOffset null
-                val registryAccess = registryAccessAt(offset)
+                val contract = targetContract(owner, methodName, args.size)
                     ?: return@rewriteExecutableJavaInvocationArgumentsWithOffset null
-                args.map { it.trim() } + holderLookupProviderArgumentExpression(registryAccess)
+                val registryAccess = providerNames.singleOrNull()
+                    ?: registryAccessAt(offset)
+                    ?: return@rewriteExecutableJavaInvocationArgumentsWithOffset null
+                insertHolderLookupProviderArgument(
+                    args,
+                    holderLookupProviderArgumentExpression(registryAccess),
+                    contract
+                )
             }
         }
 
@@ -34663,6 +34955,128 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             return capabilityTypes[capability]
                 ?: capabilityTypes[capability.substringAfterLast('.')]
                 ?: capabilityTypes[capability.takeLastWhile { it.isLetterOrDigit() || it == '_' || it == '$' }]
+        }
+    }
+
+    private data class EntityDataLambdaEvidence(
+        val valueType: String,
+        val registryAccessExpression: String
+    )
+
+    private fun entityDataLambdaReceiverOwner(
+        source: String,
+        offset: Int,
+        receiver: String,
+        entityDataValueTypes: Map<String, String>,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String? = entityDataLambdaEvidence(
+        source,
+        offset,
+        receiver,
+        entityDataValueTypes,
+        javaInheritanceIndex
+    )?.valueType
+
+    private fun entityDataLambdaRegistryAccess(
+        source: String,
+        offset: Int,
+        receiver: String,
+        entityDataValueTypes: Map<String, String>,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String? = entityDataLambdaEvidence(
+        source,
+        offset,
+        receiver,
+        entityDataValueTypes,
+        javaInheritanceIndex
+    )?.registryAccessExpression
+
+    private fun entityDataLambdaEvidence(
+        source: String,
+        offset: Int,
+        receiver: String,
+        entityDataValueTypes: Map<String, String>,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): EntityDataLambdaEvidence? {
+        val capabilityOwner = capabilityLambdaReceiverOwner(source, offset, receiver, entityDataValueTypes)
+        val capabilityProvider = capabilityLambdaRegistryAccess(source, offset, receiver)
+        if (capabilityOwner != null && capabilityProvider != null) {
+            return EntityDataLambdaEvidence(capabilityOwner, capabilityProvider)
+        }
+        return attachmentLambdaEvidence(
+            source,
+            offset,
+            receiver,
+            entityDataValueTypes,
+            javaInheritanceIndex
+        )
+    }
+
+    private fun attachmentLambdaEvidence(
+        source: String,
+        offset: Int,
+        receiver: String,
+        attachmentValueTypes: Map<String, String>,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): EntityDataLambdaEvidence? {
+        if (attachmentValueTypes.isEmpty()) return null
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val token = ".ifPresent("
+        var cursor = 0
+        while (true) {
+            val tokenIndex = executableCode.indexOf(token, cursor)
+            if (tokenIndex < 0) return null
+            val openParen = tokenIndex + ".ifPresent".length
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            if (offset !in openParen..closeParen) {
+                cursor = closeParen + 1
+                continue
+            }
+            val lambdaText = source.substring(openParen + 1, closeParen)
+            val lambdaPattern = Regex("""^\s*\(?\s*${Regex.escape(receiver)}\s*\)?\s*->""")
+            if (!lambdaPattern.containsMatchIn(maskJavaCommentsAndLiterals(lambdaText))) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val ifPresentReceiverStart = findExpressionReceiverStart(executableCode, tokenIndex)
+            if (ifPresentReceiverStart < 0 || ifPresentReceiverStart >= tokenIndex) return null
+            val getDataTokens = mutableListOf<Int>()
+            var dataCursor = ifPresentReceiverStart
+            while (true) {
+                val dataToken = executableCode.indexOf(".getData(", dataCursor)
+                if (dataToken < 0 || dataToken >= tokenIndex) break
+                getDataTokens += dataToken
+                dataCursor = dataToken + ".getData(".length
+            }
+            if (getDataTokens.size != 1) return null
+            val dataToken = getDataTokens.single()
+            val dataOpenParen = dataToken + ".getData".length
+            val dataCloseParen = findMatchingParen(executableCode, dataOpenParen)
+            if (dataCloseParen < 0 || dataCloseParen >= tokenIndex) return null
+            val dataArgs = splitTopLevelJavaArgs(source.substring(dataOpenParen + 1, dataCloseParen))
+            if (dataArgs.size != 1) return null
+            val attachmentKey = dataArgs.single()
+                .trim()
+                .replace(Regex("""\s+"""), "")
+                .removeSuffix(".get()")
+            val valueType = attachmentValueTypes[attachmentKey] ?: return null
+            val entityReceiverStart = findExpressionReceiverStart(executableCode, dataToken)
+            if (entityReceiverStart < 0 || entityReceiverStart >= dataToken) return null
+            val entityReceiver = source.substring(entityReceiverStart, dataToken).trim()
+            if (!Regex("""^(?:this|[A-Za-z_$][\w$]*)$""").matches(entityReceiver)) return null
+            if (!isEntityCapabilityReceiver(executableCode, dataToken, entityReceiver, javaInheritanceIndex)) {
+                return null
+            }
+            val registryAccess = if (entityReceiver == "this") {
+                "this.registryAccess()"
+            } else {
+                "$entityReceiver.registryAccess()"
+            }
+            return EntityDataLambdaEvidence(valueType, registryAccess)
         }
     }
 
@@ -40236,9 +40650,22 @@ ${registrations.joinToString("\n") { "        $it" }}
                     return@forEach
                 }
                 val params = callableParameters(source, method.range)
-                if (params.lastOrNull()?.let(::isHolderLookupProviderParameter) != true) return@forEach
+                val providerIndices = params.withIndex()
+                    .filter { (_, parameter) -> isHolderLookupProviderParameter(parameter) }
+                    .map { it.index }
+                if (providerIndices.isEmpty()) return@forEach
+                if (providerIndices.size != 1) {
+                    throw IllegalStateException(
+                        "${method.name} declares ${providerIndices.size} HolderLookup.Provider parameters"
+                    )
+                }
                 val owner = typeBlocks.lastOrNull { method.range.first in it.bodyStart..it.end } ?: return@forEach
-                result += HolderLookupNbtMethod(owner.name, method.name, params.size - 1)
+                result += HolderLookupNbtMethod(
+                    owner.name,
+                    method.name,
+                    params.size - 1,
+                    providerIndices.single()
+                )
             }
         }
         return result
@@ -40261,12 +40688,17 @@ ${registrations.joinToString("\n") { "        $it" }}
         result = rewriteExecutableJavaCallsInForwarder(result, target) { methodName, receiver, args ->
             val methodTargets = methodsByName[methodName].orEmpty()
             if (receiver != target.dataParameterName ||
-                methodTargets.none { it.parameterCount == null || it.parameterCount == args.size } ||
-                args.any { isHolderLookupProviderExpression(it, setOf(providerName)) }
-            ) {
+                args.any { isHolderLookupProviderExpression(it, setOf(providerName)) }) {
                 null
             } else {
-                "$receiver.$methodName(${(args.map { it.trim() } + providerName).joinToString(", ")})"
+                val contract = resolveHolderLookupNbtMethodContract(
+                    methodTargets,
+                    target.dataType,
+                    methodName,
+                    args.size
+                ) ?: return@rewriteExecutableJavaCallsInForwarder null
+                val migratedArgs = insertHolderLookupProviderArgument(args, providerName, contract)
+                "$receiver.$methodName(${migratedArgs.joinToString(", ")})"
             }
         }
 

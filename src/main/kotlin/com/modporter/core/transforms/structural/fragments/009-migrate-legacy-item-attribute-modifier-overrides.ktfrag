@@ -1,4 +1,43 @@
 
+    private fun wrapRawAttributeModifierMapKeys(source: String): String {
+        if (!source.contains("Multimap<Holder<Attribute>, AttributeModifier>") &&
+            !source.contains("ImmutableMultimap.Builder<Holder<Attribute>, AttributeModifier>") &&
+            !source.contains("ImmutableMultimap<Holder<Attribute>, AttributeModifier>")) {
+            return source
+        }
+        return replaceExecutableRegex(
+            source,
+            Regex("""\b([A-Za-z_$][\w$]*)\.put\(\s*([^,\r\n;]+?)\s*,\s*new\s+AttributeModifier\(""")
+        ) { match ->
+            val key = match.groupValues[2].trim()
+            if (isHolderAttributeExpression(key)) {
+                match.value
+            } else {
+                "${match.groupValues[1]}.put(Holder.direct($key), new AttributeModifier("
+            }
+        }
+    }
+
+    private fun isHolderAttributeExpression(expression: String): Boolean {
+        val normalized = expression.replace(Regex("""\s+"""), "")
+        return normalized.startsWith("Holder.direct(") ||
+            normalized.startsWith("net.minecraft.core.Holder.direct(") ||
+            normalized.startsWith("Attributes.") ||
+            normalized.startsWith("net.minecraft.world.entity.ai.attributes.Attributes.") ||
+            Regex("""^(?:net\.neoforged\.neoforge\.common\.)?NeoForgeMod\.[A-Z0-9_]+$""").matches(normalized) ||
+            normalized.contains(".getHolderOrThrow(") ||
+            normalized.contains(".getOrThrow(") ||
+            normalized.contains("BuiltInRegistries.ATTRIBUTE")
+    }
+
+    private fun unwrapHolderDirectAttributeConstants(source: String): String =
+        replaceExecutableRegex(
+            source,
+            Regex("""\bHolder\.direct\(\s*((?:net\.minecraft\.world\.entity\.ai\.attributes\.)?Attributes\.[A-Z0-9_]+)\s*\)""")
+        ) { match ->
+            match.groupValues[1]
+        }
+
     private fun migrateLegacyItemAttributeModifierOverrides(source: String): String {
         val executableCode = maskJavaCommentsAndLiterals(source)
         if (!executableCode.contains("getAttributeModifiers") ||
@@ -2933,60 +2972,4 @@ $body
         }
         val prefix = if (locals.isEmpty()) "" else locals.joinToString(separator = "\n", postfix = "\n") { "\t\t\t$it" }
         return "($graphicsName, deltaTracker) -> {\n$prefix$body}"
-    }
-
-    private fun migrateRenderGuiLayerEventOverlayApis(source: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains("RenderGuiLayerEvent") &&
-            !executableCode.contains("VanillaGuiOverlay") &&
-            !executableCode.contains("setupOverlayRenderState")) {
-            return source
-        }
-
-        var result = source
-        var needsVanillaGuiLayers = false
-        result = replaceExecutableRegex(
-            result,
-            Regex("""\bVanillaGuiOverlay\.([A-Z0-9_]+)\.type\(\s*\)""")
-        ) { match ->
-            needsVanillaGuiLayers = true
-            "VanillaGuiLayers.${match.groupValues[1]}"
-        }
-        result = replaceExecutableRegex(result, Regex("""\b([A-Za-z_$][\w$]*)\.getOverlay\(\s*\)""")) { match ->
-            "${match.groupValues[1]}.getName()"
-        }
-        result = replaceExecutableRegex(
-            result,
-            Regex("""([A-Za-z_$][\w$]*\.getName\(\s*\))\s*==\s*(VanillaGuiLayers\.[A-Z0-9_]+)""")
-        ) { match ->
-            "${match.groupValues[2]}.equals(${match.groupValues[1]})"
-        }
-        result = replaceExecutableRegex(
-            result,
-            Regex("""([A-Za-z_$][\w$]*\.getName\(\s*\))\s*!=\s*(VanillaGuiLayers\.[A-Z0-9_]+)""")
-        ) { match ->
-            "!${match.groupValues[2]}.equals(${match.groupValues[1]})"
-        }
-        result = replaceExecutableRegex(
-            result,
-            Regex("""(?m)^([ \t]*)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.setupOverlayRenderState\(\s*true\s*,\s*(?:true|false)\s*\)\s*;\s*\r?\n""")
-        ) { match ->
-            "${match.groupValues[1]}RenderSystem.enableBlend();\n"
-        }
-        result = replaceExecutableRegex(
-            result,
-            Regex("""(?m)^([ \t]*)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.setupOverlayRenderState\(\s*false\s*,\s*(?:true|false)\s*\)\s*;\s*\r?\n""")
-        ) { match ->
-            "${match.groupValues[1]}RenderSystem.disableBlend();\n"
-        }
-        if (result == source) return source
-        if (needsVanillaGuiLayers) {
-            result = addImportIfMissing(result, "net.neoforged.neoforge.client.gui.VanillaGuiLayers")
-        }
-        if (result.contains("RenderSystem.") && !source.contains("import com.mojang.blaze3d.systems.RenderSystem;")) {
-            result = addImportIfMissing(result, "com.mojang.blaze3d.systems.RenderSystem")
-        }
-        result = removeImport(result, "net.neoforged.neoforge.client.gui.overlay.VanillaGuiOverlay")
-        result = removeImport(result, "net.minecraftforge.client.gui.overlay.VanillaGuiOverlay")
-        return result
     }

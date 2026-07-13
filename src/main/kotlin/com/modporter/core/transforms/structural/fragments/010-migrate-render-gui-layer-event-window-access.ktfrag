@@ -1,4 +1,60 @@
 
+    private fun migrateRenderGuiLayerEventOverlayApis(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("RenderGuiLayerEvent") &&
+            !executableCode.contains("VanillaGuiOverlay") &&
+            !executableCode.contains("setupOverlayRenderState")) {
+            return source
+        }
+
+        var result = source
+        var needsVanillaGuiLayers = false
+        result = replaceExecutableRegex(
+            result,
+            Regex("""\bVanillaGuiOverlay\.([A-Z0-9_]+)\.type\(\s*\)""")
+        ) { match ->
+            needsVanillaGuiLayers = true
+            "VanillaGuiLayers.${match.groupValues[1]}"
+        }
+        result = replaceExecutableRegex(result, Regex("""\b([A-Za-z_$][\w$]*)\.getOverlay\(\s*\)""")) { match ->
+            "${match.groupValues[1]}.getName()"
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""([A-Za-z_$][\w$]*\.getName\(\s*\))\s*==\s*(VanillaGuiLayers\.[A-Z0-9_]+)""")
+        ) { match ->
+            "${match.groupValues[2]}.equals(${match.groupValues[1]})"
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""([A-Za-z_$][\w$]*\.getName\(\s*\))\s*!=\s*(VanillaGuiLayers\.[A-Z0-9_]+)""")
+        ) { match ->
+            "!${match.groupValues[2]}.equals(${match.groupValues[1]})"
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(?m)^([ \t]*)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.setupOverlayRenderState\(\s*true\s*,\s*(?:true|false)\s*\)\s*;\s*\r?\n""")
+        ) { match ->
+            "${match.groupValues[1]}RenderSystem.enableBlend();\n"
+        }
+        result = replaceExecutableRegex(
+            result,
+            Regex("""(?m)^([ \t]*)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.setupOverlayRenderState\(\s*false\s*,\s*(?:true|false)\s*\)\s*;\s*\r?\n""")
+        ) { match ->
+            "${match.groupValues[1]}RenderSystem.disableBlend();\n"
+        }
+        if (result == source) return source
+        if (needsVanillaGuiLayers) {
+            result = addImportIfMissing(result, "net.neoforged.neoforge.client.gui.VanillaGuiLayers")
+        }
+        if (result.contains("RenderSystem.") && !source.contains("import com.mojang.blaze3d.systems.RenderSystem;")) {
+            result = addImportIfMissing(result, "com.mojang.blaze3d.systems.RenderSystem")
+        }
+        result = removeImport(result, "net.neoforged.neoforge.client.gui.overlay.VanillaGuiOverlay")
+        result = removeImport(result, "net.minecraftforge.client.gui.overlay.VanillaGuiOverlay")
+        return result
+    }
+
     private fun migrateRenderGuiLayerEventWindowAccess(source: String): String {
         val executableCode = maskJavaCommentsAndLiterals(source)
         if (!executableCode.contains("RenderGuiLayerEvent") || !executableCode.contains(".getWindow()")) return source
@@ -2927,67 +2983,4 @@ ${indent}}"""
             }
         }
         return result
-    }
-
-    private fun migrateGenericRecipeInputImplementations(source: String): String {
-        if (!source.contains("Recipe<Container>") || source.contains("implements CraftingRecipe")) return source
-
-        val id = """[A-Za-z_$][\w$]*"""
-        val parameterPrefix = """(?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*)*(?:final\s+)?"""
-        val methodPattern = Regex(
-            """(?m)^([ \t]*(?:@[A-Za-z0-9_.]+(?:\([^)]*\))?\s*\r?\n[ \t]*)*(?:public|protected|private)\s+(?:boolean|ItemStack)\s+(?:matches|assemble)\s*\(\s*$parameterPrefix)(Container)(\s+($id)\s*,\s*(?:Level|HolderLookup\.Provider)\s+$id\s*\)\s*(?:throws\s+[^{;]+)?\{)"""
-        )
-
-        val replacements = mutableListOf<Pair<IntRange, String>>()
-        methodPattern.findAll(source).forEach { match ->
-            val openBrace = source.indexOf('{', match.range.last)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
-            if (openBrace < 0 || closeBrace < 0) return source
-            val body = source.substring(openBrace + 1, closeBrace)
-            val parameterName = match.groupValues[4]
-            if (!recipeInputCompatibleContainerParameterUsage(body, parameterName)) return source
-            replacements.add((match.groups[2]?.range ?: return source) to "RecipeInput")
-            Regex("""(?<![\w$])${Regex.escape(parameterName)}\s*\.\s*getContainerSize\s*\(\s*\)""")
-                .findAll(body)
-                .forEach { call ->
-                    val start = openBrace + 1 + call.range.first
-                    val end = openBrace + 1 + call.range.last
-                    replacements.add((start..end) to "$parameterName.size()")
-                }
-        }
-
-        if (replacements.isEmpty()) return source
-
-        var result = source
-        for ((range, replacement) in replacements.sortedByDescending { it.first.first }) {
-            result = result.substring(0, range.first) + replacement + result.substring(range.last + 1)
-        }
-
-        result = Regex("""Recipe\s*<\s*Container\s*>""").replace(result, "Recipe<RecipeInput>")
-        result = addImportIfMissing(result, "net.minecraft.world.item.crafting.RecipeInput")
-        val withoutContainerImport = removeImport(result, "net.minecraft.world.Container")
-        if (!hasSimpleTypeReference(withoutContainerImport, "Container")) {
-            result = withoutContainerImport
-        }
-        return result
-    }
-
-    private fun collectCustomRecipeInputTypes(javaFiles: List<Path>): Set<String> {
-        val excluded = setOf(
-            "Container",
-            "CraftingContainer",
-            "RecipeInput",
-            "SingleRecipeInput",
-            "CraftingInput"
-        )
-        return javaFiles.flatMap { javaFile ->
-            val source = maskJavaCommentsAndLiterals(javaFile.readText())
-            Regex("""\bimplements\b[^{;]*\bRecipe\s*<\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>""")
-                .findAll(source)
-                .mapNotNull { match ->
-                    val type = match.groupValues[1].substringAfterLast('.')
-                    type.takeIf { it !in excluded }
-                }
-                .toList()
-        }.toSet()
     }

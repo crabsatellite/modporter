@@ -1,4 +1,470 @@
 
+    private fun ensureModporterFluidSpritesHelper(source: String): String {
+        val helperName = "modporter${'$'}getFluidSprites"
+        if (Regex("""\bprivate\s+static\s+net\.minecraft\.client\.renderer\.texture\.TextureAtlasSprite\[\]\s+${Regex.escape(helperName)}\s*\(""")
+                .containsMatchIn(source)) {
+            return source
+        }
+        val insertAt = source.lastIndexOf('}')
+        if (insertAt < 0) return source
+        val helper = """
+
+    private static net.minecraft.client.renderer.texture.TextureAtlasSprite[] modporter${'$'}getFluidSprites(net.minecraft.world.level.BlockAndTintGetter level, net.minecraft.core.BlockPos pos, net.minecraft.world.level.material.FluidState fluidState) {
+        net.neoforged.neoforge.client.extensions.common.IClientFluidTypeExtensions extensions = net.neoforged.neoforge.client.extensions.common.IClientFluidTypeExtensions.of(fluidState);
+        java.util.function.Function<net.minecraft.resources.ResourceLocation, net.minecraft.client.renderer.texture.TextureAtlasSprite> atlas = net.minecraft.client.Minecraft.getInstance().getTextureAtlas(net.minecraft.client.renderer.texture.TextureAtlas.LOCATION_BLOCKS);
+        return new net.minecraft.client.renderer.texture.TextureAtlasSprite[] {
+                atlas.apply(extensions.getStillTexture(fluidState, level, pos)),
+                atlas.apply(extensions.getFlowingTexture(fluidState, level, pos))
+        };
+    }
+"""
+        return source.substring(0, insertAt).trimEnd() + helper + source.substring(insertAt)
+    }
+
+    private fun migrateRenderBackgroundCallArguments(source: String): String {
+        if (!source.contains("renderBackground(")) return source
+        val id = """[A-Za-z_$][\w$]*"""
+        val methodPattern = Regex(
+            """(?m)(?:public|protected|private)\s+(?:static\s+)?void\s+$id\s*\(\s*(?:net\.minecraft\.client\.gui\.)?GuiGraphics\s+($id)\s*,\s*int\s+($id)\s*,\s*int\s+($id)\s*,\s*float\s+($id)\s*\)\s*\{"""
+        )
+        var result = source
+        var cursor = 0
+        while (true) {
+            val match = methodPattern.find(result, cursor) ?: break
+            val mouseX = match.groupValues[2]
+            val mouseY = match.groupValues[3]
+            val partialTick = match.groupValues[4]
+            val openBrace = result.indexOf('{', match.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(result, openBrace) else -1
+            if (openBrace < 0 || closeBrace < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val body = result.substring(openBrace + 1, closeBrace)
+            val rewritten = Regex(
+                """((?:this\.)?renderBackground\s*\(\s*[^,;\r\n()]+\s*,\s*)mouseX\s*,\s*mouseY\s*,\s*partialTicks(\s*\))"""
+            ).replace(body) { call ->
+                "${call.groupValues[1]}$mouseX, $mouseY, $partialTick${call.groupValues[2]}"
+            }
+            if (rewritten != body) {
+                result = result.substring(0, openBrace + 1) + rewritten + result.substring(closeBrace)
+                cursor = openBrace + 1 + rewritten.length
+            } else {
+                cursor = closeBrace + 1
+            }
+        }
+        return result
+    }
+
+    private fun migrateGuiGraphicsBlitRepeatingSource(source: String): String {
+        if (!source.contains(".blitRepeating(")) return source
+        var changed = false
+        var result = source
+        var cursor = 0
+        val token = ".blitRepeating("
+        while (true) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenIndex = executableCode.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + token.length - 1
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val receiverStart = findExpressionReceiverStart(executableCode, tokenIndex)
+                .takeIf { it >= 0 && it < tokenIndex }
+                ?: simpleJavaReceiverStart(executableCode, tokenIndex)
+            if (receiverStart < 0 || receiverStart >= tokenIndex) {
+                cursor = closeParen + 1
+                continue
+            }
+            val receiver = result.substring(receiverStart, tokenIndex).trim()
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            if (args.size != 11) {
+                cursor = closeParen + 1
+                continue
+            }
+            val replacement = "modporter${'$'}blitRepeating($receiver, ${args.joinToString(", ") { it.trim() }})"
+            result = result.substring(0, receiverStart) + replacement + result.substring(closeParen + 1)
+            cursor = receiverStart + replacement.length
+            changed = true
+        }
+        if (changed) {
+            result = ensureModporterBlitRepeatingHelper(result)
+        }
+        return result
+    }
+
+    private fun simpleJavaReceiverStart(source: String, tokenIndex: Int): Int {
+        var index = tokenIndex - 1
+        while (index >= 0 && source[index].isWhitespace()) index--
+        while (index >= 0 && (source[index].isLetterOrDigit() || source[index] == '_' || source[index] == '$' || source[index] == '.')) {
+            index--
+        }
+        return index + 1
+    }
+
+    private fun ensureModporterBlitRepeatingHelper(source: String): String {
+        val helperName = "modporter${'$'}blitRepeating"
+        if (Regex("""\b${Regex.escape(helperName)}\s*\(""").containsMatchIn(source)) {
+            val declaration = Regex("""\bprivate\s+static\s+void\s+${Regex.escape(helperName)}\s*\(""")
+            if (declaration.containsMatchIn(source)) return source
+        }
+        val insertAt = source.lastIndexOf('}')
+        if (insertAt < 0) return source
+        val helper = """
+
+    private static void modporter${'$'}blitRepeating(net.minecraft.client.gui.GuiGraphics graphics, net.minecraft.resources.ResourceLocation texture, int x, int y, int width, int height, int sourceX, int sourceY, int sourceWidth, int sourceHeight, int textureWidth, int textureHeight) {
+        if (width <= 0 || height <= 0 || sourceWidth <= 0 || sourceHeight <= 0) {
+            return;
+        }
+        for (int xOffset = 0; xOffset < width; xOffset += sourceWidth) {
+            int drawWidth = Math.min(sourceWidth, width - xOffset);
+            for (int yOffset = 0; yOffset < height; yOffset += sourceHeight) {
+                int drawHeight = Math.min(sourceHeight, height - yOffset);
+                graphics.blit(texture, x + xOffset, y + yOffset, drawWidth, drawHeight, (float) sourceX, (float) sourceY, drawWidth, drawHeight, textureWidth, textureHeight);
+            }
+        }
+    }
+"""
+        return source.substring(0, insertAt).trimEnd() + helper + source.substring(insertAt)
+    }
+
+    private fun tooltipContextExpressionForPlayer(playerExpression: String): String? {
+        val trimmed = playerExpression.trim()
+        if (trimmed == "Minecraft.getInstance().player") {
+            return "Item.TooltipContext.of(Minecraft.getInstance().level)"
+        }
+        if (trimmed.endsWith(".player")) {
+            val owner = trimmed.removeSuffix(".player")
+            if (owner == "Minecraft.getInstance()") {
+                return "Item.TooltipContext.of(Minecraft.getInstance().level)"
+            }
+        }
+        if (Regex("""^[A-Za-z_$][\w$]*$""").matches(trimmed)) {
+            return "Item.TooltipContext.of($trimmed.level())"
+        }
+        return null
+    }
+
+    private fun collectEditBoxReceiverNames(source: String): Set<String> {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val names = linkedSetOf<String>()
+        Regex("""\b(?:net\.minecraft\.client\.gui\.components\.)?EditBox\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(executableCode)
+            .forEach { names += it.groupValues[1] }
+        Regex("""\b(?:private|protected|public)?\s*(?:final\s+)?(?:net\.minecraft\.client\.gui\.components\.)?EditBox\s+([A-Za-z_$][\w$]*)\s*(?:=|;)""")
+            .findAll(executableCode)
+            .forEach { names += it.groupValues[1] }
+        return names
+    }
+
+    private fun migrateGeometryLoaderResourceLocationKeys(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("ModelEvent.RegisterGeometryLoaders") || !executableCode.contains(".getPath()")) {
+            return source
+        }
+        return rewriteExecutableJavaCall(source, "register") { receiver, args ->
+            if (args.size != 2 || !args[0].trim().endsWith(".getPath()")) return@rewriteExecutableJavaCall null
+            val keyExpression = args[0].trim().removeSuffix(".getPath()")
+            "$receiver.register($keyExpression, ${args[1].trim()})"
+        }
+    }
+
+    private fun migrateLegacyItemStackRegistrySerialization(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
+    ): String {
+        if (!source.contains("ItemStack.parseOptional(") &&
+            !source.contains("ItemStack.of(") &&
+            !source.contains("ItemStack::of") &&
+            !source.contains("ContainerHelper.") &&
+            !source.contains(".saveWithoutMetadata(") &&
+            !source.contains(".save(") &&
+            !source.contains(".save()") &&
+            !source.contains(".serializeNBT()") &&
+            !source.contains(".deserializeNBT(")
+        ) return source
+        var result = source
+        val fieldTypesByName = JavaParser(
+            ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE)
+        ).parse(source).let { parsed ->
+            val compilationUnit = parsed.result.orElseThrow {
+                IllegalStateException(
+                    "Cannot parse ItemStack registry serialization source: ${parsed.problems.joinToString()}"
+                )
+            }
+            compilationUnit.findAll(FieldDeclaration::class.java)
+                .flatMap { it.variables }
+                .groupBy({ it.nameAsString }, { it.typeAsString })
+                .mapValues { (_, types) -> types.distinct() }
+        }
+        fun registryAccessAt(offset: Int): String? =
+            registryAccessExpressionAt(result, offset, javaInheritanceIndex)
+        fun blockEntityReceiverRegistryAccess(receiver: String, offset: Int): String? {
+            val normalized = receiver.trim()
+            if (normalized == "this") {
+                val declaration = enclosingJavaClassDeclaration(result, offset)
+                if (javaClassExtendsAny(declaration, javaBlockEntityBaseTypes(), javaInheritanceIndex)) {
+                    return "this.getLevel().registryAccess()"
+                }
+                return null
+            }
+            val simpleReceiver = normalized.substringAfterLast('.')
+            if (!Regex("""^[A-Za-z_$][\w$]*$""").matches(simpleReceiver)) return null
+            val scope = enclosingMethodText(result, offset) ?: result
+            val localType = javaLocalVariableTypes(scope)[simpleReceiver]
+                ?: javaLocalVariableTypes(maskJavaCommentsAndLiterals(result))[simpleReceiver]
+            if (localType != null &&
+                (localType in javaBlockEntityBaseTypes() ||
+                    javaInheritanceIndex.inherits(localType, javaBlockEntityBaseTypes()))) {
+                return "$normalized.getLevel().registryAccess()"
+            }
+            return null
+        }
+        val itemStackCollectionNames = Regex(
+            """\b(?:NonNullList|List|ArrayList|java\.util\.List|java\.util\.ArrayList)\s*<\s*ItemStack\s*>\s+([A-Za-z_$][\w$]*)\b"""
+        )
+            .findAll(result)
+            .map { it.groupValues[1] }
+            .toSet()
+        fun declaredReceiverType(receiver: String, offset: Int): String? {
+            val explicitThis = receiver.trim().startsWith("this.")
+            val normalized = receiver.trim().removePrefix("this.")
+            if (!Regex("""^[A-Za-z_$][\w$]*$""").matches(normalized)) return null
+            fun fieldType(): String? {
+                val types = fieldTypesByName[normalized].orEmpty()
+                if (types.size > 1) {
+                    throw IllegalStateException("Ambiguous field types for receiver '$receiver': $types")
+                }
+                return types.singleOrNull()
+            }
+            if (explicitThis) return fieldType()
+            val rawParameters = currentMethodParametersBeforeOffset(result, offset)
+            val sameNamedParameters = rawParameters.filter { parameter ->
+                Regex("""\b${Regex.escape(normalized)}\s*$""").containsMatchIn(parameter)
+            }
+            val parameterTypes = rawParameters
+                .mapNotNull(::parseJavaParameter)
+                .filter { (_, name) -> name == normalized }
+                .map { (type, _) -> type }
+                .distinct()
+            if (sameNamedParameters.isNotEmpty() && parameterTypes.isEmpty()) {
+                throw IllegalStateException(
+                    "Cannot parse declared parameter type for receiver '$receiver': $sameNamedParameters"
+                )
+            }
+            if (parameterTypes.size > 1) {
+                throw IllegalStateException("Ambiguous parameter types for receiver '$receiver': $parameterTypes")
+            }
+            parameterTypes.singleOrNull()?.let { return it }
+            val method = javaMethodRangesIncludingDefault(result)
+                .filter { offset in it.range }
+                .minByOrNull { it.range.last - it.range.first }
+            if (method != null) {
+                val visiblePrefix = result.substring(method.range.first, offset.coerceAtMost(method.range.last + 1))
+                javaLocalVariableTypes(visiblePrefix)[normalized]?.let { return it }
+            }
+            return fieldType()
+        }
+        fun isItemStackReceiver(receiver: String, offset: Int): Boolean {
+            val normalized = receiver.trim()
+            if (declaredReceiverType(normalized, offset)?.substringAfterLast('.') == "ItemStack") return true
+            if (normalized.startsWith("new ItemStack(") ||
+                normalized.startsWith("new net.minecraft.world.item.ItemStack(") ||
+                Regex("""\.(?:getItemInHand|getMainHandItem|getOffhandItem)\s*\(""").containsMatchIn(normalized) ||
+                Regex("""\.(?:extractItem|getStackInSlot|insertItem)\s*\(""").containsMatchIn(normalized) ||
+                Regex("""\.(?:copy|copyWithCount)\s*\(""").containsMatchIn(normalized)) {
+                return true
+            }
+            val collectionReceiver = Regex("""^(?:this\.)?([A-Za-z_$][\w$]*)\.get\s*\(""").find(normalized)
+            if (collectionReceiver != null && collectionReceiver.groupValues[1] in itemStackCollectionNames) return true
+            if (Regex("""^(?:this\.)?stacks\.get\s*\(""").containsMatchIn(normalized)) {
+                val classDecl = enclosingJavaClassDeclaration(result, offset)
+                if (javaClassExtendsAny(classDecl, setOf("ItemStackHandler"), javaInheritanceIndex)) {
+                    return true
+                }
+            }
+            return false
+        }
+        fun isItemStackHandlerReceiver(receiver: String, offset: Int): Boolean {
+            val normalized = receiver.trim()
+            val declaredType = declaredReceiverType(normalized, offset)
+            if (declaredType != null &&
+                (declaredType.substringAfterLast('.') == "ItemStackHandler" ||
+                    javaInheritanceIndex.inherits(declaredType, setOf("ItemStackHandler")))) {
+                return true
+            }
+            if (normalized == "this") {
+                val classDecl = enclosingJavaClassDeclaration(result, offset)
+                if (javaClassExtendsAny(classDecl, setOf("ItemStackHandler"), javaInheritanceIndex)) {
+                    return true
+                }
+            }
+            return false
+        }
+        fun itemStackReceiverRegistryAccess(receiver: String, offset: Int): String? {
+            val normalized = receiver.trim()
+            Regex("""^([A-Za-z_$][\w$]*)\.(?:copy|copyWithCount)\s*\(""")
+                .find(normalized)
+                ?.groupValues
+                ?.get(1)
+                ?.let { copied ->
+                    val methodPrefix = enclosingMethodText(result, offset)
+                        ?.let { method ->
+                            val relative = offset - result.indexOf(method)
+                            if (relative > 0 && relative <= method.length) method.substring(0, relative) else method
+                        }
+                        ?: result.substring(0, offset.coerceAtMost(result.length))
+                    Regex("""\bItemStack\s+${Regex.escape(copied)}\s*=\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.(?:getItemInHand|getMainHandItem|getOffhandItem)\s*\(""")
+                        .find(maskJavaCommentsAndLiterals(methodPrefix))
+                        ?.groupValues
+                        ?.get(1)
+                        ?.let { return "$it.registryAccess()" }
+                }
+            Regex("""^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.(?:getItemInHand|getMainHandItem|getOffhandItem)\s*\(""")
+                .find(normalized)
+                ?.groupValues
+                ?.get(1)
+                ?.let { return "$it.registryAccess()" }
+            return null
+        }
+        result = Regex("""ItemStack\.parseOptional\(\s*player\.registryAccess\(\)\s*,""")
+            .replace(result) { match ->
+                val registryAccess = registryAccessAt(match.range.first)
+                if (registryAccess == null) match.value else "ItemStack.parseOptional($registryAccess,"
+            }
+        var itemStackOfCursor = 0
+        while (true) {
+            val tokenIndex = result.indexOf("ItemStack.of(", itemStackOfCursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + "ItemStack.of".length
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) {
+                itemStackOfCursor = tokenIndex + "ItemStack.of(".length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            if (args.size != 1) {
+                itemStackOfCursor = closeParen + 1
+                continue
+            }
+            val registryAccess = registryAccessAt(tokenIndex)
+            if (registryAccess == null) {
+                itemStackOfCursor = closeParen + 1
+                continue
+            }
+            val replacement = "ItemStack.parseOptional($registryAccess, ${args[0].trim()})"
+            result = result.substring(0, tokenIndex) + replacement + result.substring(closeParen + 1)
+            itemStackOfCursor = tokenIndex + replacement.length
+        }
+        result = replaceExecutableRegex(result, Regex("""\.map\s*\(\s*ItemStack::of\s*\)""")) { match ->
+            val registryAccess = registryAccessAt(match.range.first)
+            if (registryAccess == null) {
+                match.value
+            } else {
+                ".map(tag -> ItemStack.parseOptional($registryAccess, tag))"
+            }
+        }
+        result = rewriteExecutableJavaCallWithOffset(result, "save") { receiver, args, offset ->
+            if (!isItemStackReceiver(receiver, offset)) return@rewriteExecutableJavaCallWithOffset null
+            val registryAccess = registryAccessAt(offset)
+                ?: itemStackReceiverRegistryAccess(receiver, offset)
+                ?: return@rewriteExecutableJavaCallWithOffset null
+            when (args.size) {
+                0 -> "$receiver.saveOptional($registryAccess)"
+                1 -> {
+                    val tagArg = args[0].trim()
+                    if (tagArg == registryAccess || tagArg.endsWith(".registryAccess()")) {
+                        null
+                    } else if (tagArg == "new net.minecraft.nbt.CompoundTag()") {
+                        "$receiver.save($registryAccess, $tagArg)"
+                    } else if (tagArg == "new CompoundTag()") {
+                        "$receiver.saveOptional($registryAccess)"
+                    } else {
+                        "$receiver.save($registryAccess, $tagArg)"
+                    }
+                }
+                else -> null
+            }
+        }
+        result = rewriteExecutableJavaCallWithOffset(result, "saveAllItems") { receiver, args, offset ->
+            if (receiver != "ContainerHelper" || args.size != 2) return@rewriteExecutableJavaCallWithOffset null
+            val registryAccess = registryAccessAt(offset) ?: return@rewriteExecutableJavaCallWithOffset null
+            "ContainerHelper.saveAllItems(${args[0].trim()}, ${args[1].trim()}, $registryAccess)"
+        }
+        result = rewriteExecutableJavaCallWithOffset(result, "loadAllItems") { receiver, args, offset ->
+            if (receiver != "ContainerHelper" || args.size != 2) return@rewriteExecutableJavaCallWithOffset null
+            val registryAccess = registryAccessAt(offset) ?: return@rewriteExecutableJavaCallWithOffset null
+            "ContainerHelper.loadAllItems(${args[0].trim()}, ${args[1].trim()}, $registryAccess)"
+        }
+        result = rewriteExecutableJavaCallWithOffset(result, "saveWithoutMetadata") { receiver, args, offset ->
+            if (args.isNotEmpty()) return@rewriteExecutableJavaCallWithOffset null
+            val receiverRegistryAccess = blockEntityReceiverRegistryAccess(receiver, offset)
+                ?: return@rewriteExecutableJavaCallWithOffset null
+            val registryAccess = registryAccessAt(offset) ?: receiverRegistryAccess
+            "$receiver.saveWithoutMetadata($registryAccess)"
+        }
+        result = rewriteExecutableJavaCallWithOffset(result, "serializeNBT") { receiver, args, offset ->
+            if (args.isNotEmpty()) return@rewriteExecutableJavaCallWithOffset null
+            val registryAccess = registryAccessAt(offset) ?: return@rewriteExecutableJavaCallWithOffset null
+                when {
+                isItemStackReceiver(receiver, offset) -> "$receiver.saveOptional($registryAccess)"
+                isItemStackHandlerReceiver(receiver, offset) -> "$receiver.serializeNBT($registryAccess)"
+                else -> null
+            }
+        }
+        result = rewriteExecutableJavaCallWithOffset(result, "deserializeNBT") { receiver, args, offset ->
+            if (args.size != 1 || !isItemStackHandlerReceiver(receiver, offset)) return@rewriteExecutableJavaCallWithOffset null
+            val registryAccess = registryAccessAt(offset) ?: return@rewriteExecutableJavaCallWithOffset null
+            "$receiver.deserializeNBT($registryAccess, ${args[0].trim()})"
+        }
+        result = threadRegistryAccessThroughPrivateContainerHelperMethods(result, javaInheritanceIndex)
+        return result
+    }
+
+    private fun threadRegistryAccessThroughPrivateContainerHelperMethods(
+        source: String,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String {
+        if (!source.contains("ContainerHelper.saveAllItems(") && !source.contains("ContainerHelper.loadAllItems(")) {
+            return source
+        }
+        val methods = javaMethodRangesIncludingDefault(source)
+        val methodCounts = methods.groupingBy { it.name }.eachCount()
+        val edits = mutableListOf<Pair<IntRange, String>>()
+
+        for (method in methods) {
+            if (methodCounts[method.name] != 1) continue
+            val methodText = source.substring(method.range)
+            if (!methodText.contains("ContainerHelper.saveAllItems(") &&
+                !methodText.contains("ContainerHelper.loadAllItems(")) {
+                continue
+            }
+            val openBrace = source.indexOf('{', method.range.first).takeIf { it in method.range } ?: continue
+            val header = source.substring(method.range.first, openBrace)
+            if (!privateMethodDeclarationLine(header, method.name)) continue
+            if (header.contains("HolderLookup.Provider")) continue
+            val paramsText = javaMethodParameterText(header) ?: continue
+            val parameterCount = splitTopLevelJavaArgs(paramsText).size
+            val providerName = uniqueLocalNameInScope(methodText, "registries")
+            val migratedMethod = addHolderLookupProviderToPrivateContainerHelperMethod(methodText, method.name, providerName)
+            if (migratedMethod == methodText) continue
+            val callEdits = privateMethodCallProviderEdits(
+                source = source,
+                method = method,
+                originalParameterCount = parameterCount,
+                javaInheritanceIndex = javaInheritanceIndex
+            ) ?: continue
+            edits += method.range to migratedMethod
+            edits += callEdits
+        }
+
+        if (edits.isEmpty()) return source
+        return addImportIfMissing(applyStringEdits(source, edits), "net.minecraft.core.HolderLookup")
+    }
+
     private fun privateMethodDeclarationLine(header: String, methodName: String): Boolean =
         header.lines().any { line ->
             Regex("""^\s*private\b[^;={}]*\b${Regex.escape(methodName)}\s*\(""").containsMatchIn(line)
@@ -2522,469 +2988,4 @@ public $className(Properties $propertiesName, WoodType $typeName) {
             }
         }
         return result
-    }
-
-    private fun migrateFluidStackNbtProviderCalls(
-        source: String,
-        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
-    ): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains("FluidStack") ||
-            !executableCode.contains(".writeToNBT(") &&
-            !executableCode.contains("FluidStack.loadFluidStackFromNBT(")
-        ) {
-            return source
-        }
-        val fluidStackType = """(?:FluidStack|net\.neoforged\.neoforge\.fluids\.FluidStack)"""
-        val fluidStackVariables = Regex("""\b$fluidStackType\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(executableCode)
-            .map { it.groupValues[1] }
-            .toSet()
-
-        var result = source
-        for (fluidStack in fluidStackVariables) {
-            result = rewriteExecutableJavaCallWithOffset(result, "writeToNBT") { receiver, args, offset ->
-                if (receiver.trim() != fluidStack || args.size != 1) {
-                    return@rewriteExecutableJavaCallWithOffset null
-                }
-                val provider = registryAccessExpressionAt(result, offset, javaInheritanceIndex)
-                    ?: return@rewriteExecutableJavaCallWithOffset null
-                "(CompoundTag) $receiver.save($provider, ${args[0].trim()})"
-            }
-        }
-        result = rewriteExecutableJavaCallWithOffset(result, "loadFluidStackFromNBT") { receiver, args, offset ->
-            if (receiver.trim() != "FluidStack" || args.size != 1) {
-                return@rewriteExecutableJavaCallWithOffset null
-            }
-            val provider = registryAccessExpressionAt(result, offset, javaInheritanceIndex)
-                ?: return@rewriteExecutableJavaCallWithOffset null
-            "FluidStack.parseOptional($provider, ${args[0].trim()})"
-        }
-        return result
-    }
-
-    private fun migrateLegacyFluidStackDeprecations(source: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains("FluidStack") &&
-            !executableCode.contains(".getDisplayName()") &&
-            !executableCode.contains(".getTranslationKey()") &&
-            !executableCode.contains(".isFluidEqual(")
-        ) {
-            return source
-        }
-        val fluidStackVariables = Regex("""\b(?:net\.neoforged\.neoforge\.fluids\.)?FluidStack\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(executableCode)
-            .map { it.groupValues[1] }
-            .toSet()
-        var result = source
-        fluidStackVariables.forEach { variable ->
-            result = replaceExecutableJavaRegex(result, Regex("""\b${Regex.escape(variable)}\.getDisplayName\(\)""")) {
-                "$variable.getHoverName()"
-            }
-            result = replaceExecutableJavaRegex(result, Regex("""\b${Regex.escape(variable)}\.getTranslationKey\(\)""")) {
-                "$variable.getDescriptionId()"
-            }
-        }
-        result = rewriteExecutableJavaCallWithOffset(result, "getDisplayName") { receiver, args, _ ->
-            if (args.isNotEmpty()) return@rewriteExecutableJavaCallWithOffset null
-            val trimmed = receiver.trim()
-            if (trimmed.startsWith("new FluidStack(") || trimmed.startsWith("new net.neoforged.neoforge.fluids.FluidStack(")) {
-                "$trimmed.getHoverName()"
-            } else {
-                null
-            }
-        }
-        result = rewriteExecutableJavaCallWithOffset(result, "getTranslationKey") { receiver, args, _ ->
-            if (args.isNotEmpty()) return@rewriteExecutableJavaCallWithOffset null
-            val trimmed = receiver.trim()
-            if (trimmed.startsWith("new FluidStack(") || trimmed.startsWith("new net.neoforged.neoforge.fluids.FluidStack(")) {
-                "$trimmed.getDescriptionId()"
-            } else {
-                null
-            }
-        }
-        result = replaceFluidStackConstructorNoArgCall(result, "getDisplayName", "getHoverName")
-        result = replaceFluidStackConstructorNoArgCall(result, "getTranslationKey", "getDescriptionId")
-        result = rewriteExecutableJavaCallWithOffset(result, "isFluidEqual") { receiver, args, _ ->
-            if (args.size != 1) return@rewriteExecutableJavaCallWithOffset null
-            val trimmed = receiver.trim()
-            val supportedReceiver = trimmed in fluidStackVariables ||
-                trimmed.endsWith(".getFluid()") ||
-                trimmed.startsWith("new FluidStack(") ||
-                trimmed.startsWith("new net.neoforged.neoforge.fluids.FluidStack(")
-            if (!supportedReceiver) return@rewriteExecutableJavaCallWithOffset null
-            "FluidStack.isSameFluidSameComponents($trimmed, ${args[0].trim()})"
-        }
-        return result
-    }
-
-    private fun replaceFluidStackConstructorNoArgCall(source: String, oldMethod: String, newMethod: String): String {
-        var result = source
-        var cursor = 0
-        while (cursor < result.length) {
-            val executable = maskJavaCommentsAndLiterals(result)
-            val match = Regex("""new\s+(?:net\.neoforged\.neoforge\.fluids\.)?FluidStack\s*\(""").find(executable, cursor) ?: break
-            val openParen = executable.indexOf('(', match.range.last)
-            if (openParen < 0) break
-            val closeParen = findMatchingParen(executable, openParen)
-            if (closeParen < 0) break
-            val after = Regex("""^\s*\.\s*${Regex.escape(oldMethod)}\s*\(\s*\)""")
-                .find(executable.substring(closeParen + 1))
-            if (after == null) {
-                cursor = closeParen + 1
-                continue
-            }
-            val methodNameStart = closeParen + 1 + after.value.indexOf(oldMethod)
-            result = result.substring(0, methodNameStart) + newMethod + result.substring(methodNameStart + oldMethod.length)
-            cursor = methodNameStart + newMethod.length
-        }
-        return result
-    }
-
-    private fun migrateXlintCleanApiDeprecations(
-        source: String,
-        mobEffectDeferredHolderFields: Set<String>,
-        javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
-    ): String {
-        var result = source
-        result = migrateLegacyFoodEffectSuppliers(result)
-        result = migrateDeprecatedTextureAtlasLocationConstants(result)
-        result = migrateDeprecatedBlockStateLiquidChecks(result)
-        result = migrateDeprecatedMobEffectHolderComparisons(result, mobEffectDeferredHolderFields)
-        result = migrateWeightedEntryWrapperArraysToLists(result)
-        result = migrateDeprecatedStructureProcessorProcessBlockOverrides(result)
-        result = migrateDeprecatedBlockRenderDispatcherSingleBlockCalls(result)
-        result = migrateDeprecatedBakedModelGetQuadsCallSites(result)
-        result = migrateDeprecatedItemTransformsConstructors(result)
-        result = migrateDeprecatedStructureGenerationHelpers(result)
-        result = migrateDeprecatedRenderSystemRunAsFancy(result)
-        result = markRequiredDeprecatedOverrides(result)
-        return result
-    }
-
-    private fun migrateLegacyFoodEffectSuppliers(source: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains(".effect(") || !executableCode.contains("MobEffectInstance")) return source
-        var result = source
-        var cursor = 0
-        while (true) {
-            val executable = maskJavaCommentsAndLiterals(result)
-            val tokenIndex = executable.indexOf(".effect(", cursor)
-            if (tokenIndex < 0) break
-            val openParen = tokenIndex + ".effect".length
-            val closeParen = findMatchingParen(executable, openParen)
-            if (closeParen < 0) {
-                cursor = tokenIndex + ".effect(".length
-                continue
-            }
-            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
-            if (args.size != 2) {
-                cursor = closeParen + 1
-                continue
-            }
-            val effect = args[0].trim()
-            if (!effect.startsWith("new MobEffectInstance(") &&
-                !effect.startsWith("new net.minecraft.world.effect.MobEffectInstance(")) {
-                cursor = closeParen + 1
-                continue
-            }
-            val replacementArgs = "() -> $effect, ${args[1].trim()}"
-            result = result.substring(0, openParen + 1) + replacementArgs + result.substring(closeParen)
-            cursor = openParen + 1 + replacementArgs.length
-        }
-        return result
-    }
-
-    private fun migrateDeprecatedTextureAtlasLocationConstants(source: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains("LOCATION_BLOCKS")) return source
-        fun insideGeneratedFluidSpritesHelper(offset: Int): Boolean =
-            javaMethodRangesIncludingDefault(source).any { method ->
-                method.name == "modporter${'$'}getFluidSprites" && offset in method.range
-            }
-        var result = replaceExecutableJavaRegex(
-            source,
-            Regex("""\bnet\.minecraft\.client\.renderer\.texture\.TextureAtlas\.LOCATION_BLOCKS\b""")
-        ) { match ->
-            if (insideGeneratedFluidSpritesHelper(match.range.first)) {
-                match.value
-            } else {
-                "net.minecraft.world.inventory.InventoryMenu.BLOCK_ATLAS"
-            }
-        }
-        result = replaceExecutableJavaRegex(result, Regex("""\bTextureAtlas\.LOCATION_BLOCKS\b""")) { match ->
-            if (insideGeneratedFluidSpritesHelper(match.range.first)) {
-                match.value
-            } else {
-                "InventoryMenu.BLOCK_ATLAS"
-            }
-        }
-        if (result == source) return source
-        if (maskJavaCommentsAndLiterals(result).contains("InventoryMenu.BLOCK_ATLAS")) {
-            result = addExecutableImportIfMissing(result, "net.minecraft.world.inventory.InventoryMenu")
-        }
-        val withoutTextureAtlas = removeExecutableImport(result, "net.minecraft.client.renderer.texture.TextureAtlas")
-        result = if (!Regex("""(?<![\w$.])TextureAtlas(?![\w$])""").containsMatchIn(maskJavaCommentsAndLiterals(withoutTextureAtlas))) {
-            withoutTextureAtlas
-        } else {
-            result
-        }
-        return result
-    }
-
-    private fun migrateDeprecatedBlockStateLiquidChecks(source: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains(".liquid()")) return source
-        var result = replaceExecutableJavaRegex(
-            source,
-            Regex("""!\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*(?:\(\))?)*)\.liquid\s*\(\s*\)""")
-        ) { match ->
-            "${match.groupValues[1]}.getFluidState().isEmpty()"
-        }
-        result = rewriteExecutableJavaCall(result, "liquid") { receiver, args ->
-            if (args.isNotEmpty()) return@rewriteExecutableJavaCall null
-            "!${receiver.trim()}.getFluidState().isEmpty()"
-        }
-        return result
-    }
-
-    private fun migrateDeprecatedMobEffectHolderComparisons(
-        source: String,
-        mobEffectDeferredHolderFields: Set<String>
-    ): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains(".is(") ||
-            !executableCode.contains("MobEffects.") &&
-            mobEffectDeferredHolderFields.none { executableCode.contains(it.substringAfterLast('.', missingDelimiterValue = it)) }) {
-            return source
-        }
-
-        val deferredHolderExpressions = mobEffectDeferredHolderFields
-            .flatMap { field ->
-                val parts = field.split('.')
-                when {
-                    parts.size >= 2 -> listOf(field, parts.takeLast(2).joinToString("."))
-                    else -> listOf(field)
-                }
-            }
-            .distinct()
-            .sortedByDescending { it.length }
-        val holderMobEffectFields = Regex(
-            """(?m)^[ \t]*(?:private|protected|public)\s+(?:final\s+)?(?:net\.minecraft\.core\.)?Holder\s*<\s*(?:net\.minecraft\.world\.effect\.)?MobEffect\s*>\s+([A-Za-z_$][\w$]*)\b"""
-        )
-            .findAll(executableCode)
-            .map { it.groupValues[1] }
-            .toSet()
-
-        fun holderKeyExpression(argument: String): String? {
-            val trimmed = argument.trim()
-            if (Regex("""MobEffects\.[A-Z0-9_]+""").matches(trimmed)) {
-                return "$trimmed.unwrapKey().orElseThrow()"
-            }
-            if (trimmed in deferredHolderExpressions) {
-                return "$trimmed.getKey()"
-            }
-            return null
-        }
-
-        return rewriteExecutableJavaCall(source, "is") { receiver, args ->
-            if (args.size != 1) return@rewriteExecutableJavaCall null
-            val normalizedReceiver = receiver.trim().removePrefix("this.")
-            if (normalizedReceiver in holderMobEffectFields) {
-                val effect = Regex("""^(MobEffects\.[A-Z0-9_]+)(?:\.unwrapKey\(\)\.orElseThrow\(\))?$""")
-                    .find(args[0].trim())
-                    ?.groupValues
-                    ?.get(1)
-                if (effect != null) {
-                    return@rewriteExecutableJavaCall "${receiver.trim()}.is($effect)"
-                }
-            }
-            val key = holderKeyExpression(args[0]) ?: return@rewriteExecutableJavaCall null
-            "${receiver.trim()}.is($key)"
-        }
-    }
-
-    private fun migrateWeightedEntryWrapperArraysToLists(source: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains("WeightedEntry.Wrapper") ||
-            !executableCode.contains(".toArray(WeightedEntry.Wrapper[]::new)")) {
-            return source
-        }
-        var changed = false
-        var result = replaceExecutableJavaRegex(
-            source,
-            Regex("""(?ms)^([ \t]*)WeightedEntry\.Wrapper\s*<\s*([^>\r\n]+)\s*>\s*\[\]\s+([A-Za-z_$][\w$]*)\s*=\s*(.*?)\.toArray\s*\(\s*WeightedEntry\.Wrapper\[\]::new\s*\)\s*;""")
-        ) { match ->
-            changed = true
-            val indent = match.groupValues[1]
-            val type = match.groupValues[2].trim()
-            val name = match.groupValues[3]
-            val streamExpression = match.groupValues[4].trim()
-            "${indent}List<WeightedEntry.Wrapper<$type>> $name = $streamExpression.toList();"
-        }
-        if (!changed) return source
-        result = addExecutableImportIfMissing(result, "java.util.List")
-        return result
-    }
-
-    private fun migrateDeprecatedStructureProcessorProcessBlockOverrides(source: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains("processBlock(") ||
-            !executableCode.contains("StructureTemplate.StructureBlockInfo") ||
-            !executableCode.contains("StructurePlaceSettings")) {
-            return source
-        }
-        var result = source
-        val edits = mutableListOf<Pair<IntRange, String>>()
-        for (method in javaMethodRangesIncludingDefault(executableCode)) {
-            if (method.name != "processBlock") continue
-            val methodText = result.substring(method.range)
-            val methodExecutable = executableCode.substring(method.range)
-            if (!Regex("""\bLevelReader\s+[A-Za-z_$][\w$]*""").containsMatchIn(methodExecutable) ||
-                !Regex("""\bStructurePlaceSettings\s+[A-Za-z_$][\w$]*""").containsMatchIn(methodExecutable) ||
-                !Regex("""\bStructureTemplate\.StructureBlockInfo\s+[A-Za-z_$][\w$]*""").containsMatchIn(methodExecutable)) {
-                continue
-            }
-            val tokenIndex = methodExecutable.indexOf("processBlock")
-            if (tokenIndex < 0) continue
-            val openParen = methodExecutable.indexOf('(', tokenIndex)
-            val closeParen = if (openParen >= 0) findMatchingParen(methodExecutable, openParen) else -1
-            if (openParen < 0 || closeParen < 0) continue
-            val params = splitTopLevelJavaArgs(methodText.substring(openParen + 1, closeParen))
-            if (params.size != 6) continue
-            val templateName = uniqueJavaIdentifier("structureTemplate", javaIdentifierTokens(methodText))
-            val signatureMigrated = methodText.substring(0, tokenIndex) +
-                "process" +
-                methodText.substring(tokenIndex + "processBlock".length, closeParen) +
-                ", @Nullable StructureTemplate $templateName" +
-                methodText.substring(closeParen)
-            val migratedMethod = rewriteExecutableJavaCall(signatureMigrated, "processBlock") { receiver, args ->
-                if (receiver.trim() == "super" && args.size == 6) {
-                    "super.process(${args.joinToString(", ") { it.trim() }}, $templateName)"
-                } else {
-                    null
-                }
-            }
-            if (migratedMethod != methodText) {
-                edits += method.range to migratedMethod
-            }
-        }
-        if (edits.isEmpty()) return source
-        result = applyStringEdits(source, edits)
-        val executableResult = maskJavaCommentsAndLiterals(result)
-        if (Regex("""(?<![\w$])@Nullable(?![\w$])""").containsMatchIn(executableResult) &&
-            !executableResult.contains("import org.jetbrains.annotations.Nullable;") &&
-            !executableResult.contains("import javax.annotation.Nullable;")) {
-            result = addExecutableImportIfMissing(result, "javax.annotation.Nullable")
-        }
-        return result
-    }
-
-    private fun migrateDeprecatedBlockRenderDispatcherSingleBlockCalls(source: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains(".renderSingleBlock(")) return source
-        val dispatcherVariables = javaVariablesOfType(executableCode, "BlockRenderDispatcher")
-        var changed = false
-        var result = rewriteExecutableJavaCall(source, "renderSingleBlock") { receiver, args ->
-            if (args.size != 5 || !isBlockRenderDispatcherExpression(receiver, dispatcherVariables)) {
-                return@rewriteExecutableJavaCall null
-            }
-            changed = true
-            "${receiver.trim()}.renderSingleBlock(${args.joinToString(", ") { it.trim() }}, ModelData.EMPTY, null)"
-        }
-        if (changed) {
-            result = addExecutableImportIfMissing(result, "net.neoforged.neoforge.client.model.data.ModelData")
-        }
-        return result
-    }
-
-    private fun isBlockRenderDispatcherExpression(receiver: String, dispatcherVariables: Set<String>): Boolean {
-        val normalized = receiver.trim()
-        if (normalized in dispatcherVariables) return true
-        return normalized.endsWith(".getBlockRenderer()") ||
-            normalized == "Minecraft.getInstance().getBlockRenderer()" ||
-            normalized.endsWith(".blockRenderer") && normalized.substringAfterLast('.') in dispatcherVariables
-    }
-
-    private fun migrateDeprecatedBakedModelGetQuadsCallSites(source: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains(".getQuads(")) return source
-        val bakedModelVariables = javaVariablesOfType(executableCode, "BakedModel")
-        var changed = false
-        var result = rewriteExecutableJavaCall(source, "getQuads") { receiver, args ->
-            if (args.size != 3 || !isBakedModelExpression(receiver, bakedModelVariables)) {
-                return@rewriteExecutableJavaCall null
-            }
-            changed = true
-            "${receiver.trim()}.getQuads(${args.joinToString(", ") { it.trim() }}, ModelData.EMPTY, null)"
-        }
-        if (changed) {
-            result = addExecutableImportIfMissing(result, "net.neoforged.neoforge.client.model.data.ModelData")
-        }
-        return result
-    }
-
-    private fun isBakedModelExpression(receiver: String, bakedModelVariables: Set<String>): Boolean {
-        val normalized = receiver.trim()
-        if (normalized in bakedModelVariables) return true
-        return normalized.contains(".getBlockModel(") ||
-            normalized.contains(".getModel(")
-    }
-
-    private fun migrateDeprecatedItemTransformsConstructors(source: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains("new ItemTransforms(") &&
-            !executableCode.contains("new net.minecraft.client.renderer.block.model.ItemTransforms(")) {
-            return source
-        }
-        var result = source
-        var cursor = 0
-        while (cursor < result.length) {
-            val executable = maskJavaCommentsAndLiterals(result)
-            val match = Regex("""new\s+(?:net\.minecraft\.client\.renderer\.block\.model\.)?ItemTransforms\s*\(""")
-                .find(executable, cursor)
-                ?: break
-            val openParen = executable.indexOf('(', match.range.last)
-            val closeParen = if (openParen >= 0) findMatchingParen(executable, openParen) else -1
-            if (openParen < 0 || closeParen < 0) {
-                cursor = match.range.last + 1
-                continue
-            }
-            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
-            if (args.size != 8) {
-                cursor = closeParen + 1
-                continue
-            }
-            val replacement = args.joinToString(", ") { it.trim() } + ", com.google.common.collect.ImmutableMap.of()"
-            result = result.substring(0, openParen + 1) + replacement + result.substring(closeParen)
-            cursor = openParen + 1 + replacement.length
-        }
-        return result
-    }
-
-    private fun javaVariablesOfType(source: String, simpleType: String): Set<String> {
-        val id = """[A-Za-z_$][\w$]*"""
-        val type = """(?:[A-Za-z_$][\w$]*\.)*${Regex.escape(simpleType)}"""
-        return Regex("""(?<![\w$])(?:final\s+)?$type\s+($id)\b""")
-            .findAll(source)
-            .map { it.groupValues[1] }
-            .toSet()
-    }
-
-    private fun migrateLegacyBlockStateUseCalls(source: String): String {
-        val executableCode = maskJavaCommentsAndLiterals(source)
-        if (!executableCode.contains(".use(")) return source
-        val blockStateVariables = javaVariablesOfType(executableCode, "BlockState")
-        fun isBlockStateReceiver(receiver: String): Boolean {
-            val normalized = receiver.trim()
-            return normalized in blockStateVariables ||
-                normalized.endsWith(".getBlockState") ||
-                Regex("""\.getBlockState\s*\(""").containsMatchIn(normalized)
-        }
-        return rewriteExecutableJavaCall(source, "use") { receiver, args ->
-            if (args.size != 4 || !isBlockStateReceiver(receiver)) {
-                return@rewriteExecutableJavaCall null
-            }
-            "${receiver.trim()}.useWithoutItem(${args[0].trim()}, ${args[1].trim()}, ${args[3].trim()})"
-        }
     }
