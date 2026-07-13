@@ -293,6 +293,9 @@ class StructuralRefactorPass : Pass {
         // CapabilityManager + AttachCapabilitiesEvent to NeoForge EntityCapability
         // registrations while preserving LazyOptional call chains.
         try {
+            val wrappedSerializableChanges = WrappedSerializableEntityCapabilityMigration()
+                .apply(projectDir, dryRun, errors)
+            changes.addAll(wrappedSerializableChanges)
             val providerBackedCapabilityChanges = migrateProviderBackedEntityCapabilities(projectDir, dryRun, errors)
             changes.addAll(providerBackedCapabilityChanges)
             val customEntityCapabilityChanges = migrateCustomEntityCapabilities(projectDir, dryRun, errors)
