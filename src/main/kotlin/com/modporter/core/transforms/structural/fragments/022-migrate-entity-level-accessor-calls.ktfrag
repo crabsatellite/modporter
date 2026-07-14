@@ -1,4 +1,156 @@
 
+    private fun migrateEntityLevelAccessorCalls(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        val types = javaFiles.mapNotNull { file -> readJavaInheritanceType(file) }
+        if (types.isEmpty()) return emptyList()
+
+        val typeByFqn = types.associateBy { it.fqn }
+        val entityMemo = mutableMapOf<String, Boolean>()
+
+        fun resolveTypeReference(rawType: String, owner: JavaInheritanceType): String? {
+            val normalized = normalizeJavaTypeReference(rawType) ?: return null
+            if (normalized.contains(".")) {
+                if (normalized.first().isLowerCase()) return normalized
+                val firstSegment = normalized.substringBefore('.')
+                owner.imports[firstSegment]?.let { imported ->
+                    return "$imported.${normalized.substringAfter('.')}"
+                }
+                val samePackage = if (owner.packageName.isBlank()) firstSegment else "${owner.packageName}.$firstSegment"
+                if (samePackage in typeByFqn) {
+                    return "$samePackage.${normalized.substringAfter('.')}"
+                }
+                return normalized
+            }
+
+            owner.imports[normalized]?.let { return it }
+            if (owner.packageName.isNotBlank()) {
+                val samePackage = "${owner.packageName}.$normalized"
+                if (samePackage in typeByFqn) return samePackage
+            }
+            owner.wildcardImports.forEach { pkg ->
+                val candidate = "$pkg.$normalized"
+                if (candidate in typeByFqn || pkg.startsWith("net.minecraft.world.entity")) {
+                    return candidate
+                }
+            }
+            return normalized
+        }
+
+        fun isEntityDerivedFqn(typeName: String, seen: Set<String> = emptySet()): Boolean {
+            val normalized = normalizeJavaTypeReference(typeName) ?: return false
+            entityMemo[normalized]?.let { return it }
+            if (normalized in seen) return false
+            if (isMinecraftEntityClass(normalized)) {
+                entityMemo[normalized] = true
+                return true
+            }
+
+            val sourceType = typeByFqn[normalized]
+            val parent = sourceType?.parentType
+            if (sourceType == null || parent == null) {
+                entityMemo[normalized] = false
+                return false
+            }
+            val parentFqn = resolveTypeReference(parent, sourceType)
+            val result = parentFqn != null && isEntityDerivedFqn(parentFqn, seen + normalized)
+            entityMemo[normalized] = result
+            return result
+        }
+
+        fun isEntityTypeReference(typeName: String, owner: JavaInheritanceType): Boolean {
+            val fqn = resolveTypeReference(typeName, owner) ?: return false
+            return isEntityDerivedFqn(fqn)
+        }
+
+        val parser = JavaParser(ParserConfiguration().setLanguageLevel(ParserConfiguration.LanguageLevel.BLEEDING_EDGE))
+        val changes = mutableListOf<Change>()
+
+        for (type in types) {
+            val original = type.file.readText()
+            if (!original.contains(".getLevel()") && !original.contains("this.getLevel()")) continue
+
+            var migrated = original
+            if (isEntityDerivedFqn(type.fqn) && !declaresGetLevelMethod(original)) {
+                migrated = replaceExecutableRegex(
+                    migrated,
+                    Regex("""(?<![\w$])this\.getLevel\(\)""")
+                ) { "this.level()" }
+            }
+
+            val entityVariables = collectEntityVariableNames(original, type, parser, ::isEntityTypeReference)
+            if (entityVariables.isNotEmpty()) {
+                migrated = replaceEntityVariableGetLevelCalls(migrated, entityVariables)
+            }
+
+            if (migrated != original) {
+                if (!dryRun) {
+                    type.file.writeText(migrated)
+                }
+                changes.add(Change(
+                    file = type.file,
+                    line = 0,
+                    description = "Migrate Entity#getLevel() accessor to Entity#level() using source inheritance",
+                    before = "entity.getLevel()",
+                    after = "entity.level()",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-entity-getlevel-accessor"
+                ))
+            }
+        }
+        return changes
+    }
+
+    private fun readJavaInheritanceType(file: Path): JavaInheritanceType? {
+        val source = file.readText()
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val className = javaTopLevelTypeName(executableCode) ?: return null
+        val imports = linkedMapOf<String, String>()
+        val wildcardImports = linkedSetOf<String>()
+        Regex("""(?m)^[ \t]*import\s+(?!static\b)([\w.]+(?:\.\*)?)\s*;""")
+            .findAll(executableCode)
+            .forEach { match ->
+                val importName = match.groupValues[1]
+                if (importName.endsWith(".*")) {
+                    wildcardImports += importName.removeSuffix(".*")
+                } else {
+                    imports[importName.substringAfterLast('.')] = importName
+                }
+            }
+        val id = """[A-Za-z_$][\w$]*"""
+        val parentType = Regex(
+            """(?s)\bclass\s+${Regex.escape(className)}(?:\s*<[^>{};]+>)?\s+extends\s+($id(?:\.$id)*)"""
+        ).find(executableCode)?.groupValues?.get(1)
+        return JavaInheritanceType(
+            file = file,
+            packageName = packageNameOf(executableCode),
+            className = className,
+            parentType = parentType,
+            imports = imports,
+            wildcardImports = wildcardImports,
+            source = source
+        )
+    }
+
+    private fun normalizeJavaTypeReference(typeName: String): String? {
+        var normalized = typeName.trim()
+        if (normalized.isBlank()) return null
+        normalized = Regex("""^@\w+(?:\([^)]*\))?\s+""").replace(normalized, "")
+        normalized = normalized.removePrefix("final ").trim()
+        normalized = Regex("""^\?\s+extends\s+""").replace(normalized, "")
+        normalized = Regex("""^\?\s+super\s+""").replace(normalized, "")
+        normalized = normalized.substringBefore('<').substringBefore('[').trim()
+        return if (Regex("""[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*""").matches(normalized)) {
+            normalized
+        } else {
+            null
+        }
+    }
+
     private fun isMinecraftEntityClass(typeName: String): Boolean {
         if (!typeName.startsWith("net.minecraft.world.entity.")) return false
         val simpleName = typeName.substringAfterLast('.')
@@ -2670,283 +2822,3 @@ public class ${builder.className} implements RecipeBuilder {
      * 3. Creates inner classes with @EventBusSubscriber(bus=MOD) / @EventBusSubscriber(bus=MOD, value=Dist.CLIENT)
      * 4. Removes modEventBus.register(this) since inner classes auto-register
     */
-    private fun extractClientOnlyEventMethods(projectDir: Path, dryRun: Boolean): List<Change> {
-        val changes = mutableListOf<Change>()
-        val srcDir = projectDir.resolve("src/main/java")
-        if (!srcDir.exists()) return changes
-
-        Files.walk(srcDir)
-            .filter { it.extension == "java" }
-            .toList()
-            .forEach { file ->
-                val content = file.readText()
-                val executableContent = maskJavaCommentsAndLiterals(content)
-                if (!Regex("""@\s*Mod\s*\(""").containsMatchIn(executableContent)) return@forEach
-                if (!Regex("""@\s*SubscribeEvent\b""").containsMatchIn(executableContent)) return@forEach
-                val code = executableContent
-                val imports = javaNonStaticImports(code)
-
-                val lines = content.lines().toMutableList()
-                val executableLines = executableContent.lines()
-                val separator = if (content.contains("\r\n")) "\r\n" else "\n"
-
-                data class ExtractedMethod(val startLine: Int, val endLine: Int, val text: String, val isClientOnly: Boolean)
-                val modBusMethods = mutableListOf<ExtractedMethod>()
-
-                var i = 0
-                while (i < lines.size) {
-                    if (executableLines.getOrNull(i)?.trimStart()?.startsWith("@SubscribeEvent") == true) {
-                        val annotLine = i
-                        var methodLine = i + 1
-                        while (methodLine < executableLines.size && executableLines[methodLine].trimStart().startsWith("@")) {
-                            methodLine++
-                        }
-                        if (methodLine >= executableLines.size) { i++; continue }
-
-                        val methodDecl = executableLines[methodLine]
-
-                        // Determine if this is a mod-bus event
-                        val eventType = Regex("""\(\s*(?:final\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\b""")
-                            .find(methodDecl)
-                            ?.groupValues
-                            ?.get(1)
-                        val isModBusEvent = eventType?.let { isKnownModBusEventParameterType(it, imports) } == true
-
-                        if (isModBusEvent) {
-                            val isClientOnly = eventType?.let { isKnownClientOnlyModBusEventParameterType(it, imports) } == true
-
-                            val openBraceIdx = (methodLine until executableLines.size).firstOrNull { executableLines[it].contains("{") }
-                            if (openBraceIdx != null) {
-                                var depth = 0
-                                var methodEnd: Int = openBraceIdx
-                                for (j in openBraceIdx until executableLines.size) {
-                                    depth += executableLines[j].count { c -> c == '{' } - executableLines[j].count { c -> c == '}' }
-                                    if (depth <= 0) {
-                                        methodEnd = j
-                                        break
-                                    }
-                                }
-                                val methodText = lines.subList(annotLine, methodEnd + 1).joinToString(separator)
-                                modBusMethods.add(ExtractedMethod(annotLine, methodEnd, methodText, isClientOnly))
-                            }
-                        }
-                    }
-                    i++
-                }
-
-                if (modBusMethods.isEmpty()) return@forEach
-
-                val modidRef = modAnnotationArgumentExpression(content)
-                    ?: throw IllegalStateException("Cannot derive mod id expression for mod-bus event extraction in $file")
-
-                val clientMethods = modBusMethods.filter { it.isClientOnly }
-                val commonMethods = modBusMethods.filter { !it.isClientOnly }
-
-                val innerClassLines = mutableListOf<String>()
-
-                // Build common mod-bus inner class
-                if (commonMethods.isNotEmpty()) {
-                    innerClassLines.add("")
-                    innerClassLines.add("    @EventBusSubscriber(modid = $modidRef, bus = EventBusSubscriber.Bus.MOD)")
-                    innerClassLines.add("    public static class ModEvents {")
-                    for (cm in commonMethods) {
-                        for (ml in cm.text.lines()) {
-                            val trimmed = ml.trimStart()
-                            if (trimmed.startsWith("public void ") || trimmed.startsWith("public static void ")) {
-                                innerClassLines.add("        ${trimmed.replace("public void ", "public static void ")}")
-                            } else {
-                                innerClassLines.add("        $trimmed")
-                            }
-                        }
-                        innerClassLines.add("")
-                    }
-                    innerClassLines.add("    }")
-                }
-
-                // Build client-only inner class
-                if (clientMethods.isNotEmpty()) {
-                    innerClassLines.add("")
-                    innerClassLines.add("    @EventBusSubscriber(modid = $modidRef, bus = EventBusSubscriber.Bus.MOD, value = net.neoforged.api.distmarker.Dist.CLIENT)")
-                    innerClassLines.add("    public static class ClientModEvents {")
-                    for (cm in clientMethods) {
-                        for (ml in cm.text.lines()) {
-                            val trimmed = ml.trimStart()
-                            if (trimmed.startsWith("public void ") || trimmed.startsWith("public static void ")) {
-                                innerClassLines.add("        ${trimmed.replace("public void ", "public static void ")}")
-                            } else {
-                                innerClassLines.add("        $trimmed")
-                            }
-                        }
-                        innerClassLines.add("")
-                    }
-                    innerClassLines.add("    }")
-                }
-
-                // Remove original methods (in reverse order)
-                for (cm in modBusMethods.sortedByDescending { it.startLine }) {
-                    for (j in cm.endLine downTo cm.startLine) {
-                        lines.removeAt(j)
-                    }
-                }
-
-                // Remove modEventBus.register(this) since inner classes auto-register
-                var currentExecutableLines = maskJavaCommentsAndLiterals(lines.joinToString(separator)).lines()
-                val modBusRegIdx = currentExecutableLines.indexOfFirst {
-                    Regex("""\bmodEventBus\s*\.\s*register\s*\(\s*this\s*\)""").containsMatchIn(it)
-                }
-                if (modBusRegIdx >= 0) {
-                    lines.removeAt(modBusRegIdx)
-                }
-
-                // Check if outer class still has @SubscribeEvent methods; if not, remove @EventBusSubscriber
-                currentExecutableLines = maskJavaCommentsAndLiterals(lines.joinToString(separator)).lines()
-                val hasRemainingSubscribeEvent = currentExecutableLines.any { line ->
-                    val t = line.trimStart()
-                    t.startsWith("@SubscribeEvent") && !t.contains("class ")
-                }
-                if (!hasRemainingSubscribeEvent) {
-                    val ebsIdx = currentExecutableLines.indexOfFirst {
-                        it.trimStart().startsWith("@EventBusSubscriber") && !it.contains("class ")
-                    }
-                    val classIdx = currentExecutableLines.indexOfFirst {
-                        it.contains("public class ") || it.contains("public final class ")
-                    }
-                    if (ebsIdx >= 0 && classIdx >= 0 && ebsIdx < classIdx) {
-                        lines.removeAt(ebsIdx)
-                    }
-                }
-
-                // Find the class closing brace and insert inner classes before it
-                var lastBrace = lines.size - 1
-                while (lastBrace >= 0 && !lines[lastBrace].trimStart().startsWith("}")) {
-                    lastBrace--
-                }
-                if (lastBrace >= 0) {
-                    lines.addAll(lastBrace, innerClassLines)
-                }
-
-                val desc = buildString {
-                    append("Extract ")
-                    if (commonMethods.isNotEmpty()) append("${commonMethods.size} mod-bus")
-                    if (commonMethods.isNotEmpty() && clientMethods.isNotEmpty()) append(" + ")
-                    if (clientMethods.isNotEmpty()) append("${clientMethods.size} client-only")
-                    append(" @SubscribeEvent method(s) to inner class(es)")
-                }
-
-                changes.add(Change(
-                    file = file,
-                    line = modBusMethods.first().startLine + 1,
-                    description = desc,
-                    before = "Instance @SubscribeEvent methods + modEventBus.register(this)",
-                    after = "@EventBusSubscriber static inner class(es)",
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-extract-mod-bus-events"
-                ))
-
-                if (!dryRun) {
-                    file.writeText(lines.joinToString(separator))
-                }
-            }
-
-        return changes
-    }
-
-    private fun migrateCommonBusModEventListeners(projectDir: Path, dryRun: Boolean): List<Change> {
-        val changes = mutableListOf<Change>()
-        val srcDir = projectDir.resolve("src/main/java")
-        if (!srcDir.exists()) return changes
-
-        val modBusListenerRefs = collectModBusListenerRefs(srcDir)
-        if (modBusListenerRefs.isEmpty()) return changes
-        val refPattern = modBusListenerRefs.joinToString("|") { Regex.escape(it) }
-        val badListenerPattern = Regex(
-            """(?m)^[ \t]*NeoForge\.EVENT_BUS\.addListener\(\s*($refPattern)\s*\);\s*\r?\n?"""
-        )
-
-        Files.walk(srcDir)
-            .filter { it.extension == "java" }
-            .toList()
-            .forEach { file ->
-                val original = file.readText()
-                if (!original.contains("@Mod(") && !original.contains("@Mod\n")) return@forEach
-                if (!original.contains("NeoForge.EVENT_BUS.addListener")) return@forEach
-
-                val matches = badListenerPattern.findAll(original).toList()
-                if (matches.isEmpty()) return@forEach
-
-                val modBusVar = detectModBusVariable(original) ?: return@forEach
-
-                val refsToRegister = matches.map { it.groupValues[1] }.distinct()
-                var modified = badListenerPattern.replace(original, "")
-                val separator = if (modified.contains("\r\n")) "\r\n" else "\n"
-                val lines = modified.lines().toMutableList()
-
-                val insertIndex = lines.indexOfFirst {
-                    Regex("""\bIEventBus\s+${Regex.escape(modBusVar)}\s*=""").containsMatchIn(it)
-                }.takeIf { it >= 0 } ?: lines.indexOfFirst {
-                    Regex("""\bpublic\s+\w+\s*\([^)]*\bIEventBus\s+${Regex.escape(modBusVar)}\b[^)]*\)\s*\{""")
-                        .containsMatchIn(it)
-                }.takeIf { it >= 0 } ?: return@forEach
-
-                val indentation = lines[insertIndex].takeWhile { it == ' ' || it == '\t' }
-                val registrationsToInsert = refsToRegister
-                    .filterNot { ref -> modified.contains("$modBusVar.addListener($ref);") }
-                    .map { ref -> "$indentation$modBusVar.addListener($ref);" }
-
-                if (registrationsToInsert.isNotEmpty()) {
-                    lines.addAll(insertIndex + 1, registrationsToInsert)
-                    modified = lines.joinToString(separator)
-                }
-
-                if (modified == original) return@forEach
-
-                changes.add(Change(
-                    file = file,
-                    line = lineNumberAt(original, matches.first().range.first),
-                    description = "Move mod-bus listener registration from NeoForge.EVENT_BUS to mod event bus",
-                    before = matches.joinToString(" ") { it.value.trim() },
-                    after = refsToRegister.joinToString(" ") { "$modBusVar.addListener($it);" },
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-modbus-listener-registration"
-                ))
-
-                if (!dryRun) {
-                    file.writeText(modified)
-                }
-            }
-
-        return changes
-    }
-
-    private fun collectModBusListenerRefs(srcDir: Path): Set<String> {
-        val refs = mutableSetOf<String>()
-        Files.walk(srcDir)
-            .filter { it.extension == "java" }
-            .toList()
-            .forEach { file ->
-                val text = file.readText()
-                val code = maskJavaComments(text)
-                val packageName = packageNameOf(code)
-                val imports = javaNonStaticImports(code)
-                val executableCode = maskJavaCommentsAndLiterals(text)
-                val typeBlocks = javaTypeBlocks(text, executableCode)
-                val methodPattern = Regex(
-                    """(?m)\b(?:public|protected|private)?\s*(?:static\s+)?void\s+(\w+)\s*\(\s*(?:final\s+)?([\w.]+)(?:<[^>]+>)?\s+\w+"""
-                )
-                methodPattern.findAll(executableCode).forEach { match ->
-                    val methodName = match.groupValues[1]
-                    val parameterType = match.groupValues[2]
-                    val isModBusEvent = isKnownModBusEventParameterType(parameterType, imports)
-                    if (isModBusEvent) {
-                        val owner = javaTypeBlockContainingOffset(match.range.first, typeBlocks)
-                        if (owner != null) {
-                            refs.add("${owner.name}::$methodName")
-                            if (packageName.isNotBlank() && owner.isPublic) {
-                                refs.add("$packageName.${owner.name}::$methodName")
-                            }
-                        }
-                    }
-                }
-            }
-        return refs
-    }

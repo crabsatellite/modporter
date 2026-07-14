@@ -7,6 +7,7 @@ import kotlin.io.path.createDirectories
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
@@ -411,6 +412,35 @@ class ExactProjectProviderCallMigrationTest {
     }
 
     @Test
+    fun `PonderLevel local supplies its registry provider from the external type contract`() {
+        write("sample/Controller.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            class Controller {
+                void tick(HolderLookup.Provider registries) { registries.toString(); }
+            }
+        """.trimIndent())
+        val scene = write("sample/Scene.java", """
+            package sample;
+            import net.createmod.ponder.api.level.PonderLevel;
+            class Scene {
+                static class Source {
+                    PonderLevel getWorld() { return null; }
+                }
+                void run(Source scene, Controller controller) {
+                    PonderLevel world = scene.getWorld();
+                    controller.tick();
+                }
+            }
+        """.trimIndent())
+
+        ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migrated = scene.readText()
+
+        assertTrue(migrated.contains("controller.tick(world.registryAccess());"), migrated)
+    }
+
+    @Test
     fun `exact Ponder scene callback uses its declared builder provider root`() {
         write("sample/Codec.java", """
             package sample;
@@ -473,7 +503,7 @@ class ExactProjectProviderCallMigrationTest {
     }
 
     @Test
-    fun `multiple visible level locals hard gate instead of choosing the nearest`() {
+    fun `multiple visible level locals create an explicit contract instead of choosing the nearest`() {
         write("sample/Codec.java", """
             package sample;
             import net.minecraft.core.HolderLookup;
@@ -494,13 +524,148 @@ class ExactProjectProviderCallMigrationTest {
                 }
             }
         """.trimIndent())
+        val changes = ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migrated = file.readText()
+
+        assertTrue(changes.isNotEmpty())
+        val provider = Regex("""run\((?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)""")
+            .find(migrated)?.groupValues?.get(1)
+        assertTrue(provider != null, migrated)
+        assertTrue(migrated.contains("codec.decode($provider)"), migrated)
+        assertFalse(migrated.contains("first.registryAccess()"), migrated)
+        assertFalse(migrated.contains("second.registryAccess()"), migrated)
+    }
+
+    @Test
+    fun `multiple provider owning target parameters propagate an explicit contract without choosing one`() {
+        val target = write("sample/Target.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.level.Level;
+            class Target {
+                void copy(Level source, Level destination, HolderLookup.Provider registries) {
+                    registries.toString();
+                }
+            }
+        """.trimIndent())
+        val caller = write("sample/Caller.java", """
+            package sample;
+            import net.minecraft.world.level.Level;
+            class Caller {
+                Target target;
+                void copy(Level source, Level destination) {
+                    target.copy(source, destination);
+                }
+            }
+        """.trimIndent())
+        val changes = ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migratedTarget = target.readText()
+        val migratedCaller = caller.readText()
+
+        assertTrue(changes.isNotEmpty())
+        assertTrue(migratedTarget.contains("HolderLookup.Provider registries"), migratedTarget)
+        val provider = Regex("""copy\(Level source, Level destination, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)""")
+            .find(migratedCaller)?.groupValues?.get(1)
+        assertTrue(provider != null, migratedCaller)
+        assertTrue(migratedCaller.contains("target.copy(source, destination, $provider)"), migratedCaller)
+        assertFalse(migratedCaller.contains("source.registryAccess()"), migratedCaller)
+        assertFalse(migratedCaller.contains("destination.registryAccess()"), migratedCaller)
+    }
+
+    @Test
+    fun `multiple provider fields on an exact parameter create an explicit contract without choosing one`() {
+        write("sample/Codec.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            class Codec {
+                void decode(HolderLookup.Provider registries) { registries.toString(); }
+            }
+        """.trimIndent())
+        write("sample/Context.java", """
+            package sample;
+            import net.minecraft.world.level.Level;
+            class Context {
+                Level source;
+                Level destination;
+            }
+        """.trimIndent())
+        val file = write("sample/Handler.java", """
+            package sample;
+            class Handler {
+                Codec codec;
+                void run(Context context) { codec.decode(); }
+            }
+        """.trimIndent())
+
+        val changes = ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migrated = file.readText()
+
+        assertTrue(changes.isNotEmpty())
+        val provider = Regex(
+            """run\(Context context, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
+        ).find(migrated)?.groupValues?.get(1)
+        assertTrue(provider != null, migrated)
+        assertTrue(migrated.contains("codec.decode($provider)"), migrated)
+        assertFalse(migrated.contains("context.source.registryAccess()"), migrated)
+        assertFalse(migrated.contains("context.destination.registryAccess()"), migrated)
+    }
+
+    @Test
+    fun `multiple provider fields on the current instance create an explicit contract without choosing one`() {
+        write("sample/Codec.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            class Codec {
+                void decode(HolderLookup.Provider registries) { registries.toString(); }
+            }
+        """.trimIndent())
+        val file = write("sample/Handler.java", """
+            package sample;
+            import net.minecraft.world.level.Level;
+            class Handler {
+                Codec codec;
+                Level source;
+                Level destination;
+                void run() { codec.decode(); }
+            }
+        """.trimIndent())
+
+        val changes = ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migrated = file.readText()
+
+        assertTrue(changes.isNotEmpty())
+        val provider = Regex(
+            """run\((?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
+        ).find(migrated)?.groupValues?.get(1)
+        assertTrue(provider != null, migrated)
+        assertTrue(migrated.contains("codec.decode($provider)"), migrated)
+        assertFalse(migrated.contains("this.source.registryAccess()"), migrated)
+        assertFalse(migrated.contains("this.destination.registryAccess()"), migrated)
+    }
+
+    @Test
+    fun `multiple provider fields without a provider demand remain untouched`() {
+        write("sample/Codec.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            class Codec {
+                void decode(HolderLookup.Provider registries) { registries.toString(); }
+            }
+        """.trimIndent())
+        val file = write("sample/Holder.java", """
+            package sample;
+            import net.minecraft.world.level.Level;
+            class Holder {
+                Level source;
+                Level destination;
+                void idle() { source.toString(); }
+            }
+        """.trimIndent())
         val original = file.readText()
 
-        val error = assertFailsWith<IllegalStateException> {
-            ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
-        }
+        val changes = ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
 
-        assertTrue(error.message.orEmpty().contains("Ambiguous exact HolderLookup.Provider sources"), error.message)
+        assertTrue(changes.isEmpty())
         assertTrue(file.readText() == original, file.readText())
     }
 
@@ -584,7 +749,114 @@ class ExactProjectProviderCallMigrationTest {
     }
 
     @Test
-    fun `parameter owned provider discharge removes exact registry accessor call arguments`() {
+    fun `unused provider discharge removes an exact inherited registry access call`() {
+        val behaviour = write("sample/Behaviour.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            interface Behaviour {
+                default void tick(String context, HolderLookup.Provider registries) {}
+            }
+        """.trimIndent())
+        val actor = write("sample/Actor.java", """
+            package sample;
+            import net.minecraft.world.entity.Entity;
+            abstract class Actor extends Entity {
+                void run(Behaviour behaviour, String context) {
+                    behaviour.tick(context);
+                    behaviour.tick(context, this.registryAccess());
+                }
+            }
+        """.trimIndent())
+
+        ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migratedBehaviour = behaviour.readText()
+        val migratedActor = actor.readText()
+
+        assertTrue(migratedBehaviour.contains("default void tick(String context)"), migratedBehaviour)
+        assertTrue(Regex("behaviour\\.tick\\(context\\);").findAll(migratedActor).count() == 2, migratedActor)
+    }
+
+    @Test
+    fun `unused provider discharge hard gates a project registry access implementation`() {
+        write("sample/Behaviour.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            interface Behaviour {
+                default void tick(String context, HolderLookup.Provider registries) {}
+            }
+        """.trimIndent())
+        val actor = write("sample/Actor.java", """
+            package sample;
+            import net.minecraft.core.RegistryAccess;
+            import net.minecraft.world.entity.Entity;
+            abstract class Actor extends Entity {
+                int accesses;
+                RegistryAccess registryAccess() {
+                    accesses++;
+                    return super.registryAccess();
+                }
+                void run(Behaviour behaviour, String context) {
+                    behaviour.tick(context);
+                    behaviour.tick(context, this.registryAccess());
+                }
+            }
+        """.trimIndent())
+
+        val error = assertFailsWith<IllegalStateException> {
+            ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        }
+
+        assertTrue(error.message.orEmpty().contains("provider demands", ignoreCase = true), error.message)
+        assertTrue(actor.readText().contains("behaviour.tick(context, this.registryAccess());"), actor.readText())
+    }
+
+    @Test
+    fun `parameter owned provider discharge removes only an exactly reproduced field path accessor`() {
+        write("sample/Context.java", """
+            package sample;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.Level;
+            class Context {
+                Level world;
+                CompoundTag data;
+            }
+        """.trimIndent())
+        val filter = write("sample/Filters.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.item.ItemStack;
+            class Filters {
+                static ItemStack get(Context context, HolderLookup.Provider registries) {
+                    return ItemStack.parseOptional(registries, context.data);
+                }
+            }
+        """.trimIndent())
+        val caller = write("sample/Caller.java", """
+            package sample;
+            class Caller {
+                Object legacy(Context context) {
+                    return Filters.get(context);
+                }
+                Object generated(Context context) {
+                    return Filters.get(context, context.world.registryAccess());
+                }
+            }
+        """.trimIndent())
+
+        ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migratedFilter = filter.readText()
+        val migratedCaller = caller.readText()
+
+        assertTrue(migratedFilter.contains("static ItemStack get(Context context)"), migratedFilter)
+        assertTrue(
+            migratedFilter.contains("ItemStack.parseOptional(context.world.registryAccess(), context.data)"),
+            migratedFilter
+        )
+        assertTrue(Regex("Filters\\.get\\(context\\);").findAll(migratedCaller).count() == 2, migratedCaller)
+    }
+
+    @Test
+    fun `different provider source preserves the explicit contract and closes legacy calls`() {
         write("sample/Context.java", """
             package sample;
             import net.minecraft.nbt.CompoundTag;
@@ -607,23 +879,88 @@ class ExactProjectProviderCallMigrationTest {
         val caller = write("sample/Caller.java", """
             package sample;
             import net.minecraft.world.level.Level;
+            import org.apache.commons.lang3.tuple.MutablePair;
             class Caller {
-                Object read(Context context, Level level) {
-                    return Filters.get(context, level.registryAccess());
+                Object legacy(Context context) {
+                    return Filters.get(context);
+                }
+                Object legacyField(MutablePair<String, Context> actor) {
+                    return Filters.get(actor.right);
+                }
+                Object generated(Context context, Level otherLevel) {
+                    return Filters.get(context, otherLevel.registryAccess());
+                }
+            }
+        """.trimIndent())
+        ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+
+        val migratedFilter = filter.readText()
+        val migratedCaller = caller.readText()
+        assertTrue(
+            migratedFilter.contains("get(Context context, HolderLookup.Provider registries)"),
+            migratedFilter
+        )
+        assertTrue(migratedFilter.contains("ItemStack.parseOptional(registries, context.data)"), migratedFilter)
+        assertTrue(
+            migratedCaller.contains("Filters.get(context, context.world.registryAccess())"),
+            migratedCaller
+        )
+        assertTrue(
+            migratedCaller.contains("Filters.get(actor.right, actor.right.world.registryAccess())"),
+            migratedCaller
+        )
+        assertTrue(
+            migratedCaller.contains("Filters.get(context, otherLevel.registryAccess())"),
+            migratedCaller
+        )
+    }
+
+    @Test
+    fun `future legacy caller provider is checked before discharging the target contract`() {
+        write("sample/Context.java", """
+            package sample;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.level.Level;
+            class Context {
+                Level world;
+                CompoundTag data;
+            }
+        """.trimIndent())
+        val target = write("sample/Filters.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.item.ItemStack;
+            class Filters {
+                static ItemStack get(Context context, HolderLookup.Provider registries) {
+                    return ItemStack.parseOptional(registries, context.data);
+                }
+            }
+        """.trimIndent())
+        val caller = write("sample/CallerEntity.java", """
+            package sample;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.Entity;
+            abstract class CallerEntity extends Entity {
+                Context context;
+                @Override
+                protected void addAdditionalSaveData(CompoundTag tag) {
+                    Filters.get(context);
                 }
             }
         """.trimIndent())
 
         ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
-        val migratedFilter = filter.readText()
+        val migratedTarget = target.readText()
         val migratedCaller = caller.readText()
 
-        assertTrue(migratedFilter.contains("static ItemStack get(Context context)"), migratedFilter)
         assertTrue(
-            migratedFilter.contains("ItemStack.parseOptional(context.world.registryAccess(), context.data)"),
-            migratedFilter
+            migratedTarget.contains("get(Context context, HolderLookup.Provider registries)"),
+            migratedTarget
         )
-        assertTrue(migratedCaller.contains("Filters.get(context);"), migratedCaller)
+        assertTrue(
+            migratedCaller.contains("Filters.get(context, this.registryAccess())"),
+            migratedCaller
+        )
     }
 
     @Test
@@ -649,6 +986,9 @@ class ExactProjectProviderCallMigrationTest {
                 CompoundTag capture(SnapshotStore store, Level level, BlockEntity blockEntity) {
                     return store.capture(level, blockEntity, level.registryAccess());
                 }
+                CompoundTag legacy(SnapshotStore store, Level level, BlockEntity blockEntity) {
+                    return store.capture(level, blockEntity);
+                }
             }
         """.trimIndent())
 
@@ -659,6 +999,114 @@ class ExactProjectProviderCallMigrationTest {
         assertTrue(migratedTarget.contains("capture(Level level, BlockEntity blockEntity)"), migratedTarget)
         assertTrue(migratedTarget.contains("blockEntity.getUpdateTag(level.registryAccess())"), migratedTarget)
         assertTrue(migratedCaller.contains("store.capture(level, blockEntity)"), migratedCaller)
+    }
+
+    @Test
+    fun `intrinsic local level discharges a generated provider without changing callers`() {
+        val file = write("sample/Behaviour.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.level.Level;
+            class Behaviour {
+                Level getWorld() { return null; }
+                void create(HolderLookup.Provider registries) {
+                    Level level = getWorld();
+                    registries.toString();
+                }
+                void tick() { create(); }
+            }
+        """.trimIndent())
+
+        ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migrated = file.readText()
+
+        assertTrue(migrated.contains("void create()"), migrated)
+        assertTrue(migrated.contains("level.registryAccess().toString();"), migrated)
+        assertTrue(migrated.contains("void tick() { create(); }"), migrated)
+    }
+
+    @Test
+    fun `intrinsic BlockEntity provider discharge changes an override family atomically`() {
+        val base = write("sample/BaseStore.java", """
+            package sample;
+            import java.util.Objects;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            abstract class BaseStore extends BlockEntity {
+                boolean unwrap(String value, HolderLookup.Provider registries) {
+                    if (value.isEmpty()) return false;
+                    Objects.requireNonNull(this.level);
+                    registries.toString();
+                    return true;
+                }
+            }
+        """.trimIndent())
+        val child = write("sample/ChildStore.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            abstract class ChildStore extends BaseStore {
+                boolean unwrap(String value, HolderLookup.Provider registries) {
+                    return true;
+                }
+            }
+        """.trimIndent())
+        val handler = write("sample/StoreHandler.java", """
+            package sample;
+            class StoreHandler {
+                BaseStore store;
+                boolean insert(String value) { return store.unwrap(value); }
+            }
+        """.trimIndent())
+
+        ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migratedBase = base.readText()
+        val migratedChild = child.readText()
+        val migratedHandler = handler.readText()
+
+        assertTrue(migratedBase.contains("boolean unwrap(String value)"), migratedBase)
+        assertTrue(migratedBase.contains("this.getLevel().registryAccess().toString();"), migratedBase)
+        assertTrue(migratedChild.contains("boolean unwrap(String value)"), migratedChild)
+        assertFalse(migratedChild.contains("HolderLookup.Provider"), migratedChild)
+        assertTrue(migratedHandler.contains("store.unwrap(value)"), migratedHandler)
+    }
+
+    @Test
+    fun `project Objects class cannot prove a BlockEntity level non null`() {
+        write("sample/Objects.java", """
+            package sample;
+            class Objects {
+                static void requireNonNull(Object value) {}
+            }
+        """.trimIndent())
+        val target = write("sample/Store.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            abstract class Store extends BlockEntity {
+                boolean unwrap(String value, HolderLookup.Provider registries) {
+                    Objects.requireNonNull(this.level);
+                    registries.toString();
+                    return true;
+                }
+            }
+        """.trimIndent())
+        val caller = write("sample/StoreHandler.java", """
+            package sample;
+            class StoreHandler {
+                Store store;
+                boolean insert(String value) { return store.unwrap(value); }
+            }
+        """.trimIndent())
+        val originalTarget = target.readText()
+        val originalCaller = caller.readText()
+
+        val error = assertFailsWith<IllegalStateException> {
+            ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        }
+
+        assertTrue(error.message.orEmpty().contains("provider demands", ignoreCase = true), error.message)
+        assertTrue(target.readText() == originalTarget, target.readText())
+        assertTrue(caller.readText() == originalCaller, caller.readText())
     }
 
     @Test
@@ -1129,7 +1577,7 @@ class ExactProjectProviderCallMigrationTest {
     }
 
     @Test
-    fun `local assignments cannot prove inherited player inventory field equivalence`() {
+    fun `local assignments cannot make inherited player inventory fields an exact provider source`() {
         write("sample/Codec.java", """
             package sample;
             import net.minecraft.core.HolderLookup;
@@ -1154,12 +1602,17 @@ class ExactProjectProviderCallMigrationTest {
                 void run() { codec.encode(); }
             }
         """.trimIndent())
-        val original = file.readText()
+        val changes = ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migrated = file.readText()
 
-        assertFailsWith<IllegalStateException> {
-            ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
-        }
-        assertTrue(file.readText() == original, file.readText())
+        assertTrue(changes.isNotEmpty())
+        val provider = Regex(
+            """run\((?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
+        ).find(migrated)?.groupValues?.get(1)
+        assertTrue(provider != null, migrated)
+        assertTrue(migrated.contains("codec.encode($provider)"), migrated)
+        assertFalse(migrated.contains("this.player.registryAccess()"), migrated)
+        assertFalse(migrated.contains("this.playerInventory.player.registryAccess()"), migrated)
     }
 
     @Test
@@ -1429,7 +1882,7 @@ class ExactProjectProviderCallMigrationTest {
     }
 
     @Test
-    fun `same shaped non Block method does not receive the external callback contract`() {
+    fun `same shaped non Block method gets an explicit contract rather than the external callback contract`() {
         write("sample/Codec.java", """
             package sample;
             import net.minecraft.core.HolderLookup;
@@ -1453,14 +1906,49 @@ class ExactProjectProviderCallMigrationTest {
                 }
             }
         """.trimIndent())
-        val original = file.readText()
+        val changes = ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migrated = file.readText()
 
-        val error = assertFailsWith<IllegalStateException> {
-            ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
-        }
+        assertTrue(changes.isNotEmpty())
+        val provider = Regex(
+            """setPlacedBy\(Level level, BlockPos pos, BlockState state, LivingEntity placer, ItemStack stack, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
+        ).find(migrated)?.groupValues?.get(1)
+        assertTrue(provider != null, migrated)
+        assertTrue(migrated.contains("codec.decode(new CompoundTag(), $provider);"), migrated)
+        assertFalse(migrated.contains("level.registryAccess()"), migrated)
+        assertFalse(migrated.contains("placer.registryAccess()"), migrated)
+    }
 
-        assertTrue(error.message.orEmpty().contains("Ambiguous exact HolderLookup.Provider"), error.message)
-        assertTrue(file.readText() == original, file.readText())
+    @Test
+    fun `container screen lifecycle owns its inherited Minecraft level provider`() {
+        write("sample/Codec.java", """
+            package sample;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+            class Codec {
+                void decode(CompoundTag tag, HolderLookup.Provider registries) {}
+            }
+        """.trimIndent())
+        val file = write("sample/CopyScreen.java", """
+            package sample;
+            import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+            import net.minecraft.world.inventory.AbstractContainerMenu;
+            import net.minecraft.nbt.CompoundTag;
+            abstract class CopyScreen extends AbstractContainerScreen<AbstractContainerMenu> {
+                void duplicate(Codec codec, CompoundTag tag) {
+                    codec.decode(tag);
+                }
+            }
+        """.trimIndent())
+
+        ExactProjectProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migrated = file.readText()
+
+        assertTrue(
+            migrated.contains("codec.decode(tag, this.minecraft.level.registryAccess());"),
+            migrated
+        )
+        assertTrue(!migrated.contains("HolderLookup.Provider modporterRegistries"), migrated)
     }
 
     private fun write(relative: String, source: String): Path {

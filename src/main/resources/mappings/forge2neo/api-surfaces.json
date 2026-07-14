@@ -145,6 +145,7 @@
     ],
     "allowedFiles": [
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalProviderContracts.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalTypeContracts.kt",
       "src/main/kotlin/com/modporter/core/transforms/text/TextReplacementPass.kt"
     ],
     "rationale": "Catnip is a published helper library used by source projects; migration contracts target its public API surface rather than a benchmark mod."
@@ -158,6 +159,7 @@
     "ruleIdPrefixes": [],
     "allowedFiles": [
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalProviderContracts.kt",
+      "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalTypeContracts.kt",
       "src/main/kotlin/com/modporter/core/transforms/structural/ExactProjectProviderCallMigration.kt"
     ],
     "rationale": "Ponder exposes a public scene API whose world facade owns the target registry provider; the contract applies to every Ponder consumer."

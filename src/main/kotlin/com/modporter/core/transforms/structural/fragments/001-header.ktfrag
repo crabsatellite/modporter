@@ -43,8 +43,11 @@ class StructuralRefactorPass : Pass {
 
     private data class ExactJavaMethodSurface(
         val name: String,
+        val nameOffset: Int,
         val range: IntRange,
-        val parameters: List<Pair<String, String>>
+        val parameters: List<Pair<String, String>>,
+        val returnType: String?,
+        val isStatic: Boolean
     )
 
     private var exactJavaMethodSurfaceSource: String? = null

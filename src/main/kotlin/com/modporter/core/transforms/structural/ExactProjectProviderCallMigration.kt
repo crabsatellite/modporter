@@ -18,6 +18,8 @@ import com.github.javaparser.ast.expr.MethodCallExpr
 import com.github.javaparser.ast.expr.MethodReferenceExpr
 import com.github.javaparser.ast.expr.NameExpr
 import com.github.javaparser.ast.expr.NullLiteralExpr
+import com.github.javaparser.ast.expr.SuperExpr
+import com.github.javaparser.ast.expr.ThisExpr
 import com.github.javaparser.ast.expr.TypeExpr
 import com.github.javaparser.ast.expr.UnaryExpr
 import com.github.javaparser.ast.stmt.BlockStmt
@@ -94,12 +96,14 @@ internal class ExactProjectProviderCallMigration {
     private data class DischargedTarget(
         val key: MethodKey,
         val providerIndex: Int,
-        val file: Path
+        val file: Path,
+        val providerExpression: Expression? = null,
+        val nonProviderParameterNames: List<String> = emptyList()
     )
 
-    private data class PendingUnusedProvider(
-        val target: DischargedTarget,
-        val method: MethodDeclaration
+    private data class LegacyProviderCandidate(
+        val key: MethodKey,
+        val providerIndex: Int
     )
 
     private data class SeededOverrideFamilies(
@@ -192,7 +196,12 @@ internal class ExactProjectProviderCallMigration {
         }.groupBy({ it.first }, { it.second })
 
         val demands = linkedMapOf<MethodKey, Demand>()
-        fun demandFor(file: Path, callable: CallableDeclaration<*>, use: com.github.javaparser.ast.Node): Demand {
+        fun demandFor(
+            file: Path,
+            callable: CallableDeclaration<*>,
+            use: com.github.javaparser.ast.Node,
+            targetOwnedProvider: String? = null
+        ): Demand {
             val method = callable as? MethodDeclaration ?: throw IllegalStateException(
                 "HolderLookup.Provider propagation cannot change constructor '${callable.nameAsString}' in $file"
             )
@@ -208,7 +217,14 @@ internal class ExactProjectProviderCallMigration {
                 throw IllegalStateException("Method $owner.${method.nameAsString} has multiple HolderLookup.Provider parameters")
             }
             val existing = providerParameters.singleOrNull()
-            val contextProvider = if (existing == null) exactCallableProviderExpression(method, use, index) else null
+            var ambiguousProviderSources = false
+            val contextProvider = if (existing == null) {
+                exactCallableProviderExpression(method, use, index, targetOwnedProvider) {
+                    ambiguousProviderSources = true
+                }
+            } else {
+                null
+            }
             val hadProvider = existing != null || contextProvider != null
             val canAddProvider = existing != null || contextProvider != null ||
                 index.isProvenNonOverride(method)
@@ -222,7 +238,8 @@ internal class ExactProjectProviderCallMigration {
                 providerName = providerName,
                 legacyArity = method.parameters.size - if (existing == null) 0 else 1,
                 hadProvider = hadProvider,
-                rooted = hadProvider || isExplicitProjectApiBoundary(method, index),
+                rooted = hadProvider || isExplicitProjectApiBoundary(method, index) ||
+                    (ambiguousProviderSources && index.isProvenNonOverride(method)),
                 canAddProvider = canAddProvider
             )
             demands[key]?.let { previous ->
@@ -290,11 +307,22 @@ internal class ExactProjectProviderCallMigration {
                 val callable = enclosingCallable(call) ?: throw IllegalStateException(
                     "Call to $targetOwner.${call.nameAsString} is outside a callable in $file"
                 )
-                if (!hasDeclaredOrExactProviderRoot(callable, call, index)) {
+                val targetOwnedProvider = exactTargetParameterOwnedProviderExpression(
+                    target.method,
+                    call,
+                    callable,
+                    index
+                )
+                if (!hasDeclaredOrExactProviderRoot(callable, call, index, targetOwnedProvider)) {
                     unseededDemands += "'$call' in $file"
                     return@calls
                 }
-                initialSites += InitialSite(file, call, demandFor(file, callable, call), target)
+                initialSites += InitialSite(
+                    file,
+                    call,
+                    demandFor(file, callable, call, targetOwnedProvider),
+                    target
+                )
             }
             unit(file).findAll(MethodReferenceExpr::class.java).forEach references@{ reference ->
                 val targetOwner = index.expressionType(reference.scope, reference) ?: return@references
@@ -383,7 +411,13 @@ internal class ExactProjectProviderCallMigration {
                 val callable = enclosingCallable(call) ?: throw IllegalStateException(
                     "Call to ${callee.key.owner}.${callee.key.name} is outside a callable in $file"
                 )
-                val caller = demandFor(file, callable, call)
+                val targetOwnedProvider = exactTargetParameterOwnedProviderExpression(
+                    callee.method,
+                    call,
+                    callable,
+                    index
+                )
+                val caller = demandFor(file, callable, call, targetOwnedProvider)
                 protectedFiles.add(file)
                 val siteKey = "$file:${call.range.orElseThrow()}:${callee.key}"
                 projectCallSites[siteKey] = ProjectCallSite(file, call, caller, callee)
@@ -516,7 +550,13 @@ internal class ExactProjectProviderCallMigration {
                             )
                         }
                         val caller = call.findAncestor(MethodDeclaration::class.java).orElse(null) ?: return@calls
-                        if (hasStrictProviderRoot(caller, call, index)) return@calls
+                        val targetOwnedProvider = exactTargetParameterOwnedProviderExpression(
+                            matches.single().method,
+                            call,
+                            caller,
+                            index
+                        )
+                        if (hasStrictProviderRoot(caller, call, index, targetOwnedProvider)) return@calls
                         val family = index.exactProjectOverrideFamily(caller) { root ->
                             index.isProvenNonOverride(root) ||
                                 ExactExternalProviderContracts.isProvenProjectHelperRoot(root, index)
@@ -611,10 +651,11 @@ internal class ExactProjectProviderCallMigration {
     private fun hasStrictProviderRoot(
         method: MethodDeclaration,
         use: com.github.javaparser.ast.Node,
-        index: JavaProjectTypeIndex
+        index: JavaProjectTypeIndex,
+        targetOwnedProvider: String? = null
     ): Boolean = method.parameters.any { parameter ->
         index.declaredType(parameter.type, method) == HOLDER_LOOKUP_PROVIDER
-    } || exactCallableProviderExpression(method, use, index) != null
+    } || exactCallableProviderExpression(method, use, index, targetOwnedProvider) != null
 
     private fun mostSpecificTargets(
         targets: List<ProviderTarget>,
@@ -698,109 +739,104 @@ internal class ExactProjectProviderCallMigration {
         releaseUnit: (Path) -> Unit,
         index: JavaProjectTypeIndex
     ): Set<Path> {
+        val legacyCallEvidence = collectLegacyProviderCallEvidence(
+            providerDeclarationFiles,
+            allFiles,
+            unit,
+            releaseUnit,
+            index
+        )
         val discharged = mutableListOf<DischargedTarget>()
-        val pendingUnused = mutableListOf<PendingUnusedProvider>()
+        val visitedMethods = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<MethodDeclaration, Boolean>()
+        )
         providerDeclarationFiles.forEach { file ->
             unit(file).findAll(MethodDeclaration::class.java).forEach methods@{ method ->
+                if (method in visitedMethods) return@methods
                 val owner = declaredOwnerOrNull(method) ?: return@methods
                 val providers = method.parameters.withIndex().filter { (_, parameter) ->
                     index.declaredType(parameter.type, method) == HOLDER_LOOKUP_PROVIDER
                 }
                 if (providers.size != 1) return@methods
                 if (!index.isProvenNonOverride(method)) return@methods
-                val provider = providers.single()
-                val parameterTypes = resolvedParameterTypes(method, index) ?: return@methods
                 if (!index.hasClosedProjectMethodHierarchy(owner)) return@methods
-                val uses = method.findAll(NameExpr::class.java).filter {
-                    it.nameAsString == provider.value.nameAsString
-                }
-                if (uses.isEmpty()) {
-                    if (method.parameters.any { index.declaredType(it.type, method) == COMPOUND_TAG }) return@methods
-                    pendingUnused += PendingUnusedProvider(
-                        DischargedTarget(
-                            MethodKey(owner, method.nameAsString, parameterTypes),
-                            provider.index,
-                            file
-                        ),
-                        method
-                    )
-                    return@methods
-                }
-                val calls = uses.map { use ->
-                    val call = use.findAncestor(MethodCallExpr::class.java).orElse(null) ?: return@methods
-                    if (call.arguments.none { it === use || it.isAncestorOf(use) }) return@methods
-                    call
-                }
-                val declaredAlternative = exactAlternativeDeclaredProviderExpression(
-                    method,
-                    provider.value,
-                    uses,
-                    index
-                )
-                val roots = calls.mapIndexed { callIndex, call ->
-                    val use = uses[callIndex]
-                    val otherRoots = call.arguments
-                        .filterNot { it === use || it.isAncestorOf(use) }
-                        .mapNotNull { exactRootParameter(it, method, index) }
-                        .distinct()
-                    if (otherRoots.size != 1) return@mapIndexed null
-                    otherRoots.single()
-                }.filterNotNull().distinct()
-                val providerExpression = declaredAlternative ?: run {
-                    if (roots.size != 1) return@methods
-                    val rootName = roots.single()
-                    val root = NameExpr(rootName)
-                    val field = index.exactDirectFieldWithType(root, uses.first(), PROVIDER_SOURCE_TYPES)
+                val family = if (method.isStatic) {
+                    listOf(JavaProjectTypeIndex.ExactProjectMethod(owner, file, method))
+                } else {
+                    index.exactProjectOverrideFamily(method) { root -> index.isProvenNonOverride(root) }
                         ?: return@methods
-                    when (field.second) {
-                        HOLDER_LOOKUP_PROVIDER, REGISTRY_ACCESS -> "$rootName.${field.first}"
-                        else -> "$rootName.${field.first}.registryAccess()"
-                    }
                 }
-                ensureLexical(file)
-                uses.forEach { use -> use.replace(StaticJavaParser.parseExpression(providerExpression)) }
-                method.parameters.removeAt(provider.index)
-                discharged += DischargedTarget(
-                    MethodKey(owner, method.nameAsString, parameterTypes),
-                    provider.index,
-                    file
-                )
-            }
-        }
-        if (pendingUnused.isNotEmpty()) {
-            val pendingByName = pendingUnused.groupBy { it.target.key.name }
-            val approved = linkedSetOf<PendingUnusedProvider>()
-            allFiles.filter { file ->
-                val source = file.readText()
-                pendingByName.keys.any { source.contains("$it(") }
-            }.forEach { file ->
-                unit(file).findAll(MethodCallExpr::class.java).forEach calls@{ call ->
-                    val candidates = pendingByName[call.nameAsString].orEmpty().filter { pending ->
-                        call.arguments.size == pending.target.key.declarationArity - 1
+                family.forEach { visitedMethods.add(it.method) }
+                val root = family.filter { candidate ->
+                    family.none { other ->
+                        other !== candidate && index.isTypeAssignableTo(candidate.owner, other.owner)
                     }
-                    if (candidates.isEmpty()) return@calls
-                    val receiverType = index.methodCallReceiverType(call) ?: return@calls
-                    val matches = candidates.filter { pending ->
-                        index.isTypeAssignableTo(receiverType, pending.target.key.owner) &&
-                            index.argumentsMatchTypes(
-                                call,
-                                pending.target.key.parameterTypes.filterIndexed { parameterIndex, _ ->
-                                    parameterIndex != pending.target.providerIndex
-                                }
-                            ) &&
-                            !index.argumentsMatchProjectMethod(call, pending.target.key.owner, call.arguments.size)
-                    }
-                    if (matches.size > 1) {
-                        throw IllegalStateException("Ambiguous unused provider target for '$call': ${matches.map { it.target.key }}")
-                    }
-                    matches.singleOrNull()?.let(approved::add)
+                }.singleOrNull() ?: return@methods
+                val rootTypes = resolvedParameterTypes(root.method, index) ?: return@methods
+                val rootProviderIndex = root.method.parameters.indexOfFirst { parameter ->
+                    index.declaredType(parameter.type, root.method) == HOLDER_LOOKUP_PROVIDER
                 }
-                if (file !in providerDeclarationFiles && file !in discharged.map { it.file }) releaseUnit(file)
-            }
-            approved.forEach { pending ->
-                ensureLexical(pending.target.file)
-                pending.method.parameters.removeAt(pending.target.providerIndex)
-                discharged += pending.target
+                if (rootProviderIndex < 0) return@methods
+                val rootKey = MethodKey(root.owner, root.method.nameAsString, rootTypes)
+                if (rootKey !in legacyCallEvidence) return@methods
+
+                val memberEdits = mutableListOf<Triple<JavaProjectTypeIndex.ExactProjectMethod, List<NameExpr>, Expression?>>()
+                val proposals = mutableListOf<DischargedTarget>()
+                family.forEach { member ->
+                    val memberProviders = member.method.parameters.withIndex().filter { (_, parameter) ->
+                        index.declaredType(parameter.type, member.method) == HOLDER_LOOKUP_PROVIDER
+                    }
+                    if (memberProviders.size != 1 || memberProviders.single().index != rootProviderIndex) return@methods
+                    val memberTypes = resolvedParameterTypes(member.method, index) ?: return@methods
+                    val provider = memberProviders.single()
+                    val uses = member.method.findAll(NameExpr::class.java).filter {
+                        it.nameAsString == provider.value.nameAsString
+                    }
+                    if (uses.isEmpty() && member.method.parameters.any {
+                            index.declaredType(it.type, member.method) == COMPOUND_TAG
+                        }
+                    ) {
+                        return@methods
+                    }
+                    val providerExpression = if (uses.isEmpty()) {
+                        null
+                    } else {
+                        exactAlternativeProviderExpression(member.method, provider.value, uses, index)
+                            ?.let { StaticJavaParser.parseExpression<Expression>(it) }
+                            ?: return@methods
+                    }
+                    memberEdits += Triple(member, uses, providerExpression)
+                    proposals += DischargedTarget(
+                        MethodKey(member.owner, member.method.nameAsString, memberTypes),
+                        provider.index,
+                        member.file,
+                        providerExpression,
+                        member.method.parameters.filterIndexed { parameterIndex, _ ->
+                            parameterIndex != provider.index
+                        }.map { it.nameAsString }
+                    )
+                }
+                if (proposals.any { proposal ->
+                        !allExistingProviderCallsCanBeDischarged(
+                            proposal,
+                            proposals,
+                            allFiles,
+                            providerDeclarationFiles,
+                            unit,
+                            releaseUnit,
+                            index
+                        )
+                    }
+                ) return@methods
+
+                memberEdits.forEach { (member, uses, providerExpression) ->
+                    ensureLexical(member.file)
+                    if (providerExpression != null) {
+                        uses.forEach { use -> use.replace(providerExpression.clone()) }
+                    }
+                    member.method.parameters.removeAt(rootProviderIndex)
+                }
+                discharged += proposals
             }
         }
         if (discharged.isEmpty()) return emptySet()
@@ -827,14 +863,15 @@ internal class ExactProjectProviderCallMigration {
                         )
                 }
                 if (targets.isEmpty()) return@calls
-                if (targets.size > 1) {
+                val exactTargets = mostSpecificDischargedTargets(targets, index)
+                if (exactTargets.size > 1) {
                     throw IllegalStateException("Ambiguous discharged provider call '$call': ${targets.map { it.key }}")
                 }
-                val target = targets.single()
+                val target = exactTargets.singleOrNull() ?: return@calls
                 val providerArgument = call.arguments[target.providerIndex]
-                if (!isSideEffectFreeProviderArgument(providerArgument, call, index)) {
+                if (!canRemoveDischargedProviderArgument(target, providerArgument, call, index)) {
                     throw IllegalStateException(
-                        "Cannot remove side-effect-unknown provider expression '$providerArgument' from $call"
+                        "Cannot prove discharged provider expression '$providerArgument' is exactly reproduced by $call"
                     )
                 }
                 ensureLexical(file)
@@ -847,46 +884,304 @@ internal class ExactProjectProviderCallMigration {
         return changedFiles
     }
 
-    private fun exactAlternativeDeclaredProviderExpression(
+    private fun collectLegacyProviderCallEvidence(
+        providerDeclarationFiles: List<Path>,
+        allFiles: List<Path>,
+        unit: (Path) -> CompilationUnit,
+        releaseUnit: (Path) -> Unit,
+        index: JavaProjectTypeIndex
+    ): Set<MethodKey> {
+        val candidates = providerDeclarationFiles.flatMap { file ->
+            unit(file).findAll(MethodDeclaration::class.java).mapNotNull { method ->
+                val owner = declaredOwnerOrNull(method) ?: return@mapNotNull null
+                val providers = method.parameters.withIndex().filter { (_, parameter) ->
+                    index.declaredType(parameter.type, method) == HOLDER_LOOKUP_PROVIDER
+                }
+                if (providers.size != 1 || !index.isProvenNonOverride(method) ||
+                    !index.hasClosedProjectMethodHierarchy(owner)
+                ) {
+                    return@mapNotNull null
+                }
+                val parameterTypes = resolvedParameterTypes(method, index) ?: return@mapNotNull null
+                LegacyProviderCandidate(
+                    MethodKey(owner, method.nameAsString, parameterTypes),
+                    providers.single().index
+                )
+            }
+        }
+        if (candidates.isEmpty()) return emptySet()
+        val candidatesByName = candidates.groupBy { it.key.name }
+        val evidence = linkedSetOf<MethodKey>()
+        allFiles.filter { file ->
+            val source = file.readText()
+            candidatesByName.keys.any { source.contains("$it(") }
+        }.forEach { file ->
+            unit(file).findAll(MethodCallExpr::class.java).forEach calls@{ call ->
+                val sameName = candidatesByName[call.nameAsString].orEmpty().filter { candidate ->
+                    call.arguments.size == candidate.key.declarationArity - 1
+                }
+                if (sameName.isEmpty()) return@calls
+                val receiverType = index.methodCallReceiverType(call) ?: return@calls
+                val matches = sameName.filter { candidate ->
+                    index.isTypeAssignableTo(receiverType, candidate.key.owner) &&
+                        index.argumentsMatchTypes(
+                            call,
+                            candidate.key.parameterTypes.filterIndexed { parameterIndex, _ ->
+                                parameterIndex != candidate.providerIndex
+                            }
+                        ) &&
+                        !index.argumentsMatchProjectMethod(call, candidate.key.owner, call.arguments.size)
+                }
+                if (matches.size > 1) {
+                    throw IllegalStateException(
+                        "Ambiguous legacy provider call evidence for '$call': ${matches.map { it.key }}"
+                    )
+                }
+                matches.singleOrNull()?.let { evidence += it.key }
+            }
+            if (file !in providerDeclarationFiles) releaseUnit(file)
+        }
+        return evidence
+    }
+
+    private fun allExistingProviderCallsCanBeDischarged(
+        target: DischargedTarget,
+        familyTargets: List<DischargedTarget>,
+        allFiles: List<Path>,
+        providerDeclarationFiles: List<Path>,
+        unit: (Path) -> CompilationUnit,
+        releaseUnit: (Path) -> Unit,
+        index: JavaProjectTypeIndex
+    ): Boolean {
+        var exact = true
+        allFiles.filter { it.readText().contains("${target.key.name}(") }.forEach { file ->
+            unit(file).findAll(MethodCallExpr::class.java).forEach calls@{ call ->
+                if (call.nameAsString != target.key.name) return@calls
+                val receiverType = index.methodCallReceiverType(call)
+                if (receiverType == null) {
+                    exact = false
+                    return@calls
+                }
+                if (!index.isTypeAssignableTo(receiverType, target.key.owner)) return@calls
+                val moreSpecific = familyTargets.any { other ->
+                    other !== target &&
+                        index.isTypeAssignableTo(receiverType, other.key.owner) &&
+                        index.isTypeAssignableTo(other.key.owner, target.key.owner) &&
+                        !index.isTypeAssignableTo(target.key.owner, other.key.owner)
+                }
+                if (moreSpecific) return@calls
+                val nonProviderTypes = target.key.parameterTypes.filterIndexed { parameterIndex, _ ->
+                    parameterIndex != target.providerIndex
+                }
+                when (call.arguments.size) {
+                    target.key.declarationArity -> {
+                        if (!index.argumentsMatchTypesExcluding(call, nonProviderTypes, target.providerIndex)) {
+                            exact = false
+                            return@calls
+                        }
+                        if (!canRemoveDischargedProviderArgument(
+                                target,
+                                call.arguments[target.providerIndex],
+                                call,
+                                index
+                            )
+                        ) {
+                            exact = false
+                        }
+                    }
+                    target.key.declarationArity - 1 -> {
+                        if (!index.argumentsMatchTypes(call, nonProviderTypes) ||
+                            index.argumentsMatchProjectMethod(call, target.key.owner, call.arguments.size)
+                        ) {
+                            return@calls
+                        }
+                        if (providerDependsOnParameters(target)) {
+                            val caller = call.findAncestor(MethodDeclaration::class.java).orElse(null)
+                            val futureProvider = caller?.let {
+                                exactCallableProviderExpression(it, call, index)
+                            }?.let { StaticJavaParser.parseExpression<Expression>(it) }
+                            if (futureProvider == null || !canReproduceDischargedProvider(
+                                    target,
+                                    futureProvider,
+                                    call.arguments.toList(),
+                                    call,
+                                    index
+                                )
+                            ) {
+                                exact = false
+                            }
+                        }
+                    }
+                }
+            }
+            if (file !in providerDeclarationFiles && file != target.file) releaseUnit(file)
+        }
+        return exact
+    }
+
+    private fun providerDependsOnParameters(target: DischargedTarget): Boolean {
+        val providerExpression = target.providerExpression ?: return false
+        return providerExpression.findAll(NameExpr::class.java).any {
+            it.nameAsString in target.nonProviderParameterNames
+        }
+    }
+
+    private fun exactAlternativeProviderExpression(
         method: MethodDeclaration,
         provider: Parameter,
         uses: List<NameExpr>,
         index: JavaProjectTypeIndex
     ): String? {
-        val typed = method.parameters.filterNot { it === provider }.mapNotNull { parameter ->
-            val type = index.declaredType(parameter.type, method) ?: return@mapNotNull null
-            Triple(parameter, type, parameter.nameAsString)
+        val callableCandidates = uses.map { use ->
+            exactCallableProviderExpression(
+                method,
+                use,
+                index,
+                ignoredProvider = provider
+            ) ?: return@map null
         }
-        fun unique(candidates: List<String>): String? = candidates.distinct().singleOrNull()
-        unique(typed.mapNotNull { (parameter, type, name) ->
-            name.takeIf {
-                type in setOf(HOLDER_LOOKUP_PROVIDER, REGISTRY_ACCESS) &&
-                    uses.all { use -> parameterProvenNonNullAt(parameter, method, use) }
-            }
-        })?.let { return it }
-        return unique(typed.mapNotNull { (parameter, type, name) ->
-            "$name.registryAccess()".takeIf {
-                (LEVEL_PROVIDER_TYPES.any { expected -> index.isTypeAssignableTo(type, expected) } ||
-                    ENTITY_PROVIDER_TYPES.any { expected -> index.isTypeAssignableTo(type, expected) }) &&
-                    uses.all { use -> parameterProvenNonNullAt(parameter, method, use) }
-            }
-        })
+        if (callableCandidates.none { it == null }) {
+            callableCandidates.filterNotNull().distinct().singleOrNull()?.let { return it }
+        }
+
+        val calls = uses.map { use ->
+            val call = use.findAncestor(MethodCallExpr::class.java).orElse(null) ?: return null
+            if (call.arguments.none { it === use || it.isAncestorOf(use) }) return null
+            call
+        }
+        val roots = calls.mapIndexedNotNull { callIndex, call ->
+            val use = uses[callIndex]
+            val otherRoots = call.arguments
+                .filterNot { it === use || it.isAncestorOf(use) }
+                .mapNotNull { exactRootParameter(it, method, index) }
+                .distinct()
+            otherRoots.singleOrNull()
+        }.distinct()
+        if (roots.size != 1) return null
+        val rootName = roots.single()
+        val field = index.exactDirectFieldWithType(NameExpr(rootName), uses.first(), PROVIDER_SOURCE_TYPES)
+            ?: return null
+        return when (field.second) {
+            HOLDER_LOOKUP_PROVIDER, REGISTRY_ACCESS -> "$rootName.${field.first}"
+            else -> "$rootName.${field.first}.registryAccess()"
+        }
     }
 
-    private fun isSideEffectFreeProviderArgument(
+    private fun canRemoveDischargedProviderArgument(
+        target: DischargedTarget,
         expression: Expression,
         use: MethodCallExpr,
         index: JavaProjectTypeIndex
     ): Boolean {
-        if (expression is NameExpr) {
-            return index.expressionType(expression, use) in setOf(HOLDER_LOOKUP_PROVIDER, REGISTRY_ACCESS)
+        val arguments = use.arguments.filterIndexed { argumentIndex, _ ->
+            argumentIndex != target.providerIndex
         }
-        val accessor = expression as? MethodCallExpr ?: return false
-        if (accessor.nameAsString != "registryAccess" || accessor.arguments.isNotEmpty()) return false
-        val scope = accessor.scope.orElse(null) as? NameExpr ?: return false
-        val receiverType = index.expressionType(scope, accessor) ?: return false
-        return PROVIDER_ACCESSOR_RECEIVER_TYPES.any { expected ->
-            index.isTypeAssignableTo(receiverType, expected)
+        return canReproduceDischargedProvider(target, expression, arguments, use, index)
+    }
+
+    private fun canReproduceDischargedProvider(
+        target: DischargedTarget,
+        expression: Expression,
+        arguments: List<Expression>,
+        use: MethodCallExpr,
+        index: JavaProjectTypeIndex
+    ): Boolean {
+        val template = target.providerExpression
+            ?: return isExactSideEffectFreeProviderExpression(expression, use, index)
+        if (arguments.size != target.nonProviderParameterNames.size) return false
+        val substitutions = target.nonProviderParameterNames.zip(arguments).toMap()
+        val referencedParameters = template.findAll(NameExpr::class.java)
+            .map { it.nameAsString }
+            .filter { it in substitutions }
+            .toSet()
+        if (referencedParameters.any { parameter ->
+                !isExactSideEffectFreeValuePath(substitutions.getValue(parameter), use, index)
+            }
+        ) {
+            return false
+        }
+        val expected = substituteExactParameters(template, substitutions)
+        if (!substituteExactReceiver(expected, use, index)) return false
+        return expected.toString() == expression.toString()
+    }
+
+    private fun substituteExactReceiver(
+        expression: Expression,
+        use: MethodCallExpr,
+        index: JavaProjectTypeIndex
+    ): Boolean {
+        val receivers = expression.findAll(ThisExpr::class.java)
+        if (receivers.isEmpty()) return true
+        if (receivers.any { it.typeName.isPresent }) return false
+        val replacement = use.scope.orElseGet { ThisExpr() }
+        if (replacement is SuperExpr) {
+            receivers.forEach { it.replace(ThisExpr()) }
+            return true
+        }
+        if (!isExactSideEffectFreeValuePath(replacement, use, index)) return false
+        receivers.forEach { it.replace(replacement.clone()) }
+        return true
+    }
+
+    private fun isExactSideEffectFreeProviderExpression(
+        expression: Expression,
+        use: MethodCallExpr,
+        index: JavaProjectTypeIndex
+    ): Boolean = when (expression) {
+        is EnclosedExpr -> isExactSideEffectFreeProviderExpression(expression.inner, use, index)
+        is NameExpr -> index.expressionType(expression, use) in setOf(HOLDER_LOOKUP_PROVIDER, REGISTRY_ACCESS)
+        is MethodCallExpr -> {
+            if (expression.nameAsString != "registryAccess" || expression.arguments.isNotEmpty()) {
+                false
+            } else if (index.projectMethodOwner(expression) != null) {
+                false
+            } else {
+                val scope = expression.scope.orElse(null)
+                val receiverType = index.methodCallReceiverType(expression)
+                (scope == null || isExactSideEffectFreeValuePath(scope, use, index)) &&
+                    receiverType != null &&
+                    (LEVEL_PROVIDER_TYPES.any { index.isTypeAssignableTo(receiverType, it) } ||
+                        ENTITY_PROVIDER_TYPES.any { index.isTypeAssignableTo(receiverType, it) })
+            }
+        }
+        else -> false
+    }
+
+    private fun substituteExactParameters(
+        template: Expression,
+        substitutions: Map<String, Expression>
+    ): Expression {
+        if (template is NameExpr) {
+            substitutions[template.nameAsString]?.let { return it.clone() }
+        }
+        val result = template.clone()
+        result.findAll(NameExpr::class.java).forEach { name ->
+            substitutions[name.nameAsString]?.let { name.replace(it.clone()) }
+        }
+        return result
+    }
+
+    private fun isExactSideEffectFreeValuePath(
+        expression: Expression,
+        use: MethodCallExpr,
+        index: JavaProjectTypeIndex
+    ): Boolean = when (expression) {
+        is EnclosedExpr -> isExactSideEffectFreeValuePath(expression.inner, use, index)
+        is NameExpr, is ThisExpr -> index.expressionType(expression, use) != null
+        is FieldAccessExpr ->
+            isExactSideEffectFreeValuePath(expression.scope, use, index) &&
+                index.expressionType(expression, use) != null
+        else -> false
+    }
+
+    private fun mostSpecificDischargedTargets(
+        targets: List<DischargedTarget>,
+        index: JavaProjectTypeIndex
+    ): List<DischargedTarget> = targets.filter { candidate ->
+        targets.none { other ->
+            other !== candidate &&
+                index.isTypeAssignableTo(other.key.owner, candidate.key.owner) &&
+                !index.isTypeAssignableTo(candidate.key.owner, other.key.owner)
         }
     }
 
@@ -992,14 +1287,33 @@ internal class ExactProjectProviderCallMigration {
     private fun exactCallableProviderExpression(
         method: MethodDeclaration,
         use: com.github.javaparser.ast.Node,
-        index: JavaProjectTypeIndex
+        index: JavaProjectTypeIndex,
+        targetOwnedProvider: String? = null,
+        ignoredProvider: Parameter? = null,
+        onAmbiguousDerivedSources: (() -> Unit)? = null
     ): String? {
+        targetOwnedProvider?.let { return it }
         ExactExternalProviderContracts.providerExpression(method, index)?.let { return it }
-        val candidates = method.parameters.mapNotNull { parameter ->
+        var ambiguousDerivedSources = false
+        fun markAmbiguousDerivedSources() {
+            ambiguousDerivedSources = true
+            onAmbiguousDerivedSources?.invoke()
+        }
+        val declaredProviders = method.parameters.filterNot { it === ignoredProvider }.mapNotNull { parameter ->
+            val type = index.declaredType(parameter.type, method) ?: return@mapNotNull null
+            parameter.nameAsString.takeIf { type in setOf(HOLDER_LOOKUP_PROVIDER, REGISTRY_ACCESS) }
+        }.distinct()
+        if (declaredProviders.size > 1) {
+            throw IllegalStateException(
+                "Ambiguous exact declared HolderLookup.Provider sources in ${method.nameAsString}: $declaredProviders"
+            )
+        }
+        declaredProviders.singleOrNull()?.let { return it }
+        val candidates = method.parameters.filterNot { it === ignoredProvider }.mapNotNull { parameter ->
             val type = index.declaredType(parameter.type, method) ?: return@mapNotNull null
             val name = parameter.nameAsString
             when (type) {
-                HOLDER_LOOKUP_PROVIDER, REGISTRY_ACCESS -> name
+                HOLDER_LOOKUP_PROVIDER, REGISTRY_ACCESS -> null
                 INVENTORY -> "$name.player.registryAccess()"
                     .takeIf { parameterProvenNonNullAt(parameter, method, use) }
                 MINECRAFT -> "$name.level.registryAccess()"
@@ -1019,20 +1333,47 @@ internal class ExactProjectProviderCallMigration {
                 }
             }
         }.toMutableList()
-        method.parameters.forEach { parameter ->
+        method.parameters.filterNot { it === ignoredProvider }.forEach { parameter ->
             if (!parameterProvenNonNullAt(parameter, method, use)) return@forEach
-            val field = index.exactDirectFieldWithType(
+            when (val query = index.exactDirectFieldQuery(
                 NameExpr(parameter.nameAsString),
                 use,
                 CALLABLE_PROVIDER_SOURCE_TYPES
-            ) ?: return@forEach
-            providerExpression("${parameter.nameAsString}.${field.first}", field.second, index)?.let(candidates::add)
+            )) {
+                JavaProjectTypeIndex.ExactFieldQuery.None -> Unit
+                is JavaProjectTypeIndex.ExactFieldQuery.Unique -> {
+                    val field = query.field
+                    providerExpression("${parameter.nameAsString}.${field.first}", field.second, index)
+                        ?.let(candidates::add)
+                }
+                is JavaProjectTypeIndex.ExactFieldQuery.Ambiguous -> markAmbiguousDerivedSources()
+            }
         }
         val localCandidates = exactVisibleLocalProviderExpressions(method, use, index)
         candidates += localCandidates
         if (!method.isStatic) {
-            index.exactInstanceFieldWithType(method, CALLABLE_PROVIDER_SOURCE_TYPES)?.let { field ->
-                providerExpression("this.${field.first}", field.second, index)?.let(candidates::add)
+            val owner = declaredOwnerOrNull(method)
+            if (owner != null && index.isTypeAssignableTo(owner, BLOCK_ENTITY) &&
+                ExactNullabilityProof.expressionProvenNonNullAt("this.level", method, use)
+            ) {
+                candidates += "this.getLevel().registryAccess()"
+            }
+            when (val query = index.exactInstanceFieldQuery(method, CALLABLE_PROVIDER_SOURCE_TYPES)) {
+                JavaProjectTypeIndex.ExactFieldQuery.None -> Unit
+                is JavaProjectTypeIndex.ExactFieldQuery.Unique -> {
+                    val field = query.field
+                    val provider = if (field.second == MINECRAFT) {
+                        val screenOwner = exactEnclosingNamedClass(method)?.fullyQualifiedName?.orElse(null)
+                        "this.${field.first}.level.registryAccess()".takeIf {
+                            field.first == "minecraft" && screenOwner != null &&
+                                index.isTypeAssignableTo(screenOwner, ABSTRACT_CONTAINER_SCREEN)
+                        }
+                    } else {
+                        providerExpression("this.${field.first}", field.second, index)
+                    }
+                    provider?.let(candidates::add)
+                }
+                is JavaProjectTypeIndex.ExactFieldQuery.Ambiguous -> markAmbiguousDerivedSources()
             }
         }
         val aliases = exactVisibleLocalProviderAliases(method, use, index)
@@ -1042,10 +1383,10 @@ internal class ExactProjectProviderCallMigration {
             }
             .toMap()
         val distinctCandidates = candidates.map { candidate -> aliases[candidate] ?: candidate }.distinct()
+        if (ambiguousDerivedSources) return null
         if (distinctCandidates.size > 1) {
-            throw IllegalStateException(
-                "Ambiguous exact HolderLookup.Provider sources in ${method.nameAsString}: $distinctCandidates"
-            )
+            markAmbiguousDerivedSources()
+            return null
         }
         distinctCandidates.singleOrNull()?.let { return it }
         exactLocalMinecraftProviderExpression(method, use, index)?.let { return it }
@@ -1110,101 +1451,101 @@ internal class ExactProjectProviderCallMigration {
         parameter: Parameter,
         method: MethodDeclaration,
         use: com.github.javaparser.ast.Node
-    ): Boolean {
-        val name = parameter.nameAsString
-        val nullableEvidence = parameter.annotations.any { it.name.identifier == "Nullable" } ||
-            method.findAll(BinaryExpr::class.java).any { isNullComparison(it, name) }
-        if (!nullableEvidence) return true
-
-        return expressionProvenNonNullAt(name, method, use)
-    }
+    ): Boolean = ExactNullabilityProof.parameterProvenNonNullAt(parameter, method, use)
 
     private fun expressionProvenNonNullAt(
         expression: String,
         method: MethodDeclaration,
         use: com.github.javaparser.ast.Node
-    ): Boolean {
-        var ancestor: com.github.javaparser.ast.Node? = use
-        while (ancestor != null && ancestor !== method) {
-            val parent = ancestor.parentNode.orElse(null)
-            if (parent is IfStmt) {
-                val inThen = parent.thenStmt === ancestor || parent.thenStmt.isAncestorOf(use)
-                val elseStmt = parent.elseStmt.orElse(null)
-                val inElse = elseStmt != null && (elseStmt === ancestor || elseStmt.isAncestorOf(use))
-                if (inThen && conditionTrueProvesNonNull(parent.condition, expression)) return true
-                if (inElse && conditionFalseProvesNonNull(parent.condition, expression)) return true
-            }
-            ancestor = parent
-        }
-
-        val block = use.findAncestor(BlockStmt::class.java).orElse(null) ?: return false
-        val containing = block.statements.firstOrNull { it === use || it.isAncestorOf(use) } ?: return false
-        val useIndex = block.statements.indexOf(containing)
-        return block.statements.take(useIndex).any { statement ->
-            val guard = statement as? IfStmt ?: return@any false
-            conditionTrueProvesNull(guard.condition, expression) && statementAlwaysExits(guard.thenStmt)
-        }
-    }
+    ): Boolean = ExactNullabilityProof.expressionProvenNonNullAt(expression, method, use)
 
     private fun isNullComparison(expression: BinaryExpr, expected: String): Boolean =
-        expression.operator in setOf(BinaryExpr.Operator.EQUALS, BinaryExpr.Operator.NOT_EQUALS) &&
-            ((normalizedExpression(expression.left) == expected && expression.right is NullLiteralExpr) ||
-                (normalizedExpression(expression.right) == expected && expression.left is NullLiteralExpr))
-
-    private fun normalizedExpression(expression: Expression): String =
-        expression.toString().replace(Regex("\\s+"), "")
-
-    private fun conditionTrueProvesNonNull(expression: Expression, name: String): Boolean = when (expression) {
-        is EnclosedExpr -> conditionTrueProvesNonNull(expression.inner, name)
-        is UnaryExpr -> expression.operator == UnaryExpr.Operator.LOGICAL_COMPLEMENT &&
-            conditionFalseProvesNonNull(expression.expression, name)
-        is BinaryExpr -> when (expression.operator) {
-            BinaryExpr.Operator.NOT_EQUALS -> isNullComparison(expression, name)
-            BinaryExpr.Operator.AND -> conditionTrueProvesNonNull(expression.left, name) ||
-                conditionTrueProvesNonNull(expression.right, name)
-            else -> false
-        }
-        else -> false
-    }
-
-    private fun conditionFalseProvesNonNull(expression: Expression, name: String): Boolean = when (expression) {
-        is EnclosedExpr -> conditionFalseProvesNonNull(expression.inner, name)
-        is UnaryExpr -> expression.operator == UnaryExpr.Operator.LOGICAL_COMPLEMENT &&
-            conditionTrueProvesNonNull(expression.expression, name)
-        is BinaryExpr -> when (expression.operator) {
-            BinaryExpr.Operator.EQUALS -> isNullComparison(expression, name)
-            BinaryExpr.Operator.OR -> conditionFalseProvesNonNull(expression.left, name) ||
-                conditionFalseProvesNonNull(expression.right, name)
-            else -> false
-        }
-        else -> false
-    }
-
-    private fun conditionTrueProvesNull(expression: Expression, name: String): Boolean = when (expression) {
-        is EnclosedExpr -> conditionTrueProvesNull(expression.inner, name)
-        is UnaryExpr -> expression.operator == UnaryExpr.Operator.LOGICAL_COMPLEMENT &&
-            conditionTrueProvesNonNull(expression.expression, name)
-        is BinaryExpr -> expression.operator == BinaryExpr.Operator.EQUALS && isNullComparison(expression, name)
-        else -> false
-    }
-
-    private fun statementAlwaysExits(statement: Statement): Boolean = when (statement) {
-        is ReturnStmt, is ThrowStmt, is ContinueStmt, is BreakStmt -> true
-        is BlockStmt -> statement.statements.lastOrNull()?.let(::statementAlwaysExits) == true
-        else -> false
-    }
+        ExactNullabilityProof.isNullComparison(expression, expected)
 
     private fun hasDeclaredOrExactProviderRoot(
         callable: CallableDeclaration<*>,
         use: com.github.javaparser.ast.Node,
-        index: JavaProjectTypeIndex
+        index: JavaProjectTypeIndex,
+        targetOwnedProvider: String? = null
     ): Boolean {
         val method = callable as? MethodDeclaration ?: return false
         val declared = method.parameters.any { parameter ->
             index.declaredType(parameter.type, method) == HOLDER_LOOKUP_PROVIDER
         }
-        if (declared || exactCallableProviderExpression(method, use, index) != null) return true
+        if (declared || exactCallableProviderExpression(method, use, index, targetOwnedProvider) != null) return true
         return index.isProvenNonOverride(method)
+    }
+
+    private fun exactTargetParameterOwnedProviderExpression(
+        target: MethodDeclaration,
+        call: MethodCallExpr,
+        caller: CallableDeclaration<*>,
+        index: JavaProjectTypeIndex
+    ): String? {
+        val callerMethod = caller as? MethodDeclaration ?: return null
+        val legacyParameters = target.parameters.filter { parameter ->
+            index.declaredType(parameter.type, target) != HOLDER_LOOKUP_PROVIDER
+        }
+        if (legacyParameters.size != call.arguments.size) return null
+        val candidates = legacyParameters.mapIndexedNotNull { argumentIndex, parameter ->
+            val parameterType = index.declaredType(parameter.type, target) ?: return@mapIndexedNotNull null
+            val targetProvider = exactParameterOwnedProviderExpression(parameter, parameterType, index)
+                ?: return@mapIndexedNotNull null
+            val nullableContract = parameter.annotations.any { it.name.identifier == "Nullable" } ||
+                target.findAll(BinaryExpr::class.java).any { isNullComparison(it, parameter.nameAsString) }
+            if (nullableContract) return@mapIndexedNotNull null
+            val argument = call.arguments[argumentIndex]
+            val argumentType = index.expressionType(argument, call) ?: return@mapIndexedNotNull null
+            if (!index.isTypeAssignableTo(argumentType, parameterType)) return@mapIndexedNotNull null
+            val exactArgument = when (argument) {
+                is ThisExpr -> true
+                is NameExpr -> {
+                    val callerParameter = callerMethod.parameters.singleOrNull {
+                        it.nameAsString == argument.nameAsString
+                    }
+                    if (callerParameter != null &&
+                        !parameterProvenNonNullAt(callerParameter, callerMethod, call)
+                    ) {
+                        return@mapIndexedNotNull null
+                    }
+                    if (index.isExactInstanceFieldReference(argument) &&
+                        !expressionProvenNonNullAt(argument.nameAsString, callerMethod, call)
+                    ) {
+                        return@mapIndexedNotNull null
+                    }
+                    true
+                }
+                is FieldAccessExpr -> isExactSideEffectFreeValuePath(argument, call, index)
+                else -> false
+            }
+            if (!exactArgument) return@mapIndexedNotNull null
+            substituteExactParameters(
+                targetProvider,
+                mapOf(parameter.nameAsString to argument)
+            ).toString()
+        }.distinct()
+        if (candidates.size > 1) return null
+        return candidates.singleOrNull()
+    }
+
+    private fun exactParameterOwnedProviderExpression(
+        parameter: Parameter,
+        parameterType: String,
+        index: JavaProjectTypeIndex
+    ): Expression? {
+        providerExpression(parameter.nameAsString, parameterType, index)?.let {
+            return StaticJavaParser.parseExpression(it)
+        }
+        val field = index.exactDirectFieldWithType(
+            NameExpr(parameter.nameAsString),
+            parameter,
+            PROVIDER_SOURCE_TYPES
+        ) ?: return null
+        val expression = when (field.second) {
+            HOLDER_LOOKUP_PROVIDER, REGISTRY_ACCESS -> "${parameter.nameAsString}.${field.first}"
+            else -> "${parameter.nameAsString}.${field.first}.registryAccess()"
+        }
+        return StaticJavaParser.parseExpression(expression)
     }
 
     private fun isExplicitProjectApiBoundary(
@@ -1299,6 +1640,9 @@ internal class ExactProjectProviderCallMigration {
         const val REGISTRY_ACCESS = "net.minecraft.core.RegistryAccess"
         const val INVENTORY = "net.minecraft.world.entity.player.Inventory"
         const val MINECRAFT = "net.minecraft.client.Minecraft"
+        const val BLOCK_ENTITY = "net.minecraft.world.level.block.entity.BlockEntity"
+        const val ABSTRACT_CONTAINER_SCREEN =
+            "net.minecraft.client.gui.screens.inventory.AbstractContainerScreen"
         val LEVEL_PROVIDER_TYPES = setOf(
             "net.minecraft.world.level.Level",
             "net.minecraft.server.level.ServerLevel",
@@ -1319,12 +1663,12 @@ internal class ExactProjectProviderCallMigration {
         val CALLABLE_PROVIDER_SOURCE_TYPES = LEVEL_PROVIDER_TYPES + ENTITY_PROVIDER_TYPES + setOf(
             HOLDER_LOOKUP_PROVIDER,
             REGISTRY_ACCESS,
-            INVENTORY
+            INVENTORY,
+            MINECRAFT
         ) + PONDER_SCENE_PROVIDER_TYPES
         val PROVIDER_SOURCE_TYPES = setOf(
             HOLDER_LOOKUP_PROVIDER,
             REGISTRY_ACCESS,
-        ) + LEVEL_PROVIDER_TYPES
-        val PROVIDER_ACCESSOR_RECEIVER_TYPES = LEVEL_PROVIDER_TYPES + ENTITY_PROVIDER_TYPES
+        ) + LEVEL_PROVIDER_TYPES + ENTITY_PROVIDER_TYPES
     }
 }

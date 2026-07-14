@@ -1,7 +1,6 @@
 
     private data class JavaInheritanceIndex(
-        private val directSuperByClass: Map<String, String>,
-        private val registryAccessFieldByClass: Map<String, String> = emptyMap()
+        private val directSuperByClass: Map<String, String>
     ) {
         fun inherits(directSuper: String, baseTypes: Set<String>): Boolean {
             var current = directSuper.substringAfterLast('.')
@@ -13,16 +12,6 @@
                     ?: return false
             }
             return false
-        }
-
-        fun inheritedRegistryAccessField(className: String): String? {
-            var current = className.substringAfterLast('.')
-            val visited = mutableSetOf<String>()
-            while (current.isNotBlank() && visited.add(current)) {
-                registryAccessFieldByClass[current]?.let { return it }
-                current = directSuperByClass[current]?.substringAfterLast('.') ?: return null
-            }
-            return null
         }
 
         companion object {
@@ -106,30 +95,13 @@
 
     private fun collectJavaInheritanceIndex(javaFiles: List<Path>): JavaInheritanceIndex {
         val directSuperByClass = linkedMapOf<String, String>()
-        val fieldsByClass = linkedMapOf<String, MutableList<Pair<String, String>>>()
         javaFiles.forEach { javaFile ->
             val source = javaFile.readText()
             collectJavaClassDeclarations(source).forEach { declaration ->
                 directSuperByClass.putIfAbsent(declaration.name, declaration.directSuper)
-                val body = source.substring(declaration.bodyRange.first + 1, declaration.bodyRange.last)
-                Regex(
-                    """(?m)^[ \t]*(?:@\w+(?:\.\w+)*(?:\([^)]*\))?\s+)*(?:public|protected|private)\s+(?!static\b)(?:final\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s+([A-Za-z_$][\w$]*)\s*(?:=[^;\r\n]*)?;"""
-                ).findAll(maskJavaCommentsAndLiterals(body))
-                    .forEach { field ->
-                        fieldsByClass.getOrPut(declaration.name) { mutableListOf() } +=
-                            field.groupValues[1].substringAfterLast('.') to field.groupValues[2]
-                    }
             }
         }
-        val provisional = JavaInheritanceIndex(directSuperByClass)
-        val entityBaseTypes = javaEntityBaseTypes()
-        val registryAccessFields = fieldsByClass.mapNotNull { (className, fields) ->
-            val entityFields = fields.filter { (type, _) ->
-                type in entityBaseTypes || provisional.inherits(type, entityBaseTypes)
-            }
-            if (entityFields.size == 1) className to entityFields.single().second else null
-        }.toMap()
-        return JavaInheritanceIndex(directSuperByClass, registryAccessFields)
+        return JavaInheritanceIndex(directSuperByClass)
     }
 
     private fun collectJavaClassNamesExtending(

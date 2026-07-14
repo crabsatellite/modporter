@@ -1,4 +1,220 @@
 
+    private fun migrateItemUseDurationCalls(source: String): String {
+        if (!source.contains(".getUseDuration(")) return source
+        var result = source
+        var cursor = 0
+        val token = ".getUseDuration("
+        while (true) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenIndex = executableCode.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + "getUseDuration".length + 1
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val receiverStart = findExpressionReceiverStart(executableCode, tokenIndex)
+            if (receiverStart < 0 || receiverStart >= tokenIndex) {
+                cursor = closeParen + 1
+                continue
+            }
+            val receiver = result.substring(receiverStart, tokenIndex).trim()
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            val itemStackVariables = Regex("""\bItemStack\s+([A-Za-z_$][\w$]*)\b""")
+                .findAll(executableCode)
+                .map { it.groupValues[1] }
+                .toSet() + itemPropertiesRegisterStackParameters(executableCode)
+            val replacement = migratedItemUseDurationCall(
+                executableCode = executableCode,
+                callOffset = tokenIndex,
+                receiver = receiver,
+                args = args,
+                itemStackVariables = itemStackVariables
+            )
+            if (replacement == null) {
+                cursor = closeParen + 1
+                continue
+            }
+            result = result.substring(0, receiverStart) + replacement + result.substring(closeParen + 1)
+            cursor = receiverStart + replacement.length
+        }
+        return result
+    }
+
+    private fun itemPropertiesRegisterStackParameters(executableCode: String): Set<String> {
+        if (!executableCode.contains("ItemProperties.register(")) return emptySet()
+        val parameters = linkedSetOf<String>()
+        var cursor = 0
+        val token = "ItemProperties.register("
+        while (true) {
+            val callStart = executableCode.indexOf(token, cursor)
+            if (callStart < 0) break
+            val openParen = callStart + "ItemProperties.register".length
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) {
+                cursor = callStart + token.length
+                continue
+            }
+            val args = splitTopLevelJavaArgs(executableCode.substring(openParen + 1, closeParen))
+            val lambda = args.lastOrNull().orEmpty()
+            Regex("""^\s*\(?\s*([A-Za-z_$][\w$]*)\s*,\s*[A-Za-z_$][\w$]*\s*,\s*[A-Za-z_$][\w$]*\s*,\s*[A-Za-z_$][\w$]*\s*\)?\s*->""")
+                .find(lambda)
+                ?.groupValues
+                ?.get(1)
+                ?.let(parameters::add)
+            cursor = closeParen + 1
+        }
+        return parameters
+    }
+
+    private fun migrateBucketPickupPickupBlockCalls(source: String): String {
+        if (!source.contains(".pickupBlock(") || !source.contains("BucketPickup")) return source
+        var result = source
+        var cursor = 0
+        val token = ".pickupBlock("
+        while (true) {
+            val executableCode = maskJavaCommentsAndLiterals(result)
+            val tokenIndex = executableCode.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = tokenIndex + ".pickupBlock".length
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) {
+                cursor = tokenIndex + token.length
+                continue
+            }
+            val receiverStart = findExpressionReceiverStart(executableCode, tokenIndex)
+            if (receiverStart < 0 || receiverStart >= tokenIndex) {
+                cursor = closeParen + 1
+                continue
+            }
+            val receiver = result.substring(receiverStart, tokenIndex).trim()
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen)).map { it.trim() }
+            val playerArgument = bucketPickupPlayerArgumentForEnclosingMethod(result, tokenIndex)
+            if (args.size != 3 || playerArgument == null || !bucketPickupReceiverHasTypeEvidence(result, receiver, tokenIndex)) {
+                cursor = closeParen + 1
+                continue
+            }
+            val replacement = "$receiver.pickupBlock($playerArgument, ${args.joinToString(", ")})"
+            result = result.substring(0, receiverStart) + replacement + result.substring(closeParen + 1)
+            cursor = receiverStart + replacement.length
+        }
+        return result
+    }
+
+    private fun bucketPickupReceiverHasTypeEvidence(source: String, receiver: String, offset: Int): Boolean {
+        if (!Regex("""^[A-Za-z_$][\w$]*$""").matches(receiver)) return false
+        return receiverHasMethodScopedTypeEvidence(source, receiver, offset, "BucketPickup")
+    }
+
+    private fun migratedItemUseDurationCall(
+        executableCode: String,
+        callOffset: Int,
+        receiver: String,
+        args: List<String>,
+        itemStackVariables: Set<String>
+    ): String? {
+        if (receiver.endsWith(".getUseItem()") && args.isEmpty()) {
+            val living = receiver.removeSuffix(".getUseItem()").trim()
+            return "$receiver.getUseDuration($living)"
+        }
+        val simpleReceiver = receiver.removePrefix("this.").trim()
+        if (simpleReceiver in itemStackVariables || receiver.endsWith(".getUseItem()")) return null
+        return when (args.size) {
+            0 -> "$receiver.getUseDuration(null)"
+            1 -> {
+                val stackArg = args[0].trim()
+                if (receiver == "this" && stackArg == "stack") {
+                    val living = singleLivingEntityParameterAt(executableCode, callOffset) ?: return null
+                    "$receiver.getUseDuration($stackArg, $living)"
+                } else {
+                    "$receiver.getUseDuration($stackArg, null)"
+                }
+            }
+            else -> null
+        }
+    }
+
+    private fun singleLivingEntityParameterAt(executableCode: String, offset: Int): String? {
+        val method = javaMethodRangesIncludingDefault(executableCode).firstOrNull { offset in it.range } ?: return null
+        val openParen = method.header.indexOf('(')
+        val closeParen = method.header.lastIndexOf(')')
+        if (openParen < 0 || closeParen <= openParen) return null
+        return singleLivingEntityParameter(method.header.substring(openParen + 1, closeParen))
+    }
+
+    private fun singleLivingEntityParameter(parameterList: String): String? {
+        val livingParameterPattern = Regex("""(?:@[A-Za-z_$][\w$.]*(?:\([^)]*\))?\s+)*(?:final\s+)?(?:LivingEntity|net\.minecraft\.world\.entity\.LivingEntity)\s+([A-Za-z_$][\w$]*)\b""")
+        return livingParameterPattern.findAll(parameterList)
+            .map { it.groupValues[1] }
+            .distinct()
+            .singleOrNull()
+    }
+
+    private fun migrateArmorMaterialHolderFields(source: String): String {
+        if (!source.contains("ArmorMaterial") || !source.contains(" material")) return source
+        val declaresMaterialField = Regex(
+            """(?m)^([ \t]*(?:public|protected|private)\s+(?:static\s+)?(?:final\s+)?)ArmorMaterial\s+material\s*;"""
+        ).containsMatchIn(source)
+        if (!declaresMaterialField) return source
+        if (!source.contains("this.material.") &&
+            !source.contains(" material.") &&
+            !source.contains("getMaterial()")) {
+            return source
+        }
+
+        var result = source
+        result = Regex("""(?m)^([ \t]*(?:public|protected|private)\s+(?:static\s+)?(?:final\s+)?)ArmorMaterial\s+material\s*;""")
+            .replace(result, "$1Holder<ArmorMaterial> material;")
+        result = Regex("""\bArmorMaterial\s+material\b""")
+            .replace(result, "Holder<ArmorMaterial> material")
+        result = Regex("""\bpublic\s+ArmorMaterial\s+getMaterial\s*\(\s*\)""")
+            .replace(result, "public Holder<ArmorMaterial> getMaterial()")
+
+        result = result
+            .replace(".material.getEnchantmentValue()", ".material.value().enchantmentValue()")
+            .replace(".material.getRepairIngredient()", ".material.value().repairIngredient().get()")
+            .replace(".material.getToughness()", ".material.value().toughness()")
+            .replace(".material.getKnockbackResistance()", ".material.value().knockbackResistance()")
+            .replace(".material.getEquipSound()", ".material.value().equipSound().value()")
+            .replace(".material.getName()", ".material.unwrapKey().orElseThrow().location().getPath()")
+            .replace(".getMaterial().getName()", ".getMaterial().unwrapKey().orElseThrow().location().getPath()")
+
+        val materialVariables = Regex("""\bHolder\s*<\s*ArmorMaterial\s*>\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(result)
+            .map { it.groupValues[1] }
+            .toSet()
+        for (variable in materialVariables) {
+            val escaped = Regex.escape(variable)
+            result = Regex("""\b$escaped\.getEnchantmentValue\(\)""").replace(result, "$variable.value().enchantmentValue()")
+            result = Regex("""\b$escaped\.getRepairIngredient\(\)""").replace(result, "$variable.value().repairIngredient().get()")
+            result = Regex("""\b$escaped\.getToughness\(\)""").replace(result, "$variable.value().toughness()")
+            result = Regex("""\b$escaped\.getKnockbackResistance\(\)""").replace(result, "$variable.value().knockbackResistance()")
+            result = Regex("""\b$escaped\.getEquipSound\(\)""").replace(result, "$variable.value().equipSound().value()")
+            result = Regex("""\b$escaped\.getName\(\)""").replace(result, "$variable.unwrapKey().orElseThrow().location().getPath()")
+        }
+
+        return if (result != source) addImportIfMissing(result, "net.minecraft.core.Holder") else source
+    }
+
+    private fun migrateArmorMaterialHolderNameAccess(source: String): String {
+        if (!source.contains("ArmorMaterial") || !source.contains(".getName()")) return source
+        var result = source
+            .replace(".getMaterial().getName()", ".getMaterial().unwrapKey().orElseThrow().location().getPath()")
+            .replace(".material.getName()", ".material.unwrapKey().orElseThrow().location().getPath()")
+
+        val materialVariables = Regex("""\bHolder\s*<\s*ArmorMaterial\s*>\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(result)
+            .map { it.groupValues[1] }
+            .toSet()
+        for (variable in materialVariables) {
+            val escaped = Regex.escape(variable)
+            result = Regex("""\b$escaped\.getName\(\)""")
+                .replace(result, "$variable.unwrapKey().orElseThrow().location().getPath()")
+        }
+        return result
+    }
+
     private fun migrateLegacyItemExtensionAndProjectileApis(source: String): String {
         if (!source.contains("canEquip(") &&
             !source.contains("customArrow(") &&
@@ -2702,124 +2918,4 @@ $indent}"""
             }
         }
         return result
-    }
-
-    private fun migrateIdBackedEntitySpatialLookupsInMethod(
-        methodText: String,
-        idBackedParameters: List<Pair<String, IdBackedEntityAccessor>>
-    ): String {
-        val executable = maskJavaCommentsAndLiterals(methodText)
-        val returnPattern = Regex(
-            """(?m)^([ \t]*)return\s+([A-Za-z_$][\w$]*)\.getEntitiesOfClass\s*\(\s*([A-Za-z_$][\w$]*)\.class\s*,"""
-        )
-        val edits = mutableListOf<Pair<IntRange, String>>()
-        for (match in returnPattern.findAll(executable)) {
-            val statementEnd = executable.indexOf(';', match.range.first)
-                .takeIf { it >= 0 }
-                ?: continue
-            val statement = methodText.substring(match.range.first, statementEnd + 1)
-            if (!statement.contains(".stream()") ||
-                !statement.contains(".findFirst()") ||
-                !statement.contains(".orElse")) {
-                continue
-            }
-            val (holderName, accessor) = idBackedParameters.firstOrNull { (name, _) ->
-                Regex("""(?<![\w$])${Regex.escape(name)}(?![\w$])""").containsMatchIn(statement)
-            } ?: continue
-            val filter = Regex(
-                """(?s)\.filter\s*\(\s*([A-Za-z_$][\w$]*)\s*->\s*(.*?)\)\s*\.findFirst\s*\("""
-            ).find(statement) ?: continue
-            val lambdaName = filter.groupValues[1]
-            val predicate = filter.groupValues[2].trim()
-            val indent = match.groupValues[1]
-            val levelName = match.groupValues[2]
-            val entityClass = match.groupValues[3]
-            val directIdName = uniqueJavaLocalName(methodText, "modporterDirectEntityId")
-            val directEntityName = uniqueJavaLocalName(methodText, "modporterDirectEntity")
-            val directTypedName = uniqueJavaLocalName(methodText, "modporterDirect$entityClass")
-            val directPredicate = Regex("""(?<![\w$])${Regex.escape(lambdaName)}(?![\w$])""")
-                .replace(predicate, directTypedName)
-            val guard = buildString {
-                append(indent)
-                append("java.util.UUID ")
-                append(directIdName)
-                append(" = ")
-                append(holderName)
-                append(".")
-                append(accessor.idGetterName)
-                append("();\n")
-                append(indent)
-                append("net.minecraft.world.entity.Entity ")
-                append(directEntityName)
-                append(" = ")
-                append(holderName)
-                append(".")
-                append(accessor.entityGetterName)
-                append("();\n")
-                append(indent)
-                append("if (")
-                append(directEntityName)
-                append(" == null && ")
-                append(directIdName)
-                append(" != null) {\n")
-                append(indent)
-                append("    ")
-                append(directEntityName)
-                append(" = ")
-                append(levelName)
-                append(".getEntity(")
-                append(directIdName)
-                append(");\n")
-                append(indent)
-                append("}\n")
-                append(indent)
-                append("if (")
-                append(directEntityName)
-                append(" instanceof ")
-                append(entityClass)
-                append(" ")
-                append(directTypedName)
-                append(" && !")
-                append(directTypedName)
-                append(".isRemoved()")
-                if (directPredicate.isNotBlank()) {
-                    append(" && ")
-                    append(directPredicate)
-                }
-                append(") {\n")
-                append(indent)
-                append("    return ")
-                append(directTypedName)
-                append(";\n")
-                append(indent)
-                append("}\n")
-            }
-            edits += (match.range.first until match.range.first) to guard
-        }
-        return applyStringEdits(methodText, edits)
-    }
-
-    private fun javaSimpleTypeName(type: String): String =
-        type.trim()
-            .removeSuffix("[]")
-            .substringBefore('<')
-            .substringAfterLast('.')
-            .trim()
-
-    private fun firstIdBackedEntityLookupInsertion(original: String, migrated: String): Int {
-        val token = "modporterDirectEntityId"
-        val index = migrated.indexOf(token)
-        if (index < 0) return 0
-        return index.coerceAtMost(original.length)
-    }
-
-    private fun firstIdBackedEntityBindingInsertion(original: String, migrated: String): Int {
-        val token = ".set"
-        val entityToken = "Entity(this);"
-        val index = migrated.indexOf(entityToken)
-            .takeIf { it >= 0 }
-            ?.let { migrated.lastIndexOf(token, it).takeIf { tokenIndex -> tokenIndex >= 0 } ?: it }
-            ?: -1
-        if (index < 0) return 0
-        return index.coerceAtMost(original.length)
     }

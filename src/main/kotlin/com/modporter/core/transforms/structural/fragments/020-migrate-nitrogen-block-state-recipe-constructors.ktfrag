@@ -1,4 +1,142 @@
 
+    private fun migrateNitrogenBlockStateRecipeConstructors(source: String): String {
+        if (!source.contains("BlockStateIngredient") ||
+            !source.contains("BlockPropertyPair") ||
+            !source.contains("CacheableFunction") ||
+            !source.contains("super(")) {
+            return source
+        }
+
+        val id = """[A-Za-z_$][\w$]*"""
+        var result = source
+        var changed = false
+        Regex("""class\s+($id)\s+extends\s+AbstractBlockStateRecipe\b""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.let { className ->
+                val constructorPattern = Regex(
+                    """(?s)public\s+${Regex.escape(className)}\s*\(\s*ResourceLocation\s+$id\s*,\s*BlockStateIngredient\s+($id)\s*,\s*BlockPropertyPair\s+($id)\s*,\s*@Nullable\s+CacheableFunction\s+($id)\s*\)\s*\{\s*super\(\s*([^,]+?)\s*,\s*$id\s*,\s*\1\s*,\s*\2\s*,\s*\3\s*\)\s*;\s*\}"""
+                )
+                result = constructorPattern.replace(result) { match ->
+                    changed = true
+                    val ingredient = match.groupValues[1]
+                    val recipeResult = match.groupValues[2]
+                    val function = match.groupValues[3]
+                    val recipeType = match.groupValues[4].trim()
+                    "public $className(BlockStateIngredient $ingredient, BlockPropertyPair $recipeResult, Optional<ResourceLocation> $function) {\n" +
+                        "        super($recipeType, $ingredient, $recipeResult, $function);\n" +
+                        "    }"
+                }
+            }
+
+        Regex("""class\s+($id)\s+extends\s+AbstractBiomeParameterRecipe\b""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?.let { className ->
+                val fullConstructorPattern = Regex(
+                    """(?s)public\s+${Regex.escape(className)}\s*\(\s*ResourceLocation\s+$id\s*,\s*@Nullable\s+ResourceKey\s*<\s*Biome\s*>\s+($id)\s*,\s*@Nullable\s+TagKey\s*<\s*Biome\s*>\s+($id)\s*,\s*BlockStateIngredient\s+($id)\s*,\s*BlockPropertyPair\s+($id)\s*,\s*@Nullable\s+CacheableFunction\s+($id)\s*\)\s*\{\s*super\(\s*([^,]+?)\s*,\s*$id\s*,\s*\1\s*,\s*\2\s*,\s*\3\s*,\s*\4\s*,\s*\5\s*\)\s*;\s*\}"""
+                )
+                result = fullConstructorPattern.replace(result) { match ->
+                    changed = true
+                    val ingredient = match.groupValues[3]
+                    val recipeResult = match.groupValues[4]
+                    val function = match.groupValues[5]
+                    val recipeType = match.groupValues[6].trim()
+                    "public $className(Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome, BlockStateIngredient $ingredient, BlockPropertyPair $recipeResult, Optional<ResourceLocation> $function) {\n" +
+                        "        super($recipeType, biome, $ingredient, $recipeResult, $function);\n" +
+                        "    }"
+                }
+                val simpleConstructorPattern = Regex(
+                    """(?s)public\s+${Regex.escape(className)}\s*\(\s*ResourceLocation\s+$id\s*,\s*BlockStateIngredient\s+($id)\s*,\s*BlockPropertyPair\s+($id)\s*,\s*@Nullable\s+CacheableFunction\s+($id)\s*\)\s*\{\s*this\(\s*$id\s*,\s*null\s*,\s*null\s*,\s*\1\s*,\s*\2\s*,\s*\3\s*\)\s*;\s*\}"""
+                )
+                result = simpleConstructorPattern.replace(result) { match ->
+                    changed = true
+                    val ingredient = match.groupValues[1]
+                    val recipeResult = match.groupValues[2]
+                    val function = match.groupValues[3]
+                    "public $className(BlockStateIngredient $ingredient, BlockPropertyPair $recipeResult, Optional<ResourceLocation> $function) {\n" +
+                        "        this(Optional.empty(), $ingredient, $recipeResult, $function);\n" +
+                        "    }"
+                }
+            }
+
+        if (!changed) return source
+        result = addImportIfMissing(result, "java.util.Optional")
+        if (result.contains("Optional<Either<")) {
+            result = addImportIfMissing(result, "com.mojang.datafixers.util.Either")
+        }
+        result = removeImport(result, "net.minecraft.commands.functions.CommandFunction")
+        result = removeImport(result, "net.minecraft.commands.CacheableFunction")
+        if (Regex("""\b@Nullable\b""").containsMatchIn(result)) {
+            result = addImportIfMissing(result, "javax.annotation.Nullable")
+        } else {
+            result = removeImport(result, "javax.annotation.Nullable")
+        }
+        return result
+    }
+
+    private fun migrateNitrogenBiomeParameterRecipeSource(source: String): String {
+        if (!source.contains("extends AbstractBlockStateRecipe") ||
+            !source.contains("biomeKey") ||
+            !source.contains("biomeTag") ||
+            !source.contains("BlockStateIngredient") ||
+            !source.contains("BlockPropertyPair") ||
+            !source.contains("CacheableFunction")) {
+            return source
+        }
+
+        val className = Regex("""class\s+([A-Za-z_$][\w$]*)\s+extends\s+AbstractBlockStateRecipe\b""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+            ?: return source
+        var result = source
+        var changed = false
+        result = Regex(
+            """(?s)@Nullable\s*\r?\n\s*private\s+final\s+ResourceKey\s*<\s*Biome\s*>\s+biomeKey\s*;\s*@Nullable\s*\r?\n\s*private\s+final\s+TagKey\s*<\s*Biome\s*>\s+biomeTag\s*;"""
+        ).replace(result) {
+            changed = true
+            "private final Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome;"
+        }
+        result = Regex(
+            """(?s)public\s+${Regex.escape(className)}\s*\(\s*RecipeType<\?>\s+type\s*,\s*ResourceLocation\s+id\s*,\s*@Nullable\s+ResourceKey\s*<\s*Biome\s*>\s+biomeKey\s*,\s*@Nullable\s+TagKey\s*<\s*Biome\s*>\s+biomeTag\s*,\s*BlockStateIngredient\s+ingredient\s*,\s*BlockPropertyPair\s+result\s*,\s*@Nullable\s+CacheableFunction\s+function\s*\)\s*\{\s*super\(\s*type\s*,\s*id\s*,\s*ingredient\s*,\s*result\s*,\s*function\s*\)\s*;\s*this\.biomeKey\s*=\s*biomeKey\s*;\s*this\.biomeTag\s*=\s*biomeTag\s*;\s*\}"""
+        ).replace(result) {
+            changed = true
+            "public $className(RecipeType<?> type, Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome, BlockStateIngredient ingredient, BlockPropertyPair result, Optional<ResourceLocation> function) {\n" +
+                "        super(type, ingredient, result, function);\n" +
+                "        this.biome = biome;\n" +
+                "    }"
+        }
+        result = Regex(
+            """(?s)if\s*\(\s*this\.biomeKey\s*!=\s*null\s*\)\s*\{\s*return\s+super\.matches\(\s*level\s*,\s*pos\s*,\s*state\s*\)\s*&&\s*level\.getBiome\(\s*pos\s*\)\.is\(\s*this\.biomeKey\s*\)\s*;\s*\}\s*else\s+if\s*\(\s*this\.biomeTag\s*!=\s*null\s*\)\s*\{\s*return\s+super\.matches\(\s*level\s*,\s*pos\s*,\s*state\s*\)\s*&&\s*level\.getBiome\(\s*pos\s*\)\.is\(\s*this\.biomeTag\s*\)\s*;"""
+        ).replace(result) {
+            changed = true
+            "if (this.biome.isPresent() && this.biome.get().left().isPresent()) {\n" +
+                "            return super.matches(level, pos, state) && level.getBiome(pos).is(this.biome.get().left().get());\n" +
+                "        } else if (this.biome.isPresent() && this.biome.get().right().isPresent()) {\n" +
+                "            return super.matches(level, pos, state) && level.getBiome(pos).is(this.biome.get().right().get());"
+        }
+        result = Regex(
+            """(?s)@Nullable\s*\r?\n\s*public\s+ResourceKey\s*<\s*Biome\s*>\s+getBiomeKey\s*\(\s*\)\s*\{\s*return\s+this\.biomeKey\s*;\s*\}\s*@Nullable\s*\r?\n\s*public\s+TagKey\s*<\s*Biome\s*>\s+getBiomeTag\s*\(\s*\)\s*\{\s*return\s+this\.biomeTag\s*;\s*\}"""
+        ).replace(result) {
+            changed = true
+            "public Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> getBiome() {\n" +
+                "        return this.biome;\n" +
+                "    }"
+        }
+        if (!changed) return source
+        result = addImportIfMissing(result, "com.mojang.datafixers.util.Either")
+        result = addImportIfMissing(result, "java.util.Optional")
+        result = removeImport(result, "net.minecraft.commands.functions.CommandFunction")
+        result = removeImport(result, "net.minecraft.commands.CacheableFunction")
+        if (!Regex("""\b@Nullable\b""").containsMatchIn(result)) {
+            result = removeImport(result, "javax.annotation.Nullable")
+        }
+        return result
+    }
+
     private fun migrateNitrogenBiomeParameterRecipeSerializerSource(source: String): String {
         if (!source.contains("extends BlockStateRecipeSerializer") ||
             !source.contains("CookieBaker") ||
@@ -2737,138 +2875,3 @@ ${methodIndent}}
         result = addImportIfMissing(result, "net.minecraft.world.item.crafting.ShapedRecipePattern")
         return result
     }
-
-    private fun legacyRecordShapedCraftingRecipeClassBody(
-        className: String,
-        serializerExpr: String,
-        recipeTypeExpr: String
-    ): String = """
-public class $className extends ShapedRecipe {
-    private final int cost;
-    private final Ingredient input;
-    private final int count;
-    private final NonNullList<Ingredient> resultItems;
-
-    public $className(int cost, int width, int height, Ingredient input, int count, NonNullList<Ingredient> resultItems) {
-        this(cost, input, count, new ShapedRecipePattern(width, height, resultItems, java.util.Optional.empty()));
-    }
-
-    public $className(int cost, Ingredient input, int count, ShapedRecipePattern pattern) {
-        super("uncrafting", CraftingBookCategory.MISC, pattern, new ItemStack(Items.AIR, count));
-        this.cost = cost;
-        this.input = input;
-        this.count = count;
-        this.resultItems = pattern.ingredients();
-    }
-
-    @Override
-    public boolean matches(CraftingInput input, Level level) {
-        return false;
-    }
-
-    @Override
-    public ItemStack assemble(CraftingInput input, HolderLookup.Provider access) {
-        return ItemStack.EMPTY;
-    }
-
-    public boolean isItemStackAnIngredient(ItemStack stack) {
-        return java.util.Arrays.stream(this.input.getItems()).anyMatch(i -> stack.is(i.getItem()) && stack.getCount() >= this.count);
-    }
-
-    @Override
-    public RecipeSerializer<?> getSerializer() {
-        return $serializerExpr;
-    }
-
-    @Override
-    public RecipeType<?> getType() {
-        return $recipeTypeExpr;
-    }
-
-    @Override
-    public NonNullList<Ingredient> getIngredients() {
-        return this.resultItems;
-    }
-
-    public int cost() {
-        return this.cost;
-    }
-
-    public int getCost() {
-        return this.cost;
-    }
-
-    public Ingredient input() {
-        return this.input;
-    }
-
-    public int count() {
-        return this.count;
-    }
-
-    public int getCount() {
-        return this.count;
-    }
-
-    public int width() {
-        return this.pattern.width();
-    }
-
-    public int height() {
-        return this.pattern.height();
-    }
-
-    public NonNullList<Ingredient> resultItems() {
-        return this.resultItems;
-    }
-
-    public static class Serializer implements RecipeSerializer<$className> {
-        public static final MapCodec<$className> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
-                Codec.INT.optionalFieldOf("cost", -1).forGetter($className::cost),
-                Ingredient.CODEC.fieldOf("input").forGetter($className::input),
-                Codec.INT.optionalFieldOf("input_count", 1).forGetter($className::count),
-                ShapedRecipePattern.MAP_CODEC.forGetter(recipe -> recipe.pattern)
-        ).apply(instance, $className::new));
-
-        public static final StreamCodec<RegistryFriendlyByteBuf, $className> STREAM_CODEC = StreamCodec.of(
-                Serializer::toNetwork,
-                Serializer::fromNetwork
-        );
-
-        @Override
-        public MapCodec<$className> codec() {
-            return CODEC;
-        }
-
-        @Override
-        public StreamCodec<RegistryFriendlyByteBuf, $className> streamCodec() {
-            return STREAM_CODEC;
-        }
-
-        private static $className fromNetwork(RegistryFriendlyByteBuf buffer) {
-            int cost = buffer.readVarInt();
-            Ingredient input = Ingredient.CONTENTS_STREAM_CODEC.decode(buffer);
-            int count = buffer.readVarInt();
-            ShapedRecipePattern pattern = ShapedRecipePattern.STREAM_CODEC.decode(buffer);
-            return new $className(cost, input, count, pattern);
-        }
-
-        private static void toNetwork(RegistryFriendlyByteBuf buffer, $className recipe) {
-            buffer.writeVarInt(recipe.cost);
-            Ingredient.CONTENTS_STREAM_CODEC.encode(buffer, recipe.input);
-            buffer.writeVarInt(recipe.count);
-            ShapedRecipePattern.STREAM_CODEC.encode(buffer, recipe.pattern);
-        }
-    }
-}
-""".trimIndent()
-
-    private data class RecipeComponentSpec(
-        val type: String,
-        val name: String,
-        val localName: String,
-        val jsonField: String,
-        val registry: String? = null,
-        val blockState: Boolean = false,
-        val booleanField: Boolean = false
-    )

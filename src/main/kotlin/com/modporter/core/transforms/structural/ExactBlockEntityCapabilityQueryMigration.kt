@@ -67,7 +67,11 @@ internal class ExactBlockEntityCapabilityQueryMigration(
                     ?: throw IllegalStateException(
                         "Block capability query '$call' uses a receiver that cannot be evaluated twice safely"
                     )
-                val lazyOptionalType = exactLazyOptionalType(unit) ?: projectLazyOptionalType
+                val lazyOptionalType = try {
+                    exactLazyOptionalType(unit)
+                } catch (error: IllegalStateException) {
+                    throw IllegalStateException("${error.message} in $file", error)
+                } ?: projectLazyOptionalType
                     ?: exactPlannedLazyOptionalType()
                     ?: throw IllegalStateException(
                         "Cannot preserve legacy LazyOptional semantics for .BLOCK capability queries in $file"
@@ -190,15 +194,26 @@ internal class ExactBlockEntityCapabilityQueryMigration(
     }
 
     private fun exactLazyOptionalType(unit: CompilationUnit): String? {
-        val candidates = unit.imports.filterNot { it.isStatic }.map { it.nameAsString }.filter { imported ->
-            imported == "net.minecraftforge.common.util.LazyOptional" ||
-                imported == "net.neoforged.neoforge.common.util.LazyOptional" ||
-                imported.matches(Regex("""com\.modporter\.generated\.[\w.]+\.compat\.LazyOptional"""))
-        }.distinct()
+        val candidates = unit.imports.filterNot { it.isStatic }
+            .map { it.nameAsString }
+            .filter { it.substringAfterLast('.') == "LazyOptional" }
+            .distinct()
+        val generated = candidates.filter {
+            it.matches(Regex("""com\.modporter\.generated\.[\w.]+\.compat\.LazyOptional"""))
+        }
+        val legacy = candidates.filter { it in LEGACY_LAZY_OPTIONAL_TYPES }
+        if (generated.size == 1 && candidates.all { it in generated || it in legacy }) {
+            unit.imports.filter { !it.isStatic && it.nameAsString in legacy }.toList().forEach { it.remove() }
+            return generated.single()
+        }
         if (candidates.size > 1) {
             throw IllegalStateException("Ambiguous LazyOptional imports: $candidates")
         }
-        return candidates.singleOrNull()
+        val candidate = candidates.singleOrNull() ?: return null
+        if (candidate !in LEGACY_LAZY_OPTIONAL_TYPES && candidate !in generated) {
+            throw IllegalStateException("Unproven LazyOptional import: $candidate")
+        }
+        return candidate
     }
 
     private fun exactProjectLazyOptionalType(
@@ -254,6 +269,10 @@ internal class ExactBlockEntityCapabilityQueryMigration(
     private companion object {
         const val BLOCK_ENTITY_TYPE = "net.minecraft.world.level.block.entity.BlockEntity"
         const val NEOFORGE_CAPABILITIES = "net.neoforged.neoforge.capabilities.Capabilities"
+        val LEGACY_LAZY_OPTIONAL_TYPES = setOf(
+            "net.minecraftforge.common.util.LazyOptional",
+            "net.neoforged.neoforge.common.util.LazyOptional"
+        )
         val NON_BLOCK_ENTITY_CAPABILITY_RECEIVERS = setOf(
             "java.lang.Object",
             "net.minecraft.world.entity.Entity",

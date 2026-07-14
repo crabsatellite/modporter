@@ -1,4 +1,131 @@
 
+    private fun collectItemStackColorHandlerLambdaNames(
+        source: String,
+        executableCode: String = maskJavaCommentsAndLiterals(source)
+    ): Set<String> {
+        val eventVariables = Regex("""\b(?:[A-Za-z_$][\w$]*\.)*RegisterColorHandlersEvent\.Item\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(executableCode)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (eventVariables.isEmpty()) return emptySet()
+
+        val itemStackParameters = linkedSetOf<String>()
+        for (eventVariable in eventVariables) {
+            val token = "$eventVariable.register("
+            var cursor = 0
+            while (true) {
+                val tokenIndex = executableCode.indexOf(token, cursor)
+                if (tokenIndex < 0) break
+                val openParen = tokenIndex + "$eventVariable.register".length
+                val closeParen = findMatchingParen(executableCode, openParen)
+                if (closeParen < 0) break
+                val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+                val lambda = args.firstOrNull()?.trim()
+                val match = lambda?.let {
+                    Regex("""^\(?\s*([A-Za-z_$][\w$]*)\s*,\s*[A-Za-z_$][\w$]*\s*\)?\s*->""")
+                        .find(maskJavaCommentsAndLiterals(it))
+                }
+                if (match != null) {
+                    itemStackParameters += match.groupValues[1]
+                }
+                cursor = closeParen + 1
+            }
+        }
+        return itemStackParameters
+    }
+
+    private fun collectItemStackCollectionNames(source: String): Set<String> =
+        Regex("""\b(?:NonNullList|List|ArrayList|java\.util\.List|java\.util\.ArrayList)\s*<\s*ItemStack\s*>\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(maskJavaCommentsAndLiterals(source))
+            .map { it.groupValues[1] }
+            .toSet()
+
+    private fun collectItemStackHandlerValueNames(source: String): Set<String> =
+        Regex("""\b(?:ItemStackHandler|net\.neoforged\.neoforge\.items\.ItemStackHandler|[A-Za-z_$][\w$]*StackHandler)\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(maskJavaCommentsAndLiterals(source))
+            .map { it.groupValues[1] }
+            .toSet()
+
+    private fun collectFluidTankValueNames(source: String): Set<String> =
+        Regex("""\b(?:FluidTank|net\.neoforged\.neoforge\.fluids\.capability\.templates\.FluidTank|[A-Za-z_$][\w$]*Tank)\s+([A-Za-z_$][\w$]*)\b""")
+            .findAll(maskJavaCommentsAndLiterals(source))
+            .map { it.groupValues[1] }
+            .toSet()
+
+    private fun collectEntityCapabilityValueTypes(javaFiles: List<Path>): Map<String, String> {
+        val result = linkedMapOf<String, String>()
+        val declaration = Regex(
+            """\b(?:net\.neoforged\.neoforge\.capabilities\.)?EntityCapability\s*<\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*,\s*(?:net\.minecraft\.core\.)?Direction\s*>\s+([A-Z][A-Z0-9_]*)\b"""
+        )
+        for (javaFile in javaFiles) {
+            val source = runCatching { javaFile.readText() }.getOrDefault("")
+            val packageName = packageNameOf(source)
+            val topLevel = classNameOfJavaSource(source)
+            declaration.findAll(maskJavaCommentsAndLiterals(source)).forEach { match ->
+                val valueType = match.groupValues[1].substringAfterLast('.')
+                val fieldName = match.groupValues[2]
+                result[fieldName] = valueType
+                if (topLevel != null) {
+                    result["$topLevel.$fieldName"] = valueType
+                    if (packageName.isNotBlank()) {
+                        result["$packageName.$topLevel.$fieldName"] = valueType
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    private fun collectEntityAttachmentValueTypes(javaFiles: List<Path>): Map<String, String> {
+        val result = linkedMapOf<String, String>()
+        val declaration = Regex(
+            """\b(?:java\.util\.function\.)?Supplier\s*<\s*(?:net\.neoforged\.neoforge\.attachment\.)?AttachmentType\s*<\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>\s*>\s+([A-Z][A-Z0-9_]*)\b"""
+        )
+        fun record(key: String, valueType: String) {
+            val previous = result[key]
+            if (previous != null && previous != valueType) {
+                throw IllegalStateException(
+                    "Conflicting entity attachment value types for '$key': $previous and $valueType"
+                )
+            }
+            result[key] = valueType
+        }
+        for (javaFile in javaFiles) {
+            val source = runCatching { javaFile.readText() }.getOrDefault("")
+            val packageName = packageNameOf(source)
+            val topLevel = classNameOfJavaSource(source)
+            declaration.findAll(maskJavaCommentsAndLiterals(source)).forEach { match ->
+                val valueType = match.groupValues[1].substringAfterLast('.')
+                val fieldName = match.groupValues[2]
+                record(fieldName, valueType)
+                if (topLevel != null) {
+                    record("$topLevel.$fieldName", valueType)
+                    if (packageName.isNotBlank()) {
+                        record("$packageName.$topLevel.$fieldName", valueType)
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    private fun mergeEntityDataValueTypes(
+        capabilities: Map<String, String>,
+        attachments: Map<String, String>
+    ): Map<String, String> {
+        val result = linkedMapOf<String, String>()
+        (capabilities.entries + attachments.entries).forEach { (key, valueType) ->
+            val previous = result[key]
+            if (previous != null && previous != valueType) {
+                throw IllegalStateException(
+                    "Conflicting entity data value types for '$key': $previous and $valueType"
+                )
+            }
+            result[key] = valueType
+        }
+        return result
+    }
+
     private fun migrateProjectItemStackNbtConstructors(
         source: String,
         constructors: Set<HolderLookupNbtConstructor>,
@@ -177,10 +304,8 @@
     }
 
     private fun isJavaCallableDeclarationAt(source: String, offset: Int, methodName: String): Boolean =
-        javaMethodRangesIncludingDefault(source).any { method ->
-            method.name == methodName &&
-                offset >= method.range.first &&
-                offset < method.range.first + method.header.length
+        exactJavaMethodSurfaces(source).any { method ->
+            method.name == methodName && method.nameOffset == offset
         }
 
     private fun holderLookupProviderArgumentExpression(expression: String): String {
@@ -221,7 +346,7 @@
         entityDataValueTypes: Map<String, String> = emptyMap(),
         javaMethodReturnTypes: Map<String, String> = emptyMap()
     ): String {
-        if (methods.isEmpty() || !source.contains("CompoundTag")) return source
+        if (methods.isEmpty() || methods.none { method -> source.contains("${method.methodName}(") }) return source
         val executableCode = maskJavaCommentsAndLiterals(source)
         val typeBlocks = javaTypeBlocks(source, executableCode)
         if (typeBlocks.isEmpty()) return source
@@ -261,6 +386,9 @@
                 params
             ) ?: targetContract(owner, methodName, params.size)
             if (contract == null) {
+                return@replaceExecutableRegex match.value
+            }
+            if (registryAccessFromParameters(params, javaInheritanceIndex) != null) {
                 return@replaceExecutableRegex match.value
             }
             changedSignature = true
@@ -2753,245 +2881,4 @@ ${assignmentIndent}}
             ?.get(1)
         val owners = listOf(levelOwner, blockOwner, angleOwner, forcedOwner)
         return owners.filterNotNull().distinct().singleOrNull()
-    }
-
-    private fun migrateLegacyITeleporterDimensionTransitions(source: String): String {
-        if (!source.contains("ITeleporter") && !source.contains("PortalInfo") && !source.contains(".changeDimension(")) {
-            return source
-        }
-
-        var result = source
-        result = migrateLegacyPlaceEntityOnlyITeleporter(result)
-        val getPortalInfoMethod = javaMethodText(source, "getPortalInfo")
-        val defaultSuperCall = getPortalInfoMethod?.let {
-            Regex("""ITeleporter\.super\.getPortalInfo\(\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*,\s*([A-Za-z_$][\w$]*)\s*\)""")
-                .find(it)
-        }
-        val defaultPortalInfoPosition = if (defaultSuperCall != null) {
-            inferLegacyTeleporterDefaultPortalPosition(getPortalInfoMethod) ?: return source
-        } else {
-            null
-        }
-        val legacySignature = legacyGetPortalInfoSignature(result)
-        if (result.contains("implements ITeleporter")) {
-            result = result.replace(" implements ITeleporter", "")
-            result = removeImport(result, "net.neoforged.neoforge.common.util.ITeleporter")
-            result = removeImport(result, "net.minecraftforge.common.util.ITeleporter")
-        }
-        val beforeNullChangeDimensionOverride = result
-        result = Regex(
-            """(?m)^([ \t]*)(@Nullable\s*\r?\n)?\1@Override\s*\r?\n\1public\s+Entity\s+changeDimension\(\s*ServerLevel\s+[A-Za-z_$][\w$]*\s*,\s*ITeleporter\s+[A-Za-z_$][\w$]*\s*\)\s*\{\s*\r?\n\1[ \t]*return\s+null\s*;\s*\r?\n\1}"""
-        ).replace(result) { match ->
-            val indent = match.groupValues[1]
-            val nullable = match.groupValues[2]
-            "${indent}${nullable}${indent}@Override\n${indent}public Entity changeDimension(DimensionTransition transition) {\n${indent}    return null;\n${indent}}"
-        }
-        if (result != beforeNullChangeDimensionOverride) {
-            result = removeImport(result, "net.neoforged.neoforge.common.util.ITeleporter")
-            result = removeImport(result, "net.minecraftforge.common.util.ITeleporter")
-            result = addImportIfMissing(result, "net.minecraft.world.level.portal.DimensionTransition")
-        }
-        if (Regex("""(?<![\w$])PortalInfo(?![\w$])""").containsMatchIn(result)) {
-            result = result.replace("import net.minecraft.world.level.portal.PortalInfo;", "import net.minecraft.world.level.portal.DimensionTransition;")
-            if (!result.contains("import net.minecraft.world.level.portal.DimensionTransition;")) {
-                result = addImportIfMissing(result, "net.minecraft.world.level.portal.DimensionTransition")
-            }
-            result = Regex("""\(\s*Entity\s+([A-Za-z_$][\w$]*)\s*,\s*ServerLevel\s+([A-Za-z_$][\w$]*)\s*,\s*(?:java\.util\.function\.)?Function\s*<\s*ServerLevel\s*,\s*PortalInfo\s*>\s*[A-Za-z_$][\w$]*\s*\)""")
-                .replace(result) { match -> "(Entity ${match.groupValues[1]}, ServerLevel ${match.groupValues[2]})" }
-            result = Regex("""(?m)^([ \t]*)@Override\s*\r?\n\1public\s+PortalInfo\s+getPortalInfo\(\s*Entity\s+([A-Za-z_$][\w$]*)\s*,\s*ServerLevel\s+([A-Za-z_$][\w$]*)\s*\)""")
-                .replace(result) { match -> "${match.groupValues[1]}public DimensionTransition getPortalInfo(Entity ${match.groupValues[2]}, ServerLevel ${match.groupValues[3]})" }
-            result = Regex("""(?m)^([ \t]*)public\s+PortalInfo\s+getPortalInfo\(\s*Entity\s+([A-Za-z_$][\w$]*)\s*,\s*ServerLevel\s+([A-Za-z_$][\w$]*)\s*\)""")
-                .replace(result) { match -> "${match.groupValues[1]}public DimensionTransition getPortalInfo(Entity ${match.groupValues[2]}, ServerLevel ${match.groupValues[3]})" }
-            result = Regex("""(?m)^([ \t]*)@Override\s*\r?\n\1public\s+boolean\s+playTeleportSound\(""")
-                .replace(result) { match -> "${match.groupValues[1]}public boolean playTeleportSound(" }
-            result = result.replace("PortalInfo pos;", "DimensionTransition pos;")
-            result = Regex("""\bPortalInfo\s+([A-Za-z_$][\w$]*)\s*=""")
-                .replace(result) { match -> "DimensionTransition ${match.groupValues[1]} =" }
-            result = Regex("""\bprivate\s+static\s+PortalInfo\s+""").replace(result, "private static DimensionTransition ")
-            result = Regex("""\bprotected\s+static\s+PortalInfo\s+""").replace(result, "protected static DimensionTransition ")
-            result = Regex("""\bpublic\s+static\s+PortalInfo\s+""").replace(result, "public static DimensionTransition ")
-            result = result.replace("pos.pos)", "pos.pos())")
-            result = result.replace("pos.pos;", "pos.pos();")
-            result = result.replace("BlockPos.containing(pos.pos)", "BlockPos.containing(pos.pos())")
-            if (defaultPortalInfoPosition != null) {
-                val entityParam = defaultSuperCall?.groupValues?.get(1) ?: legacySignature?.entityParam ?: "entity"
-                val levelParam = defaultSuperCall?.groupValues?.get(2) ?: legacySignature?.levelParam ?: "dest"
-                result = result.replace(
-                    defaultSuperCall!!.value,
-                    "makePortalInfo($levelParam, $entityParam, Vec3.atCenterOf($defaultPortalInfoPosition))"
-                )
-            }
-            result = result.replace("return makePortalInfo(entity, portalX, portalY, portalZ);", "return makePortalInfo(destDim, entity, portalX, portalY, portalZ);")
-            result = result.replace("return makePortalInfo(entity, Vec3.atCenterOf(pos));", "return makePortalInfo(world, entity, Vec3.atCenterOf(pos));")
-            result = result.replace("return makePortalInfo(entity, safeCoords.getX(), entity.getY(), safeCoords.getZ());", "return makePortalInfo(world, entity, safeCoords.getX(), entity.getY(), safeCoords.getZ());")
-            result = result.replace("return makePortalInfo(entity, new Vec3(x, y, z));", "return makePortalInfo(level, entity, new Vec3(x, y, z));")
-            result = Regex("""private\s+static\s+DimensionTransition\s+makePortalInfo\(\s*Entity\s+entity\s*,\s*double\s+x\s*,\s*double\s+y\s*,\s*double\s+z\s*\)""")
-                .replace(result, "private static DimensionTransition makePortalInfo(ServerLevel level, Entity entity, double x, double y, double z)")
-            result = Regex("""private\s+static\s+DimensionTransition\s+makePortalInfo\(\s*Entity\s+entity\s*,\s*Vec3\s+pos\s*\)""")
-                .replace(result, "private static DimensionTransition makePortalInfo(ServerLevel level, Entity entity, Vec3 pos)")
-            result = Regex("""new\s+PortalInfo\(\s*pos\s*,\s*Vec3\.ZERO\s*,\s*entity\.getYRot\(\)\s*,\s*entity\.getXRot\(\)\s*\)""")
-                .replace(result, "new DimensionTransition(level, pos, Vec3.ZERO, entity.getYRot(), entity.getXRot(), DimensionTransition.PLACE_PORTAL_TICKET)")
-            legacySignature?.let {
-                result = migratePortalInfoConstructorsInMethod(result, "getPortalInfo", it.levelParam)
-                result = migratePortalShapeCreatePortalInfoInMethod(result, "getPortalInfo")
-            }
-            result = migratePortalInfoConstructorsInMethod(result, "makePortalInfo", "level")
-            result = removeMethodByName(result, "placeEntity")
-            result = removeImport(result, "java.util.function.Function")
-            javaMethodText(result, "getPortalInfo")?.let { method ->
-                val targetLevelParam = legacySignature?.levelParam ?: "dest"
-                val migratedMethod = method.replace("makePortalInfo(entity,", "makePortalInfo($targetLevelParam, entity,")
-                result = result.replace(method, migratedMethod)
-            }
-        }
-
-        val dimensionSource = result
-        result = rewriteJavaCallWithOffset(result, "changeDimension") { receiver, args, callOffset ->
-            if (args.size != 2) return@rewriteJavaCallWithOffset null
-            val entity = legacyChangeDimensionEntityExpression(dimensionSource, receiver, callOffset)
-                ?: return@rewriteJavaCallWithOffset null
-            val dest = args[0].trim()
-            legacyAnonymousITeleporterDimensionTransition(args[1].trim(), entity, dest)?.let { transition ->
-                return@rewriteJavaCallWithOffset "$entity.changeDimension($transition)"
-            }
-            val teleporter = legacyTeleporterConstructorParts(args[1].trim())
-                ?: return@rewriteJavaCallWithOffset null
-            "$entity.changeDimension(new ${teleporter.first}(${teleporter.second}).getPortalInfo($entity, $dest))"
-        }
-        result = Regex(
-            """([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.changeDimension\(\s*([A-Za-z_$][\w$]*)\s*,\s*([^?;\r\n]+?)\?\s*new\s+([A-Za-z_$][\w$]*)\(([^)]*)\)\s*:\s*new\s+([A-Za-z_$][\w$]*)\(([^)]*)\)\s*\)"""
-        ).replace(result) { match ->
-            val entity = match.groupValues[1]
-            val dest = match.groupValues[2]
-            val condition = match.groupValues[3].trim()
-            val trueClass = match.groupValues[4]
-            val trueArgs = match.groupValues[5].trim()
-            val falseClass = match.groupValues[6]
-            val falseArgs = match.groupValues[7].trim()
-            "$entity.changeDimension($condition ? new $trueClass($trueArgs).getPortalInfo($entity, $dest) : new $falseClass($falseArgs).getPortalInfo($entity, $dest))"
-        }
-        result = removeUnusedSimpleImport(result, "net.neoforged.neoforge.common.util.ITeleporter", "ITeleporter")
-        result = removeUnusedSimpleImport(result, "net.minecraftforge.common.util.ITeleporter", "ITeleporter")
-        result = removeUnusedSimpleImport(result, "java.util.function.Function", "Function")
-        if (result.contains("DimensionTransition")) {
-            result = addImportIfMissing(result, "net.minecraft.world.level.portal.DimensionTransition")
-        }
-        if (result.contains("new Vec3(") || result.contains("Vec3.ZERO")) {
-            result = addImportIfMissing(result, "net.minecraft.world.phys.Vec3")
-        }
-        return result
-    }
-
-    private data class LegacyPlaceEntityTransition(
-        val positionExpression: String,
-        val needsVec3Constructor: Boolean
-    )
-
-    private fun migrateLegacyPlaceEntityOnlyITeleporter(source: String): String {
-        if (!source.contains("placeEntity") || !source.contains("ITeleporter") || source.contains("PortalInfo")) {
-            return source
-        }
-        var result = source
-        for (method in javaMethodRangesIncludingDefault(result).asReversed()) {
-            if (method.name != "placeEntity") continue
-            if (!isMethodInsideLegacyITeleporterClass(result, method.range.first)) continue
-            val methodText = result.substring(method.range)
-            val parameters = javaMethodParameters(methodText)
-            if (parameters.size != 5) continue
-            val entityParam = parameters[0].takeIf { it.type.endsWithJavaType("Entity") }?.name ?: continue
-            val destinationParam = parameters[2].takeIf { it.type.endsWithJavaType("ServerLevel") }?.name ?: continue
-            val transition = legacyPlaceEntityTransition(methodText, entityParam) ?: continue
-            val methodIndent = Regex("""^[ \t]*""").find(methodText)?.value ?: ""
-            val replacement = """
-${methodIndent}public DimensionTransition getPortalInfo(Entity $entityParam, ServerLevel $destinationParam) {
-${methodIndent}    return new DimensionTransition($destinationParam, ${transition.positionExpression}, Vec3.ZERO, $entityParam.getYRot(), $entityParam.getXRot(), DimensionTransition.PLACE_PORTAL_TICKET);
-${methodIndent}}
-""".trimEnd()
-            result = result.substring(0, method.range.first) + replacement + result.substring(method.range.last + 1)
-        }
-        if (result == source) return source
-        result = result.replace(" implements ITeleporter", "")
-        result = removeImport(result, "net.neoforged.neoforge.common.util.ITeleporter")
-        result = removeImport(result, "net.minecraftforge.common.util.ITeleporter")
-        result = removeUnusedSimpleImport(result, "java.util.function.Function", "Function")
-        result = addImportIfMissing(result, "net.minecraft.world.level.portal.DimensionTransition")
-        result = addImportIfMissing(result, "net.minecraft.world.phys.Vec3")
-        return result
-    }
-
-    private fun isMethodInsideLegacyITeleporterClass(source: String, methodStart: Int): Boolean {
-        val prefix = source.substring(0, methodStart)
-        val classMatch = Regex("""(?m)\b(?:class|record)\s+[A-Za-z_$][\w$]*[^{;]*\bimplements\b[^{;]*\bITeleporter\b[^{;]*\{""")
-            .findAll(prefix)
-            .lastOrNull()
-            ?: return false
-        val anonymousStart = prefix.lastIndexOf("new ITeleporter()")
-        if (anonymousStart > classMatch.range.first) return false
-        val openBrace = source.indexOf('{', classMatch.range.last - 1)
-        if (openBrace < 0) return false
-        val closeBrace = findMatchingBrace(source, openBrace)
-        return closeBrace >= methodStart
-    }
-
-    private fun legacyAnonymousITeleporterDimensionTransition(
-        expression: String,
-        entityExpression: String,
-        destinationExpression: String
-    ): String? {
-        val trimmed = expression.trim()
-        if (!trimmed.startsWith("new ITeleporter()")) return null
-        val openBrace = trimmed.indexOf('{')
-        if (openBrace < 0) return null
-        val closeBrace = findMatchingBrace(trimmed, openBrace)
-        if (closeBrace != trimmed.lastIndex) return null
-        val method = javaMethodRangesIncludingDefault(trimmed)
-            .singleOrNull { it.name == "placeEntity" }
-            ?: return null
-        val methodText = trimmed.substring(method.range)
-        val parameters = javaMethodParameters(methodText)
-        if (parameters.size != 5) return null
-        val entityParam = parameters[0].takeIf { it.type.endsWithJavaType("Entity") }?.name ?: return null
-        val transition = legacyPlaceEntityTransition(methodText, entityParam) ?: return null
-        return "new DimensionTransition($destinationExpression, ${transition.positionExpression}, Vec3.ZERO, $entityExpression.getYRot(), $entityExpression.getXRot(), DimensionTransition.PLACE_PORTAL_TICKET)"
-    }
-
-    private fun legacyPlaceEntityTransition(methodText: String, entityParam: String): LegacyPlaceEntityTransition? {
-        val executable = maskJavaCommentsAndLiterals(methodText)
-        if (!Regex("""\breturn\s+${Regex.escape(entityParam)}\s*;""").containsMatchIn(executable)) return null
-        val call = Regex("""\b${Regex.escape(entityParam)}\.teleportTo\s*\(""").find(executable) ?: return null
-        val openParen = executable.indexOf('(', call.range.last)
-        if (openParen < 0) return null
-        val closeParen = findMatchingParen(executable, openParen)
-        if (closeParen < 0) return null
-        val args = splitTopLevelJavaArgs(methodText.substring(openParen + 1, closeParen)).map { it.trim() }
-        if (args.size < 3) return null
-        val position = legacyVec3PositionExpression(args[0], args[1], args[2])
-            ?: "new Vec3(${args[0]}, ${args[1]}, ${args[2]})"
-        return LegacyPlaceEntityTransition(position, position.startsWith("new Vec3("))
-    }
-
-    private fun legacyVec3PositionExpression(x: String, y: String, z: String): String? {
-        val vectorName = Regex("""^([A-Za-z_$][\w$]*)\.x$""").find(x.trim())?.groupValues?.get(1) ?: return null
-        if (y.trim() != "$vectorName.y") return null
-        if (z.trim() != "$vectorName.z") return null
-        return vectorName
-    }
-
-    private fun legacyChangeDimensionEntityExpression(source: String, receiver: String, callOffset: Int): String? {
-        val trimmed = receiver.trim()
-        if (!trimmed.contains("(")) return trimmed
-
-        val range = enclosingMethodRange(source, callOffset) ?: return null
-        val prefix = source.substring(range.first, callOffset)
-        val patternVariable = Regex(
-            """if\s*\(\s*${Regex.escape(trimmed)}\s+instanceof\s+(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)(?:\s*<[^(){};]+>)?\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
-        ).findAll(prefix)
-            .lastOrNull { match ->
-                val openBrace = range.first + match.range.last
-                val closeBrace = findMatchingBrace(source, openBrace)
-                closeBrace > callOffset
-            }
-            ?.groupValues
-            ?.get(1)
-        return patternVariable
     }

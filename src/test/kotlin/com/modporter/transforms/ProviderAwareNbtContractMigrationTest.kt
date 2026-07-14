@@ -15,6 +15,44 @@ class ProviderAwareNbtContractMigrationTest {
     lateinit var tempDir: Path
 
     @Test
+    fun `exact Item use callback owns the Level provider even when its stack came from a player`() {
+        val file = javaFile(
+            "StackWritingItem.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.InteractionResultHolder;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            class StackWritingItem extends Item {
+                StackWritingItem(Properties properties) {
+                    super(properties);
+                }
+
+                @Override
+                public InteractionResultHolder<ItemStack> use(Level level, Player player, InteractionHand hand) {
+                    ItemStack stack = player.getItemInHand(hand);
+                    CompoundTag tag = stack.copy().save(new CompoundTag());
+                    return InteractionResultHolder.success(stack);
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(migrated.contains("stack.copy().saveOptional(level.registryAccess())"), migrated)
+        assertFalse(migrated.contains("player.registryAccess()"), migrated)
+    }
+
+    @Test
     fun `project CompoundTag serializable contracts migrate definitions bodies and call sites`() {
         val inventory = javaFile(
             "ProjectInventory.java",
@@ -145,6 +183,88 @@ class ProviderAwareNbtContractMigrationTest {
         )
         assertTrue(migrated.contains("super.deserializeNBT(registries, tag)"), migrated)
         assertFalse(migrated.contains("deserializeNBT(CompoundTag tag, HolderLookup.Provider"), migrated)
+    }
+
+    @Test
+    fun `provider demand closes an override family whose other files contain no nbt types`() {
+        val root = javaFile(
+            "DisplayTarget.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+
+            public abstract class DisplayTarget {
+                protected CompoundTag metadata() {
+                    return new CompoundTag();
+                }
+                public abstract void accept(DisplayContext context);
+            }
+            """.trimIndent()
+        )
+        val direct = javaFile(
+            "SerializedDisplayTarget.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.neoforged.neoforge.items.ItemStackHandler;
+
+            public class SerializedDisplayTarget extends DisplayTarget {
+                private final ItemStackHandler contents = new ItemStackHandler();
+
+                @Override
+                public void accept(DisplayContext context) {
+                    context.store(serialize());
+                }
+
+                private CompoundTag serialize() {
+                    CompoundTag tag = contents.serializeNBT();
+                    return tag;
+                }
+            }
+            """.trimIndent()
+        )
+        val peer = javaFile(
+            "PlainDisplayTarget.java",
+            """
+            package com.example;
+
+            public class PlainDisplayTarget extends DisplayTarget {
+                @Override
+                public void accept(DisplayContext context) {
+                    context.markAccepted();
+                }
+            }
+            """.trimIndent()
+        )
+        javaFile(
+            "DisplayContext.java",
+            """
+            package com.example;
+
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.nbt.CompoundTag;
+
+            public interface DisplayContext {
+                ItemStack stack();
+                void store(CompoundTag tag);
+                void markAccepted();
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migratedRoot = root.readText()
+        val migratedDirect = direct.readText()
+        val migratedPeer = peer.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        val providerParameter = "(?:net\\.minecraft\\.core\\.)?HolderLookup\\.Provider"
+        assertTrue(Regex("accept\\(DisplayContext context, $providerParameter").containsMatchIn(migratedRoot), migratedRoot)
+        assertTrue(Regex("accept\\(DisplayContext context, $providerParameter").containsMatchIn(migratedDirect), migratedDirect)
+        assertTrue(Regex("accept\\(DisplayContext context, $providerParameter").containsMatchIn(migratedPeer), migratedPeer)
+        assertTrue(Regex("""contents\.serializeNBT\(\w+\)""").containsMatchIn(migratedDirect), migratedDirect)
     }
 
     @Test
@@ -516,6 +636,225 @@ class ProviderAwareNbtContractMigrationTest {
             migratedBehaviour.contains("FilterItemStack.of(tag, level.registryAccess())"),
             migratedBehaviour
         )
+    }
+
+    @Test
+    fun `generic return type declarations are not rewritten as provider call sites`() {
+        val file = javaFile(
+            "GenericCapture.java",
+            """
+            package com.example;
+
+            import com.mojang.datafixers.util.Pair;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            public class GenericCapture {
+                protected Pair<String, ItemStack> capture(Level world, CompoundTag tag) {
+                    return Pair.of("item", ItemStack.of(tag));
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(
+            migrated.contains("capture(Level world, CompoundTag tag)"),
+            migrated
+        )
+        assertFalse(migrated.contains("pos, world.registryAccess())"), migrated)
+        assertTrue(migrated.contains("ItemStack.parseOptional(world.registryAccess(), tag)"), migrated)
+    }
+
+    @Test
+    fun `exact Level provider roots stop project NBT demand propagation`() {
+        val file = javaFile(
+            "LevelOwnedCodec.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            class LevelOwnedCodec {
+                static LevelOwnedCodec fromNBT(Level world, CompoundTag tag, boolean packet) {
+                    LevelOwnedCodec codec = new LevelOwnedCodec();
+                    codec.readNBT(world, tag, packet);
+                    return codec;
+                }
+
+                void readNBT(Level world, CompoundTag tag, boolean packet) {
+                    ItemStack stack = ItemStack.of(tag);
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(
+            migrated.contains("fromNBT(Level world, CompoundTag tag, boolean packet)"),
+            migrated
+        )
+        assertTrue(
+            migrated.contains("readNBT(Level world, CompoundTag tag, boolean packet)"),
+            migrated
+        )
+        assertTrue(migrated.contains("codec.readNBT(world, tag, packet);"), migrated)
+        assertTrue(migrated.contains("ItemStack.parseOptional(world.registryAccess(), tag)"), migrated)
+        assertFalse(migrated.contains("HolderLookup.Provider"), migrated)
+    }
+
+    @Test
+    fun `exact Level provider roots stop demand across an abstract override family`() {
+        val file = javaFile(
+            "LevelOwnedFamily.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            abstract class LevelOwnedFamily {
+                abstract void place(Level world);
+
+                void invoke(Level world) {
+                    place(world);
+                }
+            }
+
+            class LevelOwnedChild extends LevelOwnedFamily {
+                @Override
+                void place(Level world) {
+                    ItemStack stack = ItemStack.of(new CompoundTag());
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = file.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(migrated.contains("abstract void place(Level world);"), migrated)
+        assertTrue(migrated.contains("void place(Level world)"), migrated)
+        assertTrue(migrated.contains("place(world);"), migrated)
+        assertTrue(
+            migrated.contains("ItemStack.parseOptional(world.registryAccess(), new CompoundTag())"),
+            migrated
+        )
+        assertFalse(migrated.contains("HolderLookup.Provider"), migrated)
+    }
+
+    @Test
+    fun `ambiguous provider roots become an explicit project contract`() {
+        val helper = javaFile(
+            "AmbiguousProviderHelper.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.Level;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+
+            class AmbiguousProviderHelper {
+                static void load(Level world, Player player, BlockEntity blockEntity, CompoundTag tag) {
+                    blockEntity.load(tag);
+                }
+
+                static void invoke(Level world, Player player, BlockEntity blockEntity, CompoundTag tag) {
+                    load(world, player, blockEntity, tag);
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = helper.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        val provider = Regex(
+            """load\(Level world, Player player, BlockEntity blockEntity, CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
+        ).find(migrated)?.groupValues?.get(1)
+        assertTrue(provider != null, migrated)
+        assertTrue(migrated.contains("blockEntity.loadWithComponents(tag, $provider)"), migrated)
+        assertTrue(migrated.contains("load(world, player, blockEntity, tag, "), migrated)
+        assertFalse(migrated.contains("blockEntity.loadWithComponents(tag, world.registryAccess())"), migrated)
+        assertFalse(migrated.contains("blockEntity.loadWithComponents(tag, player.registryAccess())"), migrated)
+    }
+
+    @Test
+    fun `multiple provider roots without provider demand do not block migration`() {
+        val helper = javaFile(
+            "ProviderNeutralHelper.java",
+            """
+            package com.example;
+
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.level.Level;
+
+            class ProviderNeutralHelper {
+                void initialize(Level world, Entity entity) {
+                    CompoundTag tag = new CompoundTag();
+                    tag.putBoolean("Initialized", true);
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = helper.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(migrated.contains("initialize(Level world, Entity entity)"), migrated)
+        assertFalse(migrated.contains("HolderLookup.Provider"), migrated)
+    }
+
+    @Test
+    fun `instance Entity field is not selected when another instance Level can own the provider`() {
+        val helper = javaFile(
+            "AmbiguousInstanceProviderHelper.java",
+            """
+            package com.example;
+
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.Entity;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.level.Level;
+
+            class AmbiguousInstanceProviderHelper {
+                public Entity entity;
+                protected Level collisionLevel;
+
+                ItemStack load(CompoundTag tag) {
+                    return ItemStack.of(tag);
+                }
+            }
+            """.trimIndent()
+        )
+
+        val result = StructuralRefactorPass().apply(tempDir)
+        val migrated = helper.readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        val provider = Regex(
+            """load\(CompoundTag tag, (?:net\.minecraft\.core\.)?HolderLookup\.Provider (\w+)\)"""
+        ).find(migrated)?.groupValues?.get(1)
+        assertTrue(provider != null, migrated)
+        assertTrue(migrated.contains("ItemStack.parseOptional($provider, tag)"), migrated)
+        assertFalse(migrated.contains("entity.registryAccess()"), migrated)
+        assertFalse(migrated.contains("collisionLevel.registryAccess()"), migrated)
     }
 
     @Test

@@ -62,6 +62,30 @@ class ExactExternalProviderCallMigrationTest {
     }
 
     @Test
+    fun `BlockEntity menu writers promote their exact registry buffer provider`() {
+        val file = write("sample/SyncedBlockEntity.java", """
+            package sample;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            class SyncedBlockEntity extends BlockEntity {
+                void sendToMenu(FriendlyByteBuf buffer) {
+                    buffer.writeNbt(getUpdateTag());
+                }
+            }
+        """.trimIndent())
+
+        ExactExternalProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migrated = file.readText()
+
+        assertTrue(migrated.contains("sendToMenu(RegistryFriendlyByteBuf buffer)"), migrated)
+        assertTrue(
+            migrated.contains("getUpdateTag(buffer.registryAccess())"),
+            migrated
+        )
+        assertTrue(!migrated.contains("getLevel().registryAccess()"), migrated)
+    }
+
+    @Test
     fun `external item list contracts use exact direct and level providers`() {
         val file = write("sample/ItemListCodec.java", """
             package sample;
@@ -175,6 +199,41 @@ class ExactExternalProviderCallMigrationTest {
 
         assertTrue(changes.isEmpty())
         assertTrue(file.readText() == original, file.readText())
+    }
+
+    @Test
+    fun `registry buffer provider promotion is atomic across an exact override family`() {
+        val base = write("sample/BufferBlockEntity.java", """
+            package sample;
+            import net.createmod.ponder.api.VirtualBlockEntity;
+            import net.minecraft.network.FriendlyByteBuf;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            abstract class BufferBlockEntity extends BlockEntity implements VirtualBlockEntity {
+                void send(FriendlyByteBuf buffer) {
+                    getUpdateTag();
+                }
+            }
+        """.trimIndent())
+        val child = write("sample/ChildBufferBlockEntity.java", """
+            package sample;
+            import net.minecraft.network.FriendlyByteBuf;
+            abstract class ChildBufferBlockEntity extends BufferBlockEntity {
+                @Override
+                void send(FriendlyByteBuf buffer) {
+                    super.send(buffer);
+                }
+            }
+        """.trimIndent())
+
+        val changes = ExactExternalProviderCallMigration().migrate(tempDir, dryRun = false)
+        val migratedBase = base.readText()
+        val migratedChild = child.readText()
+
+        assertTrue(changes.size == 2, changes.toString())
+        assertTrue(migratedBase.contains("send(RegistryFriendlyByteBuf buffer)"), migratedBase)
+        assertTrue(migratedBase.contains("getUpdateTag(buffer.registryAccess())"), migratedBase)
+        assertTrue(migratedChild.contains("send(RegistryFriendlyByteBuf buffer)"), migratedChild)
+        assertTrue(migratedChild.contains("super.send(buffer);"), migratedChild)
     }
 
     @Test

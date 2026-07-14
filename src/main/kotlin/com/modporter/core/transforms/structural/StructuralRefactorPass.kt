@@ -43,8 +43,11 @@ class StructuralRefactorPass : Pass {
 
     private data class ExactJavaMethodSurface(
         val name: String,
+        val nameOffset: Int,
         val range: IntRange,
-        val parameters: List<Pair<String, String>>
+        val parameters: List<Pair<String, String>>,
+        val returnType: String?,
+        val isStatic: Boolean
     )
 
     private var exactJavaMethodSurfaceSource: String? = null
@@ -14577,8 +14580,7 @@ $fields
     )
 
     private data class JavaInheritanceIndex(
-        private val directSuperByClass: Map<String, String>,
-        private val registryAccessFieldByClass: Map<String, String> = emptyMap()
+        private val directSuperByClass: Map<String, String>
     ) {
         fun inherits(directSuper: String, baseTypes: Set<String>): Boolean {
             var current = directSuper.substringAfterLast('.')
@@ -14590,16 +14592,6 @@ $fields
                     ?: return false
             }
             return false
-        }
-
-        fun inheritedRegistryAccessField(className: String): String? {
-            var current = className.substringAfterLast('.')
-            val visited = mutableSetOf<String>()
-            while (current.isNotBlank() && visited.add(current)) {
-                registryAccessFieldByClass[current]?.let { return it }
-                current = directSuperByClass[current]?.substringAfterLast('.') ?: return null
-            }
-            return null
         }
 
         companion object {
@@ -14683,30 +14675,13 @@ $fields
 
     private fun collectJavaInheritanceIndex(javaFiles: List<Path>): JavaInheritanceIndex {
         val directSuperByClass = linkedMapOf<String, String>()
-        val fieldsByClass = linkedMapOf<String, MutableList<Pair<String, String>>>()
         javaFiles.forEach { javaFile ->
             val source = javaFile.readText()
             collectJavaClassDeclarations(source).forEach { declaration ->
                 directSuperByClass.putIfAbsent(declaration.name, declaration.directSuper)
-                val body = source.substring(declaration.bodyRange.first + 1, declaration.bodyRange.last)
-                Regex(
-                    """(?m)^[ \t]*(?:@\w+(?:\.\w+)*(?:\([^)]*\))?\s+)*(?:public|protected|private)\s+(?!static\b)(?:final\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s+([A-Za-z_$][\w$]*)\s*(?:=[^;\r\n]*)?;"""
-                ).findAll(maskJavaCommentsAndLiterals(body))
-                    .forEach { field ->
-                        fieldsByClass.getOrPut(declaration.name) { mutableListOf() } +=
-                            field.groupValues[1].substringAfterLast('.') to field.groupValues[2]
-                    }
             }
         }
-        val provisional = JavaInheritanceIndex(directSuperByClass)
-        val entityBaseTypes = javaEntityBaseTypes()
-        val registryAccessFields = fieldsByClass.mapNotNull { (className, fields) ->
-            val entityFields = fields.filter { (type, _) ->
-                type in entityBaseTypes || provisional.inherits(type, entityBaseTypes)
-            }
-            if (entityFields.size == 1) className to entityFields.single().second else null
-        }.toMap()
-        return JavaInheritanceIndex(directSuperByClass, registryAccessFields)
+        return JavaInheritanceIndex(directSuperByClass)
     }
 
     private fun collectJavaClassNamesExtending(
@@ -23086,12 +23061,6 @@ $migratedRecipes
             )
         }
 
-        if (result.contains(".save(new net.minecraft.nbt.CompoundTag())") && result.contains("Player player")) {
-            result = Regex("""([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*\(\))*)\.save\(new net\.minecraft\.nbt\.CompoundTag\(\)\)""")
-                .replace(result) { match ->
-                    "${match.groupValues[1]}.save(player.registryAccess(), new net.minecraft.nbt.CompoundTag())"
-                }
-        }
         result = migrateCopiedCustomDataWrites(result)
         result = migrateStructurePlaceSettingsLiquidSettingsSource(result)
 
@@ -31427,7 +31396,9 @@ ${indent}}"""
         parameters: List<String>,
         javaInheritanceIndex: JavaInheritanceIndex
     ): String? {
-        holderLookupProviderFromParameters(parameters)?.let { return it }
+        val declaredProviders = holderLookupProviderNamesFromParameters(parameters)
+        if (declaredProviders.size == 1) return declaredProviders.single()
+        if (declaredProviders.size > 1) return null
         val tooltipContextRegistryAccess = parameters.mapNotNull { parameter ->
             Regex("""(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*(?:(?:net\.minecraft\.world\.item\.)?Item\.)?TooltipContext\s+([A-Za-z_$][\w$]*)$""")
                 .find(parameter.trim())
@@ -31435,8 +31406,6 @@ ${indent}}"""
                 ?.get(1)
                 ?.let { "$it.registries()" }
         }.distinct()
-        if (tooltipContextRegistryAccess.size == 1) return tooltipContextRegistryAccess.single()
-        if (tooltipContextRegistryAccess.size > 1) return null
         val lootParamsRegistryAccess = parameters.mapNotNull { parameter ->
             Regex("""(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*(?:net\.minecraft\.world\.level\.storage\.loot\.)?LootParams\.Builder\s+([A-Za-z_$][\w$]*)$""")
                 .find(parameter.trim())
@@ -31444,8 +31413,6 @@ ${indent}}"""
                 ?.get(1)
                 ?.let { "$it.getLevel().registryAccess()" }
         }.distinct()
-        if (lootParamsRegistryAccess.size == 1) return lootParamsRegistryAccess.single()
-        if (lootParamsRegistryAccess.size > 1) return null
         val parameterPattern = Regex("""(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:<[^>]+>)?)\s+([A-Za-z_$][\w$]*)$""")
         val parsed = parameters.mapNotNull { parameter ->
             val cleaned = parameter.trim()
@@ -31463,16 +31430,10 @@ ${indent}}"""
             .filter { it.first in setOf("ServerLevel", "Level", "WorldGenLevel", "ServerLevelAccessor", "LevelAccessor", "LevelReader") }
             .map { "${it.second}.registryAccess()" }
             .distinct()
-        if (levelRegistryAccess.size == 1) return levelRegistryAccess.single()
-        if (levelRegistryAccess.size > 1) return null
-
         val inventoryRegistryAccess = parsed
             .filter { it.first == "Inventory" }
             .map { "${it.second}.player.registryAccess()" }
             .distinct()
-        if (inventoryRegistryAccess.size == 1) return inventoryRegistryAccess.single()
-        if (inventoryRegistryAccess.size > 1) return null
-
         val entityRegistryAccess = parsed
             .filter { (type, _) ->
                 type in javaEntityBaseTypes() ||
@@ -31480,8 +31441,13 @@ ${indent}}"""
             }
             .map { "${it.second}.registryAccess()" }
             .distinct()
-        if (entityRegistryAccess.size == 1) return entityRegistryAccess.single()
-        return null
+        return (
+            tooltipContextRegistryAccess +
+                lootParamsRegistryAccess +
+                levelRegistryAccess +
+                inventoryRegistryAccess +
+                entityRegistryAccess
+            ).distinct().singleOrNull()
     }
 
     private fun holderLookupProviderFromParameters(parameters: List<String>): String? {
@@ -31525,28 +31491,42 @@ ${indent}}"""
             } + position.column - 1
         fun surface(
             name: String,
+            nameRange: com.github.javaparser.Range,
             range: com.github.javaparser.Range,
-            parameters: List<Parameter>
+            parameters: List<Parameter>,
+            returnType: String?,
+            isStatic: Boolean
         ): ExactJavaMethodSurface {
             val start = offset(range.begin)
             val endInclusive = offset(range.end)
+            val nameStart = offset(nameRange.begin)
             if (start !in source.indices || endInclusive !in source.indices || start > endInclusive) {
                 throw IllegalStateException(
                     "Invalid exact Java callable range for $name: $start..$endInclusive"
                 )
             }
+            if (nameStart !in start..endInclusive || !source.startsWith(name, nameStart)) {
+                throw IllegalStateException(
+                    "Invalid exact Java callable name range for $name at $nameStart"
+                )
+            }
             return ExactJavaMethodSurface(
                 name,
+                nameStart,
                 start..endInclusive,
-                parameters.map { parameter -> parameter.typeAsString to parameter.nameAsString }
+                parameters.map { parameter -> parameter.typeAsString to parameter.nameAsString },
+                returnType,
+                isStatic
             )
         }
         val surfaces = unit.findAll(MethodDeclaration::class.java).mapNotNull { method ->
             val range = method.range.orElse(null) ?: return@mapNotNull null
-            surface(method.nameAsString, range, method.parameters.toList())
+            val nameRange = method.name.range.orElse(null) ?: return@mapNotNull null
+            surface(method.nameAsString, nameRange, range, method.parameters.toList(), method.typeAsString, method.isStatic)
         } + unit.findAll(ConstructorDeclaration::class.java).mapNotNull { constructor ->
             val range = constructor.range.orElse(null) ?: return@mapNotNull null
-            surface(constructor.nameAsString, range, constructor.parameters.toList())
+            val nameRange = constructor.name.range.orElse(null) ?: return@mapNotNull null
+            surface(constructor.nameAsString, nameRange, range, constructor.parameters.toList(), null, false)
         }
         exactJavaMethodSurfaceSource = source
         exactJavaMethodSurfaces = surfaces
@@ -31574,16 +31554,13 @@ ${indent}}"""
         offset: Int,
         javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
     ): String? {
+        exactExternalCallbackProviderExpressionAt(source, offset, javaInheritanceIndex)?.let { return it }
         val parameters = currentMethodParametersBeforeOffset(source, offset)
         registryAccessFromParameters(parameters, javaInheritanceIndex)?.let { return it }
         sourceProvenLocalRegistryAccessExpressionAt(source, offset)?.let { return it }
         sourceProvenClientMinecraftRegistryAccessExpressionAt(source, offset)?.let { return it }
         if (!isInsideInstanceJavaMethod(source, offset)) return null
         val declaration = enclosingJavaClassDeclaration(source, offset)
-        declaration
-            ?.name
-            ?.let { javaInheritanceIndex.inheritedRegistryAccessField(it) }
-            ?.let { return "$it.registryAccess()" }
         return entitySelfRegistryAccessExpression(declaration, javaInheritanceIndex)
     }
 
@@ -31592,18 +31569,40 @@ ${indent}}"""
         offset: Int,
         javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
     ): String? {
+        exactExternalCallbackProviderExpressionAt(source, offset, javaInheritanceIndex)?.let { return it }
         val parameters = currentMethodParametersBeforeOffset(source, offset)
         registryAccessFromParameters(parameters, javaInheritanceIndex)?.let { return it }
         sourceProvenLocalRegistryAccessExpressionAt(source, offset)?.let { return it }
         sourceProvenClientMinecraftRegistryAccessExpressionAt(source, offset)?.let { return it }
         if (!isInsideInstanceJavaMethod(source, offset)) return null
         val declaration = enclosingJavaClassDeclaration(source, offset) ?: return null
-        declaration.name
-            .let { javaInheritanceIndex.inheritedRegistryAccessField(it) }
-            ?.let { return "$it.registryAccess()" }
         return "this.registryAccess()".takeIf {
             javaClassExtendsAny(declaration, javaEntityBaseTypes(), javaInheritanceIndex)
         }
+    }
+
+    private fun exactExternalCallbackProviderExpressionAt(
+        source: String,
+        offset: Int,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String? {
+        val method = exactJavaMethodAt(source, offset) ?: return null
+        val returnType = method.returnType ?: return null
+        val declaration = enclosingJavaClassDeclaration(source, offset) ?: return null
+        return ExactExternalProviderContracts.providerExpressionForExactSurface(
+            methodName = method.name,
+            returnType = returnType,
+            parameterTypes = method.parameters.map { it.first },
+            parameterNames = method.parameters.map { it.second },
+            isStatic = method.isStatic,
+            ownerMatches = { expectedOwner ->
+                javaClassExtendsAny(
+                    declaration,
+                    setOf(expectedOwner.substringAfterLast('.')),
+                    javaInheritanceIndex
+                )
+            }
+        )
     }
 
     private fun sourceProvenLocalRegistryAccessExpressionAt(source: String, offset: Int): String? {
@@ -31669,8 +31668,15 @@ ${indent}}"""
         preferred: String
     ): String {
         val openBrace = source.indexOf('{', methodHeaderOffset)
+        val semicolon = source.indexOf(';', methodHeaderOffset)
+        if (semicolon >= 0 && (openBrace < 0 || semicolon < openBrace)) {
+            return uniqueLocalNameInScope(source.substring(methodHeaderOffset, semicolon + 1), preferred)
+        }
         if (openBrace < 0) {
-            throw IllegalStateException("Cannot locate Java method body while adding HolderLookup.Provider")
+            throw IllegalStateException(
+                "Cannot locate Java method body or abstract declaration while adding HolderLookup.Provider near: " +
+                    source.substring(methodHeaderOffset).lineSequence().firstOrNull().orEmpty().trim()
+            )
         }
         val closeBrace = findMatchingBrace(source, openBrace)
         if (closeBrace < 0) {
@@ -34660,7 +34666,59 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 )
             }
         }
-        val directCandidateOwners = candidates.map { it.owner }.toSet()
+        fun candidateForOverrideMember(member: JavaProjectTypeIndex.ExactProjectMethod): Candidate {
+            val source = runCatching { member.file.readText() }.getOrElse { error ->
+                throw IllegalStateException(
+                    "Cannot read exact override-family source ${member.file}: ${error.message}",
+                    error
+                )
+            }
+            val lineOffsets = buildList {
+                add(0)
+                source.forEachIndexed { index, character -> if (character == '\n') add(index + 1) }
+            }
+            fun offset(position: com.github.javaparser.Position): Int =
+                lineOffsets.getOrElse(position.line - 1) {
+                    throw IllegalStateException("Invalid JavaParser line ${position.line} in ${member.file}")
+                } + position.column - 1
+
+            val method = member.method
+            val owner = exactEnclosingNamedClass(method)
+                ?: throw IllegalStateException("Cannot resolve exact override-family owner for ${member.owner}")
+            val nodeRange = method.range.orElse(null)
+                ?: throw IllegalStateException("Missing exact source range for ${member.owner}.${method.nameAsString}")
+            val start = offset(nodeRange.begin)
+            val endExclusive = offset(nodeRange.end) + 1
+            if (start !in source.indices || endExclusive !in 1..source.length || start >= endExclusive) {
+                throw IllegalStateException(
+                    "Invalid exact source range for ${member.owner}.${method.nameAsString} in ${member.file}"
+                )
+            }
+            val bodyStart = method.body.flatMap { it.range }
+                .map { range -> offset(range.begin) }
+                .orElse(endExclusive)
+            val parameterTypes = method.parameters.map { parameter ->
+                javaProjectTypeIndex.declaredType(parameter.type, method)
+                    ?: throw IllegalStateException(
+                        "Cannot resolve exact override-family parameter type for " +
+                            "${member.owner}.${method.nameAsString}"
+                    )
+            }
+            return Candidate(
+                owner.nameAsString,
+                member.owner,
+                method.nameAsString,
+                method.parameters.size,
+                parameterTypes,
+                source.substring(start, bodyStart.coerceIn(start, endExclusive)),
+                source,
+                start until endExclusive,
+                method,
+                directProviderDemand = false,
+                providerIndexHint = null
+            )
+        }
+        val directCandidateOwners = candidates.mapTo(linkedSetOf()) { it.owner }
 
         fun receiverOwnerAt(source: String, executableCode: String, receiver: String, offset: Int): String? {
             val normalized = receiver.trim()
@@ -34879,11 +34937,6 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             }
         }
 
-        val overloadedLegacyShapes = candidates
-            .groupBy { Triple(it.ownerQualified, it.methodName, it.parameterCount) }
-            .filterValues { overloads -> overloads.map { it.parameterTypes }.distinct().size > 1 }
-            .keys
-
         data class CandidateKey(
             val ownerQualified: String,
             val methodName: String,
@@ -34898,75 +34951,23 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             }
         )
 
-        fun contract(candidate: Candidate): HolderLookupNbtMethod {
-            val tagIndexes = candidate.parameterTypes.orEmpty().mapIndexedNotNull { index, type ->
-                index.takeIf { type == "net.minecraft.nbt.CompoundTag" }
-            }
-            if (tagIndexes.size > 1) {
+        fun exactCandidateMap(values: List<Candidate>): Map<CandidateKey, Candidate> {
+            val candidatesByKey = values.groupBy(::key)
+            val ambiguousCandidates = candidatesByKey.filterValues { it.size > 1 }
+            if (ambiguousCandidates.isNotEmpty()) {
                 throw IllegalStateException(
-                    "Cannot choose a HolderLookup.Provider position for " +
-                        "${candidate.owner}.${candidate.methodName}: multiple CompoundTag parameters"
+                    "Cannot resolve duplicate exact Java method declarations: " +
+                        ambiguousCandidates.keys.joinToString { method ->
+                            "${method.ownerQualified}.${method.methodName}${method.parameterTypes}"
+                        }
                 )
             }
-            val returnsCompoundTag = javaProjectTypeIndex.declaredType(
-                candidate.declaration.type,
-                candidate.declaration
-            ) == "net.minecraft.nbt.CompoundTag"
-            val providerIndex = candidate.providerIndexHint ?: when {
-                tagIndexes.size == 1 -> tagIndexes.single() + 1
-                returnsCompoundTag -> 0
-                else -> candidate.parameterCount
-            }
-            return HolderLookupNbtMethod(
-                candidate.owner,
-                candidate.methodName,
-                candidate.parameterCount,
-                providerIndex,
-                candidate.parameterTypes,
-                Triple(candidate.ownerQualified, candidate.methodName, candidate.parameterCount) in overloadedLegacyShapes
-            )
+            return candidatesByKey.mapValues { it.value.single() }
         }
-        val candidatesByKey = candidates.groupBy(::key)
-        val ambiguousCandidates = candidatesByKey.filterValues { it.size > 1 }
-        if (ambiguousCandidates.isNotEmpty()) {
-            throw IllegalStateException(
-                "Cannot resolve duplicate exact Java method declarations: " +
-                    ambiguousCandidates.keys.joinToString { method ->
-                        "${method.ownerQualified}.${method.methodName}${method.parameterTypes}"
-                    }
-            )
-        }
-        val candidateByKey = candidatesByKey.mapValues { it.value.single() }
-        val overridePeersByMember = linkedMapOf<CandidateKey, MutableSet<CandidateKey>>()
-        val indexedOverrideFamilies = linkedSetOf<String>()
-        candidateByKey.forEach { (_, candidate) ->
-            val family = javaProjectTypeIndex.exactProjectOverrideFamily(candidate.declaration)
-                ?: return@forEach
-            val familyKey = family.joinToString("|") { member ->
-                "${member.owner}.${member.method.nameAsString}/${member.method.parameters.size}"
-            }
-            if (!indexedOverrideFamilies.add(familyKey)) return@forEach
-            val members = family.map { member ->
-                val parameterTypes = member.method.parameters.map { parameter ->
-                    javaProjectTypeIndex.declaredType(parameter.type, member.method)
-                        ?: throw IllegalStateException(
-                            "Cannot resolve exact override-family parameter type for " +
-                                "${member.owner}.${member.method.nameAsString}"
-                        )
-                }
-                CandidateKey(member.owner, member.method.nameAsString, parameterTypes)
-            }.toSet()
-            val missing = members - candidateByKey.keys
-            if (missing.isNotEmpty()) {
-                throw IllegalStateException(
-                    "Provider-demanded override family is not represented atomically: $missing"
-                )
-            }
-            members.forEach { member ->
-                overridePeersByMember.getOrPut(member) { linkedSetOf() }.addAll(members - member)
-            }
-        }
-        val callsByCaller = candidateByKey.mapValues { (caller, candidate) ->
+
+        fun exactCallsByCaller(
+            candidateByKey: Map<CandidateKey, Candidate>
+        ): Map<CandidateKey, Set<CandidateKey>> = candidateByKey.mapValues { (caller, candidate) ->
             candidate.declaration.findAll(MethodCallExpr::class.java).mapNotNull calls@{ call ->
                 if (call.findAncestor(MethodDeclaration::class.java).orElse(null) !== candidate.declaration) {
                     return@calls null
@@ -34996,12 +34997,158 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 mostSpecificMatches.singleOrNull()
             }.toSet() - caller
         }
+
+        val initialCandidateByKey = exactCandidateMap(candidates)
+        val preliminaryCallsByCaller = exactCallsByCaller(initialCandidateByKey)
+        val preliminaryCallersByCallee = linkedMapOf<CandidateKey, MutableSet<CandidateKey>>()
+        preliminaryCallsByCaller.forEach { (caller, callees) ->
+            callees.forEach { callee ->
+                preliminaryCallersByCallee.getOrPut(callee) { linkedSetOf() } += caller
+            }
+        }
+        val familySeedKeys = candidates.filter { it.directProviderDemand }.mapTo(linkedSetOf(), ::key)
+        val familySeedQueue = ArrayDeque(familySeedKeys)
+        while (familySeedQueue.isNotEmpty()) {
+            val demandedMethod = familySeedQueue.removeFirst()
+            preliminaryCallersByCallee[demandedMethod].orEmpty().forEach { caller ->
+                if (familySeedKeys.add(caller)) familySeedQueue.addLast(caller)
+            }
+        }
+        val overrideFamilyByDeclaration = java.util.IdentityHashMap<
+            MethodDeclaration,
+            List<JavaProjectTypeIndex.ExactProjectMethod>
+        >()
+        javaProjectTypeIndex.exactProjectOverrideFamilies(
+            familySeedKeys.map { seed -> initialCandidateByKey.getValue(seed).declaration }
+        ).forEach { family ->
+            family.forEach { member -> overrideFamilyByDeclaration[member.method] = family }
+        }
+        familySeedKeys.forEach { seed ->
+            val candidate = initialCandidateByKey.getValue(seed)
+            val family = overrideFamilyByDeclaration[candidate.declaration] ?: return@forEach
+            family.forEach { member ->
+                if (candidates.none { existing -> existing.declaration === member.method }) {
+                    candidates += candidateForOverrideMember(member)
+                }
+            }
+        }
+        directCandidateOwners += candidates.map { it.owner }
+
+        val overloadedLegacyShapes = candidates
+            .groupBy { Triple(it.ownerQualified, it.methodName, it.parameterCount) }
+            .filterValues { overloads -> overloads.map { it.parameterTypes }.distinct().size > 1 }
+            .keys
+
+        fun contract(candidate: Candidate): HolderLookupNbtMethod {
+            val tagIndexes = candidate.parameterTypes.orEmpty().mapIndexedNotNull { index, type ->
+                index.takeIf { type == "net.minecraft.nbt.CompoundTag" }
+            }
+            if (tagIndexes.size > 1) {
+                throw IllegalStateException(
+                    "Cannot choose a HolderLookup.Provider position for " +
+                        "${candidate.owner}.${candidate.methodName}: multiple CompoundTag parameters"
+                )
+            }
+            val returnsCompoundTag = javaProjectTypeIndex.declaredType(
+                candidate.declaration.type,
+                candidate.declaration
+            ) == "net.minecraft.nbt.CompoundTag"
+            val providerIndex = candidate.providerIndexHint ?: when {
+                tagIndexes.size == 1 -> tagIndexes.single() + 1
+                returnsCompoundTag -> 0
+                else -> candidate.parameterCount
+            }
+            return HolderLookupNbtMethod(
+                candidate.owner,
+                candidate.methodName,
+                candidate.parameterCount,
+                providerIndex,
+                candidate.parameterTypes,
+                Triple(candidate.ownerQualified, candidate.methodName, candidate.parameterCount) in overloadedLegacyShapes
+            )
+        }
+        val candidateByKey = exactCandidateMap(candidates)
+        val overridePeersByMember = linkedMapOf<CandidateKey, MutableSet<CandidateKey>>()
+        val indexedOverrideFamilies = linkedSetOf<String>()
+        val indexedOverrideDeclarations = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<MethodDeclaration, Boolean>()
+        )
+        candidateByKey.forEach { (_, candidate) ->
+            if (!indexedOverrideDeclarations.add(candidate.declaration)) return@forEach
+            val family = overrideFamilyByDeclaration[candidate.declaration] ?: return@forEach
+            family.forEach { member -> indexedOverrideDeclarations.add(member.method) }
+            val familyKey = family.joinToString("|") { member ->
+                "${member.owner}.${member.method.nameAsString}/${member.method.parameters.size}"
+            }
+            if (!indexedOverrideFamilies.add(familyKey)) return@forEach
+            val members = family.map { member ->
+                val parameterTypes = member.method.parameters.map { parameter ->
+                    javaProjectTypeIndex.declaredType(parameter.type, member.method)
+                        ?: throw IllegalStateException(
+                            "Cannot resolve exact override-family parameter type for " +
+                                "${member.owner}.${member.method.nameAsString}"
+                        )
+                }
+                CandidateKey(member.owner, member.method.nameAsString, parameterTypes)
+            }.toSet()
+            val missing = members - candidateByKey.keys
+            if (missing.isNotEmpty()) {
+                throw IllegalStateException(
+                    "Provider-demanded override family is not represented atomically: $missing"
+                )
+            }
+            members.forEach { member ->
+                overridePeersByMember.getOrPut(member) { linkedSetOf() }.addAll(members - member)
+            }
+        }
+        val callsByCaller = exactCallsByCaller(candidateByKey)
         val callersByCallee = linkedMapOf<CandidateKey, MutableSet<CandidateKey>>()
         callsByCaller.forEach { (caller, callees) ->
             callees.forEach { callee -> callersByCallee.getOrPut(callee) { linkedSetOf() } += caller }
         }
+        fun hasExactDeclaredProviderRoot(candidate: Candidate): Boolean {
+            if (ExactExternalProviderContracts.providerExpression(
+                    candidate.declaration,
+                    javaProjectTypeIndex
+                ) != null
+            ) {
+                return true
+            }
+            val providerParameters = candidate.declaration.parameters.mapNotNull { parameter ->
+                val nullable = parameter.annotations.any { it.name.identifier == "Nullable" } ||
+                    candidate.declaration.findAll(BinaryExpr::class.java).any { expression ->
+                        val leftName = (expression.left as? NameExpr)?.nameAsString
+                        val rightName = (expression.right as? NameExpr)?.nameAsString
+                        val comparesNull = expression.left is NullLiteralExpr || expression.right is NullLiteralExpr
+                        comparesNull && (leftName == parameter.nameAsString || rightName == parameter.nameAsString)
+                    }
+                if (nullable) return@mapNotNull null
+                val type = javaProjectTypeIndex.declaredType(parameter.type, candidate.declaration)
+                    ?: return@mapNotNull null
+                parameter.nameAsString.takeIf {
+                    type in setOf(
+                        "net.minecraft.core.HolderLookup.Provider",
+                        "net.minecraft.core.RegistryAccess"
+                    ) ||
+                        setOf(
+                            "net.minecraft.world.level.Level",
+                            "net.minecraft.world.level.LevelAccessor",
+                            "net.minecraft.world.entity.Entity"
+                        ).any { expected -> javaProjectTypeIndex.isTypeAssignableTo(type, expected) }
+                }
+            }.distinct()
+            // Multiple roots are not interchangeable. Keep the demand open so the exact
+            // call graph introduces an explicit provider contract instead of choosing one.
+            if (providerParameters.size > 1) return false
+            return providerParameters.size == 1
+        }
+        val declaredProviderRoots = candidateByKey.filterValues(::hasExactDeclaredProviderRoot).keys
+        val closedDeclaredProviderRoots = declaredProviderRoots.filterTo(linkedSetOf()) { method ->
+            overridePeersByMember[method].orEmpty().all { peer -> peer in declaredProviderRoots }
+        }
         val demanded = candidates.filter { candidate ->
             candidate.directProviderDemand &&
+                key(candidate) !in closedDeclaredProviderRoots &&
                 (
                     strictRegistryAccessExpressionAt(
                         candidate.source,
@@ -35031,7 +35178,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         }
         val reachable = demanded.filterTo(linkedSetOf()) { method ->
             val candidate = candidateByKey.getValue(method)
-            (candidate.directProviderDemand && isPrivateOrPackagePrivateJavaMethodHeader(candidate.header)) ||
+            isPrivateOrPackagePrivateJavaMethodHeader(candidate.header) ||
                 method in explicitProviderBoundaries ||
                 method in exactProviderAwareCallSites ||
                 hasProviderAwareProjectCallSite(candidate) ||
@@ -35053,14 +35200,11 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 candidate.declaration,
                 javaProjectTypeIndex
             ) == null &&
-                (
-                    strictRegistryAccessExpressionAt(
-                        candidate.source,
-                        candidate.range.first,
-                        javaInheritanceIndex
-                    ) == null ||
-                        method in exactProviderAwareCallSites || method in explicitProviderBoundaries
-                    )
+                strictRegistryAccessExpressionAt(
+                    candidate.source,
+                    candidate.range.first,
+                    javaInheritanceIndex
+                ) == null
         }.mapTo(linkedSetOf()) { method -> contract(candidateByKey.getValue(method)) }
     }
 
@@ -35563,10 +35707,8 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
     }
 
     private fun isJavaCallableDeclarationAt(source: String, offset: Int, methodName: String): Boolean =
-        javaMethodRangesIncludingDefault(source).any { method ->
-            method.name == methodName &&
-                offset >= method.range.first &&
-                offset < method.range.first + method.header.length
+        exactJavaMethodSurfaces(source).any { method ->
+            method.name == methodName && method.nameOffset == offset
         }
 
     private fun holderLookupProviderArgumentExpression(expression: String): String {
@@ -35607,7 +35749,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         entityDataValueTypes: Map<String, String> = emptyMap(),
         javaMethodReturnTypes: Map<String, String> = emptyMap()
     ): String {
-        if (methods.isEmpty() || !source.contains("CompoundTag")) return source
+        if (methods.isEmpty() || methods.none { method -> source.contains("${method.methodName}(") }) return source
         val executableCode = maskJavaCommentsAndLiterals(source)
         val typeBlocks = javaTypeBlocks(source, executableCode)
         if (typeBlocks.isEmpty()) return source
@@ -35647,6 +35789,9 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 params
             ) ?: targetContract(owner, methodName, params.size)
             if (contract == null) {
+                return@replaceExecutableRegex match.value
+            }
+            if (registryAccessFromParameters(params, javaInheritanceIndex) != null) {
                 return@replaceExecutableRegex match.value
             }
             changedSignature = true

@@ -1,4 +1,382 @@
 
+    private fun singleProjectModIdExpression(source: String, projectModIdExpression: String?): String? {
+        projectModIdExpression?.takeIf { it.isNotBlank() }?.let { return it }
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val expressions = Regex("""\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.(?:MODID|MOD_ID))\b""")
+            .findAll(executableCode)
+            .map { it.groupValues[1] }
+            .distinct()
+            .toList()
+        return expressions.singleOrNull()
+    }
+
+    private fun removeLegacyRecipeProviderStaticHasOverride(source: String): String {
+        if (!source.contains("InventoryChangeTrigger.TriggerInstance has(") ||
+            !source.contains("extends RecipeProvider")) {
+            return source
+        }
+        return Regex(
+            """(?s)\n[ \t]*protected\s+static\s+InventoryChangeTrigger\.TriggerInstance\s+has\s*\(\s*TagKey\s*<\s*Item\s*>\s+[A-Za-z_$][\w$]*\s*\)\s*\{\s*return\s+inventoryTrigger\s*\(.*?\);\s*\}\s*"""
+        ).replace(source, "\n")
+    }
+
+    private fun migrateLegacyRecipeBuilderSource(
+        source: String,
+        recipeSerializerFactoryHints: RecipeSerializerFactoryHints
+    ): String {
+        if (!source.contains("RecipeBuilder") &&
+            !source.contains("SpecialRecipeBuilder.special(") &&
+            !source.contains("SimpleCookingRecipeBuilder.generic(") &&
+            !source.contains("consumer.accept(new Result(") &&
+            !source.contains("output.accept(new Result(") &&
+            !source.contains(".toJson()")) {
+            return source
+        }
+
+        var result = source
+        var changed = false
+
+        if (result.contains("SpecialRecipeBuilder.special(") && recipeSerializerFactoryHints.fieldToFactory.isNotEmpty()) {
+            result = rewriteJavaCall(result, "special") { receiver, args ->
+                if (receiver != "SpecialRecipeBuilder" || args.size != 1) return@rewriteJavaCall null
+                val expression = args[0].trim().removeSuffix(".get()")
+                val factory = recipeSerializerFactoryHints.fieldToFactory[expression] ?: return@rewriteJavaCall null
+                changed = true
+                "SpecialRecipeBuilder.special($factory)"
+            }
+        }
+
+        val cookingFactories = mapOf(
+            "RecipeSerializer.SMELTING_RECIPE" to "SmeltingRecipe::new",
+            "RecipeSerializer.SMOKING_RECIPE" to "SmokingRecipe::new",
+            "RecipeSerializer.BLASTING_RECIPE" to "BlastingRecipe::new",
+            "RecipeSerializer.CAMPFIRE_COOKING_RECIPE" to "CampfireCookingRecipe::new"
+        )
+
+        if (result.contains("SimpleCookingRecipeBuilder.generic(")) {
+            result = rewriteJavaCall(result, "generic") { receiver, args ->
+                if (receiver != "SimpleCookingRecipeBuilder" || args.size != 6) return@rewriteJavaCall null
+                val serializer = args[5].trim()
+                val factory = cookingFactories[serializer] ?: return@rewriteJavaCall null
+                changed = true
+                "SimpleCookingRecipeBuilder.generic(${args.take(6).joinToString(", ") { it.trim() }}, $factory)"
+            }
+        }
+
+        val cookingMethodPattern = Regex(
+            """(?m)^([ \t]*private\s+)void\s+([A-Za-z_$][\w$]*)\s*\(([^)]*RecipeSerializer\s*<\s*\?\s+extends\s+AbstractCookingRecipe\s*>\s+([A-Za-z_$][\w$]*)[^)]*)\)"""
+        )
+        val genericCookingMethods = linkedMapOf<String, String>()
+        result = cookingMethodPattern.replace(result) { match ->
+            val methodName = match.groupValues[2]
+            val serializerParam = match.groupValues[4]
+            genericCookingMethods[methodName] = serializerParam
+            changed = true
+            val params = match.groupValues[3]
+                .replace(
+                    Regex("""RecipeSerializer\s*<\s*\?\s+extends\s+AbstractCookingRecipe\s*>\s+${Regex.escape(serializerParam)}"""),
+                    "RecipeSerializer<T> $serializerParam, AbstractCookingRecipe.Factory<T> ${serializerParam}Factory"
+                )
+            "${match.groupValues[1]}<T extends AbstractCookingRecipe> void $methodName($params)"
+        }
+        for ((methodName, serializerParam) in genericCookingMethods) {
+            result = rewriteJavaCall(result, "generic") { receiver, args ->
+                if (receiver != "SimpleCookingRecipeBuilder" || args.size != 6 || args[5].trim() != serializerParam) {
+                    return@rewriteJavaCall null
+                }
+                changed = true
+                "SimpleCookingRecipeBuilder.generic(${args.joinToString(", ") { it.trim() }}, ${serializerParam}Factory)"
+            }
+            for ((serializer, factory) in cookingFactories) {
+                result = rewriteJavaInvocation(result, methodName) { args ->
+                    if (serializer !in args.map { it.trim() }) return@rewriteJavaInvocation null
+                    val serializerIndex = args.indexOfFirst { it.trim() == serializer }
+                    if (serializerIndex < 0) return@rewriteJavaInvocation null
+                    val migratedArgs = args.toMutableList()
+                    migratedArgs.add(serializerIndex + 1, factory)
+                    changed = true
+                    "$methodName(${migratedArgs.joinToString(", ") { it.trim() }})"
+                }
+            }
+        }
+
+        if (result.contains("implements RecipeBuilder")) {
+            result = Regex("""CriterionTriggerInstance\s+([A-Za-z_$][\w$]*)""")
+                .replace(result) {
+                    changed = true
+                    "Criterion<?> ${it.groupValues[1]}"
+                }
+            result = result.replace("this.getDefaultRecipeId(this.getResult()).getPath()", "RecipeBuilder.getDefaultRecipeId(this.getResult()).getPath()")
+        }
+
+        migrateLegacyRecipeBuilderAdvancementCriteriaSource(result)?.let { migrated ->
+            result = migrated
+            changed = true
+        }
+
+        migrateLegacyFinishedRecipeBuilderOutputSource(result, recipeSerializerFactoryHints)?.let { migrated ->
+            result = migrated
+            changed = true
+        }
+
+        if (result.contains(".toJson()")) {
+            result = Regex("""((?:this\.)?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*(?:\(\))?)*)\.toJson\(\)""")
+                .replace(result) { match ->
+                    changed = true
+                    "Ingredient.CODEC.encodeStart(JsonOps.INSTANCE, ${match.groupValues[1]}).getOrThrow()"
+                }
+        }
+
+        if (!changed) return source
+        if (result.contains("Criterion<?>")) {
+            result = addImportIfMissing(result, "net.minecraft.advancements.Criterion")
+            result = removeImport(result, "net.minecraft.advancements.CriterionTriggerInstance")
+        }
+        if (result.contains("new LinkedHashMap<>()")) {
+            result = addImportIfMissing(result, "java.util.LinkedHashMap")
+            result = addImportIfMissing(result, "java.util.Map")
+        }
+        if (result.contains("JsonOps.INSTANCE")) {
+            result = addImportIfMissing(result, "com.mojang.serialization.JsonOps")
+        }
+        if (result.contains("ShapedRecipePattern.of(")) {
+            result = addImportIfMissing(result, "net.minecraft.world.item.crafting.ShapedRecipePattern")
+        }
+        if (result.contains("SmeltingRecipe::new")) result = addImportIfMissing(result, "net.minecraft.world.item.crafting.SmeltingRecipe")
+        if (result.contains("SmokingRecipe::new")) result = addImportIfMissing(result, "net.minecraft.world.item.crafting.SmokingRecipe")
+        if (result.contains("BlastingRecipe::new")) result = addImportIfMissing(result, "net.minecraft.world.item.crafting.BlastingRecipe")
+        if (result.contains("CampfireCookingRecipe::new")) result = addImportIfMissing(result, "net.minecraft.world.item.crafting.CampfireCookingRecipe")
+        return result
+    }
+
+    private fun migrateLegacyRecipeBuilderAdvancementCriteriaSource(source: String): String? {
+        if (!source.contains("implements RecipeBuilder") ||
+            !source.contains("Advancement.Builder") ||
+            !source.contains(".getCriteria()")) {
+            return null
+        }
+        val advancementField = Regex(
+            """private\s+final\s+Advancement\.Builder\s+([A-Za-z_$][\w$]*)\s*=\s*Advancement\.Builder\.advancement\(\)\s*;"""
+        ).find(source)?.groupValues?.get(1) ?: return null
+        val saveOutput = Regex(
+            """void\s+save\s*\(\s*RecipeOutput\s+([A-Za-z_$][\w$]*)\s*,"""
+        ).find(source)?.groupValues?.get(1) ?: return null
+
+        var result = source
+        result = Regex(
+            """private\s+final\s+Advancement\.Builder\s+${Regex.escape(advancementField)}\s*=\s*Advancement\.Builder\.advancement\(\)\s*;"""
+        ).replace(result, "private final Map<String, Criterion<?>> criteria = new LinkedHashMap<>();")
+        result = Regex("""this\.${Regex.escape(advancementField)}\.addCriterion\(([^;\r\n]+)\);""")
+            .replace(result) { match -> "this.criteria.put(${match.groupValues[1]});" }
+        result = result.replace("this.$advancementField.getCriteria().isEmpty()", "this.criteria.isEmpty()")
+
+        val advancementLine = Regex(
+            """(?m)^([ \t]*)this\.${Regex.escape(advancementField)}\.parent\(([^;\r\n]+)\)\.addCriterion\(([^;\r\n]+)\)\.rewards\(([^;\r\n]+)\)\.requirements\(([^;\r\n]+)\);\s*$"""
+        )
+        result = advancementLine.replace(result) { match ->
+            val indent = match.groupValues[1]
+            "${indent}Advancement.Builder advancementBuilder = $saveOutput.advancement().addCriterion(${match.groupValues[3]}).rewards(${match.groupValues[4]}).requirements(${match.groupValues[5]});\n" +
+                "${indent}this.criteria.forEach(advancementBuilder::addCriterion);"
+        }
+        result = replaceLegacyResultAdvancementArgument(result, advancementField)
+
+        return if (result != source) result else null
+    }
+
+    private fun replaceLegacyResultAdvancementArgument(source: String, advancementField: String): String {
+        var result = source
+        var cursor = 0
+        val constructorPattern = Regex("""new\s+((?:[A-Za-z_$][\w$]*\.)*Result)\s*\(""")
+        while (true) {
+            val match = constructorPattern.find(result, cursor) ?: break
+            val openParen = result.indexOf('(', match.range.last - 1)
+            val closeParen = if (openParen >= 0) findMatchingParen(result, openParen) else -1
+            if (openParen < 0 || closeParen < 0) {
+                cursor = match.range.last + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            if (args.none { it.trim() == "this.$advancementField" }) {
+                cursor = closeParen + 1
+                continue
+            }
+            val migratedArgs = args.joinToString(", ") { arg ->
+                if (arg.trim() == "this.$advancementField") "advancementBuilder" else arg.trim()
+            }
+            val replacement = "new ${match.groupValues[1]}($migratedArgs)"
+            result = result.substring(0, match.range.first) + replacement + result.substring(closeParen + 1)
+            cursor = match.range.first + replacement.length
+        }
+        return result
+    }
+
+    private fun migrateLegacyFinishedRecipeBuilderOutputSource(
+        source: String,
+        recipeSerializerFactoryHints: RecipeSerializerFactoryHints
+    ): String? {
+        if (!source.contains("implements RecipeBuilder") || !source.contains("new Result(")) return null
+        val serializerExpression = Regex(
+            """(?s)public\s+RecipeSerializer\s*<\s*\?\s*>\s+getType\s*\(\s*\)\s*\{\s*return\s+((?:[A-Za-z_$][\w$]*\.)+[A-Z][A-Z0-9_]*)\.get\s*\(\s*\)\s*;\s*\}"""
+        ).find(source)?.groupValues?.get(1) ?: return null
+        val recipeClass = recipeSerializerFactoryHints.fieldToRecipeClass[serializerExpression] ?: return null
+        var changed = false
+        val result = Regex(
+            """(?m)^([ \t]*)([A-Za-z_$][\w$]*)\.accept\(\s*new\s+Result\s*\(([^;\r\n]+)\)\s*\)\s*;"""
+        ).replace(source) { match ->
+            val args = splitTopLevelJavaArgs(match.groupValues[3]).map { it.trim() }
+            if (args.size < 6) return@replace match.value
+            val output = match.groupValues[2]
+            val id = args[0]
+            val input = args[1]
+            val count = args[2]
+            val cost = args[3]
+            val rows = args[4]
+            val key = args[5]
+            changed = true
+            "${match.groupValues[1]}ShapedRecipePattern pattern = ShapedRecipePattern.of($key, $rows);\n" +
+                "${match.groupValues[1]}$output.accept($id, new $recipeClass($cost, $input, $count, pattern), null);"
+        }
+        return if (changed) result else null
+    }
+
+    private fun migrateDataPackRegistryMapCodecSource(
+        source: String,
+        mapCodecConstantOwners: Set<String>
+    ): String {
+        if (mapCodecConstantOwners.isEmpty() || !source.contains(".dataPackRegistry(")) return source
+
+        var result = source
+        var changed = false
+        var cursor = 0
+        val token = ".dataPackRegistry"
+        while (cursor < result.length) {
+            val tokenIndex = result.indexOf(token, cursor)
+            if (tokenIndex < 0) break
+            val openParen = result.indexOf('(', tokenIndex + token.length)
+            if (openParen < 0) break
+            val closeParen = findMatchingParen(result, openParen)
+            if (closeParen < 0) break
+            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
+            val migratedArgs = args.map { arg ->
+                val trimmed = arg.trim()
+                val owner = mapCodecCodecReferenceOwner(trimmed)
+                if (owner != null && owner in mapCodecConstantOwners) {
+                    changed = true
+                    "${trimmed}.codec()"
+                } else {
+                    arg
+                }
+            }
+            if (migratedArgs != args) {
+                val replacement = migratedArgs.joinToString(", ")
+                result = result.substring(0, openParen + 1) + replacement + result.substring(closeParen)
+                cursor = openParen + replacement.length + 1
+            } else {
+                cursor = closeParen + 1
+            }
+        }
+        return if (changed) result else source
+    }
+
+    private fun migrateRegistrySetBuilderBuildPatchSource(source: String): String {
+        if (!source.contains(".buildPatch(") ||
+            !source.contains("DatapackBuiltinEntriesProvider") ||
+            !source.contains("extends DatapackBuiltinEntriesProvider")) {
+            return source
+        }
+        val builderFields = Regex(
+            """\b(?:public|protected|private)?\s*static\s+final\s+RegistrySetBuilder\s+([A-Za-z_$][\w$]*)\s*="""
+        ).findAll(source)
+            .map { it.groupValues[1] }
+            .toSet()
+        if (builderFields.isEmpty()) return source
+
+        var result = source
+        var changed = false
+        builderFields.forEach { builderField ->
+            val methodPattern = Regex(
+                """(?s)\n[ \t]*public\s+static\s+HolderLookup\.Provider\s+createLookup\s*\(\s*\)\s*\{\s*return\s+${Regex.escape(builderField)}\.buildPatch\s*\(\s*RegistryAccess\.fromRegistryOfRegistries\s*\(\s*BuiltInRegistries\.REGISTRY\s*\)\s*,\s*VanillaRegistries\.createLookup\s*\(\s*\)\s*\)\s*;\s*\}\s*"""
+            )
+            val migrated = methodPattern.replace(result, "\n")
+            if (migrated != result) {
+                changed = true
+                result = migrated
+            }
+        }
+        if (!changed) return source
+        listOf(
+            "net.minecraft.core.RegistryAccess",
+            "net.minecraft.core.registries.BuiltInRegistries",
+            "net.minecraft.data.registries.VanillaRegistries"
+        ).forEach { importName ->
+            val candidate = removeImport(result, importName)
+            val simpleName = importName.substringAfterLast('.')
+            if (!Regex("""\b${Regex.escape(simpleName)}\b""").containsMatchIn(candidate)) {
+                result = candidate
+            }
+        }
+        return result
+    }
+
+    private fun mapCodecCodecReferenceOwner(expression: String): String? {
+        if (expression.endsWith(".codec()")) return null
+        val match = Regex("""^(?:[A-Za-z_$][\w$]*\.)*([A-Z][A-Za-z0-9_$]*)\.CODEC$""").find(expression)
+        return match?.groupValues?.get(1)
+    }
+
+    private fun migrateRegistryFileCodecMapCodecSource(
+        source: String,
+        mapCodecConstantOwners: Set<String>
+    ): String {
+        if (mapCodecConstantOwners.isEmpty() || !source.contains("RegistryFileCodec.create(")) return source
+        val localClass = Regex("""\b(?:class|record|enum)\s+([A-Za-z_$][\w$]*)\b""")
+            .find(source)
+            ?.groupValues
+            ?.get(1)
+        var changed = false
+        val result = rewriteJavaInvocationArguments(source, "RegistryFileCodec.create") { args ->
+            if (args.size < 2) return@rewriteJavaInvocationArguments null
+            val codec = args[1].trim()
+            val owner = mapCodecCodecReferenceOwner(codec)
+            val isLocalCodec = codec == "CODEC" && localClass != null && localClass in mapCodecConstantOwners
+            if ((owner == null || owner !in mapCodecConstantOwners) && !isLocalCodec) {
+                return@rewriteJavaInvocationArguments null
+            }
+            val migrated = args.toMutableList()
+            migrated[1] = "$codec.codec()"
+            changed = true
+            migrated
+        }
+        return if (changed) result else source
+    }
+
+    private fun migrateLegacyFunctionalInterfaceMapCodecSource(source: String): String {
+        if (!source.contains("@FunctionalInterface") ||
+            !source.contains("Codec<? extends") ||
+            !source.contains("getCodec()")
+        ) {
+            return source
+        }
+        var result = Regex("""\bCodec\s*<\s*\?\s+extends\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>\s+getCodec\s*\(\s*\)\s*;""")
+            .replace(source) { match ->
+                "MapCodec<? extends ${match.groupValues[1]}> getCodec();"
+            }
+        if (result == source) return source
+        result = addImportIfMissing(result, "com.mojang.serialization.MapCodec")
+        val withoutCodecImport = removeImport(result, "com.mojang.serialization.Codec")
+        if (!Regex("""\bCodec\b""").containsMatchIn(withoutCodecImport)) {
+            result = withoutCodecImport
+        }
+        return result
+    }
+
+    private fun migrateLegacyForgeBusBindingCalls(source: String): String {
+        if (!source.contains("Bindings.getForgeBus().get()")) return source
+        var result = source.replace("Bindings.getForgeBus().get()", "NeoForge.EVENT_BUS")
+        result = addImportIfMissing(result, "net.neoforged.neoforge.common.NeoForge")
+        return result
+    }
+
     private fun migrateLegacyBiomeSourceMapCodecSource(source: String): String {
         if (!source.contains("extends BiomeSource") || !source.contains("Codec<") || !source.contains("RecordCodecBuilder.create")) {
             return source
@@ -2616,219 +2994,3 @@ ${indent}}
         migrateMethodCalls(source, ".isValidBonemealTarget") { args ->
             if (args.size == 4) args.take(3) else args
         }
-
-    private fun migrateItemUseDurationCalls(source: String): String {
-        if (!source.contains(".getUseDuration(")) return source
-        var result = source
-        var cursor = 0
-        val token = ".getUseDuration("
-        while (true) {
-            val executableCode = maskJavaCommentsAndLiterals(result)
-            val tokenIndex = executableCode.indexOf(token, cursor)
-            if (tokenIndex < 0) break
-            val openParen = tokenIndex + "getUseDuration".length + 1
-            val closeParen = findMatchingParen(executableCode, openParen)
-            if (closeParen < 0) {
-                cursor = tokenIndex + token.length
-                continue
-            }
-            val receiverStart = findExpressionReceiverStart(executableCode, tokenIndex)
-            if (receiverStart < 0 || receiverStart >= tokenIndex) {
-                cursor = closeParen + 1
-                continue
-            }
-            val receiver = result.substring(receiverStart, tokenIndex).trim()
-            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen))
-            val itemStackVariables = Regex("""\bItemStack\s+([A-Za-z_$][\w$]*)\b""")
-                .findAll(executableCode)
-                .map { it.groupValues[1] }
-                .toSet() + itemPropertiesRegisterStackParameters(executableCode)
-            val replacement = migratedItemUseDurationCall(
-                executableCode = executableCode,
-                callOffset = tokenIndex,
-                receiver = receiver,
-                args = args,
-                itemStackVariables = itemStackVariables
-            )
-            if (replacement == null) {
-                cursor = closeParen + 1
-                continue
-            }
-            result = result.substring(0, receiverStart) + replacement + result.substring(closeParen + 1)
-            cursor = receiverStart + replacement.length
-        }
-        return result
-    }
-
-    private fun itemPropertiesRegisterStackParameters(executableCode: String): Set<String> {
-        if (!executableCode.contains("ItemProperties.register(")) return emptySet()
-        val parameters = linkedSetOf<String>()
-        var cursor = 0
-        val token = "ItemProperties.register("
-        while (true) {
-            val callStart = executableCode.indexOf(token, cursor)
-            if (callStart < 0) break
-            val openParen = callStart + "ItemProperties.register".length
-            val closeParen = findMatchingParen(executableCode, openParen)
-            if (closeParen < 0) {
-                cursor = callStart + token.length
-                continue
-            }
-            val args = splitTopLevelJavaArgs(executableCode.substring(openParen + 1, closeParen))
-            val lambda = args.lastOrNull().orEmpty()
-            Regex("""^\s*\(?\s*([A-Za-z_$][\w$]*)\s*,\s*[A-Za-z_$][\w$]*\s*,\s*[A-Za-z_$][\w$]*\s*,\s*[A-Za-z_$][\w$]*\s*\)?\s*->""")
-                .find(lambda)
-                ?.groupValues
-                ?.get(1)
-                ?.let(parameters::add)
-            cursor = closeParen + 1
-        }
-        return parameters
-    }
-
-    private fun migrateBucketPickupPickupBlockCalls(source: String): String {
-        if (!source.contains(".pickupBlock(") || !source.contains("BucketPickup")) return source
-        var result = source
-        var cursor = 0
-        val token = ".pickupBlock("
-        while (true) {
-            val executableCode = maskJavaCommentsAndLiterals(result)
-            val tokenIndex = executableCode.indexOf(token, cursor)
-            if (tokenIndex < 0) break
-            val openParen = tokenIndex + ".pickupBlock".length
-            val closeParen = findMatchingParen(executableCode, openParen)
-            if (closeParen < 0) {
-                cursor = tokenIndex + token.length
-                continue
-            }
-            val receiverStart = findExpressionReceiverStart(executableCode, tokenIndex)
-            if (receiverStart < 0 || receiverStart >= tokenIndex) {
-                cursor = closeParen + 1
-                continue
-            }
-            val receiver = result.substring(receiverStart, tokenIndex).trim()
-            val args = splitTopLevelJavaArgs(result.substring(openParen + 1, closeParen)).map { it.trim() }
-            val playerArgument = bucketPickupPlayerArgumentForEnclosingMethod(result, tokenIndex)
-            if (args.size != 3 || playerArgument == null || !bucketPickupReceiverHasTypeEvidence(result, receiver, tokenIndex)) {
-                cursor = closeParen + 1
-                continue
-            }
-            val replacement = "$receiver.pickupBlock($playerArgument, ${args.joinToString(", ")})"
-            result = result.substring(0, receiverStart) + replacement + result.substring(closeParen + 1)
-            cursor = receiverStart + replacement.length
-        }
-        return result
-    }
-
-    private fun bucketPickupReceiverHasTypeEvidence(source: String, receiver: String, offset: Int): Boolean {
-        if (!Regex("""^[A-Za-z_$][\w$]*$""").matches(receiver)) return false
-        return receiverHasMethodScopedTypeEvidence(source, receiver, offset, "BucketPickup")
-    }
-
-    private fun migratedItemUseDurationCall(
-        executableCode: String,
-        callOffset: Int,
-        receiver: String,
-        args: List<String>,
-        itemStackVariables: Set<String>
-    ): String? {
-        if (receiver.endsWith(".getUseItem()") && args.isEmpty()) {
-            val living = receiver.removeSuffix(".getUseItem()").trim()
-            return "$receiver.getUseDuration($living)"
-        }
-        val simpleReceiver = receiver.removePrefix("this.").trim()
-        if (simpleReceiver in itemStackVariables || receiver.endsWith(".getUseItem()")) return null
-        return when (args.size) {
-            0 -> "$receiver.getUseDuration(null)"
-            1 -> {
-                val stackArg = args[0].trim()
-                if (receiver == "this" && stackArg == "stack") {
-                    val living = singleLivingEntityParameterAt(executableCode, callOffset) ?: return null
-                    "$receiver.getUseDuration($stackArg, $living)"
-                } else {
-                    "$receiver.getUseDuration($stackArg, null)"
-                }
-            }
-            else -> null
-        }
-    }
-
-    private fun singleLivingEntityParameterAt(executableCode: String, offset: Int): String? {
-        val method = javaMethodRangesIncludingDefault(executableCode).firstOrNull { offset in it.range } ?: return null
-        val openParen = method.header.indexOf('(')
-        val closeParen = method.header.lastIndexOf(')')
-        if (openParen < 0 || closeParen <= openParen) return null
-        return singleLivingEntityParameter(method.header.substring(openParen + 1, closeParen))
-    }
-
-    private fun singleLivingEntityParameter(parameterList: String): String? {
-        val livingParameterPattern = Regex("""(?:@[A-Za-z_$][\w$.]*(?:\([^)]*\))?\s+)*(?:final\s+)?(?:LivingEntity|net\.minecraft\.world\.entity\.LivingEntity)\s+([A-Za-z_$][\w$]*)\b""")
-        return livingParameterPattern.findAll(parameterList)
-            .map { it.groupValues[1] }
-            .distinct()
-            .singleOrNull()
-    }
-
-    private fun migrateArmorMaterialHolderFields(source: String): String {
-        if (!source.contains("ArmorMaterial") || !source.contains(" material")) return source
-        val declaresMaterialField = Regex(
-            """(?m)^([ \t]*(?:public|protected|private)\s+(?:static\s+)?(?:final\s+)?)ArmorMaterial\s+material\s*;"""
-        ).containsMatchIn(source)
-        if (!declaresMaterialField) return source
-        if (!source.contains("this.material.") &&
-            !source.contains(" material.") &&
-            !source.contains("getMaterial()")) {
-            return source
-        }
-
-        var result = source
-        result = Regex("""(?m)^([ \t]*(?:public|protected|private)\s+(?:static\s+)?(?:final\s+)?)ArmorMaterial\s+material\s*;""")
-            .replace(result, "$1Holder<ArmorMaterial> material;")
-        result = Regex("""\bArmorMaterial\s+material\b""")
-            .replace(result, "Holder<ArmorMaterial> material")
-        result = Regex("""\bpublic\s+ArmorMaterial\s+getMaterial\s*\(\s*\)""")
-            .replace(result, "public Holder<ArmorMaterial> getMaterial()")
-
-        result = result
-            .replace(".material.getEnchantmentValue()", ".material.value().enchantmentValue()")
-            .replace(".material.getRepairIngredient()", ".material.value().repairIngredient().get()")
-            .replace(".material.getToughness()", ".material.value().toughness()")
-            .replace(".material.getKnockbackResistance()", ".material.value().knockbackResistance()")
-            .replace(".material.getEquipSound()", ".material.value().equipSound().value()")
-            .replace(".material.getName()", ".material.unwrapKey().orElseThrow().location().getPath()")
-            .replace(".getMaterial().getName()", ".getMaterial().unwrapKey().orElseThrow().location().getPath()")
-
-        val materialVariables = Regex("""\bHolder\s*<\s*ArmorMaterial\s*>\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
-            .map { it.groupValues[1] }
-            .toSet()
-        for (variable in materialVariables) {
-            val escaped = Regex.escape(variable)
-            result = Regex("""\b$escaped\.getEnchantmentValue\(\)""").replace(result, "$variable.value().enchantmentValue()")
-            result = Regex("""\b$escaped\.getRepairIngredient\(\)""").replace(result, "$variable.value().repairIngredient().get()")
-            result = Regex("""\b$escaped\.getToughness\(\)""").replace(result, "$variable.value().toughness()")
-            result = Regex("""\b$escaped\.getKnockbackResistance\(\)""").replace(result, "$variable.value().knockbackResistance()")
-            result = Regex("""\b$escaped\.getEquipSound\(\)""").replace(result, "$variable.value().equipSound().value()")
-            result = Regex("""\b$escaped\.getName\(\)""").replace(result, "$variable.unwrapKey().orElseThrow().location().getPath()")
-        }
-
-        return if (result != source) addImportIfMissing(result, "net.minecraft.core.Holder") else source
-    }
-
-    private fun migrateArmorMaterialHolderNameAccess(source: String): String {
-        if (!source.contains("ArmorMaterial") || !source.contains(".getName()")) return source
-        var result = source
-            .replace(".getMaterial().getName()", ".getMaterial().unwrapKey().orElseThrow().location().getPath()")
-            .replace(".material.getName()", ".material.unwrapKey().orElseThrow().location().getPath()")
-
-        val materialVariables = Regex("""\bHolder\s*<\s*ArmorMaterial\s*>\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(result)
-            .map { it.groupValues[1] }
-            .toSet()
-        for (variable in materialVariables) {
-            val escaped = Regex.escape(variable)
-            result = Regex("""\b$escaped\.getName\(\)""")
-                .replace(result, "$variable.unwrapKey().orElseThrow().location().getPath()")
-        }
-        return result
-    }

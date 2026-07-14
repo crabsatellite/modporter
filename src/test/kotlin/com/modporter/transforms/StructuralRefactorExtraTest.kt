@@ -21519,7 +21519,7 @@ bus.addListener(ActualListenerRegistry::register);
     }
 
     @Test
-    fun `threads registry providers from inherited entity fields without widening helper signatures`() {
+    fun `threads registry providers through inherited contracts without selecting unproven fields`() {
         val srcDir = tempDir.resolve("src/main/java/com/example")
         srcDir.createDirectories()
         srcDir.resolve("WorkerEntity.java").writeText("""
@@ -21583,13 +21583,13 @@ bus.addListener(ActualListenerRegistry::register);
         val step = srcDir.resolve("ItemFluidStep.java").readText()
 
         assertTrue(result.errors.isEmpty(), "errors=${result.errors}")
-        assertTrue(step.contains("stack.saveOptional(worker.registryAccess())"), step)
-        assertTrue(step.contains("tank.writeToNBT(worker.registryAccess(), new CompoundTag())"), step)
-        assertTrue(step.contains("ItemStack.parseOptional(worker.registryAccess(), tag.getCompound(\"stack\"))"), step)
-        assertTrue(step.contains("tank.readFromNBT(worker.registryAccess(), tag.getCompound(\"tank\"))"), step)
-        assertTrue(base.contains("public abstract CompoundTag saveToNBT();"), base)
-        assertTrue(base.contains("public abstract void loadFromNBT(CompoundTag tag);"), base)
-        assertFalse(step.contains("HolderLookup.Provider"), step)
+        assertTrue(step.contains("stack.saveOptional(registries)"), step)
+        assertTrue(step.contains("tank.writeToNBT(registries, new CompoundTag())"), step)
+        assertTrue(step.contains("ItemStack.parseOptional(registries, tag.getCompound(\"stack\"))"), step)
+        assertTrue(step.contains("tank.readFromNBT(registries, tag.getCompound(\"tank\"))"), step)
+        assertTrue(base.contains("public abstract CompoundTag saveToNBT(HolderLookup.Provider registries);"), base)
+        assertTrue(base.contains("public abstract void loadFromNBT(CompoundTag tag, HolderLookup.Provider registries);"), base)
+        assertFalse(step.contains("worker.registryAccess()"), step)
     }
 
     @Test

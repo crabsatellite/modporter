@@ -1,4 +1,64 @@
 
+    private fun migrateLivingDamageEventHelperBoundaries(projectDir: Path, dryRun: Boolean): List<Change> {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return emptyList()
+        val javaFiles = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .toList()
+        val signatures = collectLivingDamageEventMethodSignatures(javaFiles)
+        if (signatures.isEmpty()) return emptyList()
+        val changes = mutableListOf<Change>()
+
+        javaFiles.forEach { javaFile ->
+            val original = javaFile.readText()
+            if (!original.contains("LivingDamageEvent") && !original.contains("LivingIncomingDamageEvent")) return@forEach
+            var migrated = migrateLivingDamageEventHelperBoundariesInSource(original, signatures)
+            migrated = migrateLegacyDamageEventAttackerBindings(migrated)
+            migrated = removeNoOpGeneratedLivingDamageHelperMethods(migrated)
+            if (migrated != original) {
+                if (!dryRun) javaFile.writeText(migrated)
+                changes.add(Change(
+                    file = javaFile,
+                    line = 0,
+                    description = "Align living damage helper call sites with NeoForge damage event phases",
+                    before = "helper call passes LivingDamageEvent.Pre/Post to incompatible helper boundary",
+                    after = "caller signature retargeted or helper call split into matching phase subscriber",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-living-damage-helper-boundary"
+                ))
+            }
+        }
+        return changes
+    }
+
+    private fun collectLivingDamageEventMethodSignatures(
+        javaFiles: List<Path>
+    ): List<LivingDamageEventMethodSignature> =
+        javaFiles.flatMap { javaFile ->
+            val source = runCatching { javaFile.readText() }.getOrDefault("")
+            if (!source.contains("LivingDamageEvent") && !source.contains("LivingIncomingDamageEvent")) {
+                return@flatMap emptyList()
+            }
+            val packageName = packageNameOf(source)
+            val className = javaTopLevelTypeName(source) ?: return@flatMap emptyList()
+            javaMethodRangesIncludingDefault(source).mapNotNull { method ->
+                val eventParameter = livingDamageEventParameter(method.header, source) ?: return@mapNotNull null
+                LivingDamageEventMethodSignature(packageName, className, method.name, eventParameter.first)
+            }
+        }
+
+    private fun livingDamageEventParameter(
+        methodHeader: String,
+        source: String
+    ): Pair<LivingDamageBoundary, String>? {
+        val parametersText = methodHeader.substringAfter("(", "").substringBeforeLast(")", "")
+        splitTopLevelJavaArgs(parametersText).forEach { parameter ->
+            val name = javaParameterName(parameter) ?: return@forEach
+            canonicalLivingDamageBoundary(parameter, source)?.let { return it to name }
+        }
+        return null
+    }
+
     private fun canonicalLivingDamageBoundary(typeText: String, source: String): LivingDamageBoundary? {
         val normalized = typeText.replace(Regex("""\s+"""), "")
         return when {
@@ -2203,7 +2263,59 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 )
             }
         }
-        val directCandidateOwners = candidates.map { it.owner }.toSet()
+        fun candidateForOverrideMember(member: JavaProjectTypeIndex.ExactProjectMethod): Candidate {
+            val source = runCatching { member.file.readText() }.getOrElse { error ->
+                throw IllegalStateException(
+                    "Cannot read exact override-family source ${member.file}: ${error.message}",
+                    error
+                )
+            }
+            val lineOffsets = buildList {
+                add(0)
+                source.forEachIndexed { index, character -> if (character == '\n') add(index + 1) }
+            }
+            fun offset(position: com.github.javaparser.Position): Int =
+                lineOffsets.getOrElse(position.line - 1) {
+                    throw IllegalStateException("Invalid JavaParser line ${position.line} in ${member.file}")
+                } + position.column - 1
+
+            val method = member.method
+            val owner = exactEnclosingNamedClass(method)
+                ?: throw IllegalStateException("Cannot resolve exact override-family owner for ${member.owner}")
+            val nodeRange = method.range.orElse(null)
+                ?: throw IllegalStateException("Missing exact source range for ${member.owner}.${method.nameAsString}")
+            val start = offset(nodeRange.begin)
+            val endExclusive = offset(nodeRange.end) + 1
+            if (start !in source.indices || endExclusive !in 1..source.length || start >= endExclusive) {
+                throw IllegalStateException(
+                    "Invalid exact source range for ${member.owner}.${method.nameAsString} in ${member.file}"
+                )
+            }
+            val bodyStart = method.body.flatMap { it.range }
+                .map { range -> offset(range.begin) }
+                .orElse(endExclusive)
+            val parameterTypes = method.parameters.map { parameter ->
+                javaProjectTypeIndex.declaredType(parameter.type, method)
+                    ?: throw IllegalStateException(
+                        "Cannot resolve exact override-family parameter type for " +
+                            "${member.owner}.${method.nameAsString}"
+                    )
+            }
+            return Candidate(
+                owner.nameAsString,
+                member.owner,
+                method.nameAsString,
+                method.parameters.size,
+                parameterTypes,
+                source.substring(start, bodyStart.coerceIn(start, endExclusive)),
+                source,
+                start until endExclusive,
+                method,
+                directProviderDemand = false,
+                providerIndexHint = null
+            )
+        }
+        val directCandidateOwners = candidates.mapTo(linkedSetOf()) { it.owner }
 
         fun receiverOwnerAt(source: String, executableCode: String, receiver: String, offset: Int): String? {
             val normalized = receiver.trim()
@@ -2422,11 +2534,6 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             }
         }
 
-        val overloadedLegacyShapes = candidates
-            .groupBy { Triple(it.ownerQualified, it.methodName, it.parameterCount) }
-            .filterValues { overloads -> overloads.map { it.parameterTypes }.distinct().size > 1 }
-            .keys
-
         data class CandidateKey(
             val ownerQualified: String,
             val methodName: String,
@@ -2441,75 +2548,23 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             }
         )
 
-        fun contract(candidate: Candidate): HolderLookupNbtMethod {
-            val tagIndexes = candidate.parameterTypes.orEmpty().mapIndexedNotNull { index, type ->
-                index.takeIf { type == "net.minecraft.nbt.CompoundTag" }
-            }
-            if (tagIndexes.size > 1) {
+        fun exactCandidateMap(values: List<Candidate>): Map<CandidateKey, Candidate> {
+            val candidatesByKey = values.groupBy(::key)
+            val ambiguousCandidates = candidatesByKey.filterValues { it.size > 1 }
+            if (ambiguousCandidates.isNotEmpty()) {
                 throw IllegalStateException(
-                    "Cannot choose a HolderLookup.Provider position for " +
-                        "${candidate.owner}.${candidate.methodName}: multiple CompoundTag parameters"
+                    "Cannot resolve duplicate exact Java method declarations: " +
+                        ambiguousCandidates.keys.joinToString { method ->
+                            "${method.ownerQualified}.${method.methodName}${method.parameterTypes}"
+                        }
                 )
             }
-            val returnsCompoundTag = javaProjectTypeIndex.declaredType(
-                candidate.declaration.type,
-                candidate.declaration
-            ) == "net.minecraft.nbt.CompoundTag"
-            val providerIndex = candidate.providerIndexHint ?: when {
-                tagIndexes.size == 1 -> tagIndexes.single() + 1
-                returnsCompoundTag -> 0
-                else -> candidate.parameterCount
-            }
-            return HolderLookupNbtMethod(
-                candidate.owner,
-                candidate.methodName,
-                candidate.parameterCount,
-                providerIndex,
-                candidate.parameterTypes,
-                Triple(candidate.ownerQualified, candidate.methodName, candidate.parameterCount) in overloadedLegacyShapes
-            )
+            return candidatesByKey.mapValues { it.value.single() }
         }
-        val candidatesByKey = candidates.groupBy(::key)
-        val ambiguousCandidates = candidatesByKey.filterValues { it.size > 1 }
-        if (ambiguousCandidates.isNotEmpty()) {
-            throw IllegalStateException(
-                "Cannot resolve duplicate exact Java method declarations: " +
-                    ambiguousCandidates.keys.joinToString { method ->
-                        "${method.ownerQualified}.${method.methodName}${method.parameterTypes}"
-                    }
-            )
-        }
-        val candidateByKey = candidatesByKey.mapValues { it.value.single() }
-        val overridePeersByMember = linkedMapOf<CandidateKey, MutableSet<CandidateKey>>()
-        val indexedOverrideFamilies = linkedSetOf<String>()
-        candidateByKey.forEach { (_, candidate) ->
-            val family = javaProjectTypeIndex.exactProjectOverrideFamily(candidate.declaration)
-                ?: return@forEach
-            val familyKey = family.joinToString("|") { member ->
-                "${member.owner}.${member.method.nameAsString}/${member.method.parameters.size}"
-            }
-            if (!indexedOverrideFamilies.add(familyKey)) return@forEach
-            val members = family.map { member ->
-                val parameterTypes = member.method.parameters.map { parameter ->
-                    javaProjectTypeIndex.declaredType(parameter.type, member.method)
-                        ?: throw IllegalStateException(
-                            "Cannot resolve exact override-family parameter type for " +
-                                "${member.owner}.${member.method.nameAsString}"
-                        )
-                }
-                CandidateKey(member.owner, member.method.nameAsString, parameterTypes)
-            }.toSet()
-            val missing = members - candidateByKey.keys
-            if (missing.isNotEmpty()) {
-                throw IllegalStateException(
-                    "Provider-demanded override family is not represented atomically: $missing"
-                )
-            }
-            members.forEach { member ->
-                overridePeersByMember.getOrPut(member) { linkedSetOf() }.addAll(members - member)
-            }
-        }
-        val callsByCaller = candidateByKey.mapValues { (caller, candidate) ->
+
+        fun exactCallsByCaller(
+            candidateByKey: Map<CandidateKey, Candidate>
+        ): Map<CandidateKey, Set<CandidateKey>> = candidateByKey.mapValues { (caller, candidate) ->
             candidate.declaration.findAll(MethodCallExpr::class.java).mapNotNull calls@{ call ->
                 if (call.findAncestor(MethodDeclaration::class.java).orElse(null) !== candidate.declaration) {
                     return@calls null
@@ -2539,12 +2594,158 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 mostSpecificMatches.singleOrNull()
             }.toSet() - caller
         }
+
+        val initialCandidateByKey = exactCandidateMap(candidates)
+        val preliminaryCallsByCaller = exactCallsByCaller(initialCandidateByKey)
+        val preliminaryCallersByCallee = linkedMapOf<CandidateKey, MutableSet<CandidateKey>>()
+        preliminaryCallsByCaller.forEach { (caller, callees) ->
+            callees.forEach { callee ->
+                preliminaryCallersByCallee.getOrPut(callee) { linkedSetOf() } += caller
+            }
+        }
+        val familySeedKeys = candidates.filter { it.directProviderDemand }.mapTo(linkedSetOf(), ::key)
+        val familySeedQueue = ArrayDeque(familySeedKeys)
+        while (familySeedQueue.isNotEmpty()) {
+            val demandedMethod = familySeedQueue.removeFirst()
+            preliminaryCallersByCallee[demandedMethod].orEmpty().forEach { caller ->
+                if (familySeedKeys.add(caller)) familySeedQueue.addLast(caller)
+            }
+        }
+        val overrideFamilyByDeclaration = java.util.IdentityHashMap<
+            MethodDeclaration,
+            List<JavaProjectTypeIndex.ExactProjectMethod>
+        >()
+        javaProjectTypeIndex.exactProjectOverrideFamilies(
+            familySeedKeys.map { seed -> initialCandidateByKey.getValue(seed).declaration }
+        ).forEach { family ->
+            family.forEach { member -> overrideFamilyByDeclaration[member.method] = family }
+        }
+        familySeedKeys.forEach { seed ->
+            val candidate = initialCandidateByKey.getValue(seed)
+            val family = overrideFamilyByDeclaration[candidate.declaration] ?: return@forEach
+            family.forEach { member ->
+                if (candidates.none { existing -> existing.declaration === member.method }) {
+                    candidates += candidateForOverrideMember(member)
+                }
+            }
+        }
+        directCandidateOwners += candidates.map { it.owner }
+
+        val overloadedLegacyShapes = candidates
+            .groupBy { Triple(it.ownerQualified, it.methodName, it.parameterCount) }
+            .filterValues { overloads -> overloads.map { it.parameterTypes }.distinct().size > 1 }
+            .keys
+
+        fun contract(candidate: Candidate): HolderLookupNbtMethod {
+            val tagIndexes = candidate.parameterTypes.orEmpty().mapIndexedNotNull { index, type ->
+                index.takeIf { type == "net.minecraft.nbt.CompoundTag" }
+            }
+            if (tagIndexes.size > 1) {
+                throw IllegalStateException(
+                    "Cannot choose a HolderLookup.Provider position for " +
+                        "${candidate.owner}.${candidate.methodName}: multiple CompoundTag parameters"
+                )
+            }
+            val returnsCompoundTag = javaProjectTypeIndex.declaredType(
+                candidate.declaration.type,
+                candidate.declaration
+            ) == "net.minecraft.nbt.CompoundTag"
+            val providerIndex = candidate.providerIndexHint ?: when {
+                tagIndexes.size == 1 -> tagIndexes.single() + 1
+                returnsCompoundTag -> 0
+                else -> candidate.parameterCount
+            }
+            return HolderLookupNbtMethod(
+                candidate.owner,
+                candidate.methodName,
+                candidate.parameterCount,
+                providerIndex,
+                candidate.parameterTypes,
+                Triple(candidate.ownerQualified, candidate.methodName, candidate.parameterCount) in overloadedLegacyShapes
+            )
+        }
+        val candidateByKey = exactCandidateMap(candidates)
+        val overridePeersByMember = linkedMapOf<CandidateKey, MutableSet<CandidateKey>>()
+        val indexedOverrideFamilies = linkedSetOf<String>()
+        val indexedOverrideDeclarations = java.util.Collections.newSetFromMap(
+            java.util.IdentityHashMap<MethodDeclaration, Boolean>()
+        )
+        candidateByKey.forEach { (_, candidate) ->
+            if (!indexedOverrideDeclarations.add(candidate.declaration)) return@forEach
+            val family = overrideFamilyByDeclaration[candidate.declaration] ?: return@forEach
+            family.forEach { member -> indexedOverrideDeclarations.add(member.method) }
+            val familyKey = family.joinToString("|") { member ->
+                "${member.owner}.${member.method.nameAsString}/${member.method.parameters.size}"
+            }
+            if (!indexedOverrideFamilies.add(familyKey)) return@forEach
+            val members = family.map { member ->
+                val parameterTypes = member.method.parameters.map { parameter ->
+                    javaProjectTypeIndex.declaredType(parameter.type, member.method)
+                        ?: throw IllegalStateException(
+                            "Cannot resolve exact override-family parameter type for " +
+                                "${member.owner}.${member.method.nameAsString}"
+                        )
+                }
+                CandidateKey(member.owner, member.method.nameAsString, parameterTypes)
+            }.toSet()
+            val missing = members - candidateByKey.keys
+            if (missing.isNotEmpty()) {
+                throw IllegalStateException(
+                    "Provider-demanded override family is not represented atomically: $missing"
+                )
+            }
+            members.forEach { member ->
+                overridePeersByMember.getOrPut(member) { linkedSetOf() }.addAll(members - member)
+            }
+        }
+        val callsByCaller = exactCallsByCaller(candidateByKey)
         val callersByCallee = linkedMapOf<CandidateKey, MutableSet<CandidateKey>>()
         callsByCaller.forEach { (caller, callees) ->
             callees.forEach { callee -> callersByCallee.getOrPut(callee) { linkedSetOf() } += caller }
         }
+        fun hasExactDeclaredProviderRoot(candidate: Candidate): Boolean {
+            if (ExactExternalProviderContracts.providerExpression(
+                    candidate.declaration,
+                    javaProjectTypeIndex
+                ) != null
+            ) {
+                return true
+            }
+            val providerParameters = candidate.declaration.parameters.mapNotNull { parameter ->
+                val nullable = parameter.annotations.any { it.name.identifier == "Nullable" } ||
+                    candidate.declaration.findAll(BinaryExpr::class.java).any { expression ->
+                        val leftName = (expression.left as? NameExpr)?.nameAsString
+                        val rightName = (expression.right as? NameExpr)?.nameAsString
+                        val comparesNull = expression.left is NullLiteralExpr || expression.right is NullLiteralExpr
+                        comparesNull && (leftName == parameter.nameAsString || rightName == parameter.nameAsString)
+                    }
+                if (nullable) return@mapNotNull null
+                val type = javaProjectTypeIndex.declaredType(parameter.type, candidate.declaration)
+                    ?: return@mapNotNull null
+                parameter.nameAsString.takeIf {
+                    type in setOf(
+                        "net.minecraft.core.HolderLookup.Provider",
+                        "net.minecraft.core.RegistryAccess"
+                    ) ||
+                        setOf(
+                            "net.minecraft.world.level.Level",
+                            "net.minecraft.world.level.LevelAccessor",
+                            "net.minecraft.world.entity.Entity"
+                        ).any { expected -> javaProjectTypeIndex.isTypeAssignableTo(type, expected) }
+                }
+            }.distinct()
+            // Multiple roots are not interchangeable. Keep the demand open so the exact
+            // call graph introduces an explicit provider contract instead of choosing one.
+            if (providerParameters.size > 1) return false
+            return providerParameters.size == 1
+        }
+        val declaredProviderRoots = candidateByKey.filterValues(::hasExactDeclaredProviderRoot).keys
+        val closedDeclaredProviderRoots = declaredProviderRoots.filterTo(linkedSetOf()) { method ->
+            overridePeersByMember[method].orEmpty().all { peer -> peer in declaredProviderRoots }
+        }
         val demanded = candidates.filter { candidate ->
             candidate.directProviderDemand &&
+                key(candidate) !in closedDeclaredProviderRoots &&
                 (
                     strictRegistryAccessExpressionAt(
                         candidate.source,
@@ -2574,7 +2775,7 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
         }
         val reachable = demanded.filterTo(linkedSetOf()) { method ->
             val candidate = candidateByKey.getValue(method)
-            (candidate.directProviderDemand && isPrivateOrPackagePrivateJavaMethodHeader(candidate.header)) ||
+            isPrivateOrPackagePrivateJavaMethodHeader(candidate.header) ||
                 method in explicitProviderBoundaries ||
                 method in exactProviderAwareCallSites ||
                 hasProviderAwareProjectCallSite(candidate) ||
@@ -2596,14 +2797,11 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
                 candidate.declaration,
                 javaProjectTypeIndex
             ) == null &&
-                (
-                    strictRegistryAccessExpressionAt(
-                        candidate.source,
-                        candidate.range.first,
-                        javaInheritanceIndex
-                    ) == null ||
-                        method in exactProviderAwareCallSites || method in explicitProviderBoundaries
-                    )
+                strictRegistryAccessExpressionAt(
+                    candidate.source,
+                    candidate.range.first,
+                    javaInheritanceIndex
+                ) == null
         }.mapTo(linkedSetOf()) { method -> contract(candidateByKey.getValue(method)) }
     }
 
@@ -2799,131 +2997,4 @@ public Vec3 getVehicleAttachmentPoint(Entity vehicle) {
             itemStackParameters += lambdaMatch.groupValues[1]
         }
         return itemStackParameters
-    }
-
-    private fun collectItemStackColorHandlerLambdaNames(
-        source: String,
-        executableCode: String = maskJavaCommentsAndLiterals(source)
-    ): Set<String> {
-        val eventVariables = Regex("""\b(?:[A-Za-z_$][\w$]*\.)*RegisterColorHandlersEvent\.Item\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(executableCode)
-            .map { it.groupValues[1] }
-            .toSet()
-        if (eventVariables.isEmpty()) return emptySet()
-
-        val itemStackParameters = linkedSetOf<String>()
-        for (eventVariable in eventVariables) {
-            val token = "$eventVariable.register("
-            var cursor = 0
-            while (true) {
-                val tokenIndex = executableCode.indexOf(token, cursor)
-                if (tokenIndex < 0) break
-                val openParen = tokenIndex + "$eventVariable.register".length
-                val closeParen = findMatchingParen(executableCode, openParen)
-                if (closeParen < 0) break
-                val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
-                val lambda = args.firstOrNull()?.trim()
-                val match = lambda?.let {
-                    Regex("""^\(?\s*([A-Za-z_$][\w$]*)\s*,\s*[A-Za-z_$][\w$]*\s*\)?\s*->""")
-                        .find(maskJavaCommentsAndLiterals(it))
-                }
-                if (match != null) {
-                    itemStackParameters += match.groupValues[1]
-                }
-                cursor = closeParen + 1
-            }
-        }
-        return itemStackParameters
-    }
-
-    private fun collectItemStackCollectionNames(source: String): Set<String> =
-        Regex("""\b(?:NonNullList|List|ArrayList|java\.util\.List|java\.util\.ArrayList)\s*<\s*ItemStack\s*>\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(maskJavaCommentsAndLiterals(source))
-            .map { it.groupValues[1] }
-            .toSet()
-
-    private fun collectItemStackHandlerValueNames(source: String): Set<String> =
-        Regex("""\b(?:ItemStackHandler|net\.neoforged\.neoforge\.items\.ItemStackHandler|[A-Za-z_$][\w$]*StackHandler)\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(maskJavaCommentsAndLiterals(source))
-            .map { it.groupValues[1] }
-            .toSet()
-
-    private fun collectFluidTankValueNames(source: String): Set<String> =
-        Regex("""\b(?:FluidTank|net\.neoforged\.neoforge\.fluids\.capability\.templates\.FluidTank|[A-Za-z_$][\w$]*Tank)\s+([A-Za-z_$][\w$]*)\b""")
-            .findAll(maskJavaCommentsAndLiterals(source))
-            .map { it.groupValues[1] }
-            .toSet()
-
-    private fun collectEntityCapabilityValueTypes(javaFiles: List<Path>): Map<String, String> {
-        val result = linkedMapOf<String, String>()
-        val declaration = Regex(
-            """\b(?:net\.neoforged\.neoforge\.capabilities\.)?EntityCapability\s*<\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*,\s*(?:net\.minecraft\.core\.)?Direction\s*>\s+([A-Z][A-Z0-9_]*)\b"""
-        )
-        for (javaFile in javaFiles) {
-            val source = runCatching { javaFile.readText() }.getOrDefault("")
-            val packageName = packageNameOf(source)
-            val topLevel = classNameOfJavaSource(source)
-            declaration.findAll(maskJavaCommentsAndLiterals(source)).forEach { match ->
-                val valueType = match.groupValues[1].substringAfterLast('.')
-                val fieldName = match.groupValues[2]
-                result[fieldName] = valueType
-                if (topLevel != null) {
-                    result["$topLevel.$fieldName"] = valueType
-                    if (packageName.isNotBlank()) {
-                        result["$packageName.$topLevel.$fieldName"] = valueType
-                    }
-                }
-            }
-        }
-        return result
-    }
-
-    private fun collectEntityAttachmentValueTypes(javaFiles: List<Path>): Map<String, String> {
-        val result = linkedMapOf<String, String>()
-        val declaration = Regex(
-            """\b(?:java\.util\.function\.)?Supplier\s*<\s*(?:net\.neoforged\.neoforge\.attachment\.)?AttachmentType\s*<\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*>\s*>\s+([A-Z][A-Z0-9_]*)\b"""
-        )
-        fun record(key: String, valueType: String) {
-            val previous = result[key]
-            if (previous != null && previous != valueType) {
-                throw IllegalStateException(
-                    "Conflicting entity attachment value types for '$key': $previous and $valueType"
-                )
-            }
-            result[key] = valueType
-        }
-        for (javaFile in javaFiles) {
-            val source = runCatching { javaFile.readText() }.getOrDefault("")
-            val packageName = packageNameOf(source)
-            val topLevel = classNameOfJavaSource(source)
-            declaration.findAll(maskJavaCommentsAndLiterals(source)).forEach { match ->
-                val valueType = match.groupValues[1].substringAfterLast('.')
-                val fieldName = match.groupValues[2]
-                record(fieldName, valueType)
-                if (topLevel != null) {
-                    record("$topLevel.$fieldName", valueType)
-                    if (packageName.isNotBlank()) {
-                        record("$packageName.$topLevel.$fieldName", valueType)
-                    }
-                }
-            }
-        }
-        return result
-    }
-
-    private fun mergeEntityDataValueTypes(
-        capabilities: Map<String, String>,
-        attachments: Map<String, String>
-    ): Map<String, String> {
-        val result = linkedMapOf<String, String>()
-        (capabilities.entries + attachments.entries).forEach { (key, valueType) ->
-            val previous = result[key]
-            if (previous != null && previous != valueType) {
-                throw IllegalStateException(
-                    "Conflicting entity data value types for '$key': $previous and $valueType"
-                )
-            }
-            result[key] = valueType
-        }
-        return result
     }

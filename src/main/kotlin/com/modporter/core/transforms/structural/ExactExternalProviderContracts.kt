@@ -26,6 +26,17 @@ internal object ExactExternalProviderContracts {
 
     private val contracts = listOf(
         Contract(
+            owner = "net.minecraft.world.item.Item",
+            methodName = "use",
+            returnType = "InteractionResultHolder<ItemStack>",
+            parameterTypes = listOf(
+                "net.minecraft.world.level.Level",
+                "net.minecraft.world.entity.player.Player",
+                "net.minecraft.world.InteractionHand"
+            ),
+            providerParameterIndex = 0
+        ),
+        Contract(
             owner = "net.minecraft.world.level.block.Block",
             methodName = "setPlacedBy",
             returnType = "void",
@@ -118,35 +129,79 @@ internal object ExactExternalProviderContracts {
         val parameterTypes = method.parameters.map { parameter ->
             index.declaredType(parameter.type, method) ?: return null
         }
-        if (method.isStatic && returnType == "void" && parameterTypes == PONDER_SCENE_CALLBACK_PARAMETERS) {
-            return "${method.parameters[0].nameAsString}.world().getHolderLookupProvider()"
+        val owner = exactEnclosingNamedClass(method)?.fullyQualifiedName?.orElse(null)
+        return providerExpressionForExactSurface(
+            methodName = method.nameAsString,
+            returnType = returnType,
+            parameterTypes = parameterTypes,
+            parameterNames = method.parameters.map { it.nameAsString },
+            isStatic = method.isStatic,
+            ownerMatches = { expected -> owner != null && index.isTypeAssignableTo(owner, expected) }
+        )
+    }
+
+    fun providerExpressionForExactSurface(
+        methodName: String,
+        returnType: String,
+        parameterTypes: List<String>,
+        parameterNames: List<String>,
+        isStatic: Boolean,
+        ownerMatches: (String) -> Boolean
+    ): String? {
+        if (parameterTypes.size != parameterNames.size) {
+            throw IllegalStateException("Exact external provider surface has inconsistent parameters for $methodName")
         }
-        if (method.isStatic) return null
-        val owner = exactEnclosingNamedClass(method)?.fullyQualifiedName?.orElse(null) ?: return null
+        val registryBuffers = parameterTypes.withIndex().filter { (_, type) ->
+            sameType(type, "net.minecraft.network.RegistryFriendlyByteBuf")
+        }
+        if (registryBuffers.size > 1) {
+            throw IllegalStateException(
+                "Ambiguous RegistryFriendlyByteBuf provider sources in $methodName"
+            )
+        }
+        registryBuffers.singleOrNull()?.let { buffer ->
+            return "${parameterNames[buffer.index]}.registryAccess()"
+        }
+        if (isStatic && sameType(returnType, "void") && sameTypes(parameterTypes, PONDER_SCENE_CALLBACK_PARAMETERS)) {
+            return "${parameterNames[0]}.world().getHolderLookupProvider()"
+        }
+        if (isStatic) return null
         val matches = contracts.filter { contract ->
-            contract.methodName == method.nameAsString &&
-                contract.returnType == returnType &&
-                contract.parameterTypes == parameterTypes &&
-                index.isTypeAssignableTo(owner, contract.owner)
+            contract.methodName == methodName &&
+                sameType(returnType, contract.returnType) &&
+                sameTypes(parameterTypes, contract.parameterTypes) &&
+                ownerMatches(contract.owner)
         }
         if (matches.size > 1) {
             throw IllegalStateException(
-                "Ambiguous exact external provider contracts for $owner.${method.nameAsString}$parameterTypes"
+                "Ambiguous exact external provider contracts for $methodName$parameterTypes"
             )
         }
         val contract = matches.singleOrNull() ?: return null
         contract.instanceProviderExpression?.let { return it }
         val providerIndex = contract.providerParameterIndex ?: throw IllegalStateException(
-            "Exact external provider contract for $owner.${method.nameAsString} has no provider source"
+            "Exact external provider contract for $methodName has no provider source"
         )
-        val parameter = method.parameters[providerIndex]
-        return when (parameterTypes[providerIndex]) {
-            "net.minecraft.world.level.Level",
-            "net.minecraft.network.RegistryFriendlyByteBuf" -> "${parameter.nameAsString}.registryAccess()"
-            else -> throw IllegalStateException(
-                "Unsupported provider source in exact external contract for $owner.${method.nameAsString}"
+        return if (
+            sameType(parameterTypes[providerIndex], "net.minecraft.world.level.Level") ||
+            sameType(parameterTypes[providerIndex], "net.minecraft.network.RegistryFriendlyByteBuf")
+        ) {
+            "${parameterNames[providerIndex]}.registryAccess()"
+        } else {
+            throw IllegalStateException(
+                "Unsupported provider source in exact external contract for $methodName"
             )
         }
+    }
+
+    private fun sameTypes(actual: List<String>, expected: List<String>): Boolean =
+        actual.size == expected.size && actual.zip(expected).all { (left, right) -> sameType(left, right) }
+
+    private fun sameType(actual: String, expected: String): Boolean {
+        val normalizedActual = actual.replace(Regex("""\s+"""), "")
+        val normalizedExpected = expected.replace(Regex("""\s+"""), "")
+        return normalizedActual == normalizedExpected ||
+            normalizedActual == normalizedExpected.substringAfterLast('.')
     }
 
     fun isProvenProjectHelperRoot(method: MethodDeclaration, index: JavaProjectTypeIndex): Boolean {

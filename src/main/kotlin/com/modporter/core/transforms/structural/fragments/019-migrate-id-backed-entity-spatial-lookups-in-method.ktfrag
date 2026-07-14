@@ -1,4 +1,124 @@
 
+    private fun migrateIdBackedEntitySpatialLookupsInMethod(
+        methodText: String,
+        idBackedParameters: List<Pair<String, IdBackedEntityAccessor>>
+    ): String {
+        val executable = maskJavaCommentsAndLiterals(methodText)
+        val returnPattern = Regex(
+            """(?m)^([ \t]*)return\s+([A-Za-z_$][\w$]*)\.getEntitiesOfClass\s*\(\s*([A-Za-z_$][\w$]*)\.class\s*,"""
+        )
+        val edits = mutableListOf<Pair<IntRange, String>>()
+        for (match in returnPattern.findAll(executable)) {
+            val statementEnd = executable.indexOf(';', match.range.first)
+                .takeIf { it >= 0 }
+                ?: continue
+            val statement = methodText.substring(match.range.first, statementEnd + 1)
+            if (!statement.contains(".stream()") ||
+                !statement.contains(".findFirst()") ||
+                !statement.contains(".orElse")) {
+                continue
+            }
+            val (holderName, accessor) = idBackedParameters.firstOrNull { (name, _) ->
+                Regex("""(?<![\w$])${Regex.escape(name)}(?![\w$])""").containsMatchIn(statement)
+            } ?: continue
+            val filter = Regex(
+                """(?s)\.filter\s*\(\s*([A-Za-z_$][\w$]*)\s*->\s*(.*?)\)\s*\.findFirst\s*\("""
+            ).find(statement) ?: continue
+            val lambdaName = filter.groupValues[1]
+            val predicate = filter.groupValues[2].trim()
+            val indent = match.groupValues[1]
+            val levelName = match.groupValues[2]
+            val entityClass = match.groupValues[3]
+            val directIdName = uniqueJavaLocalName(methodText, "modporterDirectEntityId")
+            val directEntityName = uniqueJavaLocalName(methodText, "modporterDirectEntity")
+            val directTypedName = uniqueJavaLocalName(methodText, "modporterDirect$entityClass")
+            val directPredicate = Regex("""(?<![\w$])${Regex.escape(lambdaName)}(?![\w$])""")
+                .replace(predicate, directTypedName)
+            val guard = buildString {
+                append(indent)
+                append("java.util.UUID ")
+                append(directIdName)
+                append(" = ")
+                append(holderName)
+                append(".")
+                append(accessor.idGetterName)
+                append("();\n")
+                append(indent)
+                append("net.minecraft.world.entity.Entity ")
+                append(directEntityName)
+                append(" = ")
+                append(holderName)
+                append(".")
+                append(accessor.entityGetterName)
+                append("();\n")
+                append(indent)
+                append("if (")
+                append(directEntityName)
+                append(" == null && ")
+                append(directIdName)
+                append(" != null) {\n")
+                append(indent)
+                append("    ")
+                append(directEntityName)
+                append(" = ")
+                append(levelName)
+                append(".getEntity(")
+                append(directIdName)
+                append(");\n")
+                append(indent)
+                append("}\n")
+                append(indent)
+                append("if (")
+                append(directEntityName)
+                append(" instanceof ")
+                append(entityClass)
+                append(" ")
+                append(directTypedName)
+                append(" && !")
+                append(directTypedName)
+                append(".isRemoved()")
+                if (directPredicate.isNotBlank()) {
+                    append(" && ")
+                    append(directPredicate)
+                }
+                append(") {\n")
+                append(indent)
+                append("    return ")
+                append(directTypedName)
+                append(";\n")
+                append(indent)
+                append("}\n")
+            }
+            edits += (match.range.first until match.range.first) to guard
+        }
+        return applyStringEdits(methodText, edits)
+    }
+
+    private fun javaSimpleTypeName(type: String): String =
+        type.trim()
+            .removeSuffix("[]")
+            .substringBefore('<')
+            .substringAfterLast('.')
+            .trim()
+
+    private fun firstIdBackedEntityLookupInsertion(original: String, migrated: String): Int {
+        val token = "modporterDirectEntityId"
+        val index = migrated.indexOf(token)
+        if (index < 0) return 0
+        return index.coerceAtMost(original.length)
+    }
+
+    private fun firstIdBackedEntityBindingInsertion(original: String, migrated: String): Int {
+        val token = ".set"
+        val entityToken = "Entity(this);"
+        val index = migrated.indexOf(entityToken)
+            .takeIf { it >= 0 }
+            ?.let { migrated.lastIndexOf(token, it).takeIf { tokenIndex -> tokenIndex >= 0 } ?: it }
+            ?: -1
+        if (index < 0) return 0
+        return index.coerceAtMost(original.length)
+    }
+
     private fun migrateLegacyItemAttributeModifierOverrides(projectDir: Path, dryRun: Boolean): List<Change> {
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return emptyList()
@@ -2806,144 +2926,6 @@ ${indent}}
                 .replace(result, "")
             result = removeImport(result, "net.neoforged.neoforge.common.util.LazyOptional")
             result = removeImport(result, "net.minecraftforge.common.util.LazyOptional")
-        }
-        return result
-    }
-
-    private fun migrateNitrogenBlockStateRecipeConstructors(source: String): String {
-        if (!source.contains("BlockStateIngredient") ||
-            !source.contains("BlockPropertyPair") ||
-            !source.contains("CacheableFunction") ||
-            !source.contains("super(")) {
-            return source
-        }
-
-        val id = """[A-Za-z_$][\w$]*"""
-        var result = source
-        var changed = false
-        Regex("""class\s+($id)\s+extends\s+AbstractBlockStateRecipe\b""")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
-            ?.let { className ->
-                val constructorPattern = Regex(
-                    """(?s)public\s+${Regex.escape(className)}\s*\(\s*ResourceLocation\s+$id\s*,\s*BlockStateIngredient\s+($id)\s*,\s*BlockPropertyPair\s+($id)\s*,\s*@Nullable\s+CacheableFunction\s+($id)\s*\)\s*\{\s*super\(\s*([^,]+?)\s*,\s*$id\s*,\s*\1\s*,\s*\2\s*,\s*\3\s*\)\s*;\s*\}"""
-                )
-                result = constructorPattern.replace(result) { match ->
-                    changed = true
-                    val ingredient = match.groupValues[1]
-                    val recipeResult = match.groupValues[2]
-                    val function = match.groupValues[3]
-                    val recipeType = match.groupValues[4].trim()
-                    "public $className(BlockStateIngredient $ingredient, BlockPropertyPair $recipeResult, Optional<ResourceLocation> $function) {\n" +
-                        "        super($recipeType, $ingredient, $recipeResult, $function);\n" +
-                        "    }"
-                }
-            }
-
-        Regex("""class\s+($id)\s+extends\s+AbstractBiomeParameterRecipe\b""")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
-            ?.let { className ->
-                val fullConstructorPattern = Regex(
-                    """(?s)public\s+${Regex.escape(className)}\s*\(\s*ResourceLocation\s+$id\s*,\s*@Nullable\s+ResourceKey\s*<\s*Biome\s*>\s+($id)\s*,\s*@Nullable\s+TagKey\s*<\s*Biome\s*>\s+($id)\s*,\s*BlockStateIngredient\s+($id)\s*,\s*BlockPropertyPair\s+($id)\s*,\s*@Nullable\s+CacheableFunction\s+($id)\s*\)\s*\{\s*super\(\s*([^,]+?)\s*,\s*$id\s*,\s*\1\s*,\s*\2\s*,\s*\3\s*,\s*\4\s*,\s*\5\s*\)\s*;\s*\}"""
-                )
-                result = fullConstructorPattern.replace(result) { match ->
-                    changed = true
-                    val ingredient = match.groupValues[3]
-                    val recipeResult = match.groupValues[4]
-                    val function = match.groupValues[5]
-                    val recipeType = match.groupValues[6].trim()
-                    "public $className(Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome, BlockStateIngredient $ingredient, BlockPropertyPair $recipeResult, Optional<ResourceLocation> $function) {\n" +
-                        "        super($recipeType, biome, $ingredient, $recipeResult, $function);\n" +
-                        "    }"
-                }
-                val simpleConstructorPattern = Regex(
-                    """(?s)public\s+${Regex.escape(className)}\s*\(\s*ResourceLocation\s+$id\s*,\s*BlockStateIngredient\s+($id)\s*,\s*BlockPropertyPair\s+($id)\s*,\s*@Nullable\s+CacheableFunction\s+($id)\s*\)\s*\{\s*this\(\s*$id\s*,\s*null\s*,\s*null\s*,\s*\1\s*,\s*\2\s*,\s*\3\s*\)\s*;\s*\}"""
-                )
-                result = simpleConstructorPattern.replace(result) { match ->
-                    changed = true
-                    val ingredient = match.groupValues[1]
-                    val recipeResult = match.groupValues[2]
-                    val function = match.groupValues[3]
-                    "public $className(BlockStateIngredient $ingredient, BlockPropertyPair $recipeResult, Optional<ResourceLocation> $function) {\n" +
-                        "        this(Optional.empty(), $ingredient, $recipeResult, $function);\n" +
-                        "    }"
-                }
-            }
-
-        if (!changed) return source
-        result = addImportIfMissing(result, "java.util.Optional")
-        if (result.contains("Optional<Either<")) {
-            result = addImportIfMissing(result, "com.mojang.datafixers.util.Either")
-        }
-        result = removeImport(result, "net.minecraft.commands.functions.CommandFunction")
-        result = removeImport(result, "net.minecraft.commands.CacheableFunction")
-        if (Regex("""\b@Nullable\b""").containsMatchIn(result)) {
-            result = addImportIfMissing(result, "javax.annotation.Nullable")
-        } else {
-            result = removeImport(result, "javax.annotation.Nullable")
-        }
-        return result
-    }
-
-    private fun migrateNitrogenBiomeParameterRecipeSource(source: String): String {
-        if (!source.contains("extends AbstractBlockStateRecipe") ||
-            !source.contains("biomeKey") ||
-            !source.contains("biomeTag") ||
-            !source.contains("BlockStateIngredient") ||
-            !source.contains("BlockPropertyPair") ||
-            !source.contains("CacheableFunction")) {
-            return source
-        }
-
-        val className = Regex("""class\s+([A-Za-z_$][\w$]*)\s+extends\s+AbstractBlockStateRecipe\b""")
-            .find(source)
-            ?.groupValues
-            ?.get(1)
-            ?: return source
-        var result = source
-        var changed = false
-        result = Regex(
-            """(?s)@Nullable\s*\r?\n\s*private\s+final\s+ResourceKey\s*<\s*Biome\s*>\s+biomeKey\s*;\s*@Nullable\s*\r?\n\s*private\s+final\s+TagKey\s*<\s*Biome\s*>\s+biomeTag\s*;"""
-        ).replace(result) {
-            changed = true
-            "private final Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome;"
-        }
-        result = Regex(
-            """(?s)public\s+${Regex.escape(className)}\s*\(\s*RecipeType<\?>\s+type\s*,\s*ResourceLocation\s+id\s*,\s*@Nullable\s+ResourceKey\s*<\s*Biome\s*>\s+biomeKey\s*,\s*@Nullable\s+TagKey\s*<\s*Biome\s*>\s+biomeTag\s*,\s*BlockStateIngredient\s+ingredient\s*,\s*BlockPropertyPair\s+result\s*,\s*@Nullable\s+CacheableFunction\s+function\s*\)\s*\{\s*super\(\s*type\s*,\s*id\s*,\s*ingredient\s*,\s*result\s*,\s*function\s*\)\s*;\s*this\.biomeKey\s*=\s*biomeKey\s*;\s*this\.biomeTag\s*=\s*biomeTag\s*;\s*\}"""
-        ).replace(result) {
-            changed = true
-            "public $className(RecipeType<?> type, Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> biome, BlockStateIngredient ingredient, BlockPropertyPair result, Optional<ResourceLocation> function) {\n" +
-                "        super(type, ingredient, result, function);\n" +
-                "        this.biome = biome;\n" +
-                "    }"
-        }
-        result = Regex(
-            """(?s)if\s*\(\s*this\.biomeKey\s*!=\s*null\s*\)\s*\{\s*return\s+super\.matches\(\s*level\s*,\s*pos\s*,\s*state\s*\)\s*&&\s*level\.getBiome\(\s*pos\s*\)\.is\(\s*this\.biomeKey\s*\)\s*;\s*\}\s*else\s+if\s*\(\s*this\.biomeTag\s*!=\s*null\s*\)\s*\{\s*return\s+super\.matches\(\s*level\s*,\s*pos\s*,\s*state\s*\)\s*&&\s*level\.getBiome\(\s*pos\s*\)\.is\(\s*this\.biomeTag\s*\)\s*;"""
-        ).replace(result) {
-            changed = true
-            "if (this.biome.isPresent() && this.biome.get().left().isPresent()) {\n" +
-                "            return super.matches(level, pos, state) && level.getBiome(pos).is(this.biome.get().left().get());\n" +
-                "        } else if (this.biome.isPresent() && this.biome.get().right().isPresent()) {\n" +
-                "            return super.matches(level, pos, state) && level.getBiome(pos).is(this.biome.get().right().get());"
-        }
-        result = Regex(
-            """(?s)@Nullable\s*\r?\n\s*public\s+ResourceKey\s*<\s*Biome\s*>\s+getBiomeKey\s*\(\s*\)\s*\{\s*return\s+this\.biomeKey\s*;\s*\}\s*@Nullable\s*\r?\n\s*public\s+TagKey\s*<\s*Biome\s*>\s+getBiomeTag\s*\(\s*\)\s*\{\s*return\s+this\.biomeTag\s*;\s*\}"""
-        ).replace(result) {
-            changed = true
-            "public Optional<Either<ResourceKey<Biome>, TagKey<Biome>>> getBiome() {\n" +
-                "        return this.biome;\n" +
-                "    }"
-        }
-        if (!changed) return source
-        result = addImportIfMissing(result, "com.mojang.datafixers.util.Either")
-        result = addImportIfMissing(result, "java.util.Optional")
-        result = removeImport(result, "net.minecraft.commands.functions.CommandFunction")
-        result = removeImport(result, "net.minecraft.commands.CacheableFunction")
-        if (!Regex("""\b@Nullable\b""").containsMatchIn(result)) {
-            result = removeImport(result, "javax.annotation.Nullable")
         }
         return result
     }

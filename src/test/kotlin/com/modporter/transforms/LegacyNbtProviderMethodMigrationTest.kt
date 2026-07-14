@@ -233,6 +233,42 @@ class LegacyNbtProviderMethodMigrationTest {
     }
 
     @Test
+    fun `nullable typed roots are excluded unless dominating control flow proves them non null`() {
+        val source = tempDir.resolve("src/main/java/com/example").createDirectories()
+        source.resolve("RequestData.java").writeText(
+            """
+            package com.example;
+            import net.minecraft.core.HolderLookup;
+            import net.minecraft.nbt.CompoundTag;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.level.Level;
+            public class RequestData {
+                static RequestData read(CompoundTag tag, HolderLookup.Provider registries) {
+                    return new RequestData();
+                }
+                static RequestData readFromItem(Level level, Player player, CompoundTag tag) {
+                    RequestData data = read(tag);
+                    if (player != null) player.toString();
+                    return data;
+                }
+                static RequestData readForPlayer(Player player, CompoundTag tag) {
+                    if (player != null) {
+                        return read(tag);
+                    }
+                    return null;
+                }
+            }
+            """.trimIndent()
+        )
+
+        LegacyNbtProviderMethodMigration().migrate(tempDir, dryRun = false)
+        val migrated = source.resolve("RequestData.java").readText()
+
+        assertTrue(migrated.contains("RequestData data = read(tag, level.registryAccess());"), migrated)
+        assertTrue(migrated.contains("return read(tag, player.registryAccess());"), migrated)
+    }
+
+    @Test
     fun `resolves inherited nbt targets and typed pattern variables`() {
         val source = tempDir.resolve("src/main/java/com/example").createDirectories()
         source.resolve("SyncedData.java").writeText(

@@ -1964,7 +1964,9 @@ ${indent}}"""
         parameters: List<String>,
         javaInheritanceIndex: JavaInheritanceIndex
     ): String? {
-        holderLookupProviderFromParameters(parameters)?.let { return it }
+        val declaredProviders = holderLookupProviderNamesFromParameters(parameters)
+        if (declaredProviders.size == 1) return declaredProviders.single()
+        if (declaredProviders.size > 1) return null
         val tooltipContextRegistryAccess = parameters.mapNotNull { parameter ->
             Regex("""(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*(?:(?:net\.minecraft\.world\.item\.)?Item\.)?TooltipContext\s+([A-Za-z_$][\w$]*)$""")
                 .find(parameter.trim())
@@ -1972,8 +1974,6 @@ ${indent}}"""
                 ?.get(1)
                 ?.let { "$it.registries()" }
         }.distinct()
-        if (tooltipContextRegistryAccess.size == 1) return tooltipContextRegistryAccess.single()
-        if (tooltipContextRegistryAccess.size > 1) return null
         val lootParamsRegistryAccess = parameters.mapNotNull { parameter ->
             Regex("""(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*(?:net\.minecraft\.world\.level\.storage\.loot\.)?LootParams\.Builder\s+([A-Za-z_$][\w$]*)$""")
                 .find(parameter.trim())
@@ -1981,8 +1981,6 @@ ${indent}}"""
                 ?.get(1)
                 ?.let { "$it.getLevel().registryAccess()" }
         }.distinct()
-        if (lootParamsRegistryAccess.size == 1) return lootParamsRegistryAccess.single()
-        if (lootParamsRegistryAccess.size > 1) return null
         val parameterPattern = Regex("""(?:final\s+)?(?:@[A-Za-z_$][\w$]*(?:\([^)]*\))?\s*)*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:<[^>]+>)?)\s+([A-Za-z_$][\w$]*)$""")
         val parsed = parameters.mapNotNull { parameter ->
             val cleaned = parameter.trim()
@@ -2000,16 +1998,10 @@ ${indent}}"""
             .filter { it.first in setOf("ServerLevel", "Level", "WorldGenLevel", "ServerLevelAccessor", "LevelAccessor", "LevelReader") }
             .map { "${it.second}.registryAccess()" }
             .distinct()
-        if (levelRegistryAccess.size == 1) return levelRegistryAccess.single()
-        if (levelRegistryAccess.size > 1) return null
-
         val inventoryRegistryAccess = parsed
             .filter { it.first == "Inventory" }
             .map { "${it.second}.player.registryAccess()" }
             .distinct()
-        if (inventoryRegistryAccess.size == 1) return inventoryRegistryAccess.single()
-        if (inventoryRegistryAccess.size > 1) return null
-
         val entityRegistryAccess = parsed
             .filter { (type, _) ->
                 type in javaEntityBaseTypes() ||
@@ -2017,8 +2009,13 @@ ${indent}}"""
             }
             .map { "${it.second}.registryAccess()" }
             .distinct()
-        if (entityRegistryAccess.size == 1) return entityRegistryAccess.single()
-        return null
+        return (
+            tooltipContextRegistryAccess +
+                lootParamsRegistryAccess +
+                levelRegistryAccess +
+                inventoryRegistryAccess +
+                entityRegistryAccess
+            ).distinct().singleOrNull()
     }
 
     private fun holderLookupProviderFromParameters(parameters: List<String>): String? {
@@ -2062,28 +2059,42 @@ ${indent}}"""
             } + position.column - 1
         fun surface(
             name: String,
+            nameRange: com.github.javaparser.Range,
             range: com.github.javaparser.Range,
-            parameters: List<Parameter>
+            parameters: List<Parameter>,
+            returnType: String?,
+            isStatic: Boolean
         ): ExactJavaMethodSurface {
             val start = offset(range.begin)
             val endInclusive = offset(range.end)
+            val nameStart = offset(nameRange.begin)
             if (start !in source.indices || endInclusive !in source.indices || start > endInclusive) {
                 throw IllegalStateException(
                     "Invalid exact Java callable range for $name: $start..$endInclusive"
                 )
             }
+            if (nameStart !in start..endInclusive || !source.startsWith(name, nameStart)) {
+                throw IllegalStateException(
+                    "Invalid exact Java callable name range for $name at $nameStart"
+                )
+            }
             return ExactJavaMethodSurface(
                 name,
+                nameStart,
                 start..endInclusive,
-                parameters.map { parameter -> parameter.typeAsString to parameter.nameAsString }
+                parameters.map { parameter -> parameter.typeAsString to parameter.nameAsString },
+                returnType,
+                isStatic
             )
         }
         val surfaces = unit.findAll(MethodDeclaration::class.java).mapNotNull { method ->
             val range = method.range.orElse(null) ?: return@mapNotNull null
-            surface(method.nameAsString, range, method.parameters.toList())
+            val nameRange = method.name.range.orElse(null) ?: return@mapNotNull null
+            surface(method.nameAsString, nameRange, range, method.parameters.toList(), method.typeAsString, method.isStatic)
         } + unit.findAll(ConstructorDeclaration::class.java).mapNotNull { constructor ->
             val range = constructor.range.orElse(null) ?: return@mapNotNull null
-            surface(constructor.nameAsString, range, constructor.parameters.toList())
+            val nameRange = constructor.name.range.orElse(null) ?: return@mapNotNull null
+            surface(constructor.nameAsString, nameRange, range, constructor.parameters.toList(), null, false)
         }
         exactJavaMethodSurfaceSource = source
         exactJavaMethodSurfaces = surfaces
@@ -2111,16 +2122,13 @@ ${indent}}"""
         offset: Int,
         javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
     ): String? {
+        exactExternalCallbackProviderExpressionAt(source, offset, javaInheritanceIndex)?.let { return it }
         val parameters = currentMethodParametersBeforeOffset(source, offset)
         registryAccessFromParameters(parameters, javaInheritanceIndex)?.let { return it }
         sourceProvenLocalRegistryAccessExpressionAt(source, offset)?.let { return it }
         sourceProvenClientMinecraftRegistryAccessExpressionAt(source, offset)?.let { return it }
         if (!isInsideInstanceJavaMethod(source, offset)) return null
         val declaration = enclosingJavaClassDeclaration(source, offset)
-        declaration
-            ?.name
-            ?.let { javaInheritanceIndex.inheritedRegistryAccessField(it) }
-            ?.let { return "$it.registryAccess()" }
         return entitySelfRegistryAccessExpression(declaration, javaInheritanceIndex)
     }
 
@@ -2129,18 +2137,40 @@ ${indent}}"""
         offset: Int,
         javaInheritanceIndex: JavaInheritanceIndex = JavaInheritanceIndex.EMPTY
     ): String? {
+        exactExternalCallbackProviderExpressionAt(source, offset, javaInheritanceIndex)?.let { return it }
         val parameters = currentMethodParametersBeforeOffset(source, offset)
         registryAccessFromParameters(parameters, javaInheritanceIndex)?.let { return it }
         sourceProvenLocalRegistryAccessExpressionAt(source, offset)?.let { return it }
         sourceProvenClientMinecraftRegistryAccessExpressionAt(source, offset)?.let { return it }
         if (!isInsideInstanceJavaMethod(source, offset)) return null
         val declaration = enclosingJavaClassDeclaration(source, offset) ?: return null
-        declaration.name
-            .let { javaInheritanceIndex.inheritedRegistryAccessField(it) }
-            ?.let { return "$it.registryAccess()" }
         return "this.registryAccess()".takeIf {
             javaClassExtendsAny(declaration, javaEntityBaseTypes(), javaInheritanceIndex)
         }
+    }
+
+    private fun exactExternalCallbackProviderExpressionAt(
+        source: String,
+        offset: Int,
+        javaInheritanceIndex: JavaInheritanceIndex
+    ): String? {
+        val method = exactJavaMethodAt(source, offset) ?: return null
+        val returnType = method.returnType ?: return null
+        val declaration = enclosingJavaClassDeclaration(source, offset) ?: return null
+        return ExactExternalProviderContracts.providerExpressionForExactSurface(
+            methodName = method.name,
+            returnType = returnType,
+            parameterTypes = method.parameters.map { it.first },
+            parameterNames = method.parameters.map { it.second },
+            isStatic = method.isStatic,
+            ownerMatches = { expectedOwner ->
+                javaClassExtendsAny(
+                    declaration,
+                    setOf(expectedOwner.substringAfterLast('.')),
+                    javaInheritanceIndex
+                )
+            }
+        )
     }
 
     private fun sourceProvenLocalRegistryAccessExpressionAt(source: String, offset: Int): String? {
@@ -2206,8 +2236,15 @@ ${indent}}"""
         preferred: String
     ): String {
         val openBrace = source.indexOf('{', methodHeaderOffset)
+        val semicolon = source.indexOf(';', methodHeaderOffset)
+        if (semicolon >= 0 && (openBrace < 0 || semicolon < openBrace)) {
+            return uniqueLocalNameInScope(source.substring(methodHeaderOffset, semicolon + 1), preferred)
+        }
         if (openBrace < 0) {
-            throw IllegalStateException("Cannot locate Java method body while adding HolderLookup.Provider")
+            throw IllegalStateException(
+                "Cannot locate Java method body or abstract declaration while adding HolderLookup.Provider near: " +
+                    source.substring(methodHeaderOffset).lineSequence().firstOrNull().orEmpty().trim()
+            )
         }
         val closeBrace = findMatchingBrace(source, openBrace)
         if (closeBrace < 0) {
@@ -2932,63 +2969,3 @@ $body
         val blockRange: IntRange,
         val blockText: String
     )
-
-    private fun migrateLivingDamageEventHelperBoundaries(projectDir: Path, dryRun: Boolean): List<Change> {
-        val srcDir = projectDir.resolve("src/main/java")
-        if (!srcDir.exists()) return emptyList()
-        val javaFiles = Files.walk(srcDir)
-            .filter { it.extension == "java" }
-            .toList()
-        val signatures = collectLivingDamageEventMethodSignatures(javaFiles)
-        if (signatures.isEmpty()) return emptyList()
-        val changes = mutableListOf<Change>()
-
-        javaFiles.forEach { javaFile ->
-            val original = javaFile.readText()
-            if (!original.contains("LivingDamageEvent") && !original.contains("LivingIncomingDamageEvent")) return@forEach
-            var migrated = migrateLivingDamageEventHelperBoundariesInSource(original, signatures)
-            migrated = migrateLegacyDamageEventAttackerBindings(migrated)
-            migrated = removeNoOpGeneratedLivingDamageHelperMethods(migrated)
-            if (migrated != original) {
-                if (!dryRun) javaFile.writeText(migrated)
-                changes.add(Change(
-                    file = javaFile,
-                    line = 0,
-                    description = "Align living damage helper call sites with NeoForge damage event phases",
-                    before = "helper call passes LivingDamageEvent.Pre/Post to incompatible helper boundary",
-                    after = "caller signature retargeted or helper call split into matching phase subscriber",
-                    confidence = Confidence.HIGH,
-                    ruleId = "struct-living-damage-helper-boundary"
-                ))
-            }
-        }
-        return changes
-    }
-
-    private fun collectLivingDamageEventMethodSignatures(
-        javaFiles: List<Path>
-    ): List<LivingDamageEventMethodSignature> =
-        javaFiles.flatMap { javaFile ->
-            val source = runCatching { javaFile.readText() }.getOrDefault("")
-            if (!source.contains("LivingDamageEvent") && !source.contains("LivingIncomingDamageEvent")) {
-                return@flatMap emptyList()
-            }
-            val packageName = packageNameOf(source)
-            val className = javaTopLevelTypeName(source) ?: return@flatMap emptyList()
-            javaMethodRangesIncludingDefault(source).mapNotNull { method ->
-                val eventParameter = livingDamageEventParameter(method.header, source) ?: return@mapNotNull null
-                LivingDamageEventMethodSignature(packageName, className, method.name, eventParameter.first)
-            }
-        }
-
-    private fun livingDamageEventParameter(
-        methodHeader: String,
-        source: String
-    ): Pair<LivingDamageBoundary, String>? {
-        val parametersText = methodHeader.substringAfter("(", "").substringBeforeLast(")", "")
-        splitTopLevelJavaArgs(parametersText).forEach { parameter ->
-            val name = javaParameterName(parameter) ?: return@forEach
-            canonicalLivingDamageBoundary(parameter, source)?.let { return it to name }
-        }
-        return null
-    }

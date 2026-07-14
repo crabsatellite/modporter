@@ -214,6 +214,55 @@ class ExactBlockEntityCapabilityQueryMigrationTest {
     }
 
     @Test
+    fun `removes only known stale LazyOptional imports when a unique generated adapter is present`() {
+        val file = write("sample/StaleImport.java", """
+            package sample;
+            import com.modporter.generated.sample.compat.LazyOptional;
+            import net.neoforged.neoforge.common.util.LazyOptional;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            class StaleImport {
+                Object query(BlockEntity target) {
+                    return target.getCapability(Capabilities.ItemHandler.BLOCK).orElse(null);
+                }
+            }
+        """.trimIndent())
+
+        ExactBlockEntityCapabilityQueryMigration(tempDir.resolve("src/main/java"))
+            .migrate(dryRun = false)
+        val migrated = file.readText()
+
+        assertTrue(migrated.contains("import com.modporter.generated.sample.compat.LazyOptional;"), migrated)
+        assertTrue(!migrated.contains("net.neoforged.neoforge.common.util.LazyOptional"), migrated)
+        assertTrue(migrated.contains("LazyOptional.ofNullable("), migrated)
+    }
+
+    @Test
+    fun `hard gates an unrelated same named LazyOptional import`() {
+        val file = write("sample/ForeignLazyOptional.java", """
+            package sample;
+            import com.modporter.generated.sample.compat.LazyOptional;
+            import third.party.LazyOptional;
+            import net.minecraft.world.level.block.entity.BlockEntity;
+            import net.neoforged.neoforge.capabilities.Capabilities;
+            class ForeignLazyOptional {
+                Object query(BlockEntity target) {
+                    return target.getCapability(Capabilities.ItemHandler.BLOCK).orElse(null);
+                }
+            }
+        """.trimIndent())
+        val original = file.readText()
+
+        val error = assertFailsWith<IllegalStateException> {
+            ExactBlockEntityCapabilityQueryMigration(tempDir.resolve("src/main/java"))
+                .migrate(dryRun = false)
+        }
+
+        assertTrue(error.message.orEmpty().contains("Ambiguous LazyOptional imports"), error.message)
+        assertEquals(original, file.readText())
+    }
+
+    @Test
     fun `resolves Optional lambda receiver through a method bound with an extends wildcard`() {
         write("sample/IBE.java", """
             package sample;

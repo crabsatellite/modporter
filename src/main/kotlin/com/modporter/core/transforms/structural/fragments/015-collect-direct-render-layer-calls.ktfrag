@@ -1,4 +1,267 @@
 
+    private fun collectDirectRenderLayerCalls(source: String): List<RenderLayerCall> {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        val calls = mutableListOf<RenderLayerCall>()
+        var cursor = 0
+        val token = "ItemBlockRenderTypes.setRenderLayer"
+        while (cursor < executableCode.length) {
+            val callStart = executableCode.indexOf(token, cursor)
+            if (callStart < 0) break
+            val openParen = executableCode.indexOf('(', callStart + token.length)
+            if (openParen < 0) break
+            val closeParen = findMatchingParen(executableCode, openParen)
+            if (closeParen < 0) {
+                cursor = openParen + 1
+                continue
+            }
+            var semicolon = closeParen + 1
+            while (semicolon < executableCode.length && executableCode[semicolon].isWhitespace()) semicolon++
+            if (semicolon >= executableCode.length || executableCode[semicolon] != ';') {
+                cursor = closeParen + 1
+                continue
+            }
+            val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
+            if (args.size == 2) {
+                val target = Regex("""^(?:(\w+)\.)?(\w+)\s*\.\s*get\s*\(\s*\)$""")
+                    .matchEntire(args[0].trim())
+                val renderLayer = renderLayerCallSemantics(args[1].trim())
+                if (target != null && renderLayer != null) {
+                    val start = source.lastIndexOf('\n', callStart).let { if (it < 0) 0 else it + 1 }
+                    var end = semicolon
+                    if (end + 1 < source.length && source[end + 1] == '\r') end++
+                    if (end + 1 < source.length && source[end + 1] == '\n') end++
+                    calls += RenderLayerCall(
+                        range = start..end,
+                        ownerName = target.groupValues[1].takeIf { it.isNotBlank() },
+                        fieldName = target.groupValues[2],
+                        renderType = renderLayer.first,
+                        allowedRenderTypes = renderLayer.second
+                    )
+                }
+            }
+            cursor = semicolon + 1
+        }
+        return calls
+    }
+
+    private fun renderLayerCallSemantics(expression: String): Pair<String?, Set<String>>? {
+        directModelRenderType(expression)?.let { return it to setOf(it) }
+        if ("->" !in expression) return null
+        val renderTypes = Regex("""(?:net\.minecraft\.client\.renderer\.)?RenderType\.(\w+)\s*\(""")
+            .findAll(expression)
+            .mapNotNull { directModelRenderType("RenderType.${it.groupValues[1]}()") }
+            .toSet()
+        val solidAndTranslucent = setOf("minecraft:solid", "minecraft:translucent")
+        return if (renderTypes == solidAndTranslucent) null to renderTypes else null
+    }
+
+    private fun directModelRenderType(expression: String): String? {
+        val match = Regex("""^(?:net\.minecraft\.client\.renderer\.)?RenderType\.(\w+)\s*\(\s*\)$""")
+            .matchEntire(expression)
+            ?: return null
+        return when (match.groupValues[1]) {
+            "solid" -> "minecraft:solid"
+            "cutout" -> "minecraft:cutout"
+            "cutoutMipped" -> "minecraft:cutout_mipped"
+            "translucent" -> "minecraft:translucent"
+            "tripwire" -> "minecraft:tripwire"
+            else -> null
+        }
+    }
+
+    private fun collectRegisteredBlockIds(javaFiles: List<Path>): Map<String, String> {
+        val qualified = linkedMapOf<String, String>()
+        val byField = linkedMapOf<String, MutableSet<String>>()
+        val id = """[A-Za-z_$][\w$]*"""
+        val fieldPattern = Regex(
+            """(?s)\bpublic\s+static\s+final\s+[^=;]*(?:\bBlock\b|DeferredHolder\s*<\s*Block\b)[^=;]*\s+($id)\s*=\s*[^;]*?\.register\s*\(\s*"([^"]+)"""
+        )
+        javaFiles.forEach { file ->
+            val source = file.readText()
+            val code = maskJavaComments(source)
+            val executableCode = maskJavaCommentsAndLiterals(source)
+            val className = classNameOfJavaSource(executableCode) ?: return@forEach
+            fieldPattern.findAll(code).forEach { match ->
+                val fieldName = match.groupValues[1]
+                val blockId = match.groupValues[2]
+                qualified["$className.$fieldName"] = blockId
+                byField.getOrPut(fieldName) { linkedSetOf() } += blockId
+            }
+        }
+        byField.forEach { (fieldName, ids) ->
+            if (ids.size == 1) {
+                qualified[fieldName] = ids.single()
+            }
+        }
+        return qualified
+    }
+
+    private fun resolveRegisteredBlockId(blockIds: Map<String, String>, ownerName: String?, fieldName: String): String? =
+        ownerName?.let { blockIds["$it.$fieldName"] } ?: blockIds[fieldName]
+
+    private fun modelFilesForBlockResource(resourceRoots: List<Path>, blockId: String): Set<Path> {
+        val blockstateFiles = resourceRoots.flatMap { root ->
+            val assets = root.resolve("assets")
+            if (!assets.exists()) {
+                emptyList()
+            } else {
+                Files.list(assets).use { namespaces ->
+                    namespaces
+                        .filter { it.isDirectory() }
+                        .map { it.resolve("blockstates/$blockId.json") }
+                        .filter { it.exists() }
+                        .toList()
+                }
+            }
+        }
+        if (blockstateFiles.isEmpty()) return emptySet()
+
+        val modelIds = linkedSetOf<String>()
+        blockstateFiles.forEach { blockstateFile ->
+            val root = parseStructuralResourceJson(blockstateFile.readText()) ?: return@forEach
+            val namespace = blockstateFile.parent?.parent?.fileName?.toString() ?: return@forEach
+            collectModelIds(root, modelIds, namespace)
+        }
+        if (modelIds.isEmpty()) return emptySet()
+
+        val modelFiles = linkedSetOf<Path>()
+        modelIds.forEach { modelId ->
+            val namespace = modelId.substringBefore(':')
+            val path = modelId.substringAfter(':', modelId)
+            resourceRoots
+                .map { it.resolve("assets/$namespace/models/$path.json") }
+                .firstOrNull { it.exists() }
+                ?.let { modelFiles.add(it) }
+                ?: return emptySet()
+        }
+        return modelFiles
+    }
+
+    private fun collectModelIds(element: JsonElement, output: MutableSet<String>, defaultNamespace: String) {
+        when (element) {
+            is JsonObject -> element.forEach { (key, value) ->
+                if (key == "model" && value is JsonPrimitive && value.isString) {
+                    val modelId = value.content
+                    output += if (':' in modelId) modelId else "$defaultNamespace:$modelId"
+                } else {
+                    collectModelIds(value, output, defaultNamespace)
+                }
+            }
+            is JsonArray -> element.forEach { collectModelIds(it, output, defaultNamespace) }
+            else -> {}
+        }
+    }
+
+    private fun ensureModelRenderTypes(
+        modelFiles: Set<Path>,
+        renderType: String?,
+        allowedRenderTypes: Set<String>,
+        dryRun: Boolean,
+        changes: MutableList<Change>
+    ): Boolean {
+        val migrated = linkedMapOf<Path, JsonObject>()
+        modelFiles.forEach { modelFile ->
+            val root = parseStructuralResourceJson(modelFile.readText()) as? JsonObject ?: return false
+            val migration = ensureModelRenderType(root, renderType, allowedRenderTypes) ?: return false
+            if (migration.changed) {
+                migrated[modelFile] = migration.element
+            }
+        }
+        migrated.forEach { (modelFile, element) ->
+            changes.add(Change(
+                file = modelFile,
+                line = 0,
+                description = "Write model render_type for migrated render-layer registration",
+                before = "(missing model render_type)",
+                after = renderType ?: allowedRenderTypes.sorted().joinToString("|"),
+                confidence = Confidence.HIGH,
+                ruleId = "struct-render-layer-model-render-type"
+            ))
+            if (!dryRun) {
+                modelFile.writeText(STRUCTURAL_RESOURCE_JSON.encodeToString(JsonElement.serializer(), element) + "\n")
+            }
+        }
+        return true
+    }
+
+    private fun ensureModelRenderType(
+        root: JsonObject,
+        renderType: String?,
+        allowedRenderTypes: Set<String>
+    ): RenderLayerModelMigration? {
+        val fallbackRenderType = renderType ?: "minecraft:solid".takeIf { it in allowedRenderTypes }
+        val existing = root["render_type"] as? JsonPrimitive
+        if (existing != null) {
+            return if (existing.isString && existing.content in allowedRenderTypes) {
+                RenderLayerModelMigration(root, changed = false)
+            } else {
+                null
+            }
+        }
+
+        val loader = (root["loader"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        if (loader == "neoforge:composite") {
+            val children = root["children"] as? JsonObject ?: return RenderLayerModelMigration(root, changed = false)
+            var changed = false
+            val migratedChildren = linkedMapOf<String, JsonElement>()
+            children.forEach { (name, child) ->
+                val childObject = child as? JsonObject ?: return null
+                val childExisting = childObject["render_type"] as? JsonPrimitive
+                if (childExisting != null) {
+                    if (!childExisting.isString || childExisting.content !in allowedRenderTypes) return null
+                    migratedChildren[name] = childObject
+                } else {
+                    val childRenderType = fallbackRenderType ?: return null
+                    val entries = linkedMapOf<String, JsonElement>()
+                    childObject.forEach { (key, value) -> entries[key] = value }
+                    entries["render_type"] = JsonPrimitive(childRenderType)
+                    migratedChildren[name] = JsonObject(entries)
+                    changed = true
+                }
+            }
+            if (!changed) return RenderLayerModelMigration(root, changed = false)
+            val entries = linkedMapOf<String, JsonElement>()
+            root.forEach { (key, value) ->
+                entries[key] = if (key == "children") JsonObject(migratedChildren) else value
+            }
+            return RenderLayerModelMigration(JsonObject(entries), changed = true)
+        }
+
+        val modelRenderType = fallbackRenderType ?: return null
+
+        val entries = linkedMapOf<String, JsonElement>()
+        var inserted = false
+        root.forEach { (key, value) ->
+            if (!inserted && key == "parent") {
+                entries[key] = value
+                entries["render_type"] = JsonPrimitive(modelRenderType)
+                inserted = true
+            } else {
+                entries[key] = value
+            }
+        }
+        if (!inserted) {
+            entries["render_type"] = JsonPrimitive(modelRenderType)
+        }
+        return RenderLayerModelMigration(JsonObject(entries), changed = true)
+    }
+
+    private fun migrateLegacyItemHandlerHelperStackComparisons(source: String): String {
+        val executableCode = maskJavaCommentsAndLiterals(source)
+        if (!executableCode.contains("ItemHandlerHelper.canItemStacksStack(")) return source
+        var result = rewriteExecutableJavaCall(source, "canItemStacksStack") { receiver, args ->
+            if (receiver != "ItemHandlerHelper" || args.size != 2) return@rewriteExecutableJavaCall null
+            "net.minecraft.world.item.ItemStack.isSameItemSameComponents(${args[0].trim()}, ${args[1].trim()})"
+        }
+        val withoutImport = removeImport(result, "net.neoforged.neoforge.items.ItemHandlerHelper")
+        result = if (!Regex("""\bItemHandlerHelper\b""").containsMatchIn(maskJavaCommentsAndLiterals(withoutImport))) {
+            withoutImport
+        } else {
+            result
+        }
+        return result
+    }
+
     private data class HolderLookupProviderThreadTarget(
         val owner: String,
         val name: String,
@@ -2624,374 +2887,4 @@ $targetAccess EntityDimensions $targetMethodName(Pose $poseName) {
             result = removeImport(result, "net.neoforged.neoforge.event.EventHooks")
         }
         return cleanupRedundantBlankLines(result)
-    }
-
-    private fun migrateLegacyLootAndRegistryAccess(
-        source: String,
-        legacyLootTableResourceLocationReferences: Set<String>
-    ): String {
-        var result = source
-        var needsBlocks = false
-        var needsResourceKey = false
-        var needsRegistries = false
-        var needsLootTable = false
-
-        if (result.contains(".getLootData()")) {
-            result = result.replace(".getLootData()", ".reloadableRegistries()")
-        }
-
-        if (result.contains(".getLootTable(")) {
-            result = rewriteJavaCall(result, "getLootTable") { receiver, args ->
-                if (args.size != 1) return@rewriteJavaCall null
-                val lootTable = args[0].trim()
-                val nestedLootTableKey = unwrapLootTableResourceKeyCreate(lootTable)
-                if (nestedLootTableKey != null &&
-                    (isLootTableResourceKeyExpression(nestedLootTableKey, legacyLootTableResourceLocationReferences) ||
-                        isLocalLootTableResourceKeyExpression(result, nestedLootTableKey))) {
-                    return@rewriteJavaCall "$receiver.getLootTable($nestedLootTableKey)"
-                }
-                if (isLocalLootTableResourceKeyExpression(result, lootTable)) {
-                    return@rewriteJavaCall null
-                }
-                if (isLootTableResourceKeyExpression(lootTable, legacyLootTableResourceLocationReferences)) {
-                    null
-                } else {
-                    needsResourceKey = true
-                    needsRegistries = true
-                    "$receiver.getLootTable(ResourceKey.create(Registries.LOOT_TABLE, $lootTable))"
-                }
-            }
-            result = rewriteJavaCall(result, "getLootTable") { receiver, args ->
-                if (args.size != 1 || !receiver.endsWith(".getResolver()")) return@rewriteJavaCall null
-                val key = args[0].trim()
-                if (unwrapLootTableResourceKeyCreate(key) == null &&
-                    !isLocalLootTableResourceKeyExpression(result, key) &&
-                    !isLootTableResourceKeyExpression(key, legacyLootTableResourceLocationReferences)) {
-                    return@rewriteJavaCall null
-                }
-                needsRegistries = true
-                "$receiver.lookupOrThrow(Registries.LOOT_TABLE).getOrThrow($key).value()"
-            }
-        }
-
-        if (maskJavaCommentsAndLiterals(result).contains("new AdvancementRewards(")) {
-            result = rewriteExecutableJavaNew(result, "AdvancementRewards") { args ->
-                if (args.size != 4) return@rewriteExecutableJavaNew null
-                val lootList = legacyResourceLocationArrayToList(args[1]) { entry ->
-                    if (isLootTableResourceKeyExpression(entry, legacyLootTableResourceLocationReferences)) {
-                        entry
-                    } else {
-                        needsResourceKey = true
-                        needsRegistries = true
-                        "ResourceKey.create(Registries.LOOT_TABLE, $entry)"
-                    }
-                } ?: return@rewriteExecutableJavaNew null
-                val recipeList = legacyResourceLocationArrayToList(args[2]) { it } ?: return@rewriteExecutableJavaNew null
-                "new AdvancementRewards(${args[0].trim()}, $lootList, $recipeList, ${args[3].trim()})"
-            }
-        }
-
-        if (result.contains("LootTableIdCondition.builder(")) {
-            result = rewriteJavaCall(result, "builder") { receiver, args ->
-                if (receiver != "LootTableIdCondition" || args.size != 1) return@rewriteJavaCall null
-                val lootTable = args[0].trim()
-                if (!isLootTableResourceKeyExpression(lootTable, legacyLootTableResourceLocationReferences) || lootTable.endsWith(".location()")) {
-                    null
-                } else {
-                    "$receiver.builder($lootTable.location())"
-                }
-            }
-        }
-
-        if (result.contains("LootTableSubProvider") &&
-            result.contains("BiConsumer<ResourceLocation, LootTable.Builder>")) {
-            result = result.replace(
-                "BiConsumer<ResourceLocation, LootTable.Builder>",
-                "BiConsumer<ResourceKey<LootTable>, LootTable.Builder>"
-            )
-            needsResourceKey = true
-            needsLootTable = true
-            result = rewriteExecutableJavaCall(result, "accept") { receiver, args ->
-                if (receiver.isBlank() || args.size != 2) return@rewriteExecutableJavaCall null
-                val key = args[0].trim()
-                if (key.startsWith("ResourceKey.") ||
-                    key.contains("ResourceKey.create(") ||
-                    isLootTableResourceKeyExpression(key, legacyLootTableResourceLocationReferences)) {
-                    null
-                } else {
-                    needsResourceKey = true
-                    needsRegistries = true
-                    "$receiver.accept(ResourceKey.create(Registries.LOOT_TABLE, $key), ${args[1].trim()})"
-                }
-            }
-            val withoutResourceLocation = removeImport(result, "net.minecraft.resources.ResourceLocation")
-            if (!Regex("""\bResourceLocation\b""").containsMatchIn(withoutResourceLocation)) {
-                result = withoutResourceLocation
-            }
-        }
-
-        if (result.contains("NestedLootTable.lootTableReference(")) {
-            result = migrateMethodCalls(result, "NestedLootTable.lootTableReference") { args ->
-                if (args.size == 1 && !args[0].contains("ResourceKey.create(")) {
-                    needsResourceKey = true
-                    needsRegistries = true
-                    listOf("ResourceKey.create(Registries.LOOT_TABLE, ${args[0].trim()})")
-                } else {
-                    args
-                }
-            }
-        }
-
-        if (result.contains("ResourceLocation") && result.contains("register(")) {
-            val beforeLootKeys = result
-            result = migrateLegacyLootTableResourceLocationRegistry(result, legacyLootTableResourceLocationReferences)
-            if (result != beforeLootKeys) {
-                needsResourceKey = true
-                needsRegistries = true
-                needsLootTable = true
-            }
-        }
-
-        if (result.contains("ResourceLocation") &&
-            (result.contains("LootTable") || result.contains("getLootLocation("))) {
-            val beforeLootMethods = result
-            result = Regex(
-                """(?m)^([ \t]*(?:public|protected|private)?\s*(?:abstract\s+)?(?:@\w+(?:\([^)]*\))?\s+)*)ResourceLocation(\s+[A-Za-z_$][\w$]*LootTable\s*\()"""
-            ).replace(result) { match ->
-                needsResourceKey = true
-                needsLootTable = true
-                "${match.groupValues[1]}ResourceKey<LootTable>${match.groupValues[2]}"
-            }
-            result = Regex(
-                """(?m)^([ \t]*(?:public|protected|private)?\s*(?:abstract\s+)?(?:@\w+(?:\([^)]*\))?\s+)*)ResourceLocation(\s+get[A-Za-z_$][\w$]*LootTable\s*\()"""
-            ).replace(result) { match ->
-                needsResourceKey = true
-                needsLootTable = true
-                "${match.groupValues[1]}ResourceKey<LootTable>${match.groupValues[2]}"
-            }
-            result = Regex(
-                """(?m)^([ \t]*(?:public|protected|private)?\s*(?:abstract\s+)?(?:@\w+(?:\([^)]*\))?\s+)*)ResourceLocation(\s+get[A-Za-z_$][\w$]*LootLocation\s*\()"""
-            ).replace(result) { match ->
-                needsResourceKey = true
-                needsLootTable = true
-                "${match.groupValues[1]}ResourceKey<LootTable>${match.groupValues[2]}"
-            }
-            result = Regex(
-                """(?m)^([ \t]*(?:public|protected|private)?\s*(?:abstract\s+)?(?:@\w+(?:\([^)]*\))?\s+)*)ResourceLocation(\s+getLootLocation\s*\()"""
-            ).replace(result) { match ->
-                needsResourceKey = true
-                needsLootTable = true
-                "${match.groupValues[1]}ResourceKey<LootTable>${match.groupValues[2]}"
-            }
-            if (result != beforeLootMethods) {
-                val withoutResourceLocation = removeImport(result, "net.minecraft.resources.ResourceLocation")
-                if (!Regex("""\bResourceLocation\b""").containsMatchIn(withoutResourceLocation)) {
-                    result = withoutResourceLocation
-                }
-            }
-        }
-
-        result = Regex(
-            """BuiltInRegistries\.BLOCK\.tags\(\)\.getTag\(([^)]+)\)\.getRandomElement\(((?:[^()]|\([^()]*\))+)\)\.get\(\)\.defaultBlockState\(\)"""
-        ).replace(result) { match ->
-            needsBlocks = true
-            "BuiltInRegistries.BLOCK.getRandomElementOf(${match.groupValues[1].trim()}, ${match.groupValues[2].trim()}).map(holder -> holder.value().defaultBlockState()).orElseGet(Blocks.AIR::defaultBlockState)"
-        }
-        result = result.replace("Objects.requireNonNull(BuiltInRegistries.BLOCK.tags()).getTagNames()", "BuiltInRegistries.BLOCK.getTagNames()")
-        result = Regex("""Objects\.requireNonNull\(BuiltInRegistries\.BLOCK\.tags\(\)\)\.getTag\(([^)]+)\)""")
-            .replace(result) { match -> "BuiltInRegistries.BLOCK.getOrCreateTag(${match.groupValues[1].trim()})" }
-        result = Regex("""BuiltInRegistries\.BLOCK\.tags\(\)\.getTag\(([^)]+)\)""")
-            .replace(result) { match -> "BuiltInRegistries.BLOCK.getOrCreateTag(${match.groupValues[1].trim()})" }
-
-        if (needsBlocks) result = addImportIfMissing(result, "net.minecraft.world.level.block.Blocks")
-        if (needsResourceKey) result = addImportIfMissing(result, "net.minecraft.resources.ResourceKey")
-        if (needsRegistries) result = addImportIfMissing(result, "net.minecraft.core.registries.Registries")
-        if (needsLootTable || (needsResourceKey && result.contains("ResourceKey<LootTable>"))) {
-            result = addImportIfMissing(result, "net.minecraft.world.level.storage.loot.LootTable")
-        }
-        return result
-    }
-
-    private fun collectLegacyLootTableResourceLocationReferences(javaFiles: List<Path>): Set<String> {
-        val references = linkedSetOf<String>()
-        fun addReference(expression: String) {
-            val normalized = expression
-                .trim()
-                .removeSuffix(".location()")
-                .removeSurrounding("(", ")")
-                .trim()
-            if (Regex("""(?:[A-Za-z_$][\w$]*\.)?(?:[A-Z][A-Z0-9_]*|[A-Za-z_$][\w$]*\(\))""").matches(normalized)) {
-                references += normalized
-            }
-        }
-
-        javaFiles.forEach { javaFile ->
-            val source = javaFile.readText()
-            if (!source.contains("LootTable")) return@forEach
-            var cursor = 0
-            while (true) {
-                val match = Regex("""new\s+LootTableProvider\s*\(""").find(source, cursor) ?: break
-                val openParen = source.indexOf('(', match.range.last)
-                val closeParen = findMatchingParen(source, openParen)
-                if (closeParen < 0) {
-                    cursor = match.range.last + 1
-                    continue
-                }
-                val args = splitTopLevelJavaArgs(source.substring(openParen + 1, closeParen))
-                if (args.size >= 2) addReference(args[1])
-                cursor = closeParen + 1
-            }
-            Regex("""register\.accept\s*\(\s*([^,]+?)\s*,\s*LootTable\.lootTable\s*\(""")
-                .findAll(source)
-                .forEach { addReference(it.groupValues[1]) }
-            Regex("""NestedLootTable\.lootTableReference\s*\(\s*([^)]+?)\s*\)""")
-                .findAll(source)
-                .forEach { addReference(it.groupValues[1]) }
-            Regex("""LootTableIdCondition\.builder\s*\(\s*([^)]+?)\s*\)""")
-                .findAll(source)
-                .forEach { addReference(it.groupValues[1]) }
-            Regex("""new\s+ResourceLocation\s*\[\s*]\s*\{([^}]*)}""")
-                .findAll(source)
-                .forEach { match ->
-                    splitTopLevelJavaArgs(match.groupValues[1]).forEach(::addReference)
-                }
-        }
-        return references
-    }
-
-    private fun migrateLegacyLootTableResourceLocationRegistry(
-        source: String,
-        legacyLootTableResourceLocationReferences: Set<String>
-    ): String {
-        if (!Regex("""(?m)^\s*private\s+static\s+ResourceLocation\s+register\s*\(""").containsMatchIn(source) &&
-            !Regex("""(?m)^\s*(?:public|protected|private)?\s*static\s+final\s+Set\s*<\s*ResourceLocation\s*>""").containsMatchIn(source)) {
-            return source
-        }
-
-        var result = source
-        val ownerClass = classNameOfJavaSource(source) ?: return source
-        val ownerPackage = packageNameOf(source)
-        fun isProvenLootReference(fieldName: String): Boolean {
-            if (fieldName in legacyLootTableResourceLocationReferences) return true
-            if (ownerClass.isNotBlank() && "$ownerClass.$fieldName" in legacyLootTableResourceLocationReferences) return true
-            if (ownerClass.isNotBlank() && ownerPackage.isNotBlank() &&
-                "$ownerPackage.$ownerClass.$fieldName" in legacyLootTableResourceLocationReferences) {
-                return true
-            }
-            return false
-        }
-        val staticResourceLocationSetPattern = Regex(
-            """(?m)^([ \t]*(?:public|protected|private)?\s*static\s+final\s+)Set\s*<\s*ResourceLocation\s*>(\s+([A-Za-z_$][\w$]*)\s*=)"""
-        )
-        val resourceLocationSetNames = staticResourceLocationSetPattern.findAll(result)
-            .map { it.groupValues[3] }
-            .toSet()
-        val registerSetNames = legacyResourceLocationRegisterSets(result, resourceLocationSetNames)
-        val setAliases = legacyResourceLocationSetAliases(result, resourceLocationSetNames)
-        val setReturnMethods = legacyResourceLocationSetReturnMethods(result, resourceLocationSetNames)
-        fun isProvenLootSetReference(fieldName: String): Boolean {
-            if (isProvenLootReference(fieldName)) return true
-            return setReturnMethods
-                .filterValues { returnedField -> returnedField == fieldName }
-                .keys
-                .any { methodName ->
-                    "$methodName()" in legacyLootTableResourceLocationReferences ||
-                        "$ownerClass.$methodName()" in legacyLootTableResourceLocationReferences ||
-                        (ownerPackage.isNotBlank() &&
-                            "$ownerPackage.$ownerClass.$methodName()" in legacyLootTableResourceLocationReferences)
-                }
-        }
-        fun expandSetAliases(seed: Set<String>): Set<String> {
-            val expanded = seed.toCollection(linkedSetOf())
-            var changed: Boolean
-            do {
-                changed = false
-                setAliases.forEach { (alias, target) ->
-                    if (target in expanded && expanded.add(alias)) changed = true
-                    if (alias in expanded && expanded.add(target)) changed = true
-                }
-            } while (changed)
-            return expanded
-        }
-        val directlyProvenSetNames = resourceLocationSetNames.filterTo(linkedSetOf(), ::isProvenLootReference)
-        val provenSetNames = registerSetNames.filterTo(linkedSetOf(), ::isProvenLootSetReference) + directlyProvenSetNames
-        val provenRegisteredFieldNames = Regex(
-            """(?m)^\s*public\s+static\s+final\s+ResourceLocation\s+([A-Z0-9_]+)\s*=\s*register\("""
-        ).findAll(result)
-            .map { it.groupValues[1] }
-            .filterTo(linkedSetOf(), ::isProvenLootReference)
-        val baseLootSetNames = when {
-            provenSetNames.isNotEmpty() -> provenSetNames
-            provenRegisteredFieldNames.isNotEmpty() -> registerSetNames
-            else -> emptySet()
-        }
-        val lootSetNames = expandSetAliases(baseLootSetNames)
-        if (lootSetNames.isEmpty()) return source
-        if (!Regex("""(?m)^\s*public\s+static\s+final\s+ResourceLocation\s+[A-Z0-9_]+\s*=\s*register\(""").containsMatchIn(result) &&
-            staticResourceLocationSetPattern.findAll(result).none { it.groupValues[3] in lootSetNames }) {
-            return source
-        }
-
-        result = staticResourceLocationSetPattern.replace(result) { match ->
-            if (match.groupValues[3].contains("loot", ignoreCase = true)) {
-                "${match.groupValues[1]}Set<ResourceKey<LootTable>>${match.groupValues[2]}"
-            } else {
-                match.value
-            }
-        }
-        result = Regex(
-            """(?m)^([ \t]*public\s+static\s+final\s+)ResourceLocation(\s+[A-Z0-9_]+\s*=\s*register\()"""
-        ).replace(result, "$1ResourceKey<LootTable>$2")
-        result = Regex(
-            """(?m)^([ \t]*(?:public|protected|private)?\s*(?:final\s+)?)ResourceLocation(\s+[A-Za-z_$][\w$]*(?:Loot|loot)[A-Za-z_$][\w$]*\s*;)"""
-        ).replace(result, "$1ResourceKey<LootTable>$2")
-        result = Regex(
-            """(?m)^([ \t]*(?:public|protected|private)?\s*(?:static\s+)?)Set\s*<\s*ResourceLocation\s*>(\s+[A-Za-z_$][\w$]*Builtin\s*\()"""
-        ).replace(result, "$1Set<ResourceKey<LootTable>>$2")
-        result = Regex(
-            """this\.([A-Za-z_$][\w$]*)\s*=\s*((?:[^;]|\([^;]*\))+);"""
-        ).replace(result) { match ->
-            if (!match.groupValues[1].contains("loot", ignoreCase = true)) return@replace match.value
-            val expression = match.groupValues[2].trim()
-            if (expression.startsWith("ResourceKey.create(")) {
-                match.value
-            } else {
-                "this.${match.groupValues[1]} = ResourceKey.create(Registries.LOOT_TABLE, $expression);"
-            }
-        }
-        result = Regex(
-            """private\s+static\s+ResourceLocation\s+register\s*\(\s*String\s+([A-Za-z_$][\w$]*)\s*\)\s*\{\s*return\s+register\(\s*((?:[^;]|\([^;]*\))+?)\s*\);\s*\}""",
-            RegexOption.DOT_MATCHES_ALL
-        ).replace(result) { match ->
-            val idVar = match.groupValues[1]
-            val expression = match.groupValues[2].trim()
-            val keyExpression = if (expression.startsWith("ResourceKey.create(")) {
-                expression
-            } else {
-                "ResourceKey.create(Registries.LOOT_TABLE, $expression)"
-            }
-            "private static ResourceKey<LootTable> register(String $idVar) {\n\t\treturn register($keyExpression);\n\t}"
-        }
-        result = Regex("""private\s+static\s+ResourceLocation\s+register\s*\(\s*ResourceLocation\s+([A-Za-z_$][\w$]*)\s*\)""")
-            .replace(result) { match -> "private static ResourceKey<LootTable> register(ResourceKey<LootTable> ${match.groupValues[1]})" }
-        val withoutResourceLocation = removeImport(result, "net.minecraft.resources.ResourceLocation")
-        if (!Regex("""\bResourceLocation\b""").containsMatchIn(withoutResourceLocation)) {
-            result = withoutResourceLocation
-        }
-        return result
-    }
-
-    private fun legacyResourceLocationSetAliases(source: String, setNames: Set<String>): Map<String, String> {
-        val result = linkedMapOf<String, String>()
-        val pattern = Regex(
-            """(?ms)^[ \t]*(?:public|protected|private)?\s*static\s+final\s+Set\s*<\s*ResourceLocation\s*>\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]+);"""
-        )
-        pattern.findAll(source).forEach { match ->
-            val alias = match.groupValues[1]
-            val initializer = match.groupValues[2]
-            setNames
-                .firstOrNull { target -> target != alias && Regex("""\b${Regex.escape(target)}\b""").containsMatchIn(initializer) }
-                ?.let { target -> result[alias] = target }
-        }
-        return result
     }

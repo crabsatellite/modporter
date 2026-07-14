@@ -2555,12 +2555,6 @@ $migratedRecipes
             )
         }
 
-        if (result.contains(".save(new net.minecraft.nbt.CompoundTag())") && result.contains("Player player")) {
-            result = Regex("""([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*\(\))*)\.save\(new net\.minecraft\.nbt\.CompoundTag\(\)\)""")
-                .replace(result) { match ->
-                    "${match.groupValues[1]}.save(player.registryAccess(), new net.minecraft.nbt.CompoundTag())"
-                }
-        }
         result = migrateCopiedCustomDataWrites(result)
         result = migrateStructurePlaceSettingsLiquidSettingsSource(result)
 

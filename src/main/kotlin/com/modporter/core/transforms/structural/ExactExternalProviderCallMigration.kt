@@ -32,6 +32,12 @@ internal class ExactExternalProviderCallMigration {
         val providerNames: Map<String, String>
     )
 
+    private data class PendingRegistryBufferFamily(
+        val key: String,
+        val members: List<JavaProjectTypeIndex.ExactProjectMethod>,
+        val parameterIndex: Int
+    )
+
     fun migrate(projectDir: Path, dryRun: Boolean): List<Change> {
         val sourceRoot = projectDir.resolve("src/main/java")
         if (!Files.isDirectory(sourceRoot)) return emptyList()
@@ -53,9 +59,56 @@ internal class ExactExternalProviderCallMigration {
         }
         val pendingRewrites = mutableListOf<PendingRewrite>()
         val pendingFamilies = linkedMapOf<String, PendingFamily>()
+        val pendingRegistryBufferFamilies = linkedMapOf<String, PendingRegistryBufferFamily>()
         candidateFiles.forEach { file ->
-            unit(file).findAll(MethodCallExpr::class.java).toList().forEach { call ->
-                val rewrite = ExactExternalProviderContracts.callRewrite(call, index) ?: return@forEach
+            unit(file).findAll(MethodCallExpr::class.java).toList().forEach calls@ { call ->
+                if (ExactExternalProviderContracts.callRewrite(call, index) == null) return@calls
+                val caller = call.findAncestor(MethodDeclaration::class.java).orElseThrow {
+                    IllegalStateException("Exact external provider call '$call' is not enclosed by a method")
+                }
+                if (exactDeclaredProviderExpression(caller, index) != null) return@calls
+                val legacyBuffers = caller.parameters.withIndex().filter { (_, parameter) ->
+                    index.declaredType(parameter.type, caller) == FRIENDLY_BYTE_BUF
+                }
+                if (legacyBuffers.size > 1) {
+                    throw IllegalStateException(
+                        "Ambiguous FriendlyByteBuf provider boundaries in ${caller.nameAsString}"
+                    )
+                }
+                val legacyBuffer = legacyBuffers.singleOrNull() ?: return@calls
+                val family = index.exactProjectOverrideFamily(caller) ?: throw IllegalStateException(
+                    "Cannot prove a closed project override family for FriendlyByteBuf provider boundary " +
+                        "${caller.nameAsString}"
+                )
+                val familyKey = family.joinToString("|") { member ->
+                    "${member.owner}.${member.method.nameAsString}/${member.method.parameters.size}"
+                }
+                pendingRegistryBufferFamilies.getOrPut(familyKey) {
+                    family.forEach { member ->
+                        val parameter = member.method.parameters.getOrNull(legacyBuffer.index)
+                            ?: throw IllegalStateException(
+                                "Registry buffer override family $familyKey has inconsistent arity"
+                            )
+                        if (index.declaredType(parameter.type, member.method) != FRIENDLY_BYTE_BUF) {
+                            throw IllegalStateException(
+                                "Registry buffer override family $familyKey is only partially legacy-compatible"
+                            )
+                        }
+                    }
+                    PendingRegistryBufferFamily(familyKey, family, legacyBuffer.index)
+                }
+            }
+        }
+        pendingRegistryBufferFamilies.values.forEach { family ->
+            family.members.forEach { member ->
+                ensureLexical(member.file)
+                unit(member.file).addImport(REGISTRY_FRIENDLY_BYTE_BUF)
+                member.method.parameters[family.parameterIndex].setType("RegistryFriendlyByteBuf")
+            }
+        }
+        candidateFiles.forEach { file ->
+            unit(file).findAll(MethodCallExpr::class.java).toList().forEach calls@ { call ->
+                val rewrite = ExactExternalProviderContracts.callRewrite(call, index) ?: return@calls
                 val caller = call.findAncestor(MethodDeclaration::class.java).orElseThrow {
                     IllegalStateException("Exact external provider call '$call' is not enclosed by a method")
                 }
@@ -109,6 +162,7 @@ internal class ExactExternalProviderCallMigration {
         val changedFiles = linkedSetOf<Path>().apply {
             addAll(pendingRewrites.map { it.file.toAbsolutePath().normalize() })
             addAll(pendingFamilies.values.flatMap { family -> family.members.map { it.file } })
+            addAll(pendingRegistryBufferFamilies.values.flatMap { family -> family.members.map { it.file } })
         }
         val changes = mutableListOf<Change>()
         changedFiles.forEach { file ->
@@ -142,6 +196,7 @@ internal class ExactExternalProviderCallMigration {
         caller: MethodDeclaration,
         index: JavaProjectTypeIndex
     ): String? {
+        ExactExternalProviderContracts.providerExpression(caller, index)?.let { return it }
         val typedParameters = caller.parameters.mapNotNull { parameter ->
             if (hasNullableEvidence(parameter, caller)) return@mapNotNull null
             val type = index.declaredType(parameter.type, caller) ?: return@mapNotNull null
@@ -182,6 +237,8 @@ internal class ExactExternalProviderCallMigration {
     private companion object {
         const val HOLDER_LOOKUP_PROVIDER = "net.minecraft.core.HolderLookup.Provider"
         const val REGISTRY_ACCESS = "net.minecraft.core.RegistryAccess"
+        const val FRIENDLY_BYTE_BUF = "net.minecraft.network.FriendlyByteBuf"
+        const val REGISTRY_FRIENDLY_BYTE_BUF = "net.minecraft.network.RegistryFriendlyByteBuf"
         val LEVEL_PROVIDER_TYPES = setOf(
             "net.minecraft.world.level.Level",
             "net.minecraft.server.level.ServerLevel",

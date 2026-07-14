@@ -61,6 +61,15 @@ internal fun exactEnclosingNamedClass(node: Node): TypeDeclaration<*>? {
 
 /** Lazily resolves project-source types from explicit Java structure, without heuristic fallback. */
 internal class JavaProjectTypeIndex private constructor(private val sourceRoot: Path) {
+    sealed interface ExactFieldQuery {
+        data object None : ExactFieldQuery
+        data class Unique(val field: Pair<String, String>) : ExactFieldQuery
+        data class Ambiguous(
+            val ownerType: String,
+            val fields: List<Pair<String, String>>
+        ) : ExactFieldQuery
+    }
+
     data class ExactProjectMethod(
         val owner: String,
         val file: Path,
@@ -86,6 +95,11 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         val name: String,
         val parameterTypes: List<TypeRef>,
         val returnType: TypeRef
+    )
+
+    private data class ExactMethodSignature(
+        val name: String,
+        val parameterTypes: List<String>
     )
 
     private fun methods(info: TypeInfo): List<MethodDeclaration> =
@@ -258,66 +272,109 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
     fun exactProjectOverrideFamily(
         seed: MethodDeclaration,
         rootVerifier: ((MethodDeclaration) -> Boolean)? = null
-    ): List<ExactProjectMethod>? {
-        if (seed.isStatic) return null
-        val seedOwner = exactEnclosingNamedClass(seed)?.fullyQualifiedName?.orElse(null) ?: return null
-        val seedTypes = seed.parameters.map { parameter ->
-            declaredType(parameter.type, seed) ?: return null
-        }
-        val methodName = seed.nameAsString
+    ): List<ExactProjectMethod>? = exactProjectOverrideFamilies(listOf(seed), rootVerifier).singleOrNull()
+
+    fun exactProjectOverrideFamilies(
+        seeds: Collection<MethodDeclaration>,
+        rootVerifier: ((MethodDeclaration) -> Boolean)? = null
+    ): List<List<ExactProjectMethod>> {
+        val seedsBySignature = seeds.mapNotNull { seed ->
+            if (seed.isStatic) return@mapNotNull null
+            val parameterTypes = seed.parameters.map { parameter ->
+                declaredType(parameter.type, seed) ?: return@mapNotNull null
+            }
+            ExactMethodSignature(seed.nameAsString, parameterTypes) to seed
+        }.groupBy({ it.first }, { it.second })
+        if (seedsBySignature.isEmpty()) return emptyList()
+
+        val seedNames = seedsBySignature.keys.mapTo(linkedSetOf()) { it.name }
+        val callableToken = Regex("""\b([A-Za-z_$][\w$]*)\s*\(""")
         Files.walk(sourceRoot).use { stream ->
             stream.filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".java") }
-                .filter { file -> runCatching { file.readText().contains("$methodName(") }.getOrDefault(false) }
+                .filter { file ->
+                    runCatching {
+                        callableToken.findAll(file.readText()).any { match -> match.groupValues[1] in seedNames }
+                    }.getOrDefault(false)
+                }
                 .forEach(::parseFile)
         }
-        val candidates = typesByQualifiedName.values.flatMap { info ->
+
+        val candidatesBySignature = typesByQualifiedName.values.flatMap { info ->
             methods(info).mapNotNull { method ->
-                if (method.isStatic || method.nameAsString != methodName || method.parameters.size != seedTypes.size) {
-                    return@mapNotNull null
-                }
+                if (method.isStatic || method.nameAsString !in seedNames) return@mapNotNull null
                 val parameterTypes = method.parameters.map { parameter ->
                     declaredType(parameter.type, method) ?: return@mapNotNull null
                 }
-                if (parameterTypes != seedTypes) return@mapNotNull null
+                val signature = ExactMethodSignature(method.nameAsString, parameterTypes)
+                if (signature !in seedsBySignature) return@mapNotNull null
                 val file = unitsByFile.entries.singleOrNull { (_, unit) -> unit === info.unit }?.key
-                    ?: throw IllegalStateException("Cannot locate source file for ${info.qualifiedName}.$methodName")
-                ExactProjectMethod(info.qualifiedName, file, method)
+                    ?: throw IllegalStateException(
+                        "Cannot locate source file for ${info.qualifiedName}.${method.nameAsString}"
+                    )
+                signature to ExactProjectMethod(info.qualifiedName, file, method)
             }
-        }
-        val seedCandidate = candidates.singleOrNull { it.owner == seedOwner && it.method === seed } ?: return null
-        val connected = linkedSetOf(seedCandidate)
-        var grew: Boolean
-        do {
-            grew = false
-            candidates.filterNot { it in connected }.forEach { candidate ->
-                if (connected.any { current ->
-                        isTypeAssignableTo(candidate.owner, current.owner) ||
-                            isTypeAssignableTo(current.owner, candidate.owner)
+        }.groupBy({ it.first }, { it.second })
+
+        val families = mutableListOf<List<ExactProjectMethod>>()
+        candidatesBySignature.forEach { (signature, signatureCandidates) ->
+            val signatureSeeds = seedsBySignature.getValue(signature)
+            val remaining = signatureCandidates.toMutableList()
+            while (remaining.isNotEmpty()) {
+                val connected = linkedSetOf(remaining.removeAt(0))
+                var grew: Boolean
+                do {
+                    grew = false
+                    val additions = remaining.filter { candidate ->
+                        connected.any { current ->
+                            isTypeAssignableTo(candidate.owner, current.owner) ||
+                                isTypeAssignableTo(current.owner, candidate.owner)
+                        }
                     }
-                ) {
-                    if (connected.add(candidate)) grew = true
+                    if (additions.isNotEmpty()) {
+                        connected.addAll(additions)
+                        remaining.removeAll(additions.toSet())
+                        grew = true
+                    }
+                } while (grew)
+                if (connected.none { candidate -> signatureSeeds.any { seed -> candidate.method === seed } }) {
+                    continue
                 }
-            }
-        } while (grew)
-        val roots = connected.filter { candidate ->
-            connected.none { other ->
-                other !== candidate && isTypeAssignableTo(candidate.owner, other.owner)
+                val roots = connected.filter { candidate ->
+                    connected.none { other ->
+                        other !== candidate && isTypeAssignableTo(candidate.owner, other.owner)
+                    }
+                }
+                val root = roots.singleOrNull() ?: continue
+                if (!(rootVerifier?.invoke(root.method) ?: isProvenNonOverride(root.method))) continue
+                families += connected.sortedBy { it.owner }
             }
         }
-        val root = roots.singleOrNull() ?: return null
-        if (!(rootVerifier?.invoke(root.method) ?: isProvenNonOverride(root.method))) return null
-        return connected.sortedBy { it.owner }
+        return families.sortedBy { family -> family.joinToString("|") { it.owner } }
     }
 
     fun exactDirectFieldWithType(
         root: NameExpr,
         use: Node,
         acceptedTypes: Set<String>
-    ): Pair<String, String>? {
-        val owner = exactEnclosingNamedClass(use) ?: return null
-        val ownerInfo = typeInfo(owner) ?: return null
-        val rootType = resolveExpression(root, use, ownerInfo, emptyMap()) ?: return null
-        val rootInfo = loadType(rootType.name) ?: return null
+    ): Pair<String, String>? = when (val query = exactDirectFieldQuery(root, use, acceptedTypes)) {
+        ExactFieldQuery.None -> null
+        is ExactFieldQuery.Unique -> query.field
+        is ExactFieldQuery.Ambiguous -> {
+            throw IllegalStateException(
+                "Ambiguous direct registry-provider fields on ${query.ownerType}: ${query.fields}"
+            )
+        }
+    }
+
+    fun exactDirectFieldQuery(
+        root: NameExpr,
+        use: Node,
+        acceptedTypes: Set<String>
+    ): ExactFieldQuery {
+        val owner = exactEnclosingNamedClass(use) ?: return ExactFieldQuery.None
+        val ownerInfo = typeInfo(owner) ?: return ExactFieldQuery.None
+        val rootType = resolveExpression(root, use, ownerInfo, emptyMap()) ?: return ExactFieldQuery.None
+        val rootInfo = loadType(rootType.name) ?: return ExactFieldQuery.None
         val substitutions = substitutions(rootInfo, rootType)
         val matches = fields(rootInfo).filterNot { it.isStatic }.flatMap { declaration ->
             declaration.variables.mapNotNull { field ->
@@ -329,25 +386,37 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 }
             }
         }.distinct()
-        if (matches.size > 1) {
-            throw IllegalStateException(
-                "Ambiguous direct registry-provider fields on ${rootType.name}: $matches"
-            )
-        }
-        return matches.singleOrNull()
+        return exactFieldQuery(rootType.name, matches)
     }
 
-    fun exactInstanceFieldWithType(use: Node, acceptedTypes: Set<String>): Pair<String, String>? {
-        val owner = exactEnclosingNamedClass(use) ?: return null
-        val ownerInfo = typeInfo(owner) ?: return null
-        val matches = collectFieldsWithTypes(TypeRef(ownerInfo.qualifiedName), acceptedTypes, mutableSetOf()).distinct()
-        collapseEquivalentPlayerInventoryFields(ownerInfo, matches)?.let { return it }
-        if (matches.size > 1) {
-            throw IllegalStateException(
-                "Ambiguous inherited registry-provider fields on ${ownerInfo.qualifiedName}: $matches"
-            )
+    fun exactInstanceFieldWithType(use: Node, acceptedTypes: Set<String>): Pair<String, String>? =
+        when (val query = exactInstanceFieldQuery(use, acceptedTypes)) {
+            ExactFieldQuery.None -> null
+            is ExactFieldQuery.Unique -> query.field
+            is ExactFieldQuery.Ambiguous -> {
+                throw IllegalStateException(
+                    "Ambiguous inherited registry-provider fields on ${query.ownerType}: ${query.fields}"
+                )
+            }
         }
-        return matches.singleOrNull()
+
+    fun exactInstanceFieldQuery(use: Node, acceptedTypes: Set<String>): ExactFieldQuery {
+        val owner = exactEnclosingNamedClass(use) ?: return ExactFieldQuery.None
+        val ownerInfo = typeInfo(owner) ?: return ExactFieldQuery.None
+        val matches = collectFieldsWithTypes(TypeRef(ownerInfo.qualifiedName), acceptedTypes, mutableSetOf()).distinct()
+        collapseEquivalentPlayerInventoryFields(ownerInfo, matches)?.let {
+            return ExactFieldQuery.Unique(it)
+        }
+        return exactFieldQuery(ownerInfo.qualifiedName, matches)
+    }
+
+    private fun exactFieldQuery(
+        ownerType: String,
+        matches: List<Pair<String, String>>
+    ): ExactFieldQuery = when (matches.size) {
+        0 -> ExactFieldQuery.None
+        1 -> ExactFieldQuery.Unique(matches.single())
+        else -> ExactFieldQuery.Ambiguous(ownerType, matches)
     }
 
     fun exactVisibleLocalInitializer(
@@ -466,7 +535,15 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         visited: MutableSet<String>
     ): List<Pair<String, String>> {
         if (!visited.add(receiver.toString())) return emptyList()
-        val info = loadType(receiver.name) ?: return emptyList()
+        val externalSubstitutions = receiver.arguments.singleOrNull()?.let { mapOf("T" to it) }.orEmpty()
+        val known = knownFields[receiver.name].orEmpty().mapNotNull { (name, field) ->
+            val type = substitute(field, externalSubstitutions)
+            (name to type.name).takeIf { (_, fieldType) ->
+                acceptedTypes.any { accepted -> isAssignableTo(type, accepted, mutableSetOf()) } ||
+                    fieldType in acceptedTypes
+            }
+        }
+        val info = loadType(receiver.name) ?: return known
         val substitutions = substitutions(info, receiver)
         val direct = fields(info).filterNot { it.isStatic }.flatMap { declaration ->
             declaration.variables.mapNotNull { field ->
@@ -478,7 +555,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
                 }
             }
         }
-        return direct + resolvedSupers(info, substitutions).flatMap { superType ->
+        return known + direct + resolvedSupers(info, substitutions).flatMap { superType ->
             collectFieldsWithTypes(superType, acceptedTypes, visited)
         }
     }
@@ -713,6 +790,10 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         visited: MutableSet<String>
     ): Boolean {
         if (!visited.add(receiver.toString())) return false
+        if (ExactExternalTypeContracts.hasClosedMethodSurface(receiver.name)) {
+            return parameterTypes.all { it.arrayDepth == 0 } &&
+                ExactExternalTypeContracts.containsMethod(receiver.name, name, parameterTypes.map { it.name })
+        }
         knownClosedExternalMethodSurfaces[receiver.name]?.let { surface ->
             return surface.any { signature ->
                 signature.name == name &&
@@ -746,12 +827,15 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
         visited: MutableSet<String>
     ): Boolean {
         if (!visited.add(qualifiedName)) return true
-        if (qualifiedName in knownClosedExternalMethodSurfaces) return true
+        if (qualifiedName in knownClosedExternalMethodSurfaces ||
+            ExactExternalTypeContracts.hasClosedMethodSurface(qualifiedName)
+        ) return true
         val info = loadType(qualifiedName) ?: return qualifiedName.startsWith("java.lang.")
         return info.directSupers.all { raw ->
             val resolved = resolveType(raw, info, emptyMap()) ?: return@all false
             resolved.name.startsWith("java.lang.") ||
                 resolved.name in knownClosedExternalMethodSurfaces ||
+                ExactExternalTypeContracts.hasClosedMethodSurface(resolved.name) ||
                 (loadType(resolved.name) != null && hasClosedProjectMethodHierarchy(resolved.name, visited))
         }
     }
@@ -1281,6 +1365,12 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
 
     private fun resolveField(receiver: TypeRef, name: String, visited: MutableSet<String>): TypeRef? {
         if (!visited.add(receiver.toString())) return null
+        knownIndexedGenericFields[receiver.name]?.get(name)?.let { argumentIndex ->
+            return receiver.arguments.getOrNull(argumentIndex)
+                ?: throw IllegalStateException(
+                    "Raw ${receiver.name} receiver has no exact generic type for field '$name'"
+                )
+        }
         knownFields[receiver.name]?.get(name)?.let { field ->
             val generic = receiver.arguments.singleOrNull()
             return substitute(field, if (generic == null) emptyMap() else mapOf("T" to generic))
@@ -1605,7 +1695,7 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             ),
             "java.util.List" to setOf("java.util.Collection", "java.lang.Iterable"),
             "java.util.Collection" to setOf("java.lang.Iterable")
-        )
+        ) + ExactExternalTypeContracts.assignableTypes
         // Flattened from the mapped Minecraft 1.21.1 and NeoForge 21.1 source
         // hierarchy. A surface is closed only when it includes every inherited
         // public or protected instance method, so absence is valid override proof.
@@ -1690,9 +1780,18 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             "Number", "Object", "Short", "String", "Throwable", "Void"
         ).associateWith { "java.lang.$it" }
         private val knownFields = mapOf(
-            "net.minecraft.client.gui.screens.inventory.AbstractContainerScreen" to mapOf("menu" to TypeRef("T")),
+            "net.minecraft.client.gui.screens.inventory.AbstractContainerScreen" to mapOf(
+                "menu" to TypeRef("T"),
+                "minecraft" to TypeRef("net.minecraft.client.Minecraft")
+            ),
             "net.minecraft.client.Minecraft" to mapOf(
                 "level" to TypeRef("net.minecraft.world.level.Level")
+            )
+        )
+        private val knownIndexedGenericFields = mapOf(
+            "org.apache.commons.lang3.tuple.MutablePair" to mapOf(
+                "left" to 0,
+                "right" to 1
             )
         )
         private val knownMethods = mapOf(

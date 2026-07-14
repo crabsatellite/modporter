@@ -366,6 +366,9 @@ internal class LegacyNbtProviderMethodMigration {
         }
 
         val parsedParameters = callable.parameters.mapNotNull { parameter ->
+            if (!ExactNullabilityProof.parameterProvenNonNullAt(parameter, callable, call)) {
+                return@mapNotNull null
+            }
             typeIndex.declaredType(parameter.type, callable)?.let { it to parameter.nameAsString }
         }
         unique(parsedParameters.mapNotNull { (type, name) ->
