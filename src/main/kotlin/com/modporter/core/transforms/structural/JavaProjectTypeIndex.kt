@@ -1456,7 +1456,17 @@ internal class JavaProjectTypeIndex private constructor(private val sourceRoot: 
             resolvingCallableBounds.remove(key)
             return resolved?.copy(arrayDepth = resolved.arrayDepth + raw.arrayDepth)
         }
-        return resolveType(raw, owner, substitutions)
+        val resolvedArguments = raw.arguments.map { argument ->
+            resolveLexicalType(
+                argument,
+                use,
+                owner,
+                substitutions,
+                resolvingCallableBounds
+            ) ?: return null
+        }
+        val resolvedRaw = resolveType(raw.copy(arguments = emptyList()), owner, substitutions) ?: return null
+        return resolvedRaw.copy(arguments = resolvedArguments)
     }
 
     private fun resolveType(

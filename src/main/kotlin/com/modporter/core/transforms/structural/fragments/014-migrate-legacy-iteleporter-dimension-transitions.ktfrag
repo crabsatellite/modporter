@@ -35,7 +35,8 @@
             result = removeImport(result, "net.minecraftforge.common.util.ITeleporter")
             result = addImportIfMissing(result, "net.minecraft.world.level.portal.DimensionTransition")
         }
-        if (Regex("""(?<![\w$])PortalInfo(?![\w$])""").containsMatchIn(result)) {
+        if (legacySignature != null &&
+            Regex("""(?<![\w$])PortalInfo(?![\w$])""").containsMatchIn(result)) {
             result = result.replace("import net.minecraft.world.level.portal.PortalInfo;", "import net.minecraft.world.level.portal.DimensionTransition;")
             if (!result.contains("import net.minecraft.world.level.portal.DimensionTransition;")) {
                 result = addImportIfMissing(result, "net.minecraft.world.level.portal.DimensionTransition")

@@ -226,4 +226,96 @@
         assertFalse(hooksText.contains("@EventBusSubscriber"), hooksText)
         assertFalse(hooksText.contains("@SubscribeEvent"), hooksText)
     }
+
+    @Test
+    fun `delegating entity portal overrides migrate to dimension transition exactly`() {
+        val projectDir = createFile("PortalEntity.java", """
+            package com.example;
+
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.world.level.portal.PortalInfo;
+
+            public class PortalEntity extends BasePortalEntity {
+                private static PortalInfo cachedTransition;
+
+                @Override
+                public PortalInfo findDimensionEntryPoint(ServerLevel destination) {
+                    return super.findDimensionEntryPoint(destination);
+                }
+
+                public PortalInfo customTransition(ServerLevel destination) {
+                    return calculateTransition(destination);
+                }
+
+                String documentation = "PortalInfo findDimensionEntryPoint";
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val migrated = projectDir.resolve("src/main/java/com/example/PortalEntity.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "struct-entity-delegating-dimension-transition" })
+        assertTrue(
+            migrated.contains("public DimensionTransition findDimensionEntryPoint(ServerLevel destination)"),
+            migrated
+        )
+        assertTrue(migrated.contains("return super.findDimensionEntryPoint(destination);"), migrated)
+        assertTrue(migrated.contains("private static PortalInfo cachedTransition;"), migrated)
+        assertTrue(migrated.contains("public PortalInfo customTransition(ServerLevel destination)"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.level.portal.DimensionTransition;"), migrated)
+        assertTrue(migrated.contains("import net.minecraft.world.level.portal.PortalInfo;"), migrated)
+        assertTrue(migrated.contains("\"PortalInfo findDimensionEntryPoint\""), migrated)
+    }
+
+    @Test
+    fun `registry key accessor migration requires exact registry receiver type`() {
+        val projectDir = createFile("RegistryAccess.java", """
+            package com.example;
+
+            import net.minecraft.core.Registry;
+            import net.neoforged.neoforge.registries.RegisterEvent;
+
+            public class RegistryAccess {
+                private final Registry<String> field;
+
+                public RegistryAccess(Registry<String> field) {
+                    this.field = field;
+                }
+
+                public <T> void collect(Registry<T> registry, RegisterEvent event) {
+                    registry.getRegistryKey();
+                    this.field.getRegistryKey();
+                    event.getRegistryKey();
+                    String documentation = "registry.getRegistryKey()";
+                }
+            }
+        """.trimIndent())
+        projectDir.resolve("src/main/java/com/example/UnrelatedRegistry.java").writeText("""
+            package com.example;
+
+            public class UnrelatedRegistry {
+                public Object getRegistryKey() {
+                    return null;
+                }
+
+                public void inspect(UnrelatedRegistry registry) {
+                    registry.getRegistryKey();
+                }
+            }
+        """.trimIndent())
+
+        val result = StructuralRefactorPass().apply(projectDir)
+        val registryAccess = projectDir.resolve("src/main/java/com/example/RegistryAccess.java").readText()
+        val unrelated = projectDir.resolve("src/main/java/com/example/UnrelatedRegistry.java").readText()
+
+        assertTrue(result.errors.isEmpty(), result.errors.joinToString("\n"))
+        assertTrue(result.changes.any { it.ruleId == "struct-registry-key-accessor" })
+        assertTrue(registryAccess.contains("registry.key();"), registryAccess)
+        assertTrue(registryAccess.contains("this.field.key();"), registryAccess)
+        assertTrue(registryAccess.contains("event.getRegistryKey();"), registryAccess)
+        assertTrue(registryAccess.contains("\"registry.getRegistryKey()\""), registryAccess)
+        assertTrue(unrelated.contains("registry.getRegistryKey();"), unrelated)
+        assertFalse(unrelated.contains("registry.key();"), unrelated)
+    }
 }

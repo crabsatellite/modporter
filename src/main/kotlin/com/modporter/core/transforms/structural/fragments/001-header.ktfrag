@@ -7,6 +7,7 @@ import com.github.javaparser.ParserConfiguration
 import com.github.javaparser.StaticJavaParser
 import com.github.javaparser.ast.CompilationUnit
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration
+import com.github.javaparser.ast.body.CallableDeclaration
 import com.github.javaparser.ast.body.ConstructorDeclaration
 import com.github.javaparser.ast.body.FieldDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
@@ -944,6 +945,19 @@ class StructuralRefactorPass : Pass {
             changes.addAll(attachmentRegistrationChanges)
         } catch (e: Exception) {
             errors.add("Attachment registration cleanup error: ${e.message}")
+        }
+
+        try {
+            val dimensionTransitionChanges = migrateDelegatingEntityDimensionTransitionOverrides(projectDir, dryRun)
+            changes.addAll(dimensionTransitionChanges)
+        } catch (e: Exception) {
+            errors.add("Entity dimension transition override migration error: ${e.message}")
+        }
+
+        try {
+            changes.addAll(migrateRegistryKeyAccessors(projectDir, dryRun))
+        } catch (e: Exception) {
+            errors.add("Registry key accessor migration error: ${e.message}")
         }
 
         // Some later project-level rewrites can touch entity sources after the
