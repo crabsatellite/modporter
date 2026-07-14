@@ -4,3 +4,4 @@
 004-sakura-effect-particle-fluid-and-nested-event-migrations-compile-against.ktfrag
 005-loot-conditional-function-codec-migration-rejects-member-name-fallbacks.ktfrag
 006-tier-sorting-registry-custom-tiers-migrate-to-simple-tier-incorrect-bloc.ktfrag
+007-dynamic-trees-public-api-classes-migrate-exactly.ktfrag

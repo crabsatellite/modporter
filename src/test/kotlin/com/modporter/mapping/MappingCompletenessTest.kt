@@ -5727,7 +5727,9 @@ class MappingCompletenessTest {
                 collectRefs.contains("javaTypeBlockContainingOffset(match.range.first, typeBlocks)") &&
                 staticSubscribers.contains("val typeBlocks = javaTypeBlocks(text, executableCode)") &&
                 staticSubscribers.contains("javaTypeBlockForModAnnotation(annotation.range.last, typeBlocks)") &&
-                staticSubscribers.contains("javaListenerTypeReferenceExpression(packageName, mainPackage, owner)"),
+                staticSubscribers.contains("javaTypeBlockContainingOffset(match.range.first, typeBlocks) == owner") &&
+                staticSubscribers.contains("val ownerPath = javaTypeNestingPath(owner, typeBlocks)") &&
+                staticSubscribers.contains("javaAccessibleTypeReferenceExpression("),
             "Mod event bus listener migrations must bind method references to source-declared Java type blocks"
         )
         assertTrue(

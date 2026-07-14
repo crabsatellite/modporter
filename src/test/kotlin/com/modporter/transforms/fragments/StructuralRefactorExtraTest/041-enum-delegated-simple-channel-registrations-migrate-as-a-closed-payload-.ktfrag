@@ -187,4 +187,3 @@
         assertTrue(clientCaller.contains("PacketDistributor.sendToServer(packet)"), clientCaller)
         assertTrue(main.contains("modEventBus.addListener(ModNetwork::register);"), main)
     }
-}

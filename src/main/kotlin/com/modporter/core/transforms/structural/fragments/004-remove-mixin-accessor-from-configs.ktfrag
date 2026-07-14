@@ -1,4 +1,42 @@
 
+    private fun removeMixinAccessorFromConfigs(
+        projectDir: Path,
+        accessor: WorldGenRegionStructureManagerAccessor,
+        dryRun: Boolean
+    ): List<Change> {
+        val resourcesDir = projectDir.resolve("src/main/resources")
+        if (!resourcesDir.exists()) return emptyList()
+        val changes = mutableListOf<Change>()
+        Files.walk(resourcesDir)
+            .filter { it.isRegularFile() && it.fileName.toString().endsWith(".mixins.json") }
+            .forEach { config ->
+                val original = config.readText()
+                val configPackage = Regex(""""package"\s*:\s*"([^"]+)"""")
+                    .find(original)
+                    ?.groupValues
+                    ?.get(1)
+                    ?: return@forEach
+                val relativeMixinName = relativeMixinNameForConfigPackage(
+                    accessor.packageName,
+                    accessor.simpleName,
+                    configPackage
+                ) ?: return@forEach
+                val migrated = removeMixinClassFromConfigArrays(original, relativeMixinName)
+                if (migrated == original) return@forEach
+                changes.add(Change(
+                    file = config,
+                    line = 0,
+                    description = "Remove obsolete WorldGenRegion structureManager accessor from mixin config",
+                    before = "\"$relativeMixinName\"",
+                    after = "public WorldGenRegion#getLevel().structureManager() call sites",
+                    confidence = Confidence.HIGH,
+                    ruleId = "struct-worldgenregion-structuremanager-mixin-config"
+                ))
+                if (!dryRun) config.writeText(migrated)
+            }
+        return changes
+    }
+
     private fun relativeMixinNameForConfigPackage(
         mixinPackageName: String,
         mixinClassName: String,

@@ -1643,6 +1643,8 @@ public final class ${spec.attachmentClassName} {
     private data class JavaTypeBlock(
         val name: String,
         val isPublic: Boolean,
+        val isPrivate: Boolean,
+        val isProtected: Boolean,
         val start: Int,
         val declarationStart: Int,
         val bodyStart: Int,
@@ -1701,6 +1703,8 @@ public final class ${spec.attachmentClassName} {
             JavaTypeBlock(
                 name = name,
                 isPublic = Regex("""\bpublic\b""").containsMatchIn(match.value),
+                isPrivate = Regex("""\bprivate\b""").containsMatchIn(match.value),
+                isProtected = Regex("""\bprotected\b""").containsMatchIn(match.value),
                 start = match.range.first,
                 declarationStart = declarationStart,
                 bodyStart = openBrace,
@@ -1718,6 +1722,45 @@ public final class ${spec.attachmentClassName} {
         typeBlocks
             .filter { offset > it.bodyStart && offset < it.end }
             .minByOrNull { it.end - it.bodyStart }
+
+    private fun javaTypeNestingPath(owner: JavaTypeBlock, typeBlocks: List<JavaTypeBlock>): List<JavaTypeBlock> =
+        typeBlocks
+            .filter { candidate ->
+                candidate != owner &&
+                    candidate.bodyStart < owner.declarationStart &&
+                    candidate.end > owner.end
+            }
+            .sortedBy { it.bodyStart } + owner
+
+    private fun javaTypeBlockForNestingPath(
+        path: List<String>,
+        typeBlocks: List<JavaTypeBlock>
+    ): JavaTypeBlock? = typeBlocks.singleOrNull { candidate ->
+        javaTypeNestingPath(candidate, typeBlocks).map { it.name } == path
+    }
+
+    private fun javaAccessibleTypeReferenceExpression(
+        sourcePackage: String,
+        targetPackage: String,
+        owner: JavaTypeBlock,
+        typeBlocks: List<JavaTypeBlock>
+    ): String? {
+        val path = javaTypeNestingPath(owner, typeBlocks)
+        val samePackage = sourcePackage == targetPackage
+        val accessible = if (samePackage) {
+            path.none { it.isPrivate }
+        } else {
+            path.all { it.isPublic }
+        }
+        if (!accessible) return null
+        val typePath = path.joinToString(".") { it.name }
+        return when {
+            sourcePackage.isBlank() -> typePath
+            path.all { it.isPublic } -> "$sourcePackage.$typePath"
+            samePackage -> typePath
+            else -> null
+        }
+    }
 
     private fun javaStaticFinalStringConstant(
         code: String,
@@ -2953,9 +2996,3 @@ $fields
 }
 """
     }
-
-    private data class JavaClassDeclaration(
-        val name: String,
-        val directSuper: String,
-        val bodyRange: IntRange
-    )

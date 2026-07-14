@@ -2341,6 +2341,22 @@ ${entries.joinToString(",\n")}
     ): String {
         val componentsByType = recordComponents.toMutableMap()
         componentsByType.putAll(collectJavaRecordComponentsFromSource(source))
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        ExactExternalTypeContracts.recordComponentSurfaces.forEach { surface ->
+            val packageName = surface.importOwner.substringBeforeLast('.')
+            val hasExplicitImport = Regex(
+                """(?m)^\s*import\s+${Regex.escape(surface.importOwner)}\s*;"""
+            ).containsMatchIn(executableSource)
+            val hasPackageWildcardImport = Regex(
+                """(?m)^\s*import\s+${Regex.escape(packageName)}\.\*\s*;"""
+            ).containsMatchIn(executableSource)
+            if (hasExplicitImport || hasPackageWildcardImport) {
+                componentsByType[surface.sourceType] = surface.components
+            }
+            if (executableSource.contains(surface.qualifiedType)) {
+                componentsByType[surface.qualifiedType] = surface.components
+            }
+        }
         if (componentsByType.isEmpty()) return source
         var result = source
         val localRecordComponents = linkedMapOf<String, Set<String>>()

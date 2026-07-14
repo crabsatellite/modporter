@@ -1135,10 +1135,13 @@
             import net.neoforged.bus.api.SubscribeEvent;
             import net.neoforged.fml.common.EventBusSubscriber;
 
-            @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+            @EventBusSubscriber(bus = EventBusSubscriber.Bus.FORGE)
             public class ActualSubscriber {
-                private static final String DOC = "@EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)";
-                // @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)
+                private static final String DOC = "@EventBusSubscriber(bus = EventBusSubscriber.Bus.FORGE)";
+                // @EventBusSubscriber(bus = EventBusSubscriber.Bus.FORGE)
+
+                @Other(bus = EventBusSubscriber.Bus.FORGE)
+                private Object unrelated;
 
                 @SubscribeEvent
                 public static void setup(Object event) {
@@ -1151,6 +1154,7 @@
 
         assertTrue(result.changes.any { it.ruleId == "struct-cleanup-eventbus-subscriber" })
         assertTrue(migrated.contains("@EventBusSubscriber\npublic class ActualSubscriber"), migrated)
-        assertTrue(migrated.contains("private static final String DOC = \"@EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)\";"), migrated)
-        assertTrue(migrated.contains("// @EventBusSubscriber(bus = EventBusSubscriber.Bus.MOD)"), migrated)
+        assertTrue(migrated.contains("private static final String DOC = \"@EventBusSubscriber(bus = EventBusSubscriber.Bus.FORGE)\";"), migrated)
+        assertTrue(migrated.contains("// @EventBusSubscriber(bus = EventBusSubscriber.Bus.FORGE)"), migrated)
+        assertTrue(migrated.contains("@Other(bus = EventBusSubscriber.Bus.FORGE)"), migrated)
     }

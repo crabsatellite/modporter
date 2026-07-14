@@ -922,6 +922,21 @@ class StructuralRefactorPass : Pass {
             errors.add("Empty subscriber class removal error: ${e.message}")
         }
 
+        // Some structural migrations create mod-bus subscribers after the
+        // first subscriber pass. Normalize those generated surfaces too, then
+        // fail closed if any MOD bus annotation still lacks explicit wiring.
+        if (!dryRun) {
+            try {
+                val finalStaticModBusChanges = migrateStaticModBusSubscribers(projectDir, false)
+                changes.addAll(finalStaticModBusChanges)
+                val finalSubscriberCleanupChanges = cleanupEventBusSubscriber(projectDir, false)
+                changes.addAll(finalSubscriberCleanupChanges)
+                validateNoUnresolvedEventBusSubscriberModBusParameters(projectDir)
+            } catch (e: Exception) {
+                errors.add("Final EventBusSubscriber normalization error: ${e.message}")
+            }
+        }
+
         // Final structural normalization: attachment registration methods are
         // ordinary mod-constructor registration helpers, not event handlers.
         try {

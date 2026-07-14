@@ -39,3 +39,4 @@
 039-migrates-xlint-clean-deprecated-121-api-surfaces-without-suppressing-log.ktfrag
 040-legacy-armor-tick-hooks-migrate-to-inventory-tick-with-armor-guard.ktfrag
 041-enum-delegated-simple-channel-registrations-migrate-as-a-closed-payload-.ktfrag
+042-third-party-record-components-and-event-bus-contracts-are-exact.ktfrag

@@ -1895,7 +1895,8 @@ ${indent}}
 
     private data class ConstructorSection(
         val header: String,
-        val body: String
+        val body: String,
+        val bodyRange: IntRange
     )
 
     private fun resolveModEventBusName(source: String): String? {
@@ -1905,13 +1906,15 @@ ${indent}}
         val localEventBus = Regex(
             """\b$busType\s+([A-Za-z_$][\w$]*)\s*=\s*[^;]*(?:getEventBus|getModEventBus)\s*\(\s*\)\s*;"""
         )
-
-        for (constructor in constructorSections(source, className)) {
-            parameterBus.find(constructor.header)?.groupValues?.get(1)?.let { return it }
-            localEventBus.find(constructor.body)?.groupValues?.get(1)?.let { return it }
+        val constructors = constructorSections(source, className)
+        val candidates = linkedSetOf<String>()
+        constructors.forEach { constructor ->
+            parameterBus.find(constructor.header)?.groupValues?.get(1)?.let(candidates::add)
         }
-
-        return null
+        reachableModInitializationSections(source, className, constructors).forEach { section ->
+            localEventBus.find(section.body)?.groupValues?.get(1)?.let(candidates::add)
+        }
+        return candidates.singleOrNull()
     }
 
     private fun constructorSections(source: String, className: String): List<ConstructorSection> {
@@ -1924,9 +1927,76 @@ ${indent}}
             if (openBrace < 0 || closeBrace <= openBrace) return@mapNotNull null
             ConstructorSection(
                 header = source.substring(match.range.first, openBrace),
-                body = source.substring(openBrace + 1, closeBrace)
+                body = source.substring(openBrace + 1, closeBrace),
+                bodyRange = (openBrace + 1) until closeBrace
             )
         }.toList()
+    }
+
+    private fun reachableModInitializationSections(
+        source: String,
+        className: String,
+        constructors: List<ConstructorSection> = constructorSections(source, className)
+    ): List<ConstructorSection> {
+        val executable = maskJavaCommentsAndLiterals(source)
+        val methodPattern = Regex(
+            """(?m)\b(?:(?:public|protected|private|static|final|synchronized|native|abstract|strictfp)\s+)*(?:<[^>{};]+>\s+)?[A-Za-z_$][\w$<>,.?\[\] ]*\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*(?:throws\s+[^\{]+)?\{"""
+        )
+        val methodsByName = linkedMapOf<String, MutableList<ConstructorSection>>()
+        methodPattern.findAll(executable).forEach { match ->
+            val openBrace = executable.indexOf('{', match.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executable, openBrace) else -1
+            if (openBrace >= 0 && closeBrace > openBrace) {
+                methodsByName.getOrPut(match.groupValues[1]) { mutableListOf() } += ConstructorSection(
+                    header = source.substring(match.range.first, openBrace),
+                    body = source.substring(openBrace + 1, closeBrace),
+                    bodyRange = (openBrace + 1) until closeBrace
+                )
+            }
+        }
+
+        val callPattern = Regex(
+            """(?<![\w$.])(?:(?:this|${Regex.escape(className)})\s*\.\s*)?([A-Za-z_$][\w$]*)\s*\(\s*\)\s*;"""
+        )
+        val result = constructors.toMutableList()
+        val queue = ArrayDeque(constructors)
+        val visitedMethods = linkedSetOf<String>()
+        while (queue.isNotEmpty()) {
+            val section = queue.removeFirst()
+            callPattern.findAll(maskJavaCommentsAndLiterals(section.body)).forEach { call ->
+                val methodName = call.groupValues[1]
+                if (!visitedMethods.add(methodName)) return@forEach
+                val targets = methodsByName[methodName].orEmpty()
+                if (targets.size == 1) {
+                    result += targets.single()
+                    queue.addLast(targets.single())
+                }
+            }
+        }
+        return result
+    }
+
+    private fun ensureModEventBusSurface(source: String): Pair<String, String>? {
+        resolveModEventBusName(source)?.let { return source to it }
+        val className = classNameOfJavaSource(source) ?: return null
+        if (constructorSections(source, className).isNotEmpty()) return null
+        val executable = maskJavaCommentsAndLiterals(source)
+        val classDeclaration = Regex(
+            """\b(?:(?:public|protected|private|abstract|final|static)\s+)*class\s+${Regex.escape(className)}\b[^\{;]*\{"""
+        ).find(executable) ?: return null
+        val openBrace = executable.indexOf('{', classDeclaration.range.first)
+        if (openBrace < 0) return null
+        val separator = if (source.contains("\r\n")) "\r\n" else "\n"
+        val constructor = buildString {
+            append(separator)
+            append("    public $className(IEventBus modEventBus) {")
+            append(separator)
+            append("    }")
+            append(separator)
+        }
+        var migrated = source.substring(0, openBrace + 1) + constructor + source.substring(openBrace + 1)
+        migrated = addImportIfMissing(migrated, "net.neoforged.bus.api.IEventBus")
+        return migrated to "modEventBus"
     }
 
     private fun cleanupInlineSimpleChannelRegistrations(srcDir: Path, dryRun: Boolean): List<Change> {

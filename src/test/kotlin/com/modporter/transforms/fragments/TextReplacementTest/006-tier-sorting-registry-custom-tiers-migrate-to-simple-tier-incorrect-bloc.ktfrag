@@ -791,4 +791,3 @@
         assertTrue(transformed.contains("// ForgeCatnipServices remains documentation."), transformed)
         assertTrue(result.changes.any { it.ruleId == "catnip-neoforge-platform-services" })
     }
-}

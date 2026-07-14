@@ -1,4 +1,10 @@
 
+    private data class JavaClassDeclaration(
+        val name: String,
+        val directSuper: String,
+        val bodyRange: IntRange
+    )
+
     private data class JavaInheritanceIndex(
         private val directSuperByClass: Map<String, String>
     ) {

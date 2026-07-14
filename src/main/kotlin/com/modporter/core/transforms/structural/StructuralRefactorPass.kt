@@ -922,6 +922,21 @@ class StructuralRefactorPass : Pass {
             errors.add("Empty subscriber class removal error: ${e.message}")
         }
 
+        // Some structural migrations create mod-bus subscribers after the
+        // first subscriber pass. Normalize those generated surfaces too, then
+        // fail closed if any MOD bus annotation still lacks explicit wiring.
+        if (!dryRun) {
+            try {
+                val finalStaticModBusChanges = migrateStaticModBusSubscribers(projectDir, false)
+                changes.addAll(finalStaticModBusChanges)
+                val finalSubscriberCleanupChanges = cleanupEventBusSubscriber(projectDir, false)
+                changes.addAll(finalSubscriberCleanupChanges)
+                validateNoUnresolvedEventBusSubscriberModBusParameters(projectDir)
+            } catch (e: Exception) {
+                errors.add("Final EventBusSubscriber normalization error: ${e.message}")
+            }
+        }
+
         // Final structural normalization: attachment registration methods are
         // ordinary mod-constructor registration helpers, not event handlers.
         try {
@@ -4862,7 +4877,8 @@ ${indent}}
 
     private data class ConstructorSection(
         val header: String,
-        val body: String
+        val body: String,
+        val bodyRange: IntRange
     )
 
     private fun resolveModEventBusName(source: String): String? {
@@ -4872,13 +4888,15 @@ ${indent}}
         val localEventBus = Regex(
             """\b$busType\s+([A-Za-z_$][\w$]*)\s*=\s*[^;]*(?:getEventBus|getModEventBus)\s*\(\s*\)\s*;"""
         )
-
-        for (constructor in constructorSections(source, className)) {
-            parameterBus.find(constructor.header)?.groupValues?.get(1)?.let { return it }
-            localEventBus.find(constructor.body)?.groupValues?.get(1)?.let { return it }
+        val constructors = constructorSections(source, className)
+        val candidates = linkedSetOf<String>()
+        constructors.forEach { constructor ->
+            parameterBus.find(constructor.header)?.groupValues?.get(1)?.let(candidates::add)
         }
-
-        return null
+        reachableModInitializationSections(source, className, constructors).forEach { section ->
+            localEventBus.find(section.body)?.groupValues?.get(1)?.let(candidates::add)
+        }
+        return candidates.singleOrNull()
     }
 
     private fun constructorSections(source: String, className: String): List<ConstructorSection> {
@@ -4891,9 +4909,76 @@ ${indent}}
             if (openBrace < 0 || closeBrace <= openBrace) return@mapNotNull null
             ConstructorSection(
                 header = source.substring(match.range.first, openBrace),
-                body = source.substring(openBrace + 1, closeBrace)
+                body = source.substring(openBrace + 1, closeBrace),
+                bodyRange = (openBrace + 1) until closeBrace
             )
         }.toList()
+    }
+
+    private fun reachableModInitializationSections(
+        source: String,
+        className: String,
+        constructors: List<ConstructorSection> = constructorSections(source, className)
+    ): List<ConstructorSection> {
+        val executable = maskJavaCommentsAndLiterals(source)
+        val methodPattern = Regex(
+            """(?m)\b(?:(?:public|protected|private|static|final|synchronized|native|abstract|strictfp)\s+)*(?:<[^>{};]+>\s+)?[A-Za-z_$][\w$<>,.?\[\] ]*\s+([A-Za-z_$][\w$]*)\s*\(\s*\)\s*(?:throws\s+[^\{]+)?\{"""
+        )
+        val methodsByName = linkedMapOf<String, MutableList<ConstructorSection>>()
+        methodPattern.findAll(executable).forEach { match ->
+            val openBrace = executable.indexOf('{', match.range.first)
+            val closeBrace = if (openBrace >= 0) findMatchingBrace(executable, openBrace) else -1
+            if (openBrace >= 0 && closeBrace > openBrace) {
+                methodsByName.getOrPut(match.groupValues[1]) { mutableListOf() } += ConstructorSection(
+                    header = source.substring(match.range.first, openBrace),
+                    body = source.substring(openBrace + 1, closeBrace),
+                    bodyRange = (openBrace + 1) until closeBrace
+                )
+            }
+        }
+
+        val callPattern = Regex(
+            """(?<![\w$.])(?:(?:this|${Regex.escape(className)})\s*\.\s*)?([A-Za-z_$][\w$]*)\s*\(\s*\)\s*;"""
+        )
+        val result = constructors.toMutableList()
+        val queue = ArrayDeque(constructors)
+        val visitedMethods = linkedSetOf<String>()
+        while (queue.isNotEmpty()) {
+            val section = queue.removeFirst()
+            callPattern.findAll(maskJavaCommentsAndLiterals(section.body)).forEach { call ->
+                val methodName = call.groupValues[1]
+                if (!visitedMethods.add(methodName)) return@forEach
+                val targets = methodsByName[methodName].orEmpty()
+                if (targets.size == 1) {
+                    result += targets.single()
+                    queue.addLast(targets.single())
+                }
+            }
+        }
+        return result
+    }
+
+    private fun ensureModEventBusSurface(source: String): Pair<String, String>? {
+        resolveModEventBusName(source)?.let { return source to it }
+        val className = classNameOfJavaSource(source) ?: return null
+        if (constructorSections(source, className).isNotEmpty()) return null
+        val executable = maskJavaCommentsAndLiterals(source)
+        val classDeclaration = Regex(
+            """\b(?:(?:public|protected|private|abstract|final|static)\s+)*class\s+${Regex.escape(className)}\b[^\{;]*\{"""
+        ).find(executable) ?: return null
+        val openBrace = executable.indexOf('{', classDeclaration.range.first)
+        if (openBrace < 0) return null
+        val separator = if (source.contains("\r\n")) "\r\n" else "\n"
+        val constructor = buildString {
+            append(separator)
+            append("    public $className(IEventBus modEventBus) {")
+            append(separator)
+            append("    }")
+            append(separator)
+        }
+        var migrated = source.substring(0, openBrace + 1) + constructor + source.substring(openBrace + 1)
+        migrated = addImportIfMissing(migrated, "net.neoforged.bus.api.IEventBus")
+        return migrated to "modEventBus"
     }
 
     private fun cleanupInlineSimpleChannelRegistrations(srcDir: Path, dryRun: Boolean): List<Change> {
@@ -6146,6 +6231,11 @@ ${registrations.distinct().joinToString("\n")}
         "net.minecraftforge.registries.RegisterEvent",
         "net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent",
         "net.minecraftforge.common.capabilities.RegisterCapabilitiesEvent",
+        "net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent",
+        "net.neoforged.neoforge.event.RegisterGameTestsEvent",
+        "net.minecraftforge.event.RegisterGameTestsEvent",
+        "net.neoforged.neoforge.registries.DataPackRegistryEvent",
+        "net.minecraftforge.registries.DataPackRegistryEvent",
         "net.neoforged.neoforge.event.entity.RegisterSpawnPlacementsEvent",
         "net.minecraftforge.event.entity.SpawnPlacementRegisterEvent",
         "net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent",
@@ -6168,6 +6258,14 @@ ${registrations.distinct().joinToString("\n")}
         "net.minecraftforge.client.event.RegisterShadersEvent",
         "net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent",
         "net.minecraftforge.client.event.RegisterKeyMappingsEvent",
+        "net.neoforged.neoforge.client.event.RegisterClientReloadListenersEvent",
+        "net.minecraftforge.client.event.RegisterClientReloadListenersEvent",
+        "net.neoforged.neoforge.client.event.RegisterGuiLayersEvent",
+        "net.minecraftforge.client.event.RegisterGuiOverlaysEvent",
+        "net.neoforged.neoforge.client.event.RegisterItemDecorationsEvent",
+        "net.minecraftforge.client.event.RegisterItemDecorationsEvent",
+        "net.neoforged.fml.event.config.ModConfigEvent",
+        "net.minecraftforge.fml.event.config.ModConfigEvent",
         "net.neoforged.fml.event.lifecycle.FMLLoadCompleteEvent",
         "net.minecraftforge.fml.event.lifecycle.FMLLoadCompleteEvent",
         "net.neoforged.fml.event.lifecycle.InterModEnqueueEvent",
@@ -6190,7 +6288,13 @@ ${registrations.distinct().joinToString("\n")}
         "net.neoforged.neoforge.client.event.RegisterShadersEvent",
         "net.minecraftforge.client.event.RegisterShadersEvent",
         "net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent",
-        "net.minecraftforge.client.event.RegisterKeyMappingsEvent"
+        "net.minecraftforge.client.event.RegisterKeyMappingsEvent",
+        "net.neoforged.neoforge.client.event.RegisterClientReloadListenersEvent",
+        "net.minecraftforge.client.event.RegisterClientReloadListenersEvent",
+        "net.neoforged.neoforge.client.event.RegisterGuiLayersEvent",
+        "net.minecraftforge.client.event.RegisterGuiOverlaysEvent",
+        "net.neoforged.neoforge.client.event.RegisterItemDecorationsEvent",
+        "net.minecraftforge.client.event.RegisterItemDecorationsEvent"
     )
 
     private fun removeEmptyEventBusRegistration(projectDir: Path, dryRun: Boolean): List<Change> {
@@ -6406,10 +6510,23 @@ ${registrations.distinct().joinToString("\n")}
                             text = text.replaceRange(constructorMatch.range, replacement)
                         }
                     }
-                    text = replaceExecutableRegex(
-                        text,
-                        staticFmlModEventBusPattern
-                    ) { "modEventBus" }
+                    if (className != null) {
+                        constructorSections(text, className)
+                            .filter { constructor ->
+                                Regex("""\bIEventBus\s+modEventBus\b""")
+                                    .containsMatchIn(maskJavaCommentsAndLiterals(constructor.header))
+                            }
+                            .asReversed()
+                            .forEach { constructor ->
+                                val migratedBody = replaceExecutableRegex(
+                                    constructor.body,
+                                    staticFmlModEventBusPattern
+                                ) { "modEventBus" }
+                                if (migratedBody != constructor.body) {
+                                    text = text.replaceRange(constructor.bodyRange, migratedBody)
+                                }
+                            }
+                    }
                     text = replaceExecutableRegex(
                         text,
                         Regex("""\bModLoadingContext\s*\.\s*get\s*\(\s*\)\s*\.\s*getActiveContainer\s*\(\s*\)\s*\.\s*registerConfig\s*\(""")
@@ -6418,8 +6535,9 @@ ${registrations.distinct().joinToString("\n")}
                         text,
                         Regex("""\bModLoadingContext\s*\.\s*get\s*\(\s*\)\s*\.\s*registerConfig\s*\(""")
                     ) { "modContainer.registerConfig(" }
-
-                    text = removeExecutableImport(text, "net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext")
+                    if (!maskJavaCommentsAndLiterals(text).contains("FMLJavaModLoadingContext")) {
+                        text = removeExecutableImport(text, "net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext")
+                    }
                     if (!maskJavaCommentsAndLiterals(text).contains("ModLoadingContext.")) {
                         text = removeExecutableImport(text, "net.neoforged.fml.ModLoadingContext")
                     }
@@ -6508,21 +6626,36 @@ ${registrations.distinct().joinToString("\n")}
         val acceptedHelpers = mutableListOf<StaticFmlModBusHelper>()
         val callEditsByFile = mutableMapOf<Path, MutableList<Pair<IntRange, String>>>()
         for (helper in helperMethods) {
-            val callPattern = Regex("""\b${Regex.escape(helper.ownerClass)}\.${Regex.escape(helper.methodName)}\s*\(\s*\)""")
+            val qualifiedCallPattern = Regex(
+                """\b${Regex.escape(helper.ownerClass)}\.${Regex.escape(helper.methodName)}\s*\(\s*\)"""
+            )
+            val sameOwnerCallPattern = Regex(
+                """(?<![\w$.])(?:(?:this|${Regex.escape(helper.ownerClass)})\s*\.\s*)?${Regex.escape(helper.methodName)}\s*\(\s*\)(?=\s*;)"""
+            )
             var callCount = 0
             var unresolvedCallSite = false
             val helperCallEdits = mutableMapOf<Path, MutableList<Pair<IntRange, String>>>()
             for (javaFile in javaFiles) {
                 val original = javaFile.readText()
                 val executableCode = maskJavaCommentsAndLiterals(original)
-                for (match in callPattern.findAll(executableCode)) {
+                val matches = buildList {
+                    addAll(qualifiedCallPattern.findAll(executableCode).toList())
+                    if (javaFile == helper.file) {
+                        addAll(sameOwnerCallPattern.findAll(executableCode).toList())
+                    }
+                }.distinctBy { it.range }
+                for (match in matches) {
                     callCount += 1
                     val eventBus = eventBusParameterExpressionAt(original, match.range.first)
                     if (eventBus == null) {
                         unresolvedCallSite = true
                     } else {
+                        val replacement = match.value.replace(
+                            Regex("""\(\s*\)$"""),
+                            "($eventBus)"
+                        )
                         helperCallEdits.getOrPut(javaFile) { mutableListOf() } +=
-                            match.range to "${helper.ownerClass}.${helper.methodName}($eventBus)"
+                            match.range to replacement
                     }
                 }
             }
@@ -7024,10 +7157,11 @@ $itemArguments
         registration: String,
         preferredRegistryClassName: String
     ): String {
-        val constructorBody = findConstructorBodyWithEventBus(source, eventBusName)
+        val constructorBody = findModInitializationBodyWithEventBus(source, eventBusName)
+            ?: error("Cannot locate the exact mod event bus scope for '$eventBusName'")
         fun insideConstructor(match: MatchResult): Boolean =
-            constructorBody == null || match.range.first in constructorBody
-        val clientGuardRanges = constructorBody?.let { findClientDistGuardRanges(source, it) }.orEmpty()
+            match.range.first in constructorBody
+        val clientGuardRanges = findClientDistGuardRanges(source, constructorBody)
         val isClientOnlyRegistration = registration.contains("Dist.CLIENT") || registration.contains("FMLLoader.getDist()")
         fun outsideClientGuard(match: MatchResult): Boolean =
             isClientOnlyRegistration || clientGuardRanges.none { match.range.first in it }
@@ -7060,22 +7194,18 @@ $itemArguments
             return source.substring(0, insertPos) + "\n" + registration + source.substring(insertPos)
         }
 
-        if (constructorBody != null) {
-            val localDeclaration = Regex(
-                """(?m)^([ \t]*)IEventBus\s+${Regex.escape(eventBusName)}\s*=\s*[^;]*(?:getEventBus|getModEventBus)\s*\(\s*\)\s*;\s*$"""
-            ).findAll(source)
-                .filter { insideConstructor(it) && outsideClientGuard(it) }
-                .firstOrNull()
-            if (localDeclaration != null) {
-                val insertPos = localDeclaration.range.last + 1
-                return source.substring(0, insertPos) + "\n" + registration + source.substring(insertPos)
-            }
-
-            val insertPos = constructorBody.last + 1
-            return source.substring(0, insertPos) + "\n" + registration + "\n" + source.substring(insertPos)
+        val localDeclaration = Regex(
+            """(?m)^([ \t]*)IEventBus\s+${Regex.escape(eventBusName)}\s*=\s*[^;]*(?:getEventBus|getModEventBus)\s*\(\s*\)\s*;\s*$"""
+        ).findAll(source)
+            .filter { insideConstructor(it) && outsideClientGuard(it) }
+            .firstOrNull()
+        if (localDeclaration != null) {
+            val insertPos = localDeclaration.range.last + 1
+            return source.substring(0, insertPos) + "\n" + registration + source.substring(insertPos)
         }
 
-        return source + "\n" + registration + "\n"
+        val insertPos = constructorBody.last + 1
+        return source.substring(0, insertPos) + "\n" + registration + "\n" + source.substring(insertPos)
     }
 
     private fun findClientDistGuardRanges(source: String, constructorBody: IntRange): List<IntRange> {
@@ -7092,25 +7222,17 @@ $itemArguments
             .toList()
     }
 
-    private fun findConstructorBodyWithEventBus(source: String, eventBusName: String): IntRange? {
+    private fun findModInitializationBodyWithEventBus(source: String, eventBusName: String): IntRange? {
         val className = classNameOfJavaSource(source) ?: return null
-        val constructorPattern = Regex("""\b(?:public|protected|private)?\s*${Regex.escape(className)}\s*\([^)]*\)\s*\{""")
-        for (constructorMatch in constructorPattern.findAll(source)) {
-            val openBrace = source.indexOf('{', constructorMatch.range.first)
-            val closeBrace = if (openBrace >= 0) findMatchingBrace(source, openBrace) else -1
-            if (openBrace < 0 || closeBrace <= openBrace) continue
-            val header = source.substring(constructorMatch.range.first, openBrace)
-            val body = source.substring(openBrace + 1, closeBrace)
-            val busType = """(?:IEventBus|net\.neoforged\.bus\.api\.IEventBus)"""
-            val parameterBus = Regex("""\b(?:final\s+)?$busType\s+${Regex.escape(eventBusName)}\b""").containsMatchIn(header)
-            val localBus = Regex(
-                """\b$busType\s+${Regex.escape(eventBusName)}\s*=\s*[^;]*(?:getEventBus|getModEventBus)\s*\(\s*\)\s*;"""
-            ).containsMatchIn(body)
-            if (parameterBus || localBus) {
-                return (openBrace + 1) until closeBrace
-            }
+        val busType = """(?:IEventBus|net\.neoforged\.bus\.api\.IEventBus)"""
+        val parameterBus = Regex("""\b(?:final\s+)?$busType\s+${Regex.escape(eventBusName)}\b""")
+        val localBus = Regex(
+            """\b$busType\s+${Regex.escape(eventBusName)}\s*=\s*[^;]*(?:getEventBus|getModEventBus)\s*\(\s*\)\s*;"""
+        )
+        val matches = reachableModInitializationSections(source, className).filter { section ->
+            parameterBus.containsMatchIn(section.header) || localBus.containsMatchIn(section.body)
         }
-        return null
+        return matches.singleOrNull()?.bodyRange
     }
 
     private data class LegacyFluidItemProviderFactory(
@@ -13262,6 +13384,8 @@ public final class ${spec.attachmentClassName} {
     private data class JavaTypeBlock(
         val name: String,
         val isPublic: Boolean,
+        val isPrivate: Boolean,
+        val isProtected: Boolean,
         val start: Int,
         val declarationStart: Int,
         val bodyStart: Int,
@@ -13320,6 +13444,8 @@ public final class ${spec.attachmentClassName} {
             JavaTypeBlock(
                 name = name,
                 isPublic = Regex("""\bpublic\b""").containsMatchIn(match.value),
+                isPrivate = Regex("""\bprivate\b""").containsMatchIn(match.value),
+                isProtected = Regex("""\bprotected\b""").containsMatchIn(match.value),
                 start = match.range.first,
                 declarationStart = declarationStart,
                 bodyStart = openBrace,
@@ -13337,6 +13463,45 @@ public final class ${spec.attachmentClassName} {
         typeBlocks
             .filter { offset > it.bodyStart && offset < it.end }
             .minByOrNull { it.end - it.bodyStart }
+
+    private fun javaTypeNestingPath(owner: JavaTypeBlock, typeBlocks: List<JavaTypeBlock>): List<JavaTypeBlock> =
+        typeBlocks
+            .filter { candidate ->
+                candidate != owner &&
+                    candidate.bodyStart < owner.declarationStart &&
+                    candidate.end > owner.end
+            }
+            .sortedBy { it.bodyStart } + owner
+
+    private fun javaTypeBlockForNestingPath(
+        path: List<String>,
+        typeBlocks: List<JavaTypeBlock>
+    ): JavaTypeBlock? = typeBlocks.singleOrNull { candidate ->
+        javaTypeNestingPath(candidate, typeBlocks).map { it.name } == path
+    }
+
+    private fun javaAccessibleTypeReferenceExpression(
+        sourcePackage: String,
+        targetPackage: String,
+        owner: JavaTypeBlock,
+        typeBlocks: List<JavaTypeBlock>
+    ): String? {
+        val path = javaTypeNestingPath(owner, typeBlocks)
+        val samePackage = sourcePackage == targetPackage
+        val accessible = if (samePackage) {
+            path.none { it.isPrivate }
+        } else {
+            path.all { it.isPublic }
+        }
+        if (!accessible) return null
+        val typePath = path.joinToString(".") { it.name }
+        return when {
+            sourcePackage.isBlank() -> typePath
+            path.all { it.isPublic } -> "$sourcePackage.$typePath"
+            samePackage -> typePath
+            else -> null
+        }
+    }
 
     private fun javaStaticFinalStringConstant(
         code: String,
@@ -19875,6 +20040,22 @@ ${entries.joinToString(",\n")}
     ): String {
         val componentsByType = recordComponents.toMutableMap()
         componentsByType.putAll(collectJavaRecordComponentsFromSource(source))
+        val executableSource = maskJavaCommentsAndLiterals(source)
+        ExactExternalTypeContracts.recordComponentSurfaces.forEach { surface ->
+            val packageName = surface.importOwner.substringBeforeLast('.')
+            val hasExplicitImport = Regex(
+                """(?m)^\s*import\s+${Regex.escape(surface.importOwner)}\s*;"""
+            ).containsMatchIn(executableSource)
+            val hasPackageWildcardImport = Regex(
+                """(?m)^\s*import\s+${Regex.escape(packageName)}\.\*\s*;"""
+            ).containsMatchIn(executableSource)
+            if (hasExplicitImport || hasPackageWildcardImport) {
+                componentsByType[surface.sourceType] = surface.components
+            }
+            if (executableSource.contains(surface.qualifiedType)) {
+                componentsByType[surface.qualifiedType] = surface.components
+            }
+        }
         if (componentsByType.isEmpty()) return source
         var result = source
         val localRecordComponents = linkedMapOf<String, Set<String>>()
@@ -62223,7 +62404,11 @@ $writeLines
                     text = removeExecutableImport(text, "net.neoforged.fml.common.EventBusSubscriber")
                     text = removeExecutableImport(text, "net.neoforged.fml.common.Mod.EventBusSubscriber")
                 } else {
-                    text = removeExecutableEventBusSubscriberModBusParameter(text)
+                    text = removeExecutableEventBusSubscriberForgeBusParameter(text)
+                    if (!Regex("""\bBus\s*\.""").containsMatchIn(maskJavaCommentsAndLiterals(text))) {
+                        text = removeExecutableImport(text, "net.neoforged.fml.common.EventBusSubscriber.Bus")
+                        text = removeExecutableImport(text, "net.neoforged.fml.common.Mod.EventBusSubscriber.Bus")
+                    }
                 }
 
                 if (text != original) {
@@ -62237,7 +62422,7 @@ $writeLines
                             "Remove @EventBusSubscriber from class without @SubscribeEvent methods"
                         else
                             "Remove deprecated bus= parameter from @EventBusSubscriber",
-                        before = "@EventBusSubscriber(..., bus = Bus.MOD)",
+                        before = "@EventBusSubscriber(..., bus = Bus.FORGE)",
                         after = if (!hasSubscribeEvent) "(removed)" else "@EventBusSubscriber(...)",
                         confidence = Confidence.HIGH,
                         ruleId = "struct-cleanup-eventbus-subscriber"
@@ -62248,20 +62433,72 @@ $writeLines
         return changes
     }
 
-    private fun removeExecutableEventBusSubscriberModBusParameter(source: String): String {
-        val busExpression = """(?:EventBusSubscriber|Mod\.EventBusSubscriber)\.Bus\.MOD"""
-        var result = replaceExecutableRegex(
-            source,
-            Regex("""bus\s*=\s*$busExpression\s*,\s*""")
-        ) { "" }
-        result = replaceExecutableRegex(
-            result,
-            Regex(""",\s*bus\s*=\s*$busExpression""")
-        ) { "" }
-        return replaceExecutableRegex(
-            result,
-            Regex("""\(\s*bus\s*=\s*$busExpression\s*\)""")
-        ) { "" }
+    private fun removeExecutableEventBusSubscriberForgeBusParameter(source: String): String {
+        var result = source
+        executableEventBusSubscriberAnnotationRanges(source).asReversed().forEach { range ->
+            val annotation = result.substring(range.first, range.last + 1)
+            val busExpression = """(?:(?:Mod\.)?EventBusSubscriber\.)?Bus\.FORGE"""
+            var migrated = replaceExecutableRegex(
+                annotation,
+                Regex("""bus\s*=\s*$busExpression\s*,\s*""")
+            ) { "" }
+            migrated = replaceExecutableRegex(
+                migrated,
+                Regex(""",\s*bus\s*=\s*$busExpression""")
+            ) { "" }
+            migrated = replaceExecutableRegex(
+                migrated,
+                Regex("""\(\s*bus\s*=\s*$busExpression\s*\)""")
+            ) { "" }
+            if (migrated != annotation) {
+                result = result.replaceRange(range, migrated)
+            }
+        }
+        return result
+    }
+
+    private fun containsExecutableEventBusSubscriberModBusParameter(source: String): Boolean {
+        val busExpression = Regex(
+            """\bbus\s*=\s*(?:(?:Mod\.)?EventBusSubscriber\.)?Bus\.MOD\b"""
+        )
+        return executableEventBusSubscriberAnnotationRanges(source).any { range ->
+            busExpression.containsMatchIn(maskJavaCommentsAndLiterals(source.substring(range.first, range.last + 1)))
+        }
+    }
+
+    private fun validateNoUnresolvedEventBusSubscriberModBusParameters(projectDir: Path) {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return
+        val offenders = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .filter { containsExecutableEventBusSubscriberModBusParameter(it.readText()) }
+            .map { projectDir.relativize(it).toString().replace('\\', '/') }
+            .sorted()
+            .toList()
+        if (offenders.isNotEmpty()) {
+            throw IllegalStateException(
+                "@EventBusSubscriber(bus=MOD) remains without a proven explicit mod-event-bus registration: " +
+                    offenders.joinToString()
+            )
+        }
+    }
+
+    private fun executableEventBusSubscriberAnnotationRanges(source: String): List<IntRange> {
+        val executable = maskJavaCommentsAndLiterals(source)
+        val annotation = Regex("""@(?:Mod\.)?EventBusSubscriber\b""")
+        return annotation.findAll(executable).map { match ->
+            var cursor = match.range.last + 1
+            while (cursor < executable.length && executable[cursor].isWhitespace()) cursor++
+            if (cursor < executable.length && executable[cursor] == '(') {
+                val close = findMatchingParen(executable, cursor)
+                if (close < 0) {
+                    throw IllegalStateException("Cannot match @EventBusSubscriber annotation arguments")
+                }
+                match.range.first..close
+            } else {
+                match.range
+            }
+        }.toList()
     }
 
     /**
@@ -64955,11 +65192,24 @@ public class ${builder.className} implements RecipeBuilder {
         val changes = mutableListOf<Change>()
         val srcDir = projectDir.resolve("src/main/java")
         if (!srcDir.exists()) return changes
+        val hasModBusSubscriber = Files.walk(srcDir).use { files ->
+            files.filter { it.extension == "java" }
+                .anyMatch { containsExecutableEventBusSubscriberModBusParameter(it.readText()) }
+        }
+        if (!hasModBusSubscriber) return changes
         val mainFile = detectModMainClass(projectDir) ?: return changes
         var mainText = mainFile.readText()
-        val modBusVar = detectModBusVariable(mainText) ?: return changes
+        val preparedMain = ensureModEventBusSurface(mainText) ?: return changes
+        mainText = preparedMain.first
+        val modBusVar = preparedMain.second
+        var registeredAny = false
 
-        data class StaticHandler(val methodName: String, val eventType: String, val isClientOnly: Boolean)
+        data class StaticHandler(
+            val methodName: String,
+            val eventType: String,
+            val isClientOnly: Boolean,
+            val subscribeAnnotationRange: IntRange
+        )
 
         Files.walk(srcDir)
             .filter { it.extension == "java" }
@@ -64968,74 +65218,131 @@ public class ${builder.className} implements RecipeBuilder {
             .forEach { file ->
                 var text = file.readText()
                 val original = text
-                val code = maskJavaComments(text)
-                val imports = javaNonStaticImports(code)
                 val annotationPattern = Regex(
-                    """(?m)^[ \t]*@EventBusSubscriber\((?=[^\r\n)]*\bBus\.MOD\b)(?![^\r\n)]*\bvalue\s*=)[^\r\n)]*\)\s*\r?\n"""
+                    """(?m)^[ \t]*@EventBusSubscriber\((?=[^\r\n)]*\bBus\.MOD\b)[^\r\n)]*\)\s*\r?\n"""
                 )
-                val annotation = annotationPattern.find(text) ?: return@forEach
-                val handlers = Regex(
-                    """(?m)^[ \t]*@SubscribeEvent\s*\r?\n[ \t]*(?:public\s+)?static\s+void\s+(\w+)\s*\(\s*(?:final\s+)?([\w.]+)\s+\w+\s*\)"""
-                ).findAll(maskJavaCommentsAndLiterals(text))
-                    .map { match ->
-                        val methodPrefix = text.substring(
-                            (match.range.first - 160).coerceAtLeast(0),
-                            match.range.first
-                        )
-                        val eventType = match.groupValues[2]
-                        StaticHandler(
-                            methodName = match.groupValues[1],
-                            eventType = eventType,
-                            isClientOnly = isKnownClientOnlyModBusEventParameterType(eventType, imports) ||
-                                (methodPrefix.contains("@OnlyIn") && methodPrefix.contains("Dist.CLIENT"))
-                        )
-                    }
-                    .filter { handler ->
-                        isKnownModBusEventParameterType(handler.eventType, imports)
-                    }
-                    .toList()
-                if (handlers.isEmpty()) return@forEach
-
-                val packageName = packageNameOf(text)
-                val mainPackage = packageNameOf(mainText)
-                val executableCode = maskJavaCommentsAndLiterals(text)
-                val typeBlocks = javaTypeBlocks(text, executableCode)
-                val owner = javaTypeBlockForModAnnotation(annotation.range.last, typeBlocks) ?: return@forEach
-                val listenerClassName = javaListenerTypeReferenceExpression(packageName, mainPackage, owner) ?: return@forEach
                 var mainChanged = false
-                val indent = mainConstructorIndent(mainText, modBusVar)
-                for (handler in handlers) {
-                    val listener = "$modBusVar.addListener($listenerClassName::${handler.methodName});"
-                    val registration = if (handler.isClientOnly) {
-                        "${indent}if (net.neoforged.fml.loading.FMLLoader.getDist() == net.neoforged.api.distmarker.Dist.CLIENT) {\n" +
-                            "$indent    $listener\n" +
-                            "$indent}"
-                    } else {
-                        "$indent$listener"
-                    }
-                    if (!mainText.contains(listener)) {
-                        mainText = insertModBusListener(
-                            mainText,
-                            modBusVar,
-                            registration,
-                            owner.name
-                        )
-                        mainChanged = true
-                    }
-                    text = text.replace(
-                        Regex("""(?m)^[ \t]*@SubscribeEvent\s*\r?\n(?=[ \t]*(?:public\s+)?static\s+void\s+${Regex.escape(handler.methodName)}\s*\()"""),
-                        ""
+                val registrationEvidence = mutableListOf<String>()
+
+                while (true) {
+                    val code = maskJavaComments(text)
+                    val imports = javaNonStaticImports(code)
+                    val executableCode = maskJavaCommentsAndLiterals(text)
+                    val annotation = annotationPattern.find(executableCode) ?: break
+                    val typeBlocks = javaTypeBlocks(text, executableCode)
+                    val owner = javaTypeBlockForModAnnotation(annotation.range.last, typeBlocks) ?: break
+                    val annotationIsClientOnly = Regex(
+                        """\bvalue\s*=\s*(?:Dist|net\.neoforged\.api\.distmarker\.Dist)\.CLIENT\b"""
+                    ).containsMatchIn(executableCode.substring(annotation.range.first, annotation.range.last + 1))
+                    val handlers = Regex(
+                        """(?m)^([ \t]*@SubscribeEvent\s*\r?\n)([ \t]*(?:(?:public|protected|private)\s+)?static\s+void\s+(\w+)\s*\(\s*(?:final\s+)?([\w.]+)\s+\w+\s*\))"""
+                    ).findAll(executableCode)
+                        .filter { match ->
+                            javaTypeBlockContainingOffset(match.range.first, typeBlocks) == owner
+                        }
+                        .map { match ->
+                            val methodPrefix = text.substring(
+                                (match.range.first - 160).coerceAtLeast(0),
+                                match.range.first
+                            )
+                            val eventType = match.groupValues[4]
+                            StaticHandler(
+                                methodName = match.groupValues[3],
+                                eventType = eventType,
+                                isClientOnly = annotationIsClientOnly ||
+                                    isKnownClientOnlyModBusEventParameterType(eventType, imports) ||
+                                    (methodPrefix.contains("@OnlyIn") && methodPrefix.contains("Dist.CLIENT")),
+                                subscribeAnnotationRange = match.groups[1]!!.range
+                            )
+                        }
+                        .filter { handler -> isKnownModBusEventParameterType(handler.eventType, imports) }
+                        .toList()
+                    if (handlers.isEmpty()) break
+
+                    registeredAny = true
+                    val packageName = packageNameOf(text)
+                    val mainPackage = packageNameOf(mainText)
+                    val ownerPath = javaTypeNestingPath(owner, typeBlocks)
+                    val directListenerClassName = javaAccessibleTypeReferenceExpression(
+                        packageName,
+                        mainPackage,
+                        owner,
+                        typeBlocks
                     )
+                    val indent = mainConstructorIndent(mainText, modBusVar)
+
+                    if (directListenerClassName != null) {
+                        for (handler in handlers) {
+                            val listener = "$modBusVar.addListener($directListenerClassName::${handler.methodName});"
+                            val registration = if (handler.isClientOnly) {
+                                "${indent}if (net.neoforged.fml.loading.FMLLoader.getDist() == net.neoforged.api.distmarker.Dist.CLIENT) {\n" +
+                                    "$indent    $listener\n" +
+                                    "$indent}"
+                            } else {
+                                "$indent$listener"
+                            }
+                            if (!mainText.contains(listener)) {
+                                mainText = insertModBusListener(mainText, modBusVar, registration, owner.name)
+                                mainChanged = true
+                            }
+                            registrationEvidence += listener
+                        }
+                    } else {
+                        val bridgeOwner = ownerPath.dropLast(1).asReversed().firstOrNull { candidate ->
+                            javaAccessibleTypeReferenceExpression(packageName, mainPackage, candidate, typeBlocks) != null
+                        } ?: break
+                        val bridgeOwnerPath = javaTypeNestingPath(bridgeOwner, typeBlocks).map { it.name }
+                        val bridgeClassName = javaAccessibleTypeReferenceExpression(
+                            packageName,
+                            mainPackage,
+                            bridgeOwner,
+                            typeBlocks
+                        ) ?: break
+                        val relativeOwnerName = ownerPath.drop(bridgeOwnerPath.size).joinToString(".") { it.name }
+
+                        handlers.groupBy { it.isClientOnly }.forEach { (clientOnly, groupedHandlers) ->
+                            val bridgeMethodName = if (clientOnly) {
+                                "registerClientModBusListeners"
+                            } else {
+                                "registerModBusListeners"
+                            }
+                            val listenerRefs = groupedHandlers.map { "$relativeOwnerName::${it.methodName}" }
+                            text = addStaticModBusListenerBridge(
+                                text,
+                                bridgeOwnerPath,
+                                bridgeMethodName,
+                                listenerRefs
+                            )
+                            val bridgeCall = "$bridgeClassName.$bridgeMethodName($modBusVar);"
+                            val registration = if (clientOnly) {
+                                "${indent}if (net.neoforged.fml.loading.FMLLoader.getDist() == net.neoforged.api.distmarker.Dist.CLIENT) {\n" +
+                                    "$indent    $bridgeCall\n" +
+                                    "$indent}"
+                            } else {
+                                "$indent$bridgeCall"
+                            }
+                            if (!mainText.contains(bridgeCall)) {
+                                mainText = insertModBusListener(mainText, modBusVar, registration, bridgeOwner.name)
+                                mainChanged = true
+                            }
+                            registrationEvidence += bridgeCall
+                        }
+                    }
+
+                    handlers.sortedByDescending { it.subscribeAnnotationRange.first }.forEach { handler ->
+                        text = text.removeRange(handler.subscribeAnnotationRange)
+                    }
+                    text = text.removeRange(annotation.range)
                 }
 
-                text = annotationPattern.replace(text, "")
-                if (!text.contains("@SubscribeEvent")) {
+                val finalExecutable = maskJavaCommentsAndLiterals(text)
+                if (!Regex("""@\s*SubscribeEvent\b""").containsMatchIn(finalExecutable)) {
                     text = removeImport(text, "net.neoforged.bus.api.SubscribeEvent")
                 }
-                if (!text.contains("@EventBusSubscriber")) {
+                if (!Regex("""@\s*EventBusSubscriber\b""").containsMatchIn(finalExecutable)) {
                     text = removeImport(text, "net.neoforged.fml.common.EventBusSubscriber")
                 }
-                if (!text.contains("Mod.")) {
+                if (!Regex("""\bMod\s*\.""").containsMatchIn(finalExecutable)) {
                     text = removeImport(text, "net.neoforged.fml.common.Mod")
                 }
 
@@ -65044,8 +65351,8 @@ public class ${builder.className} implements RecipeBuilder {
                         file = mainFile,
                         line = 1,
                         description = "Register static mod-bus subscriber handlers on mod event bus",
-                        before = annotation.value.trim(),
-                        after = handlers.joinToString(" ") { "$modBusVar.addListener($listenerClassName::${it.methodName});" },
+                        before = "@EventBusSubscriber(bus = Bus.MOD)",
+                        after = registrationEvidence.joinToString(" "),
                         confidence = Confidence.HIGH,
                         ruleId = "struct-static-modbus-subscriber-registration"
                     ))
@@ -65054,9 +65361,9 @@ public class ${builder.className} implements RecipeBuilder {
                 if (text != original) {
                     changes.add(Change(
                         file = file,
-                        line = lineNumberAt(original, annotation.range.first),
+                        line = 1,
                         description = "Remove deprecated static @EventBusSubscriber(bus=MOD) wiring",
-                        before = annotation.value.trim(),
+                        before = "@EventBusSubscriber(bus = Bus.MOD)",
                         after = "constructor modEventBus.addListener(...)",
                         confidence = Confidence.HIGH,
                         ruleId = "struct-static-modbus-subscriber-cleanup"
@@ -65067,11 +65374,82 @@ public class ${builder.className} implements RecipeBuilder {
                 }
             }
 
-        if (!dryRun && mainText != mainFile.readText()) {
+        if (!dryRun && registeredAny && mainText != mainFile.readText()) {
             mainFile.writeText(mainText)
         }
 
         return changes
+    }
+
+    private fun addStaticModBusListenerBridge(
+        source: String,
+        bridgeOwnerPath: List<String>,
+        methodName: String,
+        listenerReferences: List<String>
+    ): String {
+        var result = source
+        val executable = maskJavaCommentsAndLiterals(result)
+        val typeBlocks = javaTypeBlocks(result, executable)
+        val bridgeOwner = javaTypeBlockForNestingPath(bridgeOwnerPath, typeBlocks)
+            ?: error("Cannot resolve mod-bus listener bridge owner '${bridgeOwnerPath.joinToString(".")}'")
+        val methodPattern = Regex(
+            """(?m)^([ \t]*)public\s+static\s+void\s+${Regex.escape(methodName)}\s*\(\s*net\.neoforged\.bus\.api\.IEventBus\s+([A-Za-z_$][\w$]*)\s*\)\s*\{"""
+        )
+        val existingMethod = methodPattern.findAll(executable).singleOrNull { match ->
+            javaTypeBlockContainingOffset(match.range.first, typeBlocks) == bridgeOwner
+        }
+        if (existingMethod != null) {
+            val openBrace = executable.indexOf('{', existingMethod.range.first)
+            val closeBrace = findMatchingBrace(executable, openBrace)
+            if (openBrace < 0 || closeBrace < 0) {
+                error("Cannot match generated mod-bus listener bridge '$methodName'")
+            }
+            val methodIndent = existingMethod.groupValues[1]
+            val eventBusName = existingMethod.groupValues[2]
+            val statementIndent = "$methodIndent    "
+            val additions = listenerReferences
+                .map { "$eventBusName.addListener($it);" }
+                .filterNot { statement ->
+                    maskJavaCommentsAndLiterals(result.substring(openBrace + 1, closeBrace)).contains(statement)
+                }
+            if (additions.isEmpty()) return result
+            val insertion = additions.joinToString("\n", prefix = "\n", postfix = "\n$methodIndent") {
+                "$statementIndent$it"
+            }
+            return result.substring(0, closeBrace) + insertion + result.substring(closeBrace)
+        }
+
+        val conflictingMethod = Regex(
+            """(?m)^[ \t]*(?:(?:public|protected|private)\s+)?(?:static\s+)?[A-Za-z_$][\w$<>,.? \[\]]*\s+${Regex.escape(methodName)}\s*\("""
+        )
+            .findAll(executable)
+            .any { match -> javaTypeBlockContainingOffset(match.range.first, typeBlocks) == bridgeOwner }
+        if (conflictingMethod) {
+            error("Cannot generate mod-bus listener bridge '$methodName': method name already exists")
+        }
+
+        val declarationLineStart = result.lastIndexOf('\n', bridgeOwner.start)
+            .let { if (it < 0) 0 else it + 1 }
+        val ownerIndent = result.substring(declarationLineStart, bridgeOwner.start)
+        val methodIndent = "$ownerIndent    "
+        val statementIndent = "$methodIndent    "
+        val separator = if (result.contains("\r\n")) "\r\n" else "\n"
+        val method = buildString {
+            append(separator)
+            append(methodIndent)
+            append("public static void $methodName(net.neoforged.bus.api.IEventBus modEventBus) {")
+            listenerReferences.forEach { listener ->
+                append(separator)
+                append(statementIndent)
+                append("modEventBus.addListener($listener);")
+            }
+            append(separator)
+            append(methodIndent)
+            append('}')
+            append(separator)
+            append(ownerIndent)
+        }
+        return result.substring(0, bridgeOwner.end) + method + result.substring(bridgeOwner.end)
     }
 
     private fun mainConstructorIndent(source: String, eventBusName: String): String {

@@ -1,9 +1,9 @@
 001-header.ktfrag
 002-cleanup-legacy-payload-context-references.ktfrag
 003-migrate-item-stack-capability-optionals.ktfrag
-004-relative-mixin-name-for-config-package.ktfrag
+004-remove-mixin-accessor-from-configs.ktfrag
 005-migrate-block-entity-legacy-capabilities.ktfrag
-006-java-inheritance-index.ktfrag
+006-java-class-declaration.ktfrag
 007-custom-recipe-book-category-finder-source.ktfrag
 008-remove-split-tick-phase-checks-for-event-name.ktfrag
 009-migrate-legacy-potion-empty-string-checks.ktfrag

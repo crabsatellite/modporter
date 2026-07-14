@@ -375,7 +375,11 @@
                     text = removeExecutableImport(text, "net.neoforged.fml.common.EventBusSubscriber")
                     text = removeExecutableImport(text, "net.neoforged.fml.common.Mod.EventBusSubscriber")
                 } else {
-                    text = removeExecutableEventBusSubscriberModBusParameter(text)
+                    text = removeExecutableEventBusSubscriberForgeBusParameter(text)
+                    if (!Regex("""\bBus\s*\.""").containsMatchIn(maskJavaCommentsAndLiterals(text))) {
+                        text = removeExecutableImport(text, "net.neoforged.fml.common.EventBusSubscriber.Bus")
+                        text = removeExecutableImport(text, "net.neoforged.fml.common.Mod.EventBusSubscriber.Bus")
+                    }
                 }
 
                 if (text != original) {
@@ -389,7 +393,7 @@
                             "Remove @EventBusSubscriber from class without @SubscribeEvent methods"
                         else
                             "Remove deprecated bus= parameter from @EventBusSubscriber",
-                        before = "@EventBusSubscriber(..., bus = Bus.MOD)",
+                        before = "@EventBusSubscriber(..., bus = Bus.FORGE)",
                         after = if (!hasSubscribeEvent) "(removed)" else "@EventBusSubscriber(...)",
                         confidence = Confidence.HIGH,
                         ruleId = "struct-cleanup-eventbus-subscriber"
@@ -400,20 +404,72 @@
         return changes
     }
 
-    private fun removeExecutableEventBusSubscriberModBusParameter(source: String): String {
-        val busExpression = """(?:EventBusSubscriber|Mod\.EventBusSubscriber)\.Bus\.MOD"""
-        var result = replaceExecutableRegex(
-            source,
-            Regex("""bus\s*=\s*$busExpression\s*,\s*""")
-        ) { "" }
-        result = replaceExecutableRegex(
-            result,
-            Regex(""",\s*bus\s*=\s*$busExpression""")
-        ) { "" }
-        return replaceExecutableRegex(
-            result,
-            Regex("""\(\s*bus\s*=\s*$busExpression\s*\)""")
-        ) { "" }
+    private fun removeExecutableEventBusSubscriberForgeBusParameter(source: String): String {
+        var result = source
+        executableEventBusSubscriberAnnotationRanges(source).asReversed().forEach { range ->
+            val annotation = result.substring(range.first, range.last + 1)
+            val busExpression = """(?:(?:Mod\.)?EventBusSubscriber\.)?Bus\.FORGE"""
+            var migrated = replaceExecutableRegex(
+                annotation,
+                Regex("""bus\s*=\s*$busExpression\s*,\s*""")
+            ) { "" }
+            migrated = replaceExecutableRegex(
+                migrated,
+                Regex(""",\s*bus\s*=\s*$busExpression""")
+            ) { "" }
+            migrated = replaceExecutableRegex(
+                migrated,
+                Regex("""\(\s*bus\s*=\s*$busExpression\s*\)""")
+            ) { "" }
+            if (migrated != annotation) {
+                result = result.replaceRange(range, migrated)
+            }
+        }
+        return result
+    }
+
+    private fun containsExecutableEventBusSubscriberModBusParameter(source: String): Boolean {
+        val busExpression = Regex(
+            """\bbus\s*=\s*(?:(?:Mod\.)?EventBusSubscriber\.)?Bus\.MOD\b"""
+        )
+        return executableEventBusSubscriberAnnotationRanges(source).any { range ->
+            busExpression.containsMatchIn(maskJavaCommentsAndLiterals(source.substring(range.first, range.last + 1)))
+        }
+    }
+
+    private fun validateNoUnresolvedEventBusSubscriberModBusParameters(projectDir: Path) {
+        val srcDir = projectDir.resolve("src/main/java")
+        if (!srcDir.exists()) return
+        val offenders = Files.walk(srcDir)
+            .filter { it.extension == "java" }
+            .filter { containsExecutableEventBusSubscriberModBusParameter(it.readText()) }
+            .map { projectDir.relativize(it).toString().replace('\\', '/') }
+            .sorted()
+            .toList()
+        if (offenders.isNotEmpty()) {
+            throw IllegalStateException(
+                "@EventBusSubscriber(bus=MOD) remains without a proven explicit mod-event-bus registration: " +
+                    offenders.joinToString()
+            )
+        }
+    }
+
+    private fun executableEventBusSubscriberAnnotationRanges(source: String): List<IntRange> {
+        val executable = maskJavaCommentsAndLiterals(source)
+        val annotation = Regex("""@(?:Mod\.)?EventBusSubscriber\b""")
+        return annotation.findAll(executable).map { match ->
+            var cursor = match.range.last + 1
+            while (cursor < executable.length && executable[cursor].isWhitespace()) cursor++
+            if (cursor < executable.length && executable[cursor] == '(') {
+                val close = findMatchingParen(executable, cursor)
+                if (close < 0) {
+                    throw IllegalStateException("Cannot match @EventBusSubscriber annotation arguments")
+                }
+                match.range.first..close
+            } else {
+                match.range
+            }
+        }.toList()
     }
 
     /**

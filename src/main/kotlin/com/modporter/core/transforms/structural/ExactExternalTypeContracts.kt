@@ -2,6 +2,13 @@ package com.modporter.core.transforms.structural
 
 /** Exact public type contracts for third-party APIs that are absent from the source project. */
 internal object ExactExternalTypeContracts {
+    data class RecordComponentSurface(
+        val importOwner: String,
+        val sourceType: String,
+        val qualifiedType: String,
+        val components: Set<String>
+    )
+
     val assignableTypes = mapOf(
         "net.createmod.ponder.api.level.PonderLevel" to setOf(
             "net.createmod.catnip.levelWrappers.SchematicLevel",
@@ -14,6 +21,15 @@ internal object ExactExternalTypeContracts {
         ),
         "net.createmod.catnip.levelWrappers.WrappedLevel" to setOf(
             "net.minecraft.world.level.Level"
+        )
+    )
+
+    val recordComponentSurfaces = listOf(
+        RecordComponentSurface(
+            importOwner = "com.dtteam.dynamictrees.block.branch.TrunkShellBlock",
+            sourceType = "TrunkShellBlock.ShellMuse",
+            qualifiedType = "com.dtteam.dynamictrees.block.branch.TrunkShellBlock.ShellMuse",
+            components = setOf("state", "pos", "museOffset")
         )
     )
 

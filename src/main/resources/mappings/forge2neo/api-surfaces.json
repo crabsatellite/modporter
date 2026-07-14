@@ -165,6 +165,26 @@
     "rationale": "Ponder exposes a public scene API whose world facade owns the target registry provider; the contract applies to every Ponder consumer."
   },
   {
+    "id": "dynamic-trees",
+    "type": "library-api",
+    "packagePrefixes": [
+      "com.ferreusveritas.dynamictrees.",
+      "com.dtteam.dynamictrees."
+    ],
+    "coordinatePrefixes": [
+      "com.ferreusveritas.dynamictrees:",
+      "com.dtteam.dynamictrees:"
+    ],
+    "ruleIdPrefixes": [
+      "dynamictrees-"
+    ],
+    "allowedFiles": [
+      "src/main/kotlin/com/modporter/core/transforms/structural/ExactExternalTypeContracts.kt",
+      "src/main/resources/mappings/forge2neo/text-replacements.json"
+    ],
+    "rationale": "Dynamic Trees publishes a renamed NeoForge artifact whose public classes and record surfaces require explicit dependency API contracts."
+  },
+  {
     "id": "dependency-coordinate-normalization",
     "type": "dependency-coordinate-api",
     "packagePrefixes": [

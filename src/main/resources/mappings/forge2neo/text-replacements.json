@@ -71,6 +71,34 @@
       "fileGlob": "*.java"
     },
     {
+      "id": "dynamictrees-tree-helper-class",
+      "pattern": "com.ferreusveritas.dynamictrees.api.TreeHelper",
+      "replacement": "com.dtteam.dynamictrees.tree.TreeHelper",
+      "description": "Dynamic Trees moved TreeHelper to its public tree API package",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "dynamictrees-branch-destruction-data-class",
+      "pattern": "com.ferreusveritas.dynamictrees.util.BranchDestructionData",
+      "replacement": "com.dtteam.dynamictrees.api.network.BranchDestructionData",
+      "description": "Dynamic Trees moved BranchDestructionData to its public network API package",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "dynamictrees-branch-block-class",
+      "pattern": "com.ferreusveritas.dynamictrees.block.branch.BranchBlock",
+      "replacement": "com.dtteam.dynamictrees.block.branch.BranchBlock",
+      "description": "Dynamic Trees moved BranchBlock to the DT Team package root",
+      "fileGlob": "*.java"
+    },
+    {
+      "id": "dynamictrees-trunk-shell-block-class",
+      "pattern": "com.ferreusveritas.dynamictrees.block.branch.TrunkShellBlock",
+      "replacement": "com.dtteam.dynamictrees.block.branch.TrunkShellBlock",
+      "description": "Dynamic Trees moved TrunkShellBlock to the DT Team package root",
+      "fileGlob": "*.java"
+    },
+    {
       "id": "forgegui-import",
       "pattern": "import\\s+net\\.minecraftforge\\.client\\.gui\\.overlay\\.ForgeGui;\\r?\\n",
       "replacement": "import net.minecraft.client.gui.Gui;\n",
